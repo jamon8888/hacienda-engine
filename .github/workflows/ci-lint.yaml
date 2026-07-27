@@ -1,0 +1,17 @@
+name: CI - Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xberg-io/actions/setup-rust@v1
+        with:
+          toolchain: nightly
+      - run: task lint
