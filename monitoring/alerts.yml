@@ -1,0 +1,92 @@
+groups:
+  - name: hacienda
+    interval: 30s
+    rules:
+      # Latency alerts
+      - alert: PiiPipelineLatencyHigh
+        expr: histogram_quantile(0.99, rate(pii_pipeline_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PII pipeline P99 latency > 500ms"
+          description: "Stage {{ $labels.stage }} P99 is {{ $value }}s"
+
+      - alert: PiiModelInferenceLatencyHigh
+        expr: histogram_quantile(0.99, rate(pii_model_inference_duration_seconds_bucket[5m])) > 2.0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model inference P99 > 2s"
+
+      # Availability
+      - alert: PiiAvailabilityLow
+        expr: pii_slo_availability_ratio < 0.999
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PII availability below 99.9%"
+
+      # Error rate
+      - alert: PiiErrorRateHigh
+        expr: pii_slo_error_rate_ratio > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PII error rate > 1%"
+
+      # Memory
+      - alert: PiiMemoryHigh
+        expr: pii_memory_bytes / pii_memory_limit_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PII memory usage > 85%"
+
+      # Audit log
+      - alert: PiiAuditLogWriteFailures
+        expr: rate(pii_audit_write_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit log write failures detected"
+
+      # Model
+      - alert: PiiModelNotLoaded
+        expr: pii_model_loaded == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PII model not loaded"
+
+      - alert: PiiModelLoadSlow
+        expr: pii_model_load_duration_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model load time > 30s"
+
+      # Disk
+      - alert: PiiDiskSpaceLow
+        expr: pii_disk_usage_bytes / pii_disk_limit_bytes > 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space for audit logs > 90%"
+
+      # Queue
+      - alert: PiiQueueBacklog
+        expr: pii_queue_depth > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PII request queue backlog > 100"

@@ -1,0 +1,214 @@
+version: "3"
+
+vars:
+  PLAN: docs/superpowers/plans/2026-07-27-hacienda.md
+  SPEC: docs/superpowers/specs/2026-07-27-hacienda-design.md
+
+tasks:
+  # Setup
+  setup:
+    desc: Install all toolchains (rust, alef, poly, task, cargo-hack)
+    cmds:
+      - rustup toolchain install nightly
+      - cargo install cargo-alef cargo-poly task cargo-hack
+      - poly hooks install
+      - cargo install cargo-llvm-cov
+
+  # Development
+  dev:
+    desc: Start development loop
+    cmds:
+      - task check
+      - task test
+
+  # Building
+  build:
+    desc: Build Rust core (debug)
+    cmds:
+      - cargo build -p hacienda -p hacienda-core
+
+  build:release:
+    desc: Build Rust core (release)
+    cmds:
+      - cargo build -p hacienda -p hacienda-core --release
+
+  build:bindings:
+    desc: Build all language bindings
+    cmds:
+      - alef build --all-targets --release
+
+  build:all:
+    desc: Build core + all bindings
+    cmds:
+      - task build:release
+      - task build:bindings
+
+  # Testing
+  test:
+    desc: Run Rust tests
+    cmds:
+      - cargo test -p hacienda -p hacienda-core
+
+  test:bindings:
+    desc: Run binding tests
+    cmds:
+      - alef test --all-languages
+
+  test:all:
+    desc: Full test suite
+    cmds:
+      - task test
+      - task test:bindings
+
+  test:e2e:
+    desc: Run E2E tests
+    cmds:
+      - alef e2e test --all-languages
+
+  test:cov:
+    desc: Test with coverage
+    cmds:
+      - cargo llvm-cov -p hacienda -p hacienda-core --lcov --output-path lcov.info
+      - alef test --coverage --all-languages
+
+  # Linting
+  lint:
+    desc: Run poly lint (all languages)
+    cmds:
+      - poly lint .
+
+  lint:check:
+    desc: Check lint (no fix)
+    cmds:
+      - poly lint --check .
+
+  fmt:
+    desc: Format all code
+    cmds:
+      - poly fmt --fix .
+
+  fmt:check:
+    desc: Check format (no fix)
+    cmds:
+      - poly fmt --check .
+
+  check:
+    desc: Full check (fmt + lint)
+    cmds:
+      - task fmt:check
+      - task lint:check
+
+  # alef
+  alef:generate:
+    desc: Regenerate all bindings
+    cmds:
+      - alef all --clean
+
+  alef:verify:
+    desc: Verify bindings are up to date
+    cmds:
+      - alef verify --exit-code
+
+  alef:build:
+    desc: Build all bindings
+    cmds:
+      - alef build --all-targets
+
+  alef:sync:
+    desc: Sync versions from Cargo.toml
+    cmds:
+      - alef sync-versions
+
+  alef:docs:
+    desc: Generate docs
+    cmds:
+      - alef docs
+
+  # E2E per language
+  e2e:lang:
+    desc: Run E2E for specific language
+    vars:
+      LANG: python
+    cmds:
+      - alef e2e test --lang {{.LANG}}
+
+  e2e:all:
+    desc: Full E2E matrix
+    cmds:
+      - task e2e:generate
+      - task e2e:build
+      - task e2e:test
+
+  e2e:generate:
+    cmds:
+      - alef e2e generate
+
+  e2e:build:
+    cmds:
+      - alef build --all-targets --release
+
+  e2e:test:
+    cmds:
+      - alef test --e2e --all-languages
+
+  # Version management
+  versions:sync:
+    desc: Sync version from Cargo.toml to all packages
+    cmds:
+      - alef sync-versions
+
+  update:
+    desc: Update all deps (minor/patch)
+    cmds:
+      - cargo upgrade --manifest-path hacienda/Cargo.toml --manifest-path hacienda-core/Cargo.toml --allow-stale
+      - task versions:sync
+
+  upgrade:
+    desc: Upgrade all deps (major allowed)
+    cmds:
+      - cargo upgrade --manifest-path hacienda/Cargo.toml --manifest-path hacienda-core/Cargo.toml
+      - task versions:sync
+
+  # Release
+  release:
+    desc: Cut a release tag
+    vars:
+      VERSION: "0.1.0"
+    cmds:
+      - git tag -s v{{.VERSION}} -m "Release v{{.VERSION}}"
+      - git push origin v{{.VERSION}}
+      - gh workflow run publish.yaml -f tag=v{{.VERSION}}
+
+  release:dryrun:
+    desc: Dry-run release
+    vars:
+      VERSION: "0.1.0"
+    cmds:
+      - gh workflow run publish.yaml -f tag=v{{.VERSION}} -f dry_run=true
+
+  # Docker
+  docker:build:
+    desc: Build Docker image
+    cmds:
+      - docker build -t hacienda:latest -f docker/Dockerfile .
+
+  docker:run:
+    desc: Run Docker container
+    cmds:
+      - docker run --rm -p 8080:8080 hacienda:latest
+
+  # Helpers
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - cargo clean -p hacienda -p hacienda-core
+      - rm -rf build/ target/ .alef/
+
+  doctor:
+    desc: Check environment
+    cmds:
+      - rustup show
+      - cargo --version
+      - alef --version
+      - poly --version
+      - cargo --version

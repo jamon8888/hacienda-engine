@@ -1,0 +1,112 @@
+# Cargo
+target/
+Cargo.lock
+
+# Build artifacts
+build/
+*.o
+*.so
+*.dylib
+*.dll
+*.lib
+*.a
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Rust
+rust-toolchain.toml
+.cargo/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# Ruby
+.bundle/
+vendor/bundle/
+*.gem
+
+# PHP
+vendor/
+composer.lock
+
+# Go
+vendor/
+go.sum
+
+# Java
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# C#
+bin/
+obj/
+*.user
+*.suo
+
+# Elixir
+_build/
+deps/
+*.ez
+
+# Dart
+.dart_tool/
+.packages
+pubspec.lock
+
+# Zig
+zig-cache/
+zig-out/
+
+# Docker
+.docker/
+
+# Logs
+*.log
+logs/
+
+# Coverage
+lcov.info
+coverage/
+
+# Temporary
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Config
+*.local.toml
+*.local.yaml
+.env
+.env.local
+
+# IDE specific
+.vscode/settings.json
+.idea/workspace.xml

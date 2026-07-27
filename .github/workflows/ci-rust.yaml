@@ -1,0 +1,68 @@
+name: CI - Rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hacienda/**"
+      - "hacienda-core/**"
+  pull_request:
+    branches: [main]
+
+jobs:
+  clippy:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xberg-io/actions/setup-rust@v1
+        with:
+          toolchain: nightly
+          sccache: true
+      - uses: Swatinem/rust-cache@v2
+      - run: task check:rust
+
+  test:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xberg-io/actions/setup-rust@v1
+        with:
+          toolchain: nightly
+          sccache: true
+      - uses: Swatinem/rust-cache@v2
+      - run: task test:rust
+
+  feature-matrix:
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        features:
+          [
+            "xberg-full",
+            "pii",
+            "compliance",
+            "audit",
+            "review",
+            "glossary",
+            "dev",
+          ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xberg-io/actions/setup-rust@v1
+        with:
+          toolchain: nightly
+          sccache: true
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p hacienda -p hacienda-core --features ${{ matrix.features }}
+
+  test-bindings:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xberg-io/actions/setup-rust@v1
+        with:
+          toolchain: nightly
+          sccache: true
+      - uses: xberg-io/actions/install-alef@v1
+      - uses: xberg-io/actions/install-task@v1
+      - run: task test:bindings

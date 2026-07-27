@@ -1,0 +1,108 @@
+{
+  "dashboard": {
+    "title": "hacienda Overview",
+    "tags": ["hacienda", "pii", "compliance"],
+    "timezone": "utc",
+    "panels": [
+      {
+        "title": "Pipeline Latency (P99)",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(pii_pipeline_duration_seconds_bucket[5m]))",
+            "legendFormat": "P99"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(pii_pipeline_duration_seconds_bucket[5m]))",
+            "legendFormat": "P50"
+          }
+        ],
+        "yAxes": [{ "unit": "seconds" }, { "unit": "short" }]
+      },
+      {
+        "title": "Entities Detected",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "sum(rate(pii_entities_detected_total[5m])) by (category)",
+            "legendFormat": "{{category}}"
+          }
+        ]
+      },
+      {
+        "title": "Redaction Operations",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "sum(rate(pii_entities_redacted_total[5m])) by (mode)",
+            "legendFormat": "{{mode}}"
+          }
+        ]
+      },
+      {
+        "title": "Compliance Reports",
+        "type": "stat",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "increase(compliance_reports_generated_total[1h])",
+            "legendFormat": "Last Hour"
+          }
+        ]
+      },
+      {
+        "title": "Audit Log Writes",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "rate(pii_audit_writes_total[5m])",
+            "legendFormat": "Writes/sec"
+          }
+        ]
+      },
+      {
+        "title": "Review Queue Depth",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "pii_review_queue_depth",
+            "legendFormat": "Pending"
+          }
+        ]
+      },
+      {
+        "title": "Model Inference Latency",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(pii_model_inference_duration_seconds_bucket[5m]))",
+            "legendFormat": "P99"
+          }
+        ],
+        "yAxes": [{ "unit": "seconds" }, { "unit": "short" }]
+      },
+      {
+        "title": "Error Rate",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "rate(pii_pipeline_errors_total[5m])",
+            "legendFormat": "Errors/sec"
+          }
+        ]
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "30s"
+  }
+}
