@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "hacienda",
+    "hacienda-core",
+]
+exclude = [
+    "packages/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# xberg
+xberg = { path = "../xberg/crates/xberg", features = [
+    "redaction", "ner", "chunking", "embeddings", "reranker",
+    "captioning", "tokio-runtime"
+] }
+
+# PII ecosystem
+pii-pipeline = { path = "../xberg-pii-ecosystem/crates/pii-pipeline" }
+pii-config = { path = "../xberg-pii-ecosystem/crates/pii-config" }
+pii-compliance = { path = "../xberg-pii-ecosystem/crates/pii-compliance" }
+pii-audit = { path = "../xberg-pii-ecosystem/crates/pii-audit" }
+pii-review = { path = "../xberg-pii-ecosystem/crates/pii-review" }
+pii-redaction = { path = "../xberg-pii-ecosystem/crates/pii-redaction" }
+pii-fastino = { path = "../xberg-pii-ecosystem/crates/pii-fastino" }
+
+# Standard
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync"] }
+thiserror = "1.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

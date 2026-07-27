@@ -1,0 +1,39 @@
+[package]
+name = "hacienda"
+version.workspace = true
+edition.workspace = true
+description = "xberg + PII/Compliance Distribution — GDPR/DORA/AI Act compliant document intelligence"
+license.workspace = true
+
+[features]
+default = ["xberg-full", "pii", "compliance", "audit", "review", "glossary"]
+
+# xberg feature passthrough
+xberg-full = [
+    "xberg/full",
+    "xberg/tokio-runtime",
+]
+
+# hacienda features
+pii = ["hacienda-core/pii"]
+compliance = ["hacienda-core/compliance", "pii"]
+audit = ["hacienda-core/audit"]
+review = ["hacienda-core/review"]
+glossary = ["hacienda-core/glossary"]
+dev = ["pii", "compliance", "audit", "review", "glossary"]
+
+[dependencies]
+# xberg (upstream)
+xberg = { path = "../../xberg/crates/xberg", features = [
+    "ner", "redaction", "chunking", "embeddings", "reranker",
+    "captioning", "tokio-runtime"
+] }
+
+# hacienda-core
+hacienda-core = { path = "../hacienda-core" }
+
+# Shared
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
