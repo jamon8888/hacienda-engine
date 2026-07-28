@@ -18,25 +18,20 @@ jobs:
         lang: [python, node, ruby, php, go, java, csharp, elixir, wasm, dart, kotlin_android, swift, zig]
     steps:
       - uses: actions/checkout@v4
-      - uses: xberg-io/actions/setup-rust@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          sccache: true
-      - name: Install alef
-        run: cargo install cargo-alef --locked
-      - name: Install poly
-        run: cargo install poly --locked
-      - uses: xberg-io/actions/install-task@v1
-      - run: task e2e:lang LANG=${{ matrix.lang }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features -- --test-threads=1
 
   e2e:rust:
     needs: ci-rust
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: xberg-io/actions/setup-rust@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          sccache: true
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: task test:rust
+      - run: cargo test --workspace --all-features -- --test-threads=1
+

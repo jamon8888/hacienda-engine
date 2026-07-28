@@ -15,14 +15,35 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: xberg-io/actions/setup-rust@v1
+      
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          sccache: true
-      - uses: xberg-io/actions/install-task@v1
-      - name: Install poly
-        run: cargo install poly --locked
-      - run: task lint
+          components: rustfmt, clippy
+      
+      - name: Install poly tools
+        run: |
+          # Install rumdl for markdown linting
+          cargo install rumdl --locked
+          
+          # Install typos for spell checking
+          cargo install typos-cli --locked
+          
+          # Install typos words
+          cargo install typos-cli --locked --features words
+      
+      - name: Lint markdown
+        run: rumdl .
+      
+      - name: Check spelling
+        run: typos .
+      
+      - name: Check typos words
+        run: typos --words-file /dev/null --dictionary=extended --dictionary=crate-words .
+      
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked

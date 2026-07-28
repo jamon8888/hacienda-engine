@@ -14,23 +14,21 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: xberg-io/actions/setup-rust@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          sccache: true
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: task check:rust
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: xberg-io/actions/setup-rust@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          sccache: true
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: task test:rust
+      - run: cargo test --workspace --all-features
 
   feature-matrix:
     runs-on: ubuntu-24.04-arm
@@ -47,10 +45,9 @@ jobs:
         ]
     steps:
       - uses: actions/checkout@v4
-      - uses: xberg-io/actions/setup-rust@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          sccache: true
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p hacienda -p hacienda-core --features ${{ matrix.features }}
 
@@ -58,13 +55,13 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: xberg-io/actions/setup-rust@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          sccache: true
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install alef
         run: cargo install cargo-alef --locked
       - name: Install poly
         run: cargo install poly --locked
-      - uses: xberg-io/actions/install-task@v1
       - run: task test:bindings
+
