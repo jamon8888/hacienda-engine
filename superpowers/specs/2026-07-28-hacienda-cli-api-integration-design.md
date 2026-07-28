@@ -315,16 +315,33 @@ Preconditions, not design questions. Ordered by severity.
 
 ## 9. Phasing
 
-| Phase | Deliverable | Gated on |
-|---|---|---|
-| 1 | `AuditSink` + `ReviewStore` wired into the facade; file-backed default | — |
-| 2 | `hacienda-cli` with `extract`, `scan`, `config show` | Phase 1 |
-| 3 | `hacienda-api` content endpoints + `hacienda serve`, allowlist only | Phase 1 |
-| 4 | Audit / review / compliance endpoints | §7 implemented |
-| 5 | `xberg-passthrough` feature | Demonstrated demand |
+Every gap in §8 maps to a phase. A gap with no phase is a gap nobody owns.
 
-Phase 2 before Phase 3 deliberately: the CLI validates the configuration model
-against real use with no server concerns in the way.
+| Phase | Deliverable | Closes | Gated on |
+|---|---|---|---|
+| 1 | `AuditSink` + `ReviewStore` wired into the facade; file-backed default. Collapse the `record_audit` double lock while in the file. | Gaps 1, 2, 5 | — |
+| 2 | `hacienda-cli` with `extract`, `scan`, `config show` | — | Phase 1 |
+| 3 | Capability model of §7 + authn/authz middleware | Gap 6 | — |
+| 4 | `hacienda-api` content endpoints + `hacienda serve`, allowlist only | — | Phases 1, 3 |
+| 5 | Audit / review / compliance endpoints | — | Phases 3, 4 |
+| 6 | Concurrent batch; reduce audit lock contention | Gaps 3, 4 | Phase 4 **and** a measurement showing it matters |
+| 7 | `xberg-passthrough` feature | — | Demonstrated demand |
+
+Three ordering choices are deliberate:
+
+**Phase 2 before Phase 4.** The CLI validates the configuration model against
+real use with no server concerns in the way.
+
+**Phase 3 before Phase 4.** §7 says the privilege model should be designed once
+rather than retrofitted per endpoint; shipping endpoints first guarantees the
+retrofit. The content endpoints already need `documents:process`, so there is no
+version of Phase 4 that legitimately predates it.
+
+**Phase 6 last, and gated on measurement.** Gaps 3 and 4 are throughput
+concerns, not correctness ones — `process_batch` is sequential and the audit
+chain serializes on one mutex, but both are *correct*. Optimising before Phase 4
+provides a load surface to measure against is guesswork. The gate is a
+benchmark, not a hunch.
 
 ---
 
@@ -336,7 +353,7 @@ against real use with no server concerns in the way.
 | Re-implementing xberg's Embed / Chunk / Cache commands | Not hacienda's value-add; use `xberg` directly |
 | MCP server (`hacienda mcp`) | xberg has an `mcp` feature; a redacted-tool analog is plausible but unscoped |
 | Adding a library target to `xberg-cli` upstream | We do not patch xberg |
-| LoRA registry, adapter CRUD endpoints | Covered by the Phase 2+ plans |
+| LoRA registry, adapter CRUD endpoints | Covered by the LoRA plans under `docs/superpowers/plans/`, whose phase numbering is independent of §9 |
 
 ---
 
