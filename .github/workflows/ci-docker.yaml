@@ -1,0 +1,54 @@
+name: CI - Docker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'docker-compose.yml'
+      - 'Dockerfile*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'docker-compose.yml'
+      - 'Dockerfile*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dockerfile: [
+          docker/Dockerfile,
+          docker/Dockerfile.musl-build,
+          docker/Dockerfile.musl-ffi,
+          docker/Dockerfile.musl-node,
+          docker/Dockerfile.musl-rustler
+        ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: hacienda-test:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test CLI
+        run: |
+          docker run --rm hacienda-test:latest --help
+      - name: Test API
+        run: |
+          docker run -d --name hacienda-test -p 8080:8080 hacienda-test:latest serve http --config /app/config/production.toml &
+          sleep 5
+          curl -f http://localhost:8080/health
+          docker stop hacienda-test

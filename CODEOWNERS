@@ -1,0 +1,40 @@
+# hacienda CODEOWNERS
+
+# Global owners
+* @jamon8888
+
+# Core crates
+/hacienda/ @jamon8888
+/hacienda-core/ @jamon8888
+
+# PII ecosystem
+/crates/pii-* @jamon8888
+
+# CI/CD
+/.github/ @jamon8888
+/.github/workflows/ @jamon8888
+
+# Documentation
+/docs/ @jamon8888
+README.md @jamon8888
+CONTRIBUTING.md @jamon8888
+
+# CI/CD
+/.github/workflows/ @jamon8888
+/scripts/ci/ @jamon8888
+
+# Docker
+/docker/ @jamon8888
+docker-compose.yml @jamon8888
+
+# Monitoring
+/monitoring/ @jamon8888
+
+# Configuration
+/*.toml @jamon8888
+/*.yaml @jamon8888
+*.yml @jamon8888
+*.yml @jamon8888
+.editorconfig @jamon8888
+.hadolint.yaml @jamon8888
+deny.toml @jamon8888

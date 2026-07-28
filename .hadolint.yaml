@@ -1,0 +1,9 @@
+# DL3008/DL3018: version-pinning apt/apk packages is intentionally not done —
+#   the build images track distro security updates and pinned versions are
+ignored:
+  - DL3008
+  - DL3018
+  - DL4006
+  - DL3003
+  - SC2016
+  - SC2012

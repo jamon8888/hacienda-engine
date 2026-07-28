@@ -1,0 +1,86 @@
+name: Publish Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g., v0.1.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Prepare artifacts without publishing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: meta
+        run: |
+          VERSION="${{ github.event.inputs.tag }}"
+          TAG="${VERSION#v}"
+          echo "tag=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${TAG}" >> $GITHUB_OUTPUT
+          echo "dry_run=${{ inputs.dry_run }}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          - { dockerfile: docker/Dockerfile, tag: hacienda, platform: linux/amd64,linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-build, tag: hacienda-musl, platform: linux/amd64,linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-ffi, tag: hacienda-ffi, platform: linux/amd64,linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-node, tag: hacienda-node, platform: linux/amd64,linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-rustler, tag: hacienda-nif, platform: linux/amd64,linux/arm64 }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: ${{ !needs.prepare.outputs.dry_run }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: ${{ !needs.prepare.outputs.dry_run }}
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.tag }}:${{ needs.prepare.outputs.version }}
+            ghcr.io/${{ github.repository }}/${{ matrix.tag }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: ${{ !needs.prepare.outputs.dry_run }}
+          sbom: ${{ !needs.prepare.outputs.dry_run }}
+
+  helm:
+    needs: [prepare, build]
+    if: ${{ !needs.prepare.outputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Helm chart
+        if: false # TODO: Add helm chart
+        run: |
+          helm package ./charts/hacienda
+          helm push hacienda-${{ needs.prepare.outputs.version }}.tgz oci://ghcr.io/${{ github.repository }}/charts
