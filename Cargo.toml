@@ -8,20 +8,18 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+# The PII implementation is vendored into hacienda-core (see hacienda-core/src/).
+# `xberg` below is the only upstream product dependency, consumed as a facade.
+# Do not reintroduce pii-* path dependencies.
+#
+# Entries are kept alphabetical for `cargo sort`.
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
 blake3 = "1.5"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-# The PII implementation is vendored into hacienda-core (see hacienda-core/src/).
-# `xberg` above is the only upstream product dependency, consumed as a facade.
-# Do not reintroduce pii-* path dependencies.
-
-# PII detection / redaction / audit primitives
 regex = "1.10"
-
-# Standard
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
