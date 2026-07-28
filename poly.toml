@@ -75,6 +75,11 @@ use_default_ignores = true
 preserve_patterns = ["SAFETY", "SPDX", "Copyright", "License", "licensed under"]
 
 [per-file-ignores]
+# turbo.json and tsconfig.json are JSONC — Turborepo and TypeScript both officially
+# support comments there. oxc parses them as strict JSON and reports the comments as
+# `parse-error`, which is a false positive rather than a real defect.
+"**/tsconfig.json" = ["parse-error"]
+"turbo.json" = ["parse-error"]
 "**/api.py" = ["F401", "I001", "TC006", "UP035"]
 "**/*.pyi" = ["A002", "F401", "I001", "PYI033", "TC006", "UP035"]
 "**/options.py" = ["F401", "I001", "RUF100"]
