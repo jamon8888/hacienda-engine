@@ -16,9 +16,21 @@ tasks:
 
   # Development
   dev:
-    desc: Start development loop
+    desc: Fast inner loop — type-check then test (~30s warm)
     cmds:
-      - task check
+      - task check:rust
+      - task test
+
+  check:rust:
+    desc: Type-check Rust incl. tests — fastest correctness signal, skips codegen
+    cmds:
+      - cargo check -p hacienda -p hacienda-core --all-targets
+
+  verify:
+    desc: Pre-push gate — format, full lint, and tests
+    cmds:
+      - task fmt:check
+      - task lint:check
       - task test
 
   # Building
@@ -78,9 +90,15 @@ tasks:
       - poly lint .
 
   lint:check:
-    desc: Check lint (no fix)
+    desc: Check lint (no fix) — includes whole-workspace clippy
     cmds:
-      - poly lint --check .
+      # `poly lint` never writes, so there is no `--check` flag to pass (it exits 2).
+      - poly lint .
+
+  lint:fast:
+    desc: Per-file lint only, skipping whole-workspace clippy (~3s vs ~19s)
+    cmds:
+      - poly lint --no-workspace .
 
   fmt:
     desc: Format all code
