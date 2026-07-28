@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "hacienda/**"
-      - "hacienda-core/**"
+      - 'hacienda/**'
+      - 'hacienda-core/**'
   pull_request:
     branches: [main]
 
@@ -43,7 +43,7 @@ jobs:
           "audit",
           "review",
           "glossary",
-          "dev",
+          "dev"
         ]
     steps:
       - uses: actions/checkout@v4

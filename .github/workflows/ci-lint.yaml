@@ -10,8 +10,19 @@ permissions:
   contents: read
 
 jobs:
-  validate:
-    uses: xberg-io/actions/.github/workflows/reusable-validate.yml@v1
-    with:
-      setup-rust: true
-      setup-python: false
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xberg-io/actions/setup-rust@v1
+        with:
+          toolchain: nightly
+          sccache: true
+      - uses: xberg-io/actions/install-task@v1
+      - name: Install poly
+        run: cargo install poly --locked
+      - run: task lint
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
