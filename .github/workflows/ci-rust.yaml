@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "hacienda/**"
-      - "hacienda-core/**"
+      - 'hacienda/**'
+      - 'hacienda-core/**'
   pull_request:
     branches: [main]
 
@@ -36,16 +36,15 @@ jobs:
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-        features:
-          [
-            "xberg-full",
-            "pii",
-            "compliance",
-            "audit",
-            "review",
-            "glossary",
-            "dev",
-          ]
+        features: [
+          "xberg-full",
+          "pii",
+          "compliance",
+          "audit",
+          "review",
+          "glossary",
+          "dev"
+        ]
     steps:
       - uses: actions/checkout@v4
       - uses: xberg-io/actions/setup-rust@v1

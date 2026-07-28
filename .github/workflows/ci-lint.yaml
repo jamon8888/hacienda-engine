@@ -14,4 +14,7 @@ jobs:
       - uses: xberg-io/actions/setup-rust@v1
         with:
           toolchain: nightly
+          sccache: true
+      - uses: xberg-io/actions/install-task@v1
+      - uses: xberg-io/actions/install-alef@v1
       - run: task lint
