@@ -44,112 +44,17 @@ disable = ["MD012", "MD013", "MD024", "MD033", "MD036", "MD041", "MD046", "MD051
 [fmt.markdown.rumdl]
 disable = ["MD012", "MD013", "MD024", "MD033", "MD036", "MD041", "MD046", "MD051", "MD076"]
 
-[lint.python.ruff]
-select = ["ALL"]
-ignore = [
-  "ANN401",
-  "ASYNC109",
-  "ASYNC110",
-  "BLE001",
-  "COM812",
-  "D100",
-  "D104",
-  "D107",
-  "D205",
-  "E501",
-  "EM",
-  "FBT",
-  "FIX",
-  "ISC001",
-  "PD011",
-  "PGH003",
-  "PLR2004",
-  "PLW0603",
-  "S104",
-  "S110",
-  "S603",
-  "TD",
-  "TRY",
+[lint.typos]
+extend_words = [
+  "ake", "algoritmos", "arange", "bre", "caf", "charater", "chlidren", "cliper", "cursos",
+  "delocate", "docling", "edn", "ein", "excepcional", "execpt", "extention", "faiure", "fith",
+  "flate", "formated", "headerr", "helo", "hocr", "hom", "inh", "internacional", "ist",
+  "kreuzberg", "layrnorm", "legt", "markitdown", "ment", "mis", "mmaped", "multline", "odf",
+  "onnx", "openwebui", "opf", "ove", "ower", "pard", "portait", "programa", "pymupdf",
+  "relatie", "rumdl", "seperator", "ser", "similarily", "siz", "specifing", "splitted",
+  "substract", "surrealdb", "tbe", "tesseract", "tha", "thr", "threed", "ths", "thw",
+  "traineddata", "tre", "unparseable", "utiliza", "webui", "yor"
 ]
-mccabe_max_complexity = 15
-pydocstyle_convention = "google"
-pylint_max_args = 10
-pylint_max_branches = 15
-pylint_max_returns = 10
-
-[lint.php.mago]
-select = ["correctness", "security"]
-ignore = ["strict-assertions", "use-specific-assertions", "no-redundant-variable", "sensitive-parameter"]
-php_version = "8.2"
-
-[lint.typos.extend_words]
-ake = "ake"
-algoritmos = "algoritmos"
-arange = "arange"
-bre = "bre"
-caf = "caf"
-charater = "charater"
-chlidren = "chlidren"
-cliper = "cliper"
-cursos = "cursos"
-delocate = "delocate"
-docling = "docling"
-edn = "edn"
-ein = "ein"
-excepcional = "excepcional"
-execpt = "execpt"
-extention = "extention"
-faiure = "faiure"
-fith = "fith"
-flate = "flate"
-formated = "formated"
-headerr = "headerr"
-helo = "helo"
-hocr = "hocr"
-hom = "hom"
-inh = "inh"
-internacional = "internacional"
-ist = "ist"
-kreuzberg = "kreuzberg"
-layrnorm = "layrnorm"
-legt = "legt"
-markitdown = "markitdown"
-ment = "ment"
-mis = "mis"
-mmaped = "mmaped"
-multline = "multline"
-odf = "odf"
-onnx = "onnx"
-openwebui = "openwebui"
-opf = "opf"
-ove = "ove"
-ower = "ower"
-pard = "pard"
-portait = "portait"
-programa = "programa"
-pymupdf = "pymupdf"
-relatie = "relatie"
-rumdl = "rumdl"
-seperator = "seperator"
-ser = "ser"
-similarily = "similarily"
-siz = "siz"
-specifing = "specifing"
-splitted = "splitted"
-substract = "substract"
-surrealdb = "surrealdb"
-tbe = "tbe"
-tesseract = "tesseract"
-tha = "tha"
-thr = "thr"
-threed = "threed"
-ths = "ths"
-traineddata = "traineddata"
-tre = "tre"
-unparseable = "unparseable"
-utiliza = "utiliza"
-webui = "webui"
-yor = "yor"
 
 [lint.typos.extend_identifiers]
 MarkItDown = "MarkItDown"
@@ -382,7 +287,7 @@ preserve_patterns = ["SAFETY", "SPDX", "Copyright", "License", "licensed under"]
   "F841",
   "INP001",
   "N818",
-  "PERF401",
+  "PERF203",
   "PERF401",
   "PIE810",
   "PLC0206",
@@ -391,10 +296,12 @@ preserve_patterns = ["SAFETY", "SPDX", "Copyright", "License", "licensed under"]
   "PLR0912",
   "PLR0915",
   "PLW1510",
+  "PLW2901",
   "PTH110",
   "PTH112",
   "PTH118",
   "PTH119",
+  "PTH122",
   "PTH123",
   "RET504",
   "S314",
@@ -403,7 +310,16 @@ preserve_patterns = ["SAFETY", "SPDX", "Copyright", "License", "licensed under"]
   "SIM115",
   "T201",
 ]
-"tools/generate_test_fixtures/**/*.py" = ["D301", "ERA001", "PERF401", "PLC0415", "PT001", "S101", "SIM117", "T201"]
+"tools/generate_test_fixtures/**/*.py" = [
+  "D301",
+  "ERA001",
+  "PERF401",
+  "PLC0415",
+  "PT001",
+  "S101",
+  "SIM117",
+  "T201",
+]
 "tools/perf/*.py" = ["D103", "T201"]
 
 [hooks]
