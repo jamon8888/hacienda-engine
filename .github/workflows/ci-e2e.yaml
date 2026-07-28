@@ -22,9 +22,11 @@ jobs:
         with:
           toolchain: nightly
           sccache: true
-      - uses: xberg-io/actions/install-alef@v1
+      - name: Install alef
+        run: cargo install cargo-alef --locked
+      - name: Install poly
+        run: cargo install poly --locked
       - uses: xberg-io/actions/install-task@v1
-      - uses: xberg-io/actions/install-poly@v1
       - run: task e2e:lang LANG=${{ matrix.lang }}
 
   e2e:rust:

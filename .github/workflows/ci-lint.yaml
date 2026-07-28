@@ -16,6 +16,6 @@ jobs:
           toolchain: nightly
           sccache: true
       - uses: xberg-io/actions/install-task@v1
-      - uses: xberg-io/actions/install-alef@v1
-      - uses: xberg-io/actions/install-poly@v1
+      - name: Install poly
+        run: cargo install poly --locked
       - run: task lint
