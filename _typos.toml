@@ -1,0 +1,13 @@
+[files]
+extend-exclude = ["superpowers/", ".ai-rulez/"]
+
+[default.extend-words]
+hacienda = "hacienda"
+xberg = "xberg"
+pii = "pii"
+cli = "cli"
+mcp = "mcp"
+fpe = "fpe"
+drl = "drl"
+
+[default.extend-identifiers]

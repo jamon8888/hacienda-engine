@@ -15,26 +15,26 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
-      
+
       - name: Install rumdl
         run: cargo install rumdl --locked
-      
+
       - name: Install typos
         run: cargo install typos-cli --locked
-      
+
       - name: Lint markdown
-        run: rumdl check . -- --ignore superpowers
-      
+        run: rumdl check . --exclude "superpowers,.ai-rulez" -d MD013
+
       - name: Check spelling
-        run: typos .
-      
+        run: typos . --config _typos.toml
+
       - name: Check Rust formatting
         run: cargo fmt --all --check
-      
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

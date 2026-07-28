@@ -4,28 +4,13 @@ on:
   push:
     branches: [main]
     paths:
-      - 'hacienda/**'
-      - 'hacienda-core/**'
+      - "hacienda/**"
+      - "hacienda-core/**"
   pull_request:
     branches: [main]
 
 jobs:
   e2e:
-    needs: ci-rust
-    runs-on: ubuntu-24.04-arm
-    strategy:
-      matrix:
-        lang: [python, node, ruby, php, go, java, csharp, elixir, wasm, dart, kotlin_android, swift, zig]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features -- --test-threads=1
-
-  e2e:rust:
-    needs: ci-rust
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -33,4 +18,5 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features -- --test-threads=1
+      - name: Run workspace tests
+        run: cargo test --workspace --all-features -- --test-threads=1
