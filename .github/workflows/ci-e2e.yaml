@@ -34,4 +34,3 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features -- --test-threads=1
-

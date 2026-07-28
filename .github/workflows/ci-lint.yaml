@@ -21,16 +21,11 @@ jobs:
         with:
           components: rustfmt, clippy
       
-      - name: Install poly tools
-        run: |
-          # Install rumdl for markdown linting
-          cargo install rumdl --locked
-          
-          # Install typos for spell checking
-          cargo install typos-cli --locked
-          
-          # Install typos words
-          cargo install typos-cli --locked --features words
+      - name: Install rumdl
+        run: cargo install rumdl --locked
+      
+      - name: Install typos
+        run: cargo install typos-cli --locked
       
       - name: Lint markdown
         run: rumdl .
@@ -38,12 +33,8 @@ jobs:
       - name: Check spelling
         run: typos .
       
-      - name: Check typos words
-        run: typos --words-file /dev/null --dictionary=extended --dictionary=crate-words .
-      
       - name: Check Rust formatting
         run: cargo fmt --all --check
       
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
