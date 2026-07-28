@@ -237,4 +237,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 - [xberg](https://github.com/xberg-io/xberg) — Upstream document intelligence platform
 - [xberg-pii-ecosystem](https://github.com/xberg-io/xberg-pii-ecosystem) — PII crate ecosystem
-- [Compliance Spec](docs/superpowers/specs/2025-07-24-xberg-pii-ecosystem-design.md)
+- [Compliance Spec](superpowers/specs/2025-07-24-xberg-pii-ecosystem-design.md)
