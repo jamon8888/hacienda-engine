@@ -25,7 +25,8 @@
 ## 🤖 Task 1: `pii-mcp-server` Crate
 
 ### Files
-```
+
+```text
 crates/pii-mcp-server/
 ├── Cargo.toml
 ├── src/
@@ -40,6 +41,7 @@ crates/pii-mcp-server/
 ```
 
 ### Cargo.toml
+
 ```toml
 [package]
 name = "pii-mcp-server"
@@ -63,6 +65,7 @@ pii-review = { path = "../pii-review" }
 ```
 
 ### lib.rs - Server Handler
+
 ```rust
 use rmcp::{ServerHandler, tool, tool_router, resource, resource_router, prompt, prompt_router, ErrorData as McpError};
 use schemars::JsonSchema;
@@ -202,6 +205,7 @@ impl PiiMcpServer {
 ```
 
 ### Resources
+
 ```rust
 #[resource_router]
 impl PiiMcpServer {
@@ -243,6 +247,7 @@ impl PiiMcpServer {
 ```
 
 ### Prompts
+
 ```rust
 #[prompt_router]
 impl PiiMcpServer {
@@ -333,6 +338,7 @@ Generate DORA report.
 ```
 
 ### main.rs
+
 ```rust
 use rmcp::{transport::stdio, ServerHandler, ServiceExt};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -372,7 +378,8 @@ async fn main() -> anyhow::Result<()> {
 ## 🌐 Task 2: `pii-api` Crate (REST API)
 
 ### Files
-```
+
+```text
 crates/pii-api/
 ├── Cargo.toml
 ├── src/
@@ -396,6 +403,7 @@ crates/pii-api/
 ```
 
 ### Cargo.toml
+
 ```toml
 [package]
 name = "pii-api"
@@ -426,6 +434,7 @@ pii-audit = { path = "../pii-audit" }
 ```
 
 ### routes/pii.rs
+
 ```rust
 use axum::{Json, extract::State, response::IntoResponse};
 use serde::{Deserialize, Serialize};
@@ -479,6 +488,7 @@ pub async fn scan_handler(
 ```
 
 ### routes/compliance.rs
+
 ```rust
 #[utoipa::path(
     get,
@@ -516,6 +526,7 @@ pub async fn model_card_handler(State(state): State<Arc<ApiState>>) -> impl Into
 ```
 
 ### Auth + Rate Limiting
+
 ```rust
 // auth.rs
 use axum::{extract::FromRequestParts, http::StatusCode, response::Response};
@@ -580,6 +591,7 @@ pub fn require_role(role: Role) -> impl Fn(Request, Next) -> Result<Response, St
 ```
 
 ### Rate Limiting
+
 ```rust
 // rate_limit.rs
 use governor::{Quota, RateLimiter};
@@ -601,6 +613,7 @@ pub fn rate_limit_layer(config: RateLimitConfig) -> impl Layer<Router> + Clone {
 ```
 
 ### OpenAPI
+
 ```rust
 // openapi.rs
 use utoipa::OpenApi;
@@ -656,6 +669,7 @@ pub fn openapi_json() -> String {
 ## 🖥️ Task 3: `pii-cli` Crate
 
 ### Cargo.toml
+
 ```toml
 [package]
 name = "pii-cli"
@@ -684,6 +698,7 @@ self_update = { version = "0.30", features = ["signatures"] }
 ```
 
 ### main.rs
+
 ```rust
 use clap::{Parser, Subcommand};
 use pii_pipeline::{PiiPipeline, PipelineConfig};
@@ -781,6 +796,7 @@ fn main() -> anyhow::Result<()> {
 ## 🌐 Task 4: `pii-wasm` Crate
 
 ### Cargo.toml
+
 ```toml
 [package]
 name = "pii-wasm"
@@ -819,6 +835,7 @@ strip = true
 ```
 
 ### lib.rs
+
 ```rust
 use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -916,6 +933,7 @@ impl NerEngine {
 ## 🧪 Task 5: Tests + Distribution
 
 ### MCP Contract Tests
+
 ```rust
 // tests/mcp_contract_tests.rs
 use rmcp::{transport::stdio, ServerHandler};
@@ -949,11 +967,13 @@ async fn mcp_redact_tool() {
 ### Distribution Configs
 
 #### Docker Multi-arch
+
 ```dockerfile
 # Dockerfile (already shown in plan 01)
 ```
 
 #### Helm Chart
+
 ```yaml
 # helm/xberg-pii/values.yaml
 replicaCount: 3
@@ -973,6 +993,7 @@ config:
 ```
 
 #### NPM Package
+
 ```json
 {
   "name": "@xberg/pii-wasm",

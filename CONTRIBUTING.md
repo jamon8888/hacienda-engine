@@ -106,7 +106,7 @@ task test:cov
 
 We use [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```text
 feat: add PCI-DSS redaction profile
 fix: fix audit chain verification on empty chain
 docs: update API reference for /v1/pii/redact

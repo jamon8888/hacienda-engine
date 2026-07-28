@@ -19,7 +19,7 @@ xberg-studio currently extracts base entities (Person, Organization, Location, E
 
 ## 2. Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        VERTICAL NER PIPELINE                            │
 ├─────────────────────────────────────────────────────────────────────────┤
@@ -464,7 +464,7 @@ const engine = new XbergEngine({ bridgeTimeoutMs: 30000 }, { ner: { ner: nerBrid
 
 ### Vertical Dictionary Structure
 
-```
+```text
 src/lib/verticals/
 ├── m&a.yaml              # M&A taxonomy
 ├── financial_services.yaml

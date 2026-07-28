@@ -534,7 +534,7 @@ git commit -m "test: add integration tests for xberg-facade"
 
 ## Execution Order Summary
 
-```
+```text
 Track A (Task A1) ──┐
                      ├──▶ Track A (Task A2: fix compilation) ──▶ Track C (Task C1: tests)
 Track B (Task B1) ──┘

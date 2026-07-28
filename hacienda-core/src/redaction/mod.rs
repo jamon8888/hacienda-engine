@@ -2,7 +2,7 @@ pub mod engine;
 pub mod fpe;
 pub mod patterns;
 
-use pii_redaction::{RedactionEngine, RedactionConfig, RedactionMode, RedactionResult};
+use pii_redaction::{RedactionConfig, RedactionEngine, RedactionMode, RedactionResult};
 
 pub struct RedactionEngineWrapper {
     inner: RedactionEngine,
@@ -10,7 +10,9 @@ pub struct RedactionEngineWrapper {
 
 impl RedactionEngineWrapper {
     pub fn new(config: RedactionConfig) -> Self {
-        Self { inner: RedactionEngine::new(config) }
+        Self {
+            inner: RedactionEngine::new(config),
+        }
     }
 
     pub fn redact(&self, text: &str) -> RedactionResult {

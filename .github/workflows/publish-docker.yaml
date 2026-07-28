@@ -43,11 +43,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - { dockerfile: docker/Dockerfile, tag: hacienda, platform: linux/amd64,linux/arm64 }
-          - { dockerfile: docker/Dockerfile.musl-build, tag: hacienda-musl, platform: linux/amd64,linux/arm64 }
-          - { dockerfile: docker/Dockerfile.musl-ffi, tag: hacienda-ffi, platform: linux/amd64,linux/arm64 }
-          - { dockerfile: docker/Dockerfile.musl-node, tag: hacienda-node, platform: linux/amd64,linux/arm64 }
-          - { dockerfile: docker/Dockerfile.musl-rustler, tag: hacienda-nif, platform: linux/amd64,linux/arm64 }
+          - { dockerfile: docker/Dockerfile, tag: hacienda, platform: linux/amd64, linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-build, tag: hacienda-musl, platform: linux/amd64, linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-ffi, tag: hacienda-ffi, platform: linux/amd64, linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-node, tag: hacienda-node, platform: linux/amd64, linux/arm64 }
+          - { dockerfile: docker/Dockerfile.musl-rustler, tag: hacienda-nif, platform: linux/amd64, linux/arm64 }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

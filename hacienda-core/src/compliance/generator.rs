@@ -1,14 +1,14 @@
-mod generator;
-mod dpia;
-mod model_card;
-mod dora;
 mod checklist;
+mod dora;
+mod dpia;
+mod generator;
+mod model_card;
 
-pub use generator::ComplianceGenerator;
-pub use dpia::DpiaDocument;
-pub use model_card::{generate_model_card, ModelCard};
+pub use checklist::{ChecklistItem, ComplianceChecklist};
 pub use dora::{DoraReport, PiiIncident};
-pub use checklist::{ComplianceChecklist, ChecklistItem};
+pub use dpia::DpiaDocument;
+pub use generator::ComplianceGenerator;
+pub use model_card::{generate_model_card, ModelCard};
 
 pub struct ComplianceGenerator {
     model_name: String,
@@ -36,7 +36,12 @@ impl ComplianceGenerator {
             actions_taken: vec![],
             lessons_learned: vec![],
         });
-        ComplianceReport { dpia, model_card, dora, generated_at: chrono::Utc::now().to_rfc3339() }
+        ComplianceReport {
+            dpia,
+            model_card,
+            dora,
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        }
     }
 
     pub async fn model_card(&self) -> ModelCard {

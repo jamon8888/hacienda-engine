@@ -1,10 +1,10 @@
-use xberg::{extract, ExtractInput, ExtractionConfig, ExtractionResult};
-use hacienda_core::pii::{PiiPipeline, PipelineConfig, PipelineResult};
-use hacienda_core::compliance::ComplianceGenerator;
 use hacienda_core::audit::{AuditChain, FileSink};
+use hacienda_core::compliance::ComplianceGenerator;
+use hacienda_core::glossary::{generate_markdown_links, EntityGlossary};
+use hacienda_core::pii::{PiiPipeline, PipelineConfig, PipelineResult};
 use hacienda_core::review::ReviewQueue;
-use hacienda_core::glossary::{EntityGlossary, generate_markdown_links};
 use std::sync::{Arc, Mutex};
+use xberg::{extract, ExtractInput, ExtractionConfig, ExtractionResult};
 
 pub struct HaciendaFacade {
     extraction_config: ExtractionConfig,
@@ -27,20 +27,30 @@ pub struct HaciendaFacadeConfig {
 
 impl HaciendaFacade {
     pub fn new(config: HaciendaFacadeConfig) -> Result<Self, HaciendaError> {
-        let pii_pipeline = config.pii.as_ref()
+        let pii_pipeline = config
+            .pii
+            .as_ref()
             .map(|c| PiiPipeline::new(c.clone()))
             .transpose()?;
 
-        let compliance = config.compliance.as_ref()
+        let compliance = config
+            .compliance
+            .as_ref()
             .map(|c| ComplianceGenerator::new(c.model_name.clone()));
 
-        let audit_chain = config.audit.as_ref()
+        let audit_chain = config
+            .audit
+            .as_ref()
             .map(|c| Arc::new(Mutex::new(AuditChain::new(c.config_hash.clone()))));
 
-        let review_queue = config.review.as_ref()
+        let review_queue = config
+            .review
+            .as_ref()
             .map(|c| Arc::new(ReviewQueue::new(c.clone())));
 
-        let glossary = config.glossary.as_ref()
+        let glossary = config
+            .glossary
+            .as_ref()
             .map(|c| Arc::new(Mutex::new(EntityGlossary::new(c.clone()))));
 
         // Register PII processor with xberg if PII enabled
@@ -67,7 +77,11 @@ impl HaciendaFacade {
 
         // 2. PII Pipeline (optional)
         let pii_result = if let Some(pipeline) = &self.pii_pipeline {
-            let text = extraction.results.first().map(|r| r.content.as_str()).unwrap_or("");
+            let text = extraction
+                .results
+                .first()
+                .map(|r| r.content.as_str())
+                .unwrap_or("");
             let result = pipeline.process(text)?;
 
             // Log to audit chain
@@ -90,12 +104,16 @@ impl HaciendaFacade {
             }
 
             Some(result)
-        } else { None };
+        } else {
+            None
+        };
 
         // 3. Compliance (optional)
         let compliance_report = if let Some(comp) = &self.compliance {
             Some(comp.full_report().await?)
-        } else { None };
+        } else {
+            None
+        };
 
         // 4. Glossary linking (optional)
         let glossary_links = if let Some(glossary) = &self.glossary {
@@ -104,14 +122,23 @@ impl HaciendaFacade {
                 guard.insert(entity);
             }
             Some(guard.generate_links(&extraction.results[0].content)?)
-        } else { None };
+        } else {
+            None
+        };
 
         Ok(HaciendaResult {
             extraction,
             pii: pii_result,
             compliance: compliance_report,
-            audit_log: self.audit_chain.as_ref().map(|c| c.lock().unwrap().entries().to_vec()),
-            review_count: self.review_queue.as_ref().map(|q| q.stats().pending).unwrap_or(0),
+            audit_log: self
+                .audit_chain
+                .as_ref()
+                .map(|c| c.lock().unwrap().entries().to_vec()),
+            review_count: self
+                .review_queue
+                .as_ref()
+                .map(|q| q.stats().pending)
+                .unwrap_or(0),
             glossary_links,
             metadata: HaciendaMetadata {
                 processing_time_ms: start.elapsed().as_millis() as u64,
@@ -121,7 +148,10 @@ impl HaciendaFacade {
     }
 
     /// Batch processing
-    pub async fn process_batch(&self, inputs: Vec<ExtractInput>) -> Result<Vec<HaciendaResult>, HaciendaError> {
+    pub async fn process_batch(
+        &self,
+        inputs: Vec<ExtractInput>,
+    ) -> Result<Vec<HaciendaResult>, HaciendaError> {
         let mut results = Vec::with_capacity(inputs.len());
         for input in inputs {
             results.push(self.process(input).await?);
@@ -148,26 +178,34 @@ pub struct HaciendaMetadata {
 }
 
 mod compliance {
-    use hacienda_core::compliance::{ComplianceGenerator, ComplianceReport, ComplianceChecklist, ModelCard, DoraReport};
     pub use hacienda_core::compliance::*;
+    use hacienda_core::compliance::{
+        ComplianceChecklist, ComplianceGenerator, ComplianceReport, DoraReport, ModelCard,
+    };
 }
 
 mod audit {
-    use hacienda_core::audit::{AuditChain, FileSink, AuditEntry, AuditSink};
     pub use hacienda_core::audit::*;
+    use hacienda_core::audit::{AuditChain, AuditEntry, AuditSink, FileSink};
 }
 
 mod review {
-    use hacienda_core::review::{ReviewQueue, ReviewQueueItem, ReviewRequest, ReviewDecision, ReviewStatus, Priority, QueueStats};
     pub use hacienda_core::review::*;
+    use hacienda_core::review::{
+        Priority, QueueStats, ReviewDecision, ReviewQueue, ReviewQueueItem, ReviewRequest,
+        ReviewStatus,
+    };
 }
 
 mod glossary {
-    use hacienda_core::glossary::{EntityGlossary, GlossaryEntry, generate_markdown_links};
     pub use hacienda_core::glossary::*;
+    use hacienda_core::glossary::{generate_markdown_links, EntityGlossary, GlossaryEntry};
 }
 
 mod pii {
-    use hacienda_core::pii::{PiiPipeline, PipelineConfig, PipelineResult, PipelineEntity, PipelineAuditEntry, PipelineMetrics};
     pub use hacienda_core::pii::*;
+    use hacienda_core::pii::{
+        PiiPipeline, PipelineAuditEntry, PipelineConfig, PipelineEntity, PipelineMetrics,
+        PipelineResult,
+    };
 }

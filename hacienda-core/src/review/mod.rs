@@ -1,14 +1,18 @@
-mod queue;
-mod item;
-mod decision;
 mod config;
+mod decision;
+mod item;
+mod queue;
 
-pub use queue::ReviewQueue;
-pub use item::{ReviewQueueItem, ReviewRequest};
-pub use decision::{ReviewDecision, ReviewStatus, Priority};
 pub use config::ReviewConfig;
+pub use decision::{Priority, ReviewDecision, ReviewStatus};
+pub use item::{ReviewQueueItem, ReviewRequest};
+pub use queue::ReviewQueue;
 
-use pii_review::{ReviewQueue as PiiReviewQueue, ReviewQueueItem as PiiReviewQueueItem, ReviewRequest as PiiReviewRequest, ReviewDecision as PiiReviewDecision, ReviewStatus as PiiReviewStatus, Priority as PiiPriority, ReviewConfig as PiiReviewConfig};
+use pii_review::{
+    Priority as PiiPriority, ReviewConfig as PiiReviewConfig, ReviewDecision as PiiReviewDecision,
+    ReviewQueue as PiiReviewQueue, ReviewQueueItem as PiiReviewQueueItem,
+    ReviewRequest as PiiReviewRequest, ReviewStatus as PiiReviewStatus,
+};
 
 pub struct ReviewQueueWrapper {
     inner: PiiReviewQueue,
@@ -17,7 +21,9 @@ pub struct ReviewQueueWrapper {
 impl ReviewQueueWrapper {
     pub fn new(config: ReviewConfig) -> Self {
         let pii_config = PiiReviewConfig::default();
-        Self { inner: PiiReviewQueue::new() }
+        Self {
+            inner: PiiReviewQueue::new(),
+        }
     }
 
     pub fn submit(&self, request: ReviewRequest) -> ReviewQueueItem {
@@ -33,19 +39,27 @@ impl ReviewQueueWrapper {
         item.into()
     }
 
-    pub fn decide(&self, id: &str, decision: ReviewDecision, reviewer: &str, comment: &str) -> Result<ReviewQueueItem, String> {
+    pub fn decide(
+        &self,
+        id: &str,
+        decision: ReviewDecision,
+        reviewer: &str,
+        comment: &str,
+    ) -> Result<ReviewQueueItem, String> {
         let pii_decision = match decision {
             ReviewDecision::Approve => PiiReviewDecision::Approve,
             ReviewDecision::Reject => PiiReviewDecision::Reject,
             ReviewDecision::Modify => PiiReviewDecision::Modify,
         };
-        self.inner.decide(id, pii_decision, reviewer, comment)
+        self.inner
+            .decide(id, pii_decision, reviewer, comment)
             .map(|i| i.into())
             .map_err(|e| e.to_string())
     }
 
     pub fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, String> {
-        self.inner.assign(id, reviewer)
+        self.inner
+            .assign(id, reviewer)
             .map(|i| i.into())
             .map_err(|e| e.to_string())
     }
@@ -58,7 +72,11 @@ impl ReviewQueueWrapper {
             ReviewStatus::Rejected => pii_review::ReviewStatus::Rejected,
             ReviewStatus::Modified => pii_review::ReviewStatus::Modified,
         });
-        self.inner.list(pii_filter).into_iter().map(|i| i.into()).collect()
+        self.inner
+            .list(pii_filter)
+            .into_iter()
+            .map(|i| i.into())
+            .collect()
     }
 
     pub fn get(&self, id: &str) -> Option<ReviewQueueItem> {

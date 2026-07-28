@@ -24,7 +24,8 @@
 ## 🛡️ Task 1: `pii-audit` Crate
 
 ### Files
-```
+
+```text
 crates/pii-audit/
 ├── Cargo.toml
 ├── src/
@@ -41,6 +42,7 @@ crates/pii-audit/
 ```
 
 ### Cargo.toml
+
 ```toml
 [package]
 name = "pii-audit"
@@ -60,6 +62,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ```
 
 ### lib.rs
+
 ```rust
 use blake3;
 use serde::{Deserialize, Serialize};
@@ -174,6 +177,7 @@ impl AuditChain {
 ```
 
 ### Sink Trait
+
 ```rust
 #[async_trait]
 pub trait AuditSink: Send + Sync {
@@ -194,6 +198,7 @@ pub struct FileSink {
 ```
 
 ### Export Formats
+
 ```rust
 pub enum ExportFormat {
     JsonLines,
@@ -217,6 +222,7 @@ pub async fn export_audit(
 ## ⚖️ Task 2: `pii-compliance` Crate
 
 ### DPIA Generator
+
 ```rust
 // pii-compliance/src/dpia.rs
 
@@ -283,6 +289,7 @@ impl DpiaGenerator {
 ```
 
 ### Model Card Generator (AI Act Art. 11)
+
 ```rust
 pub fn generate_model_card(config: &PipelineConfig) -> ModelCard {
     ModelCard {
@@ -345,6 +352,7 @@ pub fn generate_model_card(config: &PipelineConfig) -> ModelCard {
 ```
 
 ### DORA Incident Reporter
+
 ```rust
 pub struct DoraIncidentReporter;
 
@@ -392,6 +400,7 @@ impl DoraIncidentReporter {
 ## 👥 Task 3: `pii-review` Crate
 
 ### Review Queue
+
 ```rust
 // pii-review/src/lib.rs
 
@@ -455,6 +464,7 @@ impl ReviewQueue {
 ## 🧪 Task 4: Tests + Compliance Validation
 
 ### Integration Tests
+
 ```rust
 // tests/compliance_tests.rs
 
@@ -510,6 +520,7 @@ fn audit_log_integrity_chain() {
 ```
 
 ### Compliance Tests
+
 ```rust
 #[test]
 fn model_card_contains_all_required_sections() {
@@ -553,6 +564,7 @@ fn incident_report_contains_all_dora_fields() {
 ## 📝 Task 5: Documentation + Runbooks
 
 ### Runbooks
+
 ```markdown
 # docs/runbooks/model-oom.md
 

@@ -1,8 +1,21 @@
 alef_version = "0.44.0"
 extra_clippy_allows = ["redundant_field_names"]
 languages = [
-  "python", "node", "ruby", "php", "ffi", "go", "java", "csharp",
-  "elixir", "wasm", "dart", "jni", "kotlin_android", "swift", "zig"
+  "python",
+  "node",
+  "ruby",
+  "php",
+  "ffi",
+  "go",
+  "java",
+  "csharp",
+  "elixir",
+  "wasm",
+  "dart",
+  "jni",
+  "kotlin_android",
+  "swift",
+  "zig",
 ]
 
 [workspace.dto]
@@ -31,13 +44,8 @@ kotlin_android = { async_wrappers = false }
 
 [workspace.docs]
 reference_output = "docs-site/src/content/docs/reference"
-cli_sources = [
-  "hacienda/src/cli.rs",
-  "hacienda-core/src/cli_overrides.rs",
-]
-mcp_sources = [
-  "hacienda-core/src/mcp/server.rs",
-]
+cli_sources = ["hacienda/src/cli.rs", "hacienda-core/src/cli_overrides.rs"]
+mcp_sources = ["hacienda-core/src/mcp/server.rs"]
 skills = { template_dir = "templates/docs/skills", output_dir = ".codex/skills" }
 
 [workspace.sync]
@@ -99,18 +107,9 @@ dart = "packages/dart/lib/src/"
 zig = "packages/zig/src/"
 
 [crates.exclude]
-types = [
-  "HaciendaFacadeConfig",
-  "PipelineConfigInternal",
-  "AuditChainInternal",
-]
-fields = [
-  "HaciendaFacade::extraction_config",
-  "HaciendaFacade::pii_pipeline",
-]
-methods = [
-  "HaciendaFacade::register_internal_processors",
-]
+types = ["HaciendaFacadeConfig", "PipelineConfigInternal", "AuditChainInternal"]
+fields = ["HaciendaFacade::extraction_config", "HaciendaFacade::pii_pipeline"]
+methods = ["HaciendaFacade::register_internal_processors"]
 
 [crates.features]
 default = ["xberg-full", "pii", "compliance", "audit", "review", "glossary"]

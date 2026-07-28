@@ -29,7 +29,9 @@ pub fn generate_model_card(model_name: &str) -> ModelCard {
         },
         known_biases: vec!["English language bias".into(), "Western name bias".into()],
         intended_use: "PII detection and redaction in documents".into(),
-        limitations: "May miss context-dependent PII. Not suitable for legal decisions without human review.".into(),
+        limitations:
+            "May miss context-dependent PII. Not suitable for legal decisions without human review."
+                .into(),
         citations: vec![],
         license: "Apache-2.0".into(),
     }

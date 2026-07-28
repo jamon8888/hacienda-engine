@@ -90,6 +90,7 @@ cargo new --lib crates/pii-pipeline
 #### 1.3 Configure each crate's Cargo.toml
 
 **File:** `crates/pii-regex/Cargo.toml`
+
 ```toml
 [package]
 name = "pii-regex"
@@ -107,6 +108,7 @@ thiserror = { workspace = true }
 ```
 
 **File:** `crates/pii-merge/Cargo.toml`
+
 ```toml
 [package]
 name = "pii-merge"
@@ -122,6 +124,7 @@ pii-regex = { path = "../pii-regex" }
 ```
 
 **File:** `crates/pii-redaction/Cargo.toml`
+
 ```toml
 [package]
 name = "pii-redaction"
@@ -145,6 +148,7 @@ fpe = ["aes-gcm", "cipher", "ctr"]
 ```
 
 **File:** `crates/pii-fastino/Cargo.toml`
+
 ```toml
 [package]
 name = "pii-fastino"
@@ -171,6 +175,7 @@ wasm = ["candle-core/wasm", "candle-nn/wasm", "candle-transformers/wasm"]
 ```
 
 **File:** `crates/pii-config/Cargo.toml`
+
 ```toml
 [package]
 name = "pii-config"
@@ -187,6 +192,7 @@ thiserror = { workspace = true }
 ```
 
 **File:** `crates/pii-pipeline/Cargo.toml`
+
 ```toml
 [package]
 name = "pii-pipeline"

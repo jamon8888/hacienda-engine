@@ -26,6 +26,7 @@
 ### Task 1: Project Scaffold
 
 **Files:**
+
 - Create: `package.json`
 - Create: `vite.config.ts`
 - Create: `tsconfig.json`
@@ -36,6 +37,7 @@
 - Create: `src/app.css`
 
 **Interfaces:**
+
 - Produces: Buildable Svelte project structure
 
 - [ ] **Step 1: Write package.json**
@@ -215,6 +217,7 @@ input, select { font-family: inherit; }
 ```bash
 npm install && npm run dev
 ```
+
 Expected: Vite starts, shows blank page (App.svelte not created yet)
 
 - [ ] **Step 10: Commit**
@@ -229,9 +232,11 @@ git commit -m "chore: scaffold xberg-studio Svelte project"
 ### Task 2: Type Definitions & Shared Types
 
 **Files:**
+
 - Create: `src/lib/types.ts`
 
 **Interfaces:**
+
 - Produces: TypeScript types for files, entities, progress, config
 
 - [ ] **Step 1: Write src/lib/types.ts**
@@ -322,6 +327,7 @@ export function validateFile(file: File): { valid: boolean; error?: string } {
 ```bash
 npx svelte-check
 ```
+
 Expected: No errors
 
 - [ ] **Step 3: Commit**
@@ -336,10 +342,12 @@ git commit -m "feat: add shared type definitions"
 ### Task 3: Onboarding Screen Component
 
 **Files:**
+
 - Create: `src/lib/Onboarding.svelte`
 - Create: `src/lib/Onboarding.test.ts`
 
 **Interfaces:**
+
 - Consumes: `types.ts` (OnboardingState)
 - Produces: `Onboarding` component with progress events
 
@@ -375,6 +383,7 @@ describe('Onboarding', () => {
 ```bash
 npm test -- src/lib/Onboarding.test.ts
 ```
+
 Expected: FAIL (component doesn't exist)
 
 - [ ] **Step 3: Write Onboarding.svelte**
@@ -492,6 +501,7 @@ Expected: FAIL (component doesn't exist)
 ```bash
 npm test -- src/lib/Onboarding.test.ts
 ```
+
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -506,10 +516,12 @@ git commit -m "feat: add onboarding screen with local AI messaging"
 ### Task 4: Asset Loader (CDN + IndexedDB Cache)
 
 **Files:**
+
 - Create: `src/lib/asset-loader.ts`
 - Create: `src/lib/asset-loader.test.ts`
 
 **Interfaces:**
+
 - Consumes: `types.ts`
 - Produces: `loadXbergWasm()`, `loadNerModel()`, `loadTessdata()` functions
 
@@ -549,6 +561,7 @@ describe('Asset Loader', () => {
 ```bash
 npm test -- src/lib/asset-loader.test.ts
 ```
+
 Expected: FAIL
 
 - [ ] **Step 3: Write asset-loader.ts**
@@ -658,6 +671,7 @@ export async function createNerBackend(
 ```bash
 npm test -- src/lib/asset-loader.test.ts
 ```
+
 Expected: PASS (with mocked idb)
 
 - [ ] **Step 5: Commit**
@@ -672,10 +686,12 @@ git commit -m "feat: add asset loader with IndexedDB caching"
 ### Task 5: Web Worker Pipeline
 
 **Files:**
+
 - Create: `src/worker/pipeline.ts`
 - Create: `src/worker/pipeline.test.ts`
 
 **Interfaces:**
+
 - Consumes: `types.ts` (FileInput, ProcessedFile, ProgressUpdate, AppConfig)
 - Produces: Worker message handler with extract → NER → link pipeline
 
@@ -704,6 +720,7 @@ describe('Worker Pipeline', () => {
 ```bash
 npm test -- src/worker/pipeline.test.ts
 ```
+
 Expected: FAIL
 
 - [ ] **Step 3: Write pipeline.ts**
@@ -952,7 +969,7 @@ function buildFrontmatter(input: FileInput, entities: Entity[]): string {
     slug: e.slug
   }));
 
-  const type = input.mimeType.split('/')[1] || 'unknown';
+  const type = input.mimeType.split[1]('/') || 'unknown';
   return `---
 source: ${input.name}
 type: ${type}
@@ -1093,13 +1110,15 @@ self.onmessage = async (event: MessageEvent) => {
     await processFiles(files, config);
   }
 };
-```
+
+```text
 
 - [ ] **Step 4: Run test**
 
 ```bash
 npm test -- src/worker/pipeline.test.ts
 ```
+
 Expected: PASS (structural)
 
 - [ ] **Step 5: Add worker to vite config**
@@ -1121,10 +1140,12 @@ git commit -m "feat: add web worker extraction pipeline"
 ### Task 6: Main App Component
 
 **Files:**
+
 - Create: `src/App.svelte`
 - Create: `src/App.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Onboarding.svelte`, `asset-loader.ts`, `types.ts`, `worker/pipeline.ts`
 - Produces: Root app with file handling, progress, download
 
@@ -1156,6 +1177,7 @@ describe('App', () => {
 ```bash
 npm test -- src/App.test.ts
 ```
+
 Expected: FAIL
 
 - [ ] **Step 3: Write App.svelte**
@@ -1525,6 +1547,7 @@ Expected: FAIL
 ```bash
 npm test -- src/App.test.ts
 ```
+
 Expected: PASS
 
 - [ ] **Step 7: Run dev server to verify**
@@ -1532,6 +1555,7 @@ Expected: PASS
 ```bash
 npm run dev
 ```
+
 Expected: App loads, shows onboarding, then drop zone
 
 - [ ] **Step 8: Commit**
@@ -1546,10 +1570,12 @@ git commit -m "feat: add main app component with drop zone, progress, config pan
 ### Task 7: Integration & E2E Tests
 
 **Files:**
+
 - Create: `playwright.config.ts`
 - Create: `tests/e2e/basic.spec.ts`
 
 **Interfaces:**
+
 - Consumes: Built app
 - Produces: Playwright test suite
 
@@ -1633,6 +1659,7 @@ test.describe('xberg-studio', () => {
 ```bash
 npm run build && npx playwright test
 ```
+
 Expected: Tests pass
 
 - [ ] **Step 4: Commit**
@@ -1647,11 +1674,13 @@ git commit -m "feat: add Playwright E2E test suite"
 ### Task 8: Production Build & Deploy Config
 
 **Files:**
+
 - Create: `.github/workflows/deploy.yml`
 - Create: `vercel.json` (optional)
 - Create: `netlify.toml` (optional)
 
 **Interfaces:**
+
 - Consumes: `package.json`, `vite.config.ts`
 - Produces: CI/CD pipeline for GitHub Pages
 
@@ -1741,6 +1770,7 @@ jobs:
 ```bash
 npm run build
 ```
+
 Expected: `dist/` folder with index.html, assets, worker
 
 - [ ] **Step 5: Commit**
@@ -1755,9 +1785,11 @@ git commit -m "ci: add GitHub Pages, Vercel, Netlify deploy configs"
 ### Task 9: README & Documentation
 
 **Files:**
+
 - Create: `README.md`
 
 **Interfaces:**
+
 - Produces: Project documentation
 
 - [ ] **Step 1: Write README.md**
@@ -1785,7 +1817,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173
+Open <http://localhost:5173>
 
 ## Deployment
 
@@ -1808,7 +1840,7 @@ npm run build
 
 ## Architecture
 
-```
+```text
 ┌─────────────┐     ┌──────────────┐     ┌──────────────┐
 │   Svelte    │────▶│  Web Worker  │────▶│    .zip      │
 │    UI       │     │  (pipeline)  │     │   Download   │
@@ -1871,7 +1903,8 @@ entities:
 ## License
 
 MIT
-```
+
+```text
 
 - [ ] **Step 2: Commit**
 
@@ -1885,9 +1918,11 @@ git commit -m "docs: add README with features, deployment, architecture"
 ### Task 10: Final Verification
 
 **Files:**
+
 - All previous files
 
 **Interfaces:**
+
 - Consumes: Complete codebase
 - Produces: Working production build
 
@@ -1900,6 +1935,7 @@ npx svelte-check
 npm test
 npx playwright test
 ```
+
 Expected: All pass
 
 - [ ] **Step 2: Build and verify output**
@@ -1908,6 +1944,7 @@ Expected: All pass
 npm run build
 ls -la dist/
 ```
+
 Expected: `dist/index.html`, `dist/assets/*.js`, `dist/worker/*.js`
 
 - [ ] **Step 3: Preview production build**
@@ -1915,11 +1952,13 @@ Expected: `dist/index.html`, `dist/assets/*.js`, `dist/worker/*.js`
 ```bash
 npm run preview
 ```
+
 Expected: App loads, onboarding shows, drop zone works
 
 - [ ] **Step 4: Test with sample files**
 
 Drag-drop test files from xberg fixtures:
+
 - `test_documents/sample.pdf`
 - `test_documents/sample.docx`
 - `test_documents/sample.eml`

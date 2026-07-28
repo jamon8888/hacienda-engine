@@ -1,8 +1,8 @@
+use crate::audit::{AuditChain, AuditEntry, AuditSink};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use crate::audit::{AuditChain, AuditEntry, AuditSink};
 
 pub struct FileSink {
     writer: Mutex<BufWriter<File>>,
@@ -22,11 +22,11 @@ impl FileSink {
         config_hash: String,
     ) -> Result<Self, String> {
         let base_path = path.as_ref().to_path_buf();
-        let file = File::create(&base_path)
-            .map_err(|e| format!("Failed to create audit log: {}", e))?;
-        
+        let file =
+            File::create(&base_path).map_err(|e| format!("Failed to create audit log: {}", e))?;
+
         let chain = AuditChain::new("default".into());
-        
+
         Ok(Self {
             writer: Mutex::new(BufWriter::new(file)),
             chain: Mutex::new(AuditChain::new("default".into())),
@@ -46,20 +46,24 @@ impl FileSink {
 impl AuditSink for FileSink {
     fn write(&self, entry: &AuditEntry) -> Result<(), String> {
         // Write to chain
-        self.chain.lock().unwrap().append(entry.clone())
+        self.chain
+            .lock()
+            .unwrap()
+            .append(entry.clone())
             .map_err(|e| format!("Chain append failed: {}", e))?;
 
         // Write to file
         let mut writer = self.writer.lock().unwrap();
-        let entry_json = serde_json::to_string(entry)
-            .map_err(|e| format!("Serialization failed: {}", e))?;
-        
-        writer.write_all(entry_json.as_bytes())
+        let entry_json =
+            serde_json::to_string(entry).map_err(|e| format!("Serialization failed: {}", e))?;
+
+        writer
+            .write_all(entry_json.as_bytes())
             .map_err(|e| format!("Write failed: {}", e))?;
-        writer.write_all(b"\n")
+        writer
+            .write_all(b"\n")
             .map_err(|e| format!("Newline write failed: {}", e))?;
-        writer.flush()
-            .map_err(|e| format!("Flush failed: {}", e))?;
+        writer.flush().map_err(|e| format!("Flush failed: {}", e))?;
 
         // Check rotation
         let current_size = *self.current_size.lock().unwrap() + entry_json.len() as u64 + 1;
@@ -73,7 +77,10 @@ impl AuditSink for FileSink {
     }
 
     fn flush(&self) -> Result<(), String> {
-        self.writer.lock().unwrap().flush()
+        self.writer
+            .lock()
+            .unwrap()
+            .flush()
             .map_err(|e| format!("Flush failed: {}", e))
     }
 
@@ -84,11 +91,13 @@ impl AuditSink for FileSink {
         }
 
         let new_file_count = file_count + 1;
-        let new_path = self.base_path.with_extension(format!("log.{}", new_file_count));
-        
-        let new_file = File::create(&new_path)
-            .map_err(|e| format!("Failed to create rotated file: {}", e))?;
-        
+        let new_path = self
+            .base_path
+            .with_extension(format!("log.{}", new_file_count));
+
+        let new_file =
+            File::create(&new_path).map_err(|e| format!("Failed to create rotated file: {}", e))?;
+
         *self.writer.lock().unwrap() = BufWriter::new(new_file);
         *self.current_size.lock().unwrap() = 0;
         *self.file_count.lock().unwrap() = new_file_count;

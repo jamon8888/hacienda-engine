@@ -35,7 +35,7 @@ A client-side Svelte web app that converts documents to RAG-ready Markdown files
 
 ### Architecture Diagram
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │  Svelte UI (main thread)                                │
 │  ┌─────────────┐  ┌──────────┐  ┌───────────────────┐  │
@@ -67,6 +67,7 @@ A client-side Svelte web app that converts documents to RAG-ready Markdown files
 Three-stage streaming pipeline in a Web Worker:
 
 **Stage 1: Extract (xberg WASM)**
+
 - File arrives as `ArrayBuffer` or `ReadableStream`
 - xberg WASM `extract()` produces markdown chunks
 - For large files (>10MB): process in page/chunk boundaries
@@ -74,6 +75,7 @@ Three-stage streaming pipeline in a Web Worker:
 - **Transcript handling:** Extracts timestamped text segments from .srt/.vtt
 
 **Stage 2: NER (Candle GLiNER2)**
+
 - `fastino/GLiNER2-Guardrails-PII-Multi` model loaded via `Gliner2Candle::from_bytes()`
 - Model weights fetched from CDN, cached in browser (IndexedDB)
 - F16 dtype on wasm32 for memory efficiency (~600MB)
@@ -81,6 +83,7 @@ Three-stage streaming pipeline in a Web Worker:
 - Zero-shot: pass any entity labels at inference time
 
 **Stage 3: Link + Glossary**
+
 - String-replace entity spans with markdown links
 - Slugify function: `Acme Corp` → `acme-corp`
 - Track entity frequency for glossary ranking
@@ -143,7 +146,7 @@ Content here with [John Doe](entity:person/john-doe) working at
 
 ### Zip Structure
 
-```
+```text
 output.zip
 ├── report.md
 ├── document.md
@@ -213,7 +216,7 @@ const result = await extract(input, {
 
 On first load, show a full-screen onboarding modal before the drag-drop zone:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                                                         │
 │      🔒  xberg-studio — 100% Local AI in Your Browser  │
@@ -235,6 +238,7 @@ On first load, show a full-screen onboarding modal before the drag-drop zone:
 ```
 
 **Behavior:**
+
 - Shows on first visit (detected via `localStorage` flag)
 - Downloads GLiNER2 model (~600 MB F16) to IndexedDB cache
 - Pre-warms xberg WASM and tesseract-wasm
@@ -246,7 +250,7 @@ On first load, show a full-screen onboarding modal before the drag-drop zone:
 
 Minimal Svelte app with drag-drop zone and hidden config:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │  xberg-studio                           [⚙ Config]     │
 ├─────────────────────────────────────────────────────────┤
@@ -338,7 +342,7 @@ function validateFile(file: File): { valid: boolean; error?: string } {
 
 ### Inline Error Display
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │  ❌  Unsupported file: presentation.key                 │
 │                                                         │

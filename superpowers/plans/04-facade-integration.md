@@ -23,7 +23,8 @@
 ## 🏗️ Task 1: `xberg-facade` Crate
 
 ### Files
-```
+
+```text
 crates/xberg-facade/
 ├── Cargo.toml
 ├── src/
@@ -42,6 +43,7 @@ crates/xberg-facade/
 ```
 
 ### Cargo.toml
+
 ```toml
 [package]
 name = "xberg-facade"
@@ -66,6 +68,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
 ```
 
 ### lib.rs - Unified Facade
+
 ```rust
 use xberg::{
     extract, extract_batch, detect_mime_type,
@@ -217,6 +220,7 @@ impl XbergFacade {
 ```
 
 ### config.rs
+
 ```rust
 use xberg::{CaptioningConfig, ChunkConfig, EmbeddingConfig, RerankerConfig};
 
@@ -237,6 +241,7 @@ pub struct XbergFacadeConfig {
 ## 🔗 Task 2: xberg Core Integration (PR)
 
 ### 1. xberg/Cargo.toml - New Features
+
 ```toml
 # Add to [features] section
 pii-fastino = ["dep:pii-fastino", "ner"]
@@ -245,7 +250,9 @@ pii-compliance = ["dep:pii-compliance", "pii-pipeline"]
 ```
 
 ### 2. NerBackendKind Extension
+
 **File:** `crates/xberg/src/core/config/ner.rs`
+
 ```rust
 pub enum NerBackendKind {
     #[default] Onnx,
@@ -255,7 +262,9 @@ pub enum NerBackendKind {
 ```
 
 ### 3. NerBackend Implementation
+
 **File:** `crates/xberg/src/text/ner/fastino_backend.rs` (NEW)
+
 ```rust
 use xberg_gliner::candle::Gliner2Candle;
 
@@ -300,7 +309,9 @@ impl NerBackend for FastinoBackend {
 ```
 
 ### 4. Register in make_backend
+
 **File:** `crates/xberg/src/text/ner/mod.rs`
+
 ```rust
 fn make_backend(config: &NerConfig) -> Result<Arc<dyn NerBackend>> {
     match config.backend {
@@ -319,7 +330,9 @@ fn make_backend(config: &NerConfig) -> Result<Arc<dyn NerBackend>> {
 ```
 
 ### 5. PII Post-Processor
+
 **File:** `crates/xberg/src/plugins/processor/builtin/ner.rs` (extend)
+
 ```rust
 #[cfg(feature = "pii-pipeline")]
 pub fn register_pii_processor() -> Result<()> {
@@ -348,7 +361,9 @@ impl PostProcessor for PiiPostProcessor {
 ```
 
 ### 5. WASM NER Backend Kind
+
 **File:** `crates/xberg-wasm/src/lib.rs` (add variant)
+
 ```rust
 pub enum WasmNerBackendKind {
     Onnx = 0,
@@ -358,7 +373,9 @@ pub enum WasmNerBackendKind {
 ```
 
 ### 6. CLI Subcommand
+
 **File:** `crates/xberg-cli/src/commands/pii.rs` (NEW)
+
 ```rust
 pub fn pii_command() -> Command {
     Command::new("pii")
@@ -421,6 +438,7 @@ async fn xberg_ner_candle_backend() {
 ## 📝 Task 4: Documentation + Migration Guide
 
 ### Migration Guide
+
 ```markdown
 # docs/migration/pii-integration.md
 
@@ -433,6 +451,7 @@ xberg = { version = "1.0", features = ["pii-pipeline", "pii-fastino", "pii-compl
 ```
 
 ## Config
+
 ```toml
 [extraction]
 # ... existing config
@@ -444,6 +463,7 @@ return_audit_log = true
 ```
 
 ## Usage
+
 ```rust
 let facade = XbergFacade::new(XbergFacadeConfig {
     extraction: ExtractionConfig::default(),
@@ -454,12 +474,14 @@ let result = facade.process(ExtractInput::from_uri("contract.pdf")).await.unwrap
 ```
 
 ## Conformité RGPD/DORA/AI Act
+
 - **Art. 25 RGPD** : Redaction par défaut, audit log
 - **Art. 30 RGPD** : Registre = audit log structuré
 - **Art. 32 RGPD** : FPE, audit chain, encryption
 - **DORA** : Incident report tool, chaos testing
 - **AI Act** : Model card, risk assessment, human oversight
-```
+
+```text
 
 ---
 

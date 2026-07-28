@@ -17,14 +17,12 @@ impl AuditExporter {
         format: ExportFormat,
     ) -> Result<String, String> {
         let entries = chain.entries();
-        
+
         match format {
-            ExportFormat::Json => {
-                serde_json::to_string_pretty(entries)
-                    .map_err(|e| e.to_string())
-            }
+            ExportFormat::Json => serde_json::to_string_pretty(entries).map_err(|e| e.to_string()),
             ExportFormat::JsonLines => {
-                let lines: Vec<String> = entries.iter()
+                let lines: Vec<String> = entries
+                    .iter()
                     .map(|e| serde_json::to_string(e).unwrap())
                     .collect();
                 Ok(lines.join("\n"))

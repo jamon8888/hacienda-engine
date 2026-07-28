@@ -1,6 +1,9 @@
-use pii_pipeline::{PiiPipeline, PipelineConfig, PipelineResult, PipelineEntity, PipelineAuditEntry, PipelineMetrics};
-use hacienda_core::redaction::{RedactionEngine, RedactionConfig, RedactionMode};
 use hacienda_core::pii::profiles::RedactionProfile;
+use hacienda_core::redaction::{RedactionConfig, RedactionEngine, RedactionMode};
+use pii_pipeline::{
+    PiiPipeline, PipelineAuditEntry, PipelineConfig, PipelineEntity, PipelineMetrics,
+    PipelineResult,
+};
 use std::sync::Arc;
 
 pub struct PiiPipelineWrapper {
@@ -23,5 +26,5 @@ impl PiiPipelineWrapper {
     }
 }
 
-pub use pii_pipeline::{PipelineResult, PipelineEntity, PipelineAuditEntry, PipelineMetrics};
 pub use pii_config::PipelineConfig;
+pub use pii_pipeline::{PipelineAuditEntry, PipelineEntity, PipelineMetrics, PipelineResult};

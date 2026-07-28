@@ -1,11 +1,14 @@
-pub mod generator;
-pub mod dpia;
-pub mod model_card;
-pub mod dora;
 pub mod ai_act;
 pub mod checklist;
+pub mod dora;
+pub mod dpia;
+pub mod generator;
+pub mod model_card;
 
-use pii_compliance::{ComplianceGenerator as PiiComplianceGenerator, ComplianceReport, ModelCard as PiiModelCard, DoraReport, ComplianceChecklist, ChecklistItem};
+use pii_compliance::{
+    ChecklistItem, ComplianceChecklist, ComplianceGenerator as PiiComplianceGenerator,
+    ComplianceReport, DoraReport, ModelCard as PiiModelCard,
+};
 
 pub struct ComplianceGeneratorWrapper {
     inner: PiiComplianceGenerator,
@@ -13,7 +16,9 @@ pub struct ComplianceGeneratorWrapper {
 
 impl ComplianceGeneratorWrapper {
     pub fn new(model_name: String) -> Self {
-        Self { inner: PiiComplianceGenerator::new(model_name) }
+        Self {
+            inner: PiiComplianceGenerator::new(model_name),
+        }
     }
 
     pub async fn full_report(&self) -> ComplianceReport {

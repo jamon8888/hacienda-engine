@@ -30,7 +30,7 @@ Il s'intègre **nativement** à **xberg-core** (97 formats, OCR, crawl, traducti
 
 ## 🏗️ Architecture Globale
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         xberg-pii-ecosystem                                  │
 ├─────────────────────────────────────────────────────────────────────────────┤

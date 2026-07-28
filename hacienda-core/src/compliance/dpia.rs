@@ -37,7 +37,9 @@ pub struct DpiaGenerator {
 
 impl DpiaGenerator {
     pub fn new(model_name: &str) -> Self {
-        Self { model_name: model_name.to_string() }
+        Self {
+            model_name: model_name.to_string(),
+        }
     }
 
     pub fn generate(&self) -> DpiaDocument {

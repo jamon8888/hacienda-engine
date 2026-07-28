@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::compliance::PiiIncident;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoraReport {

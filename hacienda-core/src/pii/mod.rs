@@ -1,13 +1,13 @@
-mod pipeline;
 mod config;
+mod pipeline;
 mod xberg_integration;
 
-pub use pipeline::*;
 pub use config::*;
+pub use pipeline::*;
 pub use xberg_integration::*;
 
-use pii_pipeline::PiiPipeline;
 use pii_config::PipelineConfig as PiiPipelineConfig;
+use pii_pipeline::PiiPipeline;
 
 pub struct PiiPipelineWrapper {
     inner: PiiPipeline,
@@ -22,8 +22,7 @@ impl PiiPipelineWrapper {
     }
 
     pub fn process(&self, text: &str) -> Result<PipelineResult, String> {
-        self.inner.process(text)
-            .map_err(|e| e.to_string())
+        self.inner.process(text).map_err(|e| e.to_string())
     }
 }
 
@@ -65,17 +64,25 @@ impl From<pii_pipeline::PipelineResult> for PipelineResult {
     fn from(r: pii_pipeline::PipelineResult) -> Self {
         Self {
             redacted_text: r.redacted_text,
-            entities: r.entities.into_iter().map(|e| PipelineEntity {
-                category: e.category,
-                start: e.start,
-                end: e.end,
-                confidence: e.confidence,
-            }).collect(),
-            audit_log: r.audit_log.into_iter().map(|e| PipelineAuditEntry {
-                category: e.category,
-                span_hash: e.span_hash,
-                chain_hash: e.chain_hash,
-            }).collect(),
+            entities: r
+                .entities
+                .into_iter()
+                .map(|e| PipelineEntity {
+                    category: e.category,
+                    start: e.start,
+                    end: e.end,
+                    confidence: e.confidence,
+                })
+                .collect(),
+            audit_log: r
+                .audit_log
+                .into_iter()
+                .map(|e| PipelineAuditEntry {
+                    category: e.category,
+                    span_hash: e.span_hash,
+                    chain_hash: e.chain_hash,
+                })
+                .collect(),
             metrics: PipelineMetrics {
                 regex_ms: r.metrics.regex_ms,
                 model_ms: r.metrics.model_ms,

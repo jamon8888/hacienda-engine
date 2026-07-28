@@ -1,4 +1,7 @@
-pub fn generate_markdown_links(text: &str, glossary: &crate::glossary::entity_linker::EntityGlossary) -> Result<String, String> {
+pub fn generate_markdown_links(
+    text: &str,
+    glossary: &crate::glossary::entity_linker::EntityGlossary,
+) -> Result<String, String> {
     glossary.generate_links(text)
 }
 

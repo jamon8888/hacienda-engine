@@ -4,15 +4,15 @@ on:
   push:
     branches: [main]
     paths:
-      - 'docker/**'
-      - 'docker-compose.yml'
-      - 'Dockerfile*'
+      - "docker/**"
+      - "docker-compose.yml"
+      - "Dockerfile*"
   pull_request:
     branches: [main]
     paths:
-      - 'docker/**'
-      - 'docker-compose.yml'
-      - 'Dockerfile*'
+      - "docker/**"
+      - "docker-compose.yml"
+      - "Dockerfile*"
 
 jobs:
   build:
@@ -24,7 +24,7 @@ jobs:
           docker/Dockerfile.musl-build,
           docker/Dockerfile.musl-ffi,
           docker/Dockerfile.musl-node,
-          docker/Dockerfile.musl-rustler
+          docker/Dockerfile.musl-rustler,
         ]
     steps:
       - uses: actions/checkout@v4

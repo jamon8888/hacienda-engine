@@ -1,5 +1,5 @@
-use pii_audit::{AuditChain as PiiAuditChain, AuditEntry as PiiAuditEntry, AuditSink};
 use blake3;
+use pii_audit::{AuditChain as PiiAuditChain, AuditEntry as PiiAuditEntry, AuditSink};
 
 pub struct AuditChain {
     entries: Vec<AuditEntry>,
@@ -43,7 +43,8 @@ impl AuditChain {
     pub fn new(config_hash: String) -> Self {
         Self {
             entries: Vec::new(),
-            last_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            last_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             config_hash,
         }
     }
@@ -69,19 +70,22 @@ impl AuditChain {
     }
 
     pub fn verify(&self) -> Result<(), String> {
-        let mut last_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
-        
+        let mut last_hash =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+
         for entry in &self.entries {
             let entry_json = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
-            let expected_hash = blake3::hash(format!("{}{}", last_hash, entry_json).as_bytes()).to_hex().to_string();
-            
+            let expected_hash = blake3::hash(format!("{}{}", last_hash, entry_json).as_bytes())
+                .to_hex()
+                .to_string();
+
             if entry.chain_hash != expected_hash {
                 return Err(format!("Chain integrity broken at entry {}", entry.id));
             }
-            
+
             last_hash = entry.chain_hash.clone();
         }
-        
+
         Ok(())
     }
 

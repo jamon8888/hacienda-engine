@@ -77,7 +77,12 @@ pub enum ReviewCommands {
     /// Get review item
     Get { id: String },
     /// Make decision
-    Decide { id: String, decision: String, reviewer: String, comment: String },
+    Decide {
+        id: String,
+        decision: String,
+        reviewer: String,
+        comment: String,
+    },
     /// Assign reviewer
     Assign { id: String, reviewer: String },
     /// Queue statistics
@@ -87,9 +92,17 @@ pub enum ReviewCommands {
 #[derive(Parser)]
 pub enum AuditCommands {
     /// Query audit logs
-    Query { from: Option<String>, to: Option<String>, category: Option<String> },
+    Query {
+        from: Option<String>,
+        to: Option<String>,
+        category: Option<String>,
+    },
     /// Export audit logs
-    Export { format: String, from: Option<String>, to: Option<String> },
+    Export {
+        format: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
     /// Verify chain integrity
     Verify,
     /// Statistics

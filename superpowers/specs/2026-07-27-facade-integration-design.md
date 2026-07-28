@@ -12,7 +12,7 @@ Create a unified `xberg-facade` crate that chains xberg's document processing pi
 
 ## Architecture
 
-```
+```text
 Two parallel workspaces, two agents:
 
 Agent A (pii-ecosystem)          Agent B (xberg core)
@@ -101,7 +101,7 @@ pub struct FacadeResult {
 
 ### Processing Pipeline
 
-```
+```text
 ExtractInput
     │
     ▼

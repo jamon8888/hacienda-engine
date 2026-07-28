@@ -1,6 +1,6 @@
-use axum::{Router, routing::get, routing::post};
-use std::sync::Arc;
+use axum::{routing::get, routing::post, Router};
 use hacienda_core::{HaciendaFacade, HaciendaFacadeConfig};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct HaciendaApiState {
@@ -11,31 +11,26 @@ pub fn create_app(state: HaciendaApiState) -> Router {
     Router::new()
         // Mount ALL xberg routes under /v1
         .nest("/v1", xberg::api::create_app(state.xberg_state()))
-        
         // Add hacienda PII routes
         .route("/v1/pii/scan", post(pii_scan))
         .route("/v1/pii/redact", post(pii_redact))
         .route("/v1/pii/explain", post(pii_explain))
         .route("/v1/pii/batch", post(pii_batch))
-        
         // Compliance
         .route("/v1/compliance/report", get(compliance_report))
         .route("/v1/compliance/model-card", get(model_card))
         .route("/v1/compliance/dora", post(dora_report))
         .route("/v1/compliance/checklist", get(checklist))
-        
         // Review queue
         .route("/v1/review", post(create_review))
         .route("/v1/review", get(list_reviews))
         .route("/v1/review/:id", get(get_review))
         .route("/v1/review/:id/decision", post(submit_decision))
         .route("/v1/review/:id/assign", post(assign_reviewer))
-        
         // Audit
         .route("/v1/audit/logs", get(query_audit))
         .route("/v1/audit/export", get(export_audit))
         .route("/v1/audit/stats", get(audit_stats))
-        
         .with_state(state)
 }
 
@@ -88,12 +83,19 @@ async fn pii_batch(
     axum::extract::State(state): axum::extract::State<HaciendaApiState>,
     axum::Json(req): axum::Json<BatchRequest>,
 ) -> axum::Json<BatchResponse> {
-    let results = state.facade.process_batch(req.texts.into_iter().map(Into::into).collect()).await.unwrap();
+    let results = state
+        .facade
+        .process_batch(req.texts.into_iter().map(Into::into).collect())
+        .await
+        .unwrap();
     axum::Json(BatchResponse {
-        results: results.into_iter().map(|r| ScanResponse {
-            entities: r.pii.map(|p| p.entities).unwrap_or_default(),
-            redacted: r.pii.map(|p| p.redacted_text),
-        }).collect(),
+        results: results
+            .into_iter()
+            .map(|r| ScanResponse {
+                entities: r.pii.map(|p| p.entities).unwrap_or_default(),
+                redacted: r.pii.map(|p| p.redacted_text),
+            })
+            .collect(),
     })
 }
 
@@ -150,7 +152,9 @@ async fn audit_stats() -> axum::Json<serde_json::Value> {
 
 // Request/Response types
 #[derive(serde::Deserialize)]
-struct ScanRequest { input: String }
+struct ScanRequest {
+    input: String,
+}
 
 #[derive(serde::Serialize)]
 struct ScanResponse {
@@ -159,7 +163,9 @@ struct ScanResponse {
 }
 
 #[derive(serde::Deserialize)]
-struct RedactRequest { input: String }
+struct RedactRequest {
+    input: String,
+}
 
 #[derive(serde::Serialize)]
 struct RedactResponse {
@@ -168,7 +174,10 @@ struct RedactResponse {
 }
 
 #[derive(serde::Deserialize)]
-struct ExplainRequest { input: String, index: usize }
+struct ExplainRequest {
+    input: String,
+    index: usize,
+}
 
 #[derive(serde::Serialize)]
 struct ExplainResponse {
@@ -198,7 +207,11 @@ impl Default for ExplainResponse {
 }
 
 #[derive(serde::Deserialize)]
-struct BatchRequest { texts: Vec<String> }
+struct BatchRequest {
+    texts: Vec<String>,
+}
 
 #[derive(serde::Serialize)]
-struct BatchResponse { results: Vec<ScanResponse> }
+struct BatchResponse {
+    results: Vec<ScanResponse>,
+}
