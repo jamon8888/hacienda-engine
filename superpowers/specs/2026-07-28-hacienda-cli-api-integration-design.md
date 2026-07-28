@@ -40,13 +40,14 @@ off-by-default, audited opt-in.
 | 4 | CLI reuse of `xberg-cli` | **Impossible** (§3). hacienda owns a small command set; raw xberg work delegates to the `xberg` binary via subprocess. |
 | 5 | Crate layout | Four crates: `hacienda-core`, `hacienda`, `hacienda-api`, `hacienda-cli`. |
 | 6 | Config precedence | Mirrors xberg exactly: defaults < discovered file < `--config` < `--config-json` < flags. |
-| 7 | Deployment target | **Single-node first.** Persistence seams designed now; horizontal scale not built. |
+| 7 | Deployment target | **Horizontally scalable** (revised 2026-07-28, §12). Segmented audit chains; stateless facade. |
 | 8 | Span text in API responses | **Withheld by default.** `include_text` requires capability + is audited. |
+| 9 | xberg dependency | **Pinned to release tag `v1.0.2`** via git, not a path dep (§11). |
 
-Decisions 2 and 7 were open questions at the end of the brainstorm; they are
-resolved here as the conservative default and are revisable without
-architectural churn, because both are isolated behind a feature flag and a trait
-seam respectively.
+Decision 2 remains the conservative default and is isolated behind a feature
+flag. **Decision 7 was originally "single-node first" and is now reversed** —
+§12 gives the architecture. The reversal is affordable precisely because the
+persistence seams had not yet been built the wrong way.
 
 ---
 
@@ -311,6 +312,14 @@ Preconditions, not design questions. Ordered by severity.
 
 6. **No authn/authz exists at all.** §7 is unimplemented.
 
+7. **`Pseudonymize` does not pseudonymise** — `redaction/engine.rs:93` emits a
+   per-category constant, and it is the **default** mode. Correctness, compliance
+   and scaling defect in one. Full analysis in §12.3.
+
+8. **The upstream adapter cache is unbounded** — `CANDLE_BACKEND_CACHE` never
+   evicts, so per-tenant LoRA adapters accumulate merged weights for process
+   lifetime. Cannot be fixed upstream; must be bounded by routing (§12.4).
+
 ---
 
 ## 9. Phasing
@@ -319,12 +328,13 @@ Every gap in §8 maps to a phase. A gap with no phase is a gap nobody owns.
 
 | Phase | Deliverable | Closes | Gated on |
 |---|---|---|---|
-| 1 | `AuditSink` + `ReviewStore` wired into the facade; file-backed default. Collapse the `record_audit` double lock while in the file. | Gaps 1, 2, 5 | — |
-| 2 | `hacienda-cli` with `extract`, `scan`, `config show` | — | Phase 1 |
+| 0 | Real pseudonymisation via deterministic AEAD (§12.3); rename or remove the misleading default | Gap 7 | — |
+| 1 | Segment model + `AuditStore` / `ReviewStore` / `JobStore` traits; in-memory and file backends. Collapse the `record_audit` double lock while in the file. | Gaps 1, 2, 5 | — |
+| 2 | `hacienda-cli` with `extract`, `scan`, `config show`, `--concurrency` | Gap 3 | Phases 0, 1 |
 | 3 | Capability model of §7 + authn/authz middleware | Gap 6 | — |
 | 4 | `hacienda-api` content endpoints + `hacienda serve`, allowlist only | — | Phases 1, 3 |
-| 5 | Audit / review / compliance endpoints | — | Phases 3, 4 |
-| 6 | Concurrent batch; reduce audit lock contention | Gaps 3, 4 | Phase 4 **and** a measurement showing it matters |
+| 5 | Audit / review / compliance endpoints; `hacienda audit verify` across segments | — | Phases 3, 4 |
+| 6 | Postgres store backend; `--shard`; adapter-aware routing | Gaps 4, 8 | Phase 4 **and** a measurement showing it matters |
 | 7 | `xberg-passthrough` feature | — | Demonstrated demand |
 
 Three ordering choices are deliberate:
@@ -337,11 +347,22 @@ rather than retrofitted per endpoint; shipping endpoints first guarantees the
 retrofit. The content endpoints already need `documents:process`, so there is no
 version of Phase 4 that legitimately predates it.
 
-**Phase 6 last, and gated on measurement.** Gaps 3 and 4 are throughput
-concerns, not correctness ones — `process_batch` is sequential and the audit
-chain serializes on one mutex, but both are *correct*. Optimising before Phase 4
-provides a load surface to measure against is guesswork. The gate is a
-benchmark, not a hunch.
+**Phase 6 last, and gated on measurement.** Gap 4 is a throughput concern, not a
+correctness one — the audit chain serialises on one mutex, but it is *correct*.
+Optimising before Phase 4 provides a load surface to measure against is
+guesswork. The gate is a benchmark, not a hunch.
+
+**Phase 0 is new and comes first.** Gap 7 is not a scaling issue that can wait
+for Phase 6: pseudonymisation is the *default* redaction mode, so every document
+processed before it is fixed is redacted by a control that does not match its
+own name — and §12.3's derivation is what makes redaction consistent across
+nodes in the first place. Building the store layer on top of a placeholder
+pseudonymiser would mean migrating already-redacted corpora later.
+
+Note the ordering constraint this creates: **the segment model (Phase 1) must
+land before anything writes audit records at scale**, because retrofitting
+segment identity onto an existing flat chain means rewriting history, which is
+precisely what a tamper-evident log is designed to make impossible.
 
 ---
 
@@ -357,7 +378,220 @@ benchmark, not a hunch.
 
 ---
 
-## 11. Open Risks
+## 11. xberg Dependency & Version Policy
+
+### 11.1 What changed
+
+Verified 2026-07-28 against tags in the sibling checkout, not assumed.
+
+| Claim | Finding |
+|---|---|
+| "latest is rc.42" | **Outdated.** Tags run `rc.38 … rc.42`, then **`v1.0.1`, `v1.0.2`**. `origin/main` is at `v1.0.2` (0 commits ahead). xberg is now a stable 1.x. |
+| "new LoRA implementation" | **Not in any release.** `git diff v1.0.0-rc.37 v1.0.2 -- crates/xberg-gliner/src/candle/` is **empty**. PEFT load, `merge_into_base()`, and the base-model-name guard are byte-identical. |
+| What actually changed | A **cargo feature split** in `crates/xberg/src/text/ner/candle.rs` (32 lines, all `#[cfg]` gates). |
+
+The split:
+
+```toml
+ner-candle-backend = ["ner", "dep:xberg-gliner", "xberg-gliner/candle"]  # no tokio
+ner-candle         = ["ner-candle-backend", "tokio-runtime"]            # unchanged meaning
+ner-candle-wasm    = ["ner-candle-backend"]                             # new
+```
+
+Every gate moved from `feature = "ner-candle"` to `feature = "ner-candle-backend"`,
+and the `block_in_place` call in `CandleBackend::detect` is now additionally gated
+on `feature = "tokio-runtime"` — so a no-tokio build calls inference directly
+instead of through the blocking pool.
+
+**The significance is where LoRA can now run, not how it works.** `ner-candle-wasm`
+makes adapter-merged GLiNER2 buildable without a tokio runtime, which is what a
+browser target needs. For `apps/hacienda-studio`, whose entire premise is that
+document content never leaves the browser, that is the enabling change.
+
+Non-breaking for hacienda: `ner-candle`, `ner`, `redaction`, and `tokio-runtime`
+all still exist with the same meaning. `NerBackend`, `CandleBackend::get_or_init`,
+`ExtractInput`, `ExtractionConfig`, `ExtractionResult` and `api::create_router`
+are unchanged.
+
+**hacienda must continue to enable `ner-candle`, not `ner-candle-backend`.** The
+latter omits `tokio-runtime`, which silently changes inference from
+`block_in_place` to a direct call — CPU-bound work on the async runtime, which
+the `async-and-concurrency` rule forbids.
+
+### 11.2 Why a git tag instead of a path dependency
+
+The sibling checkout at `../xberg` is a working tree, not a release: it sits on
+rc.37 and carries 37 uncommitted changes, one of which adds an `xberg::pii`
+module re-exporting the very `pii_*` crates this repo vendored away from.
+Building against it made hacienda's output a function of someone's unstaged work,
+which is not a reproducible build and not something CI can reproduce at all.
+
+```toml
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", features = [...] }
+```
+
+`Cargo.lock` now pins commit `9dcc864d8591d30f8039266e0bb3e82ec3918556`. For
+local co-development, override without editing the manifest via `[patch]` in
+`.cargo/config.toml`.
+
+Upgrade policy: pin to a release tag; bump deliberately; re-verify the four
+touched surfaces (`NerBackend`, `get_or_init`, extraction types,
+`create_router`) on every bump.
+
+---
+
+## 12. Horizontal Scaling
+
+Reverses the original Decision 7. §8's gaps are no longer just durability
+problems — they are the scaling architecture.
+
+### 12.1 The hard constraint: a hash chain is sequential
+
+`AuditChain` computes `entry.hash = H(prev_hash || entry)`. That is what makes it
+tamper-evident, and it is also why two nodes cannot append concurrently: both
+need the same `prev_hash`. Serialising every node through one writer would
+reintroduce the bottleneck and add a single point of failure.
+
+**Resolution: segmented chains.** Each writer owns its own chain segment.
+
+```text
+Segment {
+  segment_id, node_id, config_hash,
+  prev_segment_tip: Option<Hash>,   // links this node's previous segment
+  entries: [...],                   // internally hash-chained (unchanged)
+  sealed_tip: Hash,
+  opened_at, sealed_at,
+}
+```
+
+Verification becomes three independent checks:
+
+1. Each segment verifies internally — `AuditChain::verify()`, unchanged.
+2. Each node's segments link: `prev_segment_tip == previous.sealed_tip`.
+3. Periodic **anchors** record a merkle root over all live segment tips,
+   giving a global tamper-evident checkpoint without serialising the write path.
+
+This is defensible because DORA and GDPR require that a record exists, is
+unaltered, and can be produced — **not** that all records share one global total
+order. Buying a total order at the cost of a serialised writer trades a real
+property for a legally unnecessary one.
+
+The payoff: **a CLI run and an API replica become the same kind of writer.** A
+laptop invocation and a Kubernetes pod both emit segments, and one
+`hacienda audit verify` covers both.
+
+### 12.2 State inventory
+
+| State | Today | Scaled |
+|---|---|---|
+| Audit chain | `Mutex<AuditChain>`, RAM-only | Segment per writer behind `AuditStore` |
+| Review queue | in-memory | `ReviewStore`; transitions are compare-and-swap |
+| Glossary | `Mutex<BTreeMap>` | Grow-only map — per-node accumulate, merge on read |
+| Async job state | does not exist | `JobStore` |
+| Pseudonym mapping | does not exist (§12.3) | Derived, never stored |
+| Model + adapter cache | per-process, unbounded (upstream) | Adapter-aware routing (§12.4) |
+
+`HaciendaFacade` holds `Arc<dyn AuditStore>` and friends instead of mutexes.
+Replicas become interchangeable: no sticky sessions, no leader election on the
+hot path. Readiness gates on model loaded **and** stores reachable.
+
+`ReviewQueue::assign` already refuses to act on an item that is no longer
+pending — that is a compare-and-swap, and it maps directly onto a conditional
+`UPDATE ... WHERE status = 'pending'`. The semantics survive the move.
+
+### 12.3 Pseudonymisation must be stateless — and today it is not implemented
+
+Once two nodes redact the same person, they must produce the same token, or the
+output is worthless: you could no longer tell whether two mentions co-refer.
+
+**But `RedactionMode::Pseudonymize` does not pseudonymise.**
+`redaction/engine.rs:93` is:
+
+```rust
+RedactionMode::Pseudonymize => format!("[{:?}:****]", entity.category).to_uppercase(),
+```
+
+Every email becomes the identical `[EMAIL:****]`. No mapping store exists
+anywhere in the crate. This is masking, and **it is the default mode**
+(`redaction/types.rs:53`).
+
+That matters beyond naming. Under GDPR Art. 4(5) pseudonymisation is a specific
+measure with specific consequences — pseudonymised data remains personal data
+and is recognised under Art. 32. Irreversible masking is a different measure with
+a different legal character. A DPIA generated by §5.3's `/v1/compliance/dpia`
+would describe a control the code does not implement. It also contradicts
+`2026-07-28-hacienda-studio-client-app-design.md`, which promises **reversible**
+pseudonymisation with a keyfile — unachievable when every value of a category
+collapses to one token.
+
+The fix is also what makes it scale. Derive, never store:
+
+```text
+token = base32( AES-SIV( tenant_key, category || normalize(text) ) )[..n]
+```
+
+Deterministic authenticated encryption (SIV / synthetic-IV AEAD) is stable across
+nodes with no shared table, and reversible with the key — satisfying the Studio
+promise and cross-node consistency with the same construction. Deterministic
+encryption leaks equality of plaintexts, which here is precisely the property
+wanted. An HMAC variant is simpler if reversibility is dropped, but the Studio
+spec says it must not be.
+
+The tenant key is configuration and a secret, not runtime state, so it does not
+reintroduce coordination.
+
+### 12.4 Adapter-aware routing — where LoRA meets scaling
+
+xberg caches merged backends per process:
+
+```rust
+static CANDLE_BACKEND_CACHE: LazyLock<RwLock<AHashMap<(PathBuf, Option<PathBuf>), Arc<CandleBackend>>>>
+```
+
+**This map has no eviction.** Every `(model, adapter)` pair ever requested keeps
+merged GLiNER2 weights resident for the life of the process. That is correct for
+a CLI and for a server with one adapter. It is a memory leak the moment there are
+per-tenant LoRA adapters and a round-robin load balancer, because every replica
+eventually loads every adapter.
+
+We do not patch xberg, so hacienda bounds it from outside:
+
+- **Route by adapter.** Rendezvous-hash `adapter_id` to a small subset of
+  replicas (k > 1 for availability). Each node then holds a bounded working set
+  instead of the union of all tenants.
+- **Admission control**: cap distinct adapters per process; reject or redirect
+  past the cap rather than swelling.
+- **Process recycling** as a backstop — blunt, but it reclaims merged weights.
+- **Push inference to the client** where possible: `ner-candle-wasm` (§11.1)
+  removes server-side adapter pressure entirely for the Studio path.
+
+Adapter affinity is routing, not session state; replicas stay interchangeable for
+everything else.
+
+### 12.5 CLI
+
+"Scaling a CLI" means two distinct things:
+
+- **Within one invocation** — a worker pool over documents, replacing the
+  sequential loop in `process_batch` (gap 3). `--concurrency N`, default CPU
+  count.
+- **Across invocations** — `--shard i/N` for embarrassingly parallel runs on
+  many machines. Each writes its own segment; `hacienda audit verify` reconciles
+  them afterwards. `--node-id` labels segments, defaulting to
+  hostname + pid + run uuid.
+
+### 12.6 Deployment
+
+| Concern | Position |
+|---|---|
+| Store backend | Postgres for segments, review, jobs. Sealed segments may go to object storage. |
+| Model weights | Baked into the image or a shared read-only volume; readiness waits on load. |
+| Sticky sessions | Not required — adapter affinity is routing. |
+| Scaling signal | Queue depth for async jobs; per-adapter concurrency for sync. |
+
+---
+
+## 13. Open Risks
 
 - **The Candle NER path is stub-tested only.** `PiiPipeline` is covered by test
   doubles; loading real GLiNER2 weights with a LoRA adapter end-to-end is
@@ -365,8 +599,9 @@ benchmark, not a hunch.
   running regex-only would be a worse failure than not shipping it. `GET
   /v1/pii/config` must report whether a model is actually loaded
   (`PiiPipeline::has_model()`).
-- **xberg is `1.0.0-rc.37`.** Re-implemented endpoints will drift from upstream
-  behaviour. Accepted: the alternative is passing through unredacted content.
+- **xberg is pinned at `v1.0.2`.** Re-implemented endpoints will drift from
+  upstream behaviour. Accepted: the alternative is passing through unredacted
+  content.
 - **`apps/hacienda-studio` is the natural first API consumer** — its
   `worker/pipeline.ts` currently processes client-side. Its actual contract has
   not been read; the §5.3 surface is not yet validated against it.

@@ -315,6 +315,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codepage"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48f68d061bc2828ae826206326e61251aca94c1e4a5305cf52d9138639c918b4"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2734,7 +2743,8 @@ dependencies = [
 
 [[package]]
 name = "xberg"
-version = "1.0.0-rc.37"
+version = "1.0.2"
+source = "git+https://github.com/xberg-io/xberg.git?tag=v1.0.2#9dcc864d8591d30f8039266e0bb3e82ec3918556"
 dependencies = [
  "ahash",
  "async-trait",
@@ -2742,6 +2752,7 @@ dependencies = [
  "bitvec",
  "blake3",
  "bytes",
+ "codepage",
  "comrak",
  "dirs",
  "encoding_rs",
@@ -2783,7 +2794,8 @@ dependencies = [
 
 [[package]]
 name = "xberg-gliner"
-version = "1.0.0-rc.37"
+version = "1.0.2"
+source = "git+https://github.com/xberg-io/xberg.git?tag=v1.0.2#9dcc864d8591d30f8039266e0bb3e82ec3918556"
 dependencies = [
  "candle-core",
  "candle-nn",

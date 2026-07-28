@@ -37,7 +37,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # features only gate implementation code we never call. Enabling them pulled ONNX
 # Runtime (`ort`), `ndarray`, `liter-llm`, and the ICU segmenter family into the graph
 # for no benefit. Do not re-add a feature here without a call site to justify it.
-xberg = { path = "../xberg/crates/xberg", features = [
+#
+# Pinned to a release tag rather than `path = "../xberg/crates/xberg"`. The sibling
+# checkout is a working tree: it sits on rc.37 and carries uncommitted edits, one of
+# which adds an `xberg::pii` module re-exporting the very `pii_*` crates this repo
+# vendored away from. Building against it made hacienda's output a function of
+# someone's unstaged work. A tag is reproducible and CI can fetch it.
+#
+# To develop xberg and hacienda together, override locally without editing this file:
+#   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", features = [
     "redaction",
     "ner",
     "tokio-runtime",
