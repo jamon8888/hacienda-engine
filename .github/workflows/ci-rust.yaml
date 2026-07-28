@@ -59,4 +59,4 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: task test:bindings
+      - run: cargo test --workspace --all-features -- --test-threads=1
