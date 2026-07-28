@@ -14,16 +14,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg
-          path: ../xberg
-          ref: main
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg-pii-ecosystem
-          path: ../xberg-pii-ecosystem
-          ref: main
+      - name: Checkout dependency repos
+        run: |
+          git clone --depth 1 https://github.com/jamon8888/xberg.git ../xberg
+          git clone --depth 1 https://github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
@@ -34,16 +28,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg
-          path: ../xberg
-          ref: main
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg-pii-ecosystem
-          path: ../xberg-pii-ecosystem
-          ref: main
+      - name: Checkout dependency repos
+        run: |
+          git clone --depth 1 https://github.com/jamon8888/xberg.git ../xberg
+          git clone --depth 1 https://github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
@@ -66,16 +54,10 @@ jobs:
           ]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg
-          path: ../xberg
-          ref: main
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg-pii-ecosystem
-          path: ../xberg-pii-ecosystem
-          ref: main
+      - name: Checkout dependency repos
+        run: |
+          git clone --depth 1 https://github.com/jamon8888/xberg.git ../xberg
+          git clone --depth 1 https://github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
@@ -86,16 +68,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg
-          path: ../xberg
-          ref: main
-      - uses: actions/checkout@v4
-        with:
-          repository: jamon8888/xberg-pii-ecosystem
-          path: ../xberg-pii-ecosystem
-          ref: main
+      - name: Checkout dependency repos
+        run: |
+          git clone --depth 1 https://github.com/jamon8888/xberg.git ../xberg
+          git clone --depth 1 https://github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
