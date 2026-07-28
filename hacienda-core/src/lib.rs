@@ -12,4 +12,3 @@ pub mod review;
 pub use config::{HaciendaConfig, HaciendaFacadeConfig};
 pub use error::HaciendaError;
 pub use facade::HaciendaFacade;
-// ci test
