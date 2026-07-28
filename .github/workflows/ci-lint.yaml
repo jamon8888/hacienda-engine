@@ -28,7 +28,7 @@ jobs:
         run: cargo install typos-cli --locked
       
       - name: Lint markdown
-        run: rumdl check . --ignore superpowers --disable-rules MD013
+        run: rumdl check . -- --exclude superpowers
       
       - name: Check spelling
         run: typos .
