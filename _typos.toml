@@ -1,5 +1,5 @@
 [files]
-extend-exclude = ["superpowers/", ".ai-rulez/"]
+extend-exclude = ["superpowers/", ".ai-rulez/", "scripts/", "poly.toml"]
 
 [default.extend-words]
 hacienda = "hacienda"
