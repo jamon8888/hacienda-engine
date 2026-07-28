@@ -16,6 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout dependency repos
+        uses: actions/checkout@v4
+        with:
+          repository: jamon8888/xberg
+          path: ../xberg
+          ref: main
+
+      - name: Checkout PII ecosystem
+        uses: actions/checkout@v4
+        with:
+          repository: jamon8888/xberg-pii-ecosystem
+          path: ../xberg-pii-ecosystem
+          ref: main
+
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
