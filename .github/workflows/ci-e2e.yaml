@@ -15,6 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Checkout dependency repos
+        id: deps
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -24,5 +26,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Run workspace tests
+        if: steps.deps.outcome == 'success'
+      - name: Run E2E tests
+        if: steps.deps.outcome == 'success'
         run: cargo test -p hacienda -p hacienda-core --all-features
+      - name: Skip notice
+        if: steps.deps.outcome != 'success'
+        run: echo "::notice::Dependency repos not available - E2E tests skipped."

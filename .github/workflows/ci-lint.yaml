@@ -16,13 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout dependency repos
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg.git ../xberg
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
-
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -40,8 +33,19 @@ jobs:
       - name: Check spelling
         run: typos . --config _typos.toml
 
+      - name: Checkout dependency repos
+        id: deps
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg.git ../xberg
+          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
+
       - name: Check Rust formatting
+        if: steps.deps.outcome == 'success'
         run: cargo fmt -p hacienda -p hacienda-core --check
 
       - name: Run clippy
+        if: steps.deps.outcome == 'success'
         run: cargo clippy -p hacienda -p hacienda-core --all-targets --all-features -- -D warnings
