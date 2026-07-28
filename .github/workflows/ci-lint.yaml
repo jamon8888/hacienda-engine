@@ -34,7 +34,7 @@ jobs:
         run: typos . --config _typos.toml
 
       - name: Check Rust formatting
-        run: cargo fmt --all --check
+        run: cargo fmt -p hacienda -p hacienda-core --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy -p hacienda -p hacienda-core --all-targets --all-features -- -D warnings

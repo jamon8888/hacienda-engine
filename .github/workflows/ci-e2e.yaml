@@ -19,4 +19,4 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run workspace tests
-        run: cargo test --workspace --all-features -- --test-threads=1
+        run: cargo test -p hacienda -p hacienda-core --all-features

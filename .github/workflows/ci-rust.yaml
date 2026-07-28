@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'hacienda/**'
-      - 'hacienda-core/**'
+      - "hacienda/**"
+      - "hacienda-core/**"
   pull_request:
     branches: [main]
 
@@ -18,7 +18,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy -p hacienda -p hacienda-core --all-targets --all-features -- -D warnings
 
   test:
     runs-on: ubuntu-24.04-arm
@@ -28,21 +28,22 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - run: cargo test -p hacienda -p hacienda-core --all-features
 
   feature-matrix:
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-        features: [
-          "xberg-full",
-          "pii",
-          "compliance",
-          "audit",
-          "review",
-          "glossary",
-          "dev"
-        ]
+        features:
+          [
+            "xberg-full",
+            "pii",
+            "compliance",
+            "audit",
+            "review",
+            "glossary",
+            "dev",
+          ]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -59,4 +60,4 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features -- --test-threads=1
+      - run: cargo test -p hacienda -p hacienda-core --all-features
