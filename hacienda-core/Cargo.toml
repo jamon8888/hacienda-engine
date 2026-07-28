@@ -2,40 +2,27 @@
 name = "hacienda-core"
 version.workspace = true
 edition.workspace = true
-description = "PII/Compliance/Audit/Review/Glossary core for hacienda"
+description = "PII, compliance, audit, review, and glossary core for hacienda"
 license.workspace = true
 
 [features]
-default = ["pii", "compliance", "audit", "review", "glossary"]
-pii = ["pii-pipeline", "pii-config"]
-compliance = ["pii-compliance", "pii"]
-audit = ["pii-audit"]
-review = ["pii-review"]
-glossary = ["fuzzy-matcher"]
+default = []
+# Enables the Candle GLiNER2 NER backend (with LoRA adapter support) through xberg.
+ner-candle = ["xberg/ner-candle"]
 
 [dependencies]
-# xberg
-xberg = { workspace = true, features = ["ner", "redaction"] }
-
-# PII ecosystem
-pii-pipeline = { workspace = true, optional = true }
-pii-config = { workspace = true, optional = true }
-pii-compliance = { workspace = true, optional = true }
-pii-audit = { workspace = true, optional = true }
-pii-review = { workspace = true, optional = true }
-pii-redaction = { workspace = true }
-pii-fastino = { workspace = true }
-
-# Standard
+blake3 = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-bytes = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
+xberg = { workspace = true }
 
-# Glossary
-fuzzy-matcher = { version = "0.3", optional = true }
+[dev-dependencies]
+# Test doubles implement xberg's async `NerBackend` trait, which is `async_trait`-based.
+async-trait = { workspace = true }

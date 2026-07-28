@@ -1,12 +1,7 @@
 [workspace]
 resolver = "2"
-members = [
-    "hacienda",
-    "hacienda-core",
-]
-exclude = [
-    "packages/*",
-]
+members = ["hacienda", "hacienda-core"]
+exclude = ["packages/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,29 +9,63 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# xberg
-xberg = { path = "../xberg/crates/xberg", features = [
-    "redaction", "ner", "chunking", "embeddings", "reranker",
-    "captioning", "tokio-runtime"
-] }
+anyhow = "1.0"
+async-trait = "0.1"
+blake3 = "1.5"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+# The PII implementation is vendored into hacienda-core (see hacienda-core/src/).
+# `xberg` above is the only upstream product dependency, consumed as a facade.
+# Do not reintroduce pii-* path dependencies.
 
-# PII ecosystem
-pii-pipeline = { path = "../xberg-pii-ecosystem/crates/pii-pipeline" }
-pii-config = { path = "../xberg-pii-ecosystem/crates/pii-config" }
-pii-compliance = { path = "../xberg-pii-ecosystem/crates/pii-compliance" }
-pii-audit = { path = "../xberg-pii-ecosystem/crates/pii-audit" }
-pii-review = { path = "../xberg-pii-ecosystem/crates/pii-review" }
-pii-redaction = { path = "../xberg-pii-ecosystem/crates/pii-redaction" }
-pii-fastino = { path = "../xberg-pii-ecosystem/crates/pii-fastino" }
+# PII detection / redaction / audit primitives
+regex = "1.10"
 
 # Standard
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync"] }
 thiserror = "1.0"
-anyhow = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+# xberg
+#
+# Feature set is deliberately minimal: hacienda only consumes `xberg::extract_batch`,
+# `xberg::text::ner`, and `xberg::types::entity`. The config types for embeddings,
+# reranking, captioning, and chunking (`EmbeddingConfig`, `RerankerConfig`,
+# `CaptioningConfig`, `ChunkingConfig`) are exported by xberg unconditionally, so those
+# features only gate implementation code we never call. Enabling them pulled ONNX
+# Runtime (`ort`), `ndarray`, `liter-llm`, and the ICU segmenter family into the graph
+# for no benefit. Do not re-add a feature here without a call site to justify it.
+xberg = { path = "../xberg/crates/xberg", features = [
+    "redaction",
+    "ner",
+    "tokio-runtime",
+] }
+
+# Profiles must live in the workspace root manifest. Cargo silently ignores
+# `[profile.*]` in path dependencies, so the tuning in ../xberg/Cargo.toml has never
+# applied to this workspace — these builds were defaulting to full debuginfo across the
+# whole dependency graph.
+[profile.dev]
+# `line-tables-only` keeps backtraces with file/line numbers for panics and test
+# failures, but drops variable/type debuginfo. Full `debug = 2` produced ~5.9 GB of
+# artifacts, and builds here are I/O-bound rather than CPU-bound, so artifact size is
+# the dominant cost. Use `debug = 2` temporarily if you need a stepping debugger.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+# Dependencies are built once and then only read back. They never need debuginfo, and
+# stripping it is the single largest reduction in bytes written and re-read per build.
+[profile.dev.package."*"]
+debug = false
+
+# Test/bench profiles inherit from dev, but state the debuginfo intent explicitly so a
+# future `[profile.test]` addition does not silently reintroduce full debuginfo.
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
