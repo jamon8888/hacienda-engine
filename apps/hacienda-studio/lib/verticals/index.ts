@@ -1,3 +1,20 @@
+import maYaml from "./m&a.yaml?raw";
+import financialServicesYaml from "./financial_services.yaml?raw";
+import sharedYaml from "./shared.yaml?raw";
+
+/**
+ * Taxonomies are bundled at build time rather than fetched at runtime. The
+ * previous fetch("/src/lib/verticals/…") hit the SPA fallback, which returns
+ * index.html with HTTP 200 — so response.ok was true, HTML reached parseYAML,
+ * and the resulting taxonomy had no entityTypes, crashing the worker on the
+ * first file processed.
+ */
+const RAW_TAXONOMIES: Record<string, string> = {
+  "m&a": maYaml,
+  financial_services: financialServicesYaml,
+  shared: sharedYaml,
+};
+
 export interface VerticalTaxonomy {
   vertical: string;
   sectors: string[];
@@ -22,11 +39,10 @@ export async function loadVerticalTaxonomy(
     return taxonomyCache.get(vertical)!;
   }
 
-  const response = await fetch(`/src/lib/verticals/${vertical}.yaml`);
-  if (!response.ok) {
-    throw new Error(`Failed to load vertical taxonomy: ${vertical}`);
+  const yamlText = RAW_TAXONOMIES[vertical];
+  if (yamlText === undefined) {
+    throw new Error(`Unknown vertical taxonomy: ${vertical}`);
   }
-  const yamlText = await response.text();
   const taxonomy = parseYAML(yamlText) as VerticalTaxonomy;
   taxonomy.vertical = vertical;
   taxonomyCache.set(vertical, taxonomy);
