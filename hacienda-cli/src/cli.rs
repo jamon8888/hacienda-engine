@@ -1,13 +1,15 @@
 //! The clap surface.
 //!
-//! Scope is Phase 2 of `superpowers/specs/2026-07-28-hacienda-cli-api-integration-design.md`
-//! §9: `extract`, `scan`, and `config show`. The remaining commands of §6.2 —
-//! `audit`, `review`, `compliance`, `glossary`, `serve`, `completions`, and the `xberg`
-//! passthrough — belong to Phases 4 through 7 and are deliberately absent rather than
-//! present and stubbed. A subcommand that parses and then apologises is indistinguishable
-//! from one that is broken.
+//! Scope is Phases 2 and 4 of
+//! `superpowers/specs/2026-07-28-hacienda-cli-api-integration-design.md` §9: `extract`,
+//! `scan`, `config show`, and `serve`. The remaining commands of §6.2 — `audit`,
+//! `review`, `compliance`, `glossary`, `completions`, and the `xberg` passthrough —
+//! belong to Phases 5 through 7 and are deliberately absent rather than present and
+//! stubbed. A subcommand that parses and then apologises is indistinguishable from one
+//! that is broken.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Redaction-by-default document extraction.
@@ -40,6 +42,23 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Serve the HTTP API.
+    Serve(ServeArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct ServeArgs {
+    /// Address to bind.
+    ///
+    /// Loopback by default. This API serves document content, so a default of
+    /// `0.0.0.0` would put every client's corpus one `docker run -p` away from the
+    /// network — and the operator would never have typed a flag that said so.
+    ///
+    /// Binding a non-loopback address is refused unless `auth.enabled` is `true` in the
+    /// configuration. There is no override flag: the combination "reachable from the
+    /// network" plus "no authentication" has no legitimate use on this product.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8787")]
+    pub bind: SocketAddr,
 }
 
 #[derive(Debug, Subcommand)]

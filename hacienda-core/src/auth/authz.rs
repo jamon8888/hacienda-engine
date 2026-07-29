@@ -29,35 +29,102 @@ impl std::ops::Deref for AuthExtension {
 /// How specifically a pattern matched a path, used to break ties between
 /// overlapping patterns deterministically.
 ///
-/// An exact pattern always beats a wildcard; between two wildcards the one with the
-/// longer prefix wins. Without this, iteration order over a `HashMap` decided which
-/// capability guarded a path, so the answer could differ between processes.
+/// An exact pattern beats a parameterised one, which beats a wildcard; between two
+/// wildcards the one with the longer prefix wins, and between two parameterised patterns
+/// the one with more literal segments wins. Without this, iteration order over a
+/// `HashMap` decided which capability guarded a path, so the answer could differ
+/// between processes.
+///
+/// The variant order below *is* the precedence order — `derive(Ord)` reads it top to
+/// bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MatchRank {
-    /// Matched via `prefix/*`; ordered by prefix length.
+    /// Matched via `prefix/*` or a trailing `{*rest}` capture; ordered by prefix length.
     Prefix(usize),
+    /// Matched a pattern containing `{param}` segments; ordered by literal segment count.
+    Param(usize),
     /// Matched the whole path literally.
     Exact,
 }
 
 /// Match `path` against a route `pattern`, returning how specific the match was.
 ///
-/// A pattern ending in `*` matches the path it prefixes plus any descendant, but only at
-/// a segment boundary: `/v1/audit*` covers `/v1/audit` and `/v1/audit/export` and does
-/// *not* cover `/v1/auditor-backdoor`. Plain `starts_with` treats that backdoor as an
-/// audit route, which silently hands it whatever capability guards the audit trail.
+/// Three pattern forms are understood:
+///
+/// - **Literal** — `/v1/documents` matches only itself.
+/// - **Parameterised** — axum's `{id}` syntax, as in `/v1/jobs/{id}`. Each `{name}`
+///   matches exactly one non-empty segment, and axum's `{*rest}` matches one or more
+///   trailing segments.
+/// - **Prefix** — a trailing `*`, as in `/v1/audit*`.
+///
+/// The parameterised form is not optional sugar. The route table is written in axum's
+/// syntax, so a table entry like `/v1/jobs/{id}` would otherwise match no request at
+/// all; combined with deny-by-default that makes the route return 403 to *every* caller,
+/// including its rightful owner. Registering a route and having it be unreachable is
+/// the failure this arm prevents.
+///
+/// Prefix matching is anchored at a segment boundary: `/v1/audit*` covers `/v1/audit`
+/// and `/v1/audit/export` and does *not* cover `/v1/auditor-backdoor`. Plain
+/// `starts_with` treats that backdoor as an audit route, which silently hands it
+/// whatever capability guards the audit trail.
 fn match_pattern(pattern: &str, path: &str) -> Option<MatchRank> {
-    let Some(raw_prefix) = pattern.strip_suffix('*') else {
-        return (pattern == path).then_some(MatchRank::Exact);
-    };
-    // Accept both `/v1/audit*` and `/v1/audit/*` spellings.
-    let prefix = raw_prefix.strip_suffix('/').unwrap_or(raw_prefix);
-    if path == prefix {
-        return Some(MatchRank::Prefix(prefix.len()));
+    if let Some(raw_prefix) = pattern.strip_suffix('*') {
+        // Accept both `/v1/audit*` and `/v1/audit/*` spellings.
+        let prefix = raw_prefix.strip_suffix('/').unwrap_or(raw_prefix);
+        if path == prefix {
+            return Some(MatchRank::Prefix(prefix.len()));
+        }
+        let rest = path.strip_prefix(prefix)?;
+        return rest
+            .starts_with('/')
+            .then_some(MatchRank::Prefix(prefix.len()));
     }
-    let rest = path.strip_prefix(prefix)?;
-    rest.starts_with('/')
-        .then_some(MatchRank::Prefix(prefix.len()))
+
+    if !pattern.contains('{') {
+        return (pattern == path).then_some(MatchRank::Exact);
+    }
+
+    match_parameterised(pattern, path)
+}
+
+/// Match an axum-style parameterised pattern such as `/v1/jobs/{id}`.
+fn match_parameterised(pattern: &str, path: &str) -> Option<MatchRank> {
+    let mut literals = 0usize;
+    let mut pattern_segments = pattern.split('/');
+    let mut path_segments = path.split('/');
+
+    loop {
+        match (pattern_segments.next(), path_segments.next()) {
+            (None, None) => return Some(MatchRank::Param(literals)),
+            (Some(pattern_segment), Some(path_segment)) => {
+                let Some(name) = parameter_name(pattern_segment) else {
+                    if pattern_segment != path_segment {
+                        return None;
+                    }
+                    literals += 1;
+                    continue;
+                };
+                // A parameter never matches an empty segment: `/v1/jobs/` must not
+                // resolve as "job with an empty id" and inherit the route's capability.
+                if path_segment.is_empty() {
+                    return None;
+                }
+                if name.starts_with('*') {
+                    // Trailing capture: consumes the rest of the path. Ranked as a
+                    // prefix match because it is exactly as unspecific as `prefix/*`.
+                    let prefix_len = pattern.len() - pattern_segment.len();
+                    return Some(MatchRank::Prefix(prefix_len));
+                }
+            }
+            // One ran out before the other: different segment counts, no match.
+            _ => return None,
+        }
+    }
+}
+
+/// The parameter name inside a `{...}` segment, or `None` if the segment is a literal.
+fn parameter_name(segment: &str) -> Option<&str> {
+    segment.strip_prefix('{')?.strip_suffix('}')
 }
 
 /// State for the auth middleware.
@@ -309,6 +376,95 @@ mod tests {
 
         // No match
         assert!(state.required_capabilities("/health").is_none());
+    }
+
+    /// The route table is written in axum's syntax, so a pattern like `/v1/jobs/{id}`
+    /// must match a concrete request path.
+    ///
+    /// Before this arm existed, `match_pattern` compared `/v1/jobs/{id}` to
+    /// `/v1/jobs/abc` literally, found no match, and deny-by-default turned the whole
+    /// endpoint into a permanent 403 — for its owner as much as for an intruder. The
+    /// route was registered, reviewed, and unreachable.
+    #[test]
+    fn should_match_an_axum_path_parameter_against_a_concrete_segment() {
+        let state = AuthState::new(Arc::new(crate::auth::authn::DevTokenResolver))
+            .with_route_requirement(
+                "/v1/jobs/{id}",
+                require_capability![Capability::DocumentsProcess],
+            );
+
+        assert!(state
+            .required_capabilities("/v1/jobs/9f2c1e0a")
+            .unwrap()
+            .has(Capability::DocumentsProcess));
+    }
+
+    /// A parameter matches exactly one non-empty segment — no more, no less.
+    ///
+    /// Matching zero segments would let `/v1/jobs/` inherit the route's capability as a
+    /// job with an empty id; matching several would let `/v1/jobs/a/b` inherit it too,
+    /// silently extending the grant to a sub-resource nobody registered.
+    #[test]
+    fn should_not_let_a_path_parameter_span_more_or_fewer_than_one_segment() {
+        let state = AuthState::new(Arc::new(crate::auth::authn::DevTokenResolver))
+            .with_route_requirement(
+                "/v1/jobs/{id}",
+                require_capability![Capability::DocumentsProcess],
+            );
+
+        assert!(state.required_capabilities("/v1/jobs").is_none());
+        assert!(state.required_capabilities("/v1/jobs/").is_none());
+        assert!(state
+            .required_capabilities("/v1/jobs/abc/results")
+            .is_none());
+        assert!(state.required_capabilities("/v1/jobsX/abc").is_none());
+    }
+
+    /// A literal pattern must win over a parameterised one that also matches, and a
+    /// parameterised one must win over a prefix wildcard. Otherwise the capability
+    /// guarding a path would depend on `HashMap` iteration order.
+    #[test]
+    fn should_prefer_the_most_specific_pattern() {
+        let state = AuthState::new(Arc::new(crate::auth::authn::DevTokenResolver))
+            .with_route_requirement("/v1/jobs*", require_capability![Capability::AuditRead])
+            .with_route_requirement(
+                "/v1/jobs/{id}",
+                require_capability![Capability::DocumentsProcess],
+            )
+            .with_route_requirement(
+                "/v1/jobs/stats",
+                require_capability![Capability::AuditExport],
+            );
+
+        // Exact beats parameterised beats prefix.
+        assert!(state
+            .required_capabilities("/v1/jobs/stats")
+            .unwrap()
+            .has(Capability::AuditExport));
+        assert!(state
+            .required_capabilities("/v1/jobs/abc")
+            .unwrap()
+            .has(Capability::DocumentsProcess));
+        assert!(state
+            .required_capabilities("/v1/jobs/abc/raw")
+            .unwrap()
+            .has(Capability::AuditRead));
+    }
+
+    /// axum's trailing capture `{*rest}` consumes the remainder of the path and is as
+    /// unspecific as a `prefix/*` wildcard, so it must rank as one.
+    #[test]
+    fn should_treat_a_trailing_capture_as_a_prefix_match() {
+        let state = AuthState::new(Arc::new(crate::auth::authn::DevTokenResolver))
+            .with_route_requirement(
+                "/v1/audit/{*rest}",
+                require_capability![Capability::AuditRead],
+            );
+
+        assert!(state.required_capabilities("/v1/audit/a").is_some());
+        assert!(state.required_capabilities("/v1/audit/a/b/c").is_some());
+        // The capture requires at least one segment.
+        assert!(state.required_capabilities("/v1/audit").is_none());
     }
 
     #[test]

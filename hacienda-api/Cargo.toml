@@ -1,0 +1,22 @@
+[package]
+name = "hacienda-api"
+version.workspace = true
+edition.workspace = true
+description = "HTTP API layer over HaciendaFacade — axum router for hacienda-engine"
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+data-encoding = { workspace = true }
+hacienda-core = { path = "../hacienda-core", features = ["jobs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+xberg = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

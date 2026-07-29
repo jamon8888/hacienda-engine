@@ -227,11 +227,22 @@ pub enum TokenResolverType {
 }
 
 /// Static token configuration.
+///
+/// # The secret is write-only
+///
+/// `token` deserialises but does not serialise. `hacienda config show` prints the
+/// effective configuration, and §6.3 of the integration design draws the line in the same
+/// place for the pseudonymisation key: report the id and the resolver, never the material.
+/// A `config show` that lists valid bearer tokens is a credential dump — into a terminal,
+/// a support ticket, or a CI log.
+///
+/// `skip_serializing` rather than `skip`: loading a file must still read the secret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticTokenConfig {
     /// Token identifier (for logging).
     pub id: String,
-    /// The actual token string.
+    /// The actual token string. Never serialised — see the type docs.
+    #[serde(skip_serializing)]
     pub token: String,
     /// Principal ID.
     pub principal_id: String,
@@ -481,6 +492,50 @@ mod tests {
         };
 
         assert!(build_token_resolver(&config).is_err());
+    }
+
+    /// `hacienda config show` serialises the whole `HaciendaConfig`. If the bearer
+    /// secret rides along, that command prints a working credential for every configured
+    /// principal — the same failure the design forbids for the pseudonymisation key.
+    #[test]
+    fn should_not_serialise_the_bearer_secret_in_the_config() {
+        let config = AuthConfig {
+            enabled: true,
+            resolver: TokenResolverType::Memory,
+            static_tokens: vec![StaticTokenConfig {
+                id: "token-1".to_string(),
+                token: "s3cret-bearer-value".to_string(),
+                principal_id: "service-1".to_string(),
+                principal_name: None,
+                capabilities: vec!["documents:process".to_string()],
+                expires_at: None,
+            }],
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("s3cret-bearer-value"),
+            "config serialisation leaked a bearer token: {json}"
+        );
+        // The id must survive, or the operator cannot tell which token is configured.
+        assert!(json.contains("token-1"));
+    }
+
+    /// The secret must still *load*: `skip_serializing`, not `skip`.
+    #[test]
+    fn should_still_deserialise_the_bearer_secret_from_a_config_file() {
+        let toml_src = r#"
+            enabled = true
+            resolver = "memory"
+            [[static_tokens]]
+            id = "token-1"
+            token = "s3cret-bearer-value"
+            principal_id = "service-1"
+            capabilities = ["documents:process"]
+        "#;
+
+        let config: AuthConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(config.static_tokens[0].token, "s3cret-bearer-value");
     }
 
     /// The dev resolver splits on `_`, so a capability list followed by a

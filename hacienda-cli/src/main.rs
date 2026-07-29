@@ -29,6 +29,7 @@ fn main() -> std::process::ExitCode {
                     commands::run_config_show(format, cli.config, cli.config_json).await
                 }
             },
+            Command::Serve(args) => commands::run_serve(args, cli.config, cli.config_json).await,
         }
     });
 

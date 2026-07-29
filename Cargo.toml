@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["hacienda", "hacienda-cli", "hacienda-core"]
+members = ["hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
 exclude = ["packages/*"]
 
 [workspace.package]
@@ -21,6 +21,11 @@ license = "Apache-2.0"
 aes-siv = "0.7"
 anyhow = "1.0"
 async-trait = "0.1"
+# Used by three crates: hacienda-core (auth middleware), hacienda-api (the router), and
+# hacienda-cli (`axum::serve`). Declared once so the version cannot skew — a `Router`
+# built against one axum and served by another is a type mismatch with an unreadable
+# error, not a runtime surprise, but it is still an hour lost.
+axum = { version = "0.8", features = ["macros"] }
 blake3 = "1.5"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }

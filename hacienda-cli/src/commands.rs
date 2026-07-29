@@ -1,10 +1,14 @@
 //! Command implementations for the hacienda CLI.
 
-use crate::cli::{ConcurrencyArgs, ExtractArgs, Format, Mode, ScanArgs};
+use crate::cli::{ConcurrencyArgs, ExtractArgs, Format, Mode, ScanArgs, ServeArgs};
 use anyhow::{Context, Result};
 use hacienda::{HaciendaConfig, HaciendaFacade};
+use hacienda_api::{ApiLimits, ApiState};
+use hacienda_core::auth::AuthState;
+use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::RedactionMode;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task;
@@ -333,6 +337,7 @@ pub async fn run_scan(
         compliance: config.compliance,
         review: config.review,
         glossary: config.glossary,
+        auth: config.auth,
     })?);
 
     let _concurrency = parse_concurrency(&args.concurrency);
@@ -412,6 +417,7 @@ pub async fn run_extract(
         compliance: config.compliance,
         review: config.review,
         glossary: config.glossary,
+        auth: config.auth,
     })?);
 
     let concurrency = parse_concurrency(&args.concurrency);
@@ -478,4 +484,120 @@ pub async fn run_extract(
     }
 
     Ok(())
+}
+
+/// Refuse a bind address that would expose the API to the network without authentication.
+///
+/// This is the one policy `serve` enforces before opening a socket, and it is
+/// deliberately not overridable by a flag. `auth.enabled = false` means every request is
+/// `Caller::Trusted` — no capability is checked, `pii:reveal` included — which is correct
+/// when the only client is the desktop app on the same machine and wrong the instant the
+/// socket is reachable from anywhere else. On a product that holds documents covered by
+/// *secret professionnel*, "reachable and unauthenticated" is not a configuration, it is
+/// an incident.
+///
+/// Loopback covers `127.0.0.0/8` and `::1`. `0.0.0.0` and `::` are *not* loopback and are
+/// refused: they are the two spellings people reach for when containerising, which is
+/// exactly when this check has to hold.
+fn check_bind_policy(bind: SocketAddr, auth_enabled: bool) -> Result<()> {
+    if auth_enabled || bind.ip().is_loopback() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to bind {bind}: it is reachable from the network and authentication is \
+         disabled, so every caller would be trusted with unredacted PII.\n\
+         Either bind a loopback address (the default, 127.0.0.1:8787), or enable \
+         authentication in the configuration:\n\n\
+         \x20   [auth]\n\
+         \x20   enabled = true\n\
+         \x20   resolver = \"memory\"\n\n\
+         \x20   [[auth.static_tokens]]\n\
+         \x20   id = \"studio\"\n\
+         \x20   token = \"<secret>\"\n\
+         \x20   principal_id = \"studio\"\n\
+         \x20   capabilities = [\"documents:process\"]"
+    )
+}
+
+/// Run `hacienda serve` — the HTTP API of the integration design §5.
+pub async fn run_serve(
+    args: ServeArgs,
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let config = load_config(config_path, config_json, None, None)?;
+
+    // Before the socket, not after: a bind that succeeds and is then torn down has
+    // already been reachable.
+    check_bind_policy(args.bind, config.auth.enabled)?;
+
+    let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
+    let auth_enabled = config.auth.enabled;
+
+    let facade = Arc::new(HaciendaFacade::new(config).context("building the facade")?);
+    let jobs = InMemoryJobStore::new().into_arc();
+    let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+
+    let listener = tokio::net::TcpListener::bind(args.bind)
+        .await
+        .with_context(|| format!("binding {}", args.bind))?;
+    let local_addr = listener.local_addr().context("reading the bound address")?;
+
+    // stderr, not stdout: stdout is where the other subcommands write machine-readable
+    // output, and `serve` should compose with them without polluting a pipe.
+    eprintln!("hacienda serving on http://{local_addr}");
+    eprintln!(
+        "  authentication: {}",
+        if auth_enabled {
+            "enabled"
+        } else {
+            "DISABLED — every caller is trusted (loopback only)"
+        }
+    );
+
+    axum::serve(listener, hacienda_api::router(state))
+        .await
+        .context("serving the API")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_bind_policy;
+    use std::net::SocketAddr;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// The default is loopback, so the common case must not need auth configured.
+    #[test]
+    fn should_allow_loopback_without_authentication() {
+        assert!(check_bind_policy(addr("127.0.0.1:8787"), false).is_ok());
+        assert!(check_bind_policy(addr("[::1]:8787"), false).is_ok());
+        // 127.0.0.0/8 in full, not just 127.0.0.1.
+        assert!(check_bind_policy(addr("127.0.0.53:8787"), false).is_ok());
+    }
+
+    /// The whole point of the check. `0.0.0.0` and `::` are the spellings a container
+    /// setup reaches for, which is exactly when an unauthenticated API becomes reachable.
+    #[test]
+    fn should_refuse_a_network_reachable_bind_when_authentication_is_disabled() {
+        for spelling in ["0.0.0.0:8787", "[::]:8787", "192.168.1.10:8787"] {
+            let error = check_bind_policy(addr(spelling), false)
+                .expect_err("binding {spelling} without auth must be refused");
+            let message = error.to_string();
+            assert!(
+                message.contains("[auth]"),
+                "the refusal must tell the operator how to proceed, got: {message}"
+            );
+        }
+    }
+
+    /// Enabling authentication is the sanctioned way to serve on a network address —
+    /// otherwise the check above would be indistinguishable from "never bind publicly".
+    #[test]
+    fn should_allow_a_network_reachable_bind_once_authentication_is_enabled() {
+        assert!(check_bind_policy(addr("0.0.0.0:8787"), true).is_ok());
+        assert!(check_bind_policy(addr("192.168.1.10:8787"), true).is_ok());
+    }
 }

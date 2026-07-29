@@ -4,6 +4,7 @@
 //! stage configuration types are the real ones from their own modules — there is no
 //! parallel configuration taxonomy to keep in sync.
 
+use crate::auth::authn::AuthConfig;
 use crate::compliance::ComplianceConfig;
 use crate::glossary::GlossaryConfig;
 use crate::pii::PipelineConfig;
@@ -36,6 +37,13 @@ pub struct HaciendaConfig {
     /// Requires `pii`: there is nothing to review without detections.
     pub review: Option<ReviewConfig>,
     pub glossary: Option<GlossaryConfig>,
+    /// Authentication for `hacienda serve`. Disabled by default, which is correct for
+    /// the CLI and the desktop app: there, the process boundary *is* the trust boundary.
+    ///
+    /// It is not a field the CLI reads — `hacienda extract` is always `Caller::Trusted`.
+    /// It lives here so that one config file describes the whole product, and so that
+    /// `hacienda serve` can refuse a non-loopback bind when it is off.
+    pub auth: AuthConfig,
 }
 
 impl HaciendaConfig {

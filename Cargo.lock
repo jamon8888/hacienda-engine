@@ -1275,12 +1275,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "hacienda-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "data-encoding",
+ "hacienda-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+ "xberg",
+]
+
+[[package]]
 name = "hacienda-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "hacienda",
+ "hacienda-api",
  "hacienda-core",
  "num_cpus",
  "serde",

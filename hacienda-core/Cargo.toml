@@ -15,7 +15,7 @@ jobs = []
 [dependencies]
 aes-siv = { workspace = true }
 async-trait = { workspace = true }
-axum = { version = "0.8", features = ["macros"] }
+axum = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 data-encoding = { workspace = true }

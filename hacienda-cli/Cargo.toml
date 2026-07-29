@@ -14,9 +14,14 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
 hacienda = { path = "../hacienda" }
-hacienda-core = { path = "../hacienda-core" }
+hacienda-api = { path = "../hacienda-api" }
+# `jobs` is required by `serve`, which constructs the API's job store. hacienda-api
+# enables it too; naming it here means this crate does not rely on feature unification
+# with a sibling in order to compile.
+hacienda-core = { path = "../hacienda-core", features = ["jobs"] }
 num_cpus = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
