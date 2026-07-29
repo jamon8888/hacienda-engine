@@ -1,9 +1,10 @@
 //! The `hacienda` binary.
 
 mod cli;
+mod commands;
 
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand};
+use cli::{Cli, Command};
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
@@ -16,15 +17,26 @@ fn main() -> std::process::ExitCode {
 
     let cli = Cli::parse();
 
-    // Task 2 ships the parse surface and nothing behind it. Each arm lands in its own
-    // task: `extract` and `scan` in Task 6, `config show` in Task 3.
-    let unimplemented = match &cli.command {
-        Command::Extract(_) => "extract",
-        Command::Scan(_) => "scan",
-        Command::Config {
-            command: ConfigCommand::Show { .. },
-        } => "config show",
-    };
-    eprintln!("hacienda: `{unimplemented}` is not implemented yet");
-    std::process::ExitCode::from(70)
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let result = rt.block_on(async {
+        match cli.command {
+            Command::Extract(args) => {
+                commands::run_extract(args, cli.config, cli.config_json).await
+            }
+            Command::Scan(args) => commands::run_scan(args, cli.config, cli.config_json).await,
+            Command::Config { command } => match command {
+                cli::ConfigCommand::Show { format } => {
+                    commands::run_config_show(format, cli.config, cli.config_json).await
+                }
+            },
+        }
+    });
+
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
