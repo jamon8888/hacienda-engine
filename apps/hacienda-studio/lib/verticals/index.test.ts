@@ -9,7 +9,7 @@ import { loadVerticalTaxonomy } from "./index";
  * shape every caller depends on.
  */
 describe("loadVerticalTaxonomy", () => {
-  it.each(["m&a", "financial_services", "shared"])(
+  it.each(["m&a", "financial_services", "business_law", "shared"])(
     "loads %s with populated entity types and relationships",
     async (vertical) => {
       const taxonomy = await loadVerticalTaxonomy(vertical);
@@ -36,6 +36,43 @@ describe("loadVerticalTaxonomy", () => {
     expect(taxonomy.entityTypes).toContain("fund");
     expect(taxonomy.entityTypes).toContain("carried_interest");
     expect(taxonomy.relationships).toContain("invests_in");
+  });
+
+  it("parses the business law taxonomy", async () => {
+    const taxonomy = await loadVerticalTaxonomy("business_law");
+
+    expect(taxonomy.entityTypes).toContain("contracting_party");
+    expect(taxonomy.entityTypes).toContain("indemnification_clause");
+    expect(taxonomy.relationships).toContain("governed_by");
+  });
+
+  /**
+   * VerticalDictionary's lookup map (dictionary.ts) is a flat Map keyed by
+   * lowercased entity type — the last-loaded taxonomy silently wins a shared
+   * key. business_law.yaml intentionally omits governing_law/jurisdiction/
+   * regulator because m&a.yaml/shared.yaml already own them (see the review
+   * note in superpowers/specs/2026-07-29-business-law-gliner2-lora-design.md
+   * §4); this guards against a future edit silently reintroducing that.
+   */
+  it("does not let business_law redeclare an entity type owned by another vertical", async () => {
+    const [ma, financialServices, shared, businessLaw] = await Promise.all(
+      ["m&a", "financial_services", "shared", "business_law"].map(
+        loadVerticalTaxonomy,
+      ),
+    );
+    const owned = new Map<string, string>();
+    for (const taxonomy of [ma, financialServices, shared]) {
+      for (const type of taxonomy.entityTypes) {
+        owned.set(type, taxonomy.vertical);
+      }
+    }
+
+    for (const type of businessLaw.entityTypes) {
+      expect(
+        owned.has(type),
+        `"${type}" is already owned by vertical "${owned.get(type)}"; business_law must not redeclare it`,
+      ).toBe(false);
+    }
   });
 
   it("parses the shared taxonomy", async () => {
