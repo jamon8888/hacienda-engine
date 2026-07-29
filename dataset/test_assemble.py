@@ -49,7 +49,7 @@ def test_span_not_aligned_to_a_word_boundary_raises_rather_than_silently_corrupt
     except ValueError:
         raised = True
 
-    assert raised, "a mid-word span must be rejected, not silently mis-assembled"
+    assert raised, "a mid-word span must be rejected, not silently corrupted"
 
 
 def test_split_is_by_document_not_by_chunk():
