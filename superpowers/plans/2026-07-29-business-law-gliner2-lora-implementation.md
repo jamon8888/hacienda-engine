@@ -237,10 +237,22 @@ def test_split_is_by_task_not_by_document():
 
 ---
 
-## Phase 3: Auto-Labeling — deterministic pieces (external, Python, real unit tests)
+## Phase 3: Auto-Labeling — deterministic pieces (real unit tests, executed this session)
 
 The LLM call itself isn't unit-testable, but everything around it is pure logic and
 should be tested as such before any model spend.
+
+> **Executed 2026-07-29.** "External" in this phase's original heading described where
+> the *full pipeline* lives once it exists (a separate Python project, per the spec's
+> Non-Goals) — it did not mean these specific modules couldn't be written and tested now.
+> They're pure Python with no dependencies beyond `pyyaml` (already vendored in the
+> system's dist-packages) and `pytest` (installed this session via pip, network to
+> PyPI reachable). Tasks 3–5 below were implemented in `labeling/` at the repo root
+> (outside both the Cargo workspace's explicit `members` list and the npm
+> `workspaces: ["apps/*"]` glob, so nothing here enters either build graph) and verified
+> with real `pytest` runs: 6/6 (offset resolver), 6/6 (taxonomy gate, reading the actual
+> `business_law.yaml` from Task 1), 5/5 (consistency voter) — 17/17, plus 6/6 more for
+> Task 7 below, 23/23 total across `labeling/` and `dataset/` together.
 
 ### Task 3: Offset resolver
 
@@ -366,7 +378,15 @@ def test_single_sample_agreement_goes_to_review_not_training():
 
 ---
 
-## Phase 5: Dataset Assembly (external, Python, real unit test)
+## Phase 5: Dataset Assembly (real unit tests, executed this session)
+
+> **Executed 2026-07-29** alongside Phase 3 — see the note there. Implemented in
+> `dataset/assemble.py`, 6/6 passing: the round-trip assertion, a single-word span, a
+> mid-word span correctly raising rather than silently corrupting, document-level (not
+> chunk-level) splitting, and — a case the original plan didn't call out but the
+> implementation surfaced — a document with mixed auto-labeled/human-reviewed records
+> correctly excluded from the test split entirely, rather than leaking its reviewed
+> chunk into test while its auto-labeled chunk trains.
 
 ### Task 7: Word-token span conversion with round-trip assertion
 
@@ -558,17 +578,22 @@ Not executable in a sandbox without network access to a ~600MB model checkpoint.
   a test so it can't silently reappear)
 - ✅ Corpus sourcing + task-ID contamination split — Task 2
 - ✅ Auto-labeling: offset resolution, taxonomy gate, self-consistency — Tasks 3–5
-- ✅ Human QC + active-learning loop — Task 6
+  (executed this session, 17/17 passing)
+- ✅ Human QC + active-learning loop — Task 6 (genuinely blocked: needs an actual human
+  legal-domain reviewer and a real LLM call over real documents, neither available here)
 - ✅ Dataset assembly, word-token round-trip, document-level split, human-only test set —
-  Task 7
+  Task 7 (executed this session, 6/6 passing)
 - ✅ LoRA training contract (`target_modules`, corrected `base_model_name_or_path`
   substring guard) — Task 8
 - ✅ Adapter load-path verification in this repo — Task 9a (executed this session, real
   weights not required); Task 9b staged for whoever has the real GLiNER2 checkpoint
 - ✅ Held-out evaluation vs. zero-shot baseline — Task 10
 
-**Boundary check:** no task in Phases 2–6, 8 adds code to this Cargo/npm workspace — only
-Tasks 1 and 9 touch this repo, matching the spec's Non-Goals (§2).
+**Boundary check:** Tasks 1, 3–5, 7, and 9a all live in this repo now — `labeling/` and
+`dataset/` sit outside both the Cargo workspace's `members` list and the npm
+`workspaces: ["apps/*"]` glob, so they're in the repo without being part of either build
+graph, consistent with the spec's Non-Goals (§2) about the *pipeline*, not a claim that
+none of its logic could be written here.
 
 **No placeholders:** every task has concrete file paths and either real test code or a
 named script deliverable; nothing deferred to a "TODO" inside this plan.
@@ -577,14 +602,26 @@ named script deliverable; nothing deferred to a "TODO" inside this plan.
 
 ## Execution Handoff
 
-Tasks 1 and 9a were executed in this session, in a worktree, and verified with real test
-runs (not just written):
+Tasks 1, 3, 4, 5, 7, and 9a were executed in this session, in a worktree, and verified
+with real test runs (not just written):
 
 - Task 1: `npx vitest run` — 10/10 in `lib/verticals/index.test.ts`, 27/27 across the full
   `hacienda-studio` unit suite.
-- Task 9a: pending — implemented against the real `xberg` v1.0.2 source, to be run with
-  `cargo test -p hacienda-core --features ner-candle`.
+- Task 9a: `cargo test -p hacienda-core --features ner-candle --test lora_adapter_contract`
+  — 3/3, compiled against the real pinned `xberg` v1.0.2 git dependency.
+- Tasks 3–5, 7: `python3 -m pytest labeling dataset` — 23/23.
 
-Task 9b (real-weights guard test) and Phases 2–8 (external Python pipeline, GPU-dependent
-training) remain staged as written specs for whoever/whatever runs them next — not
-executable in this sandbox.
+What's left genuinely isn't a sandbox limitation uniformly — it's task-specific:
+
+- **Task 2** (corpus extraction): `harvey-labs` is a public repo and reachable
+  (`git ls-remote` succeeded during this session) — the task-ID split logic itself is
+  pure Python and could be written now; extracting the actual `.docx`/`.pdf` documents
+  needs `xberg`'s document-conversion path wired up as a callable Python step, which
+  doesn't exist yet.
+- **Task 6** (human QC): a hard blocker — needs an actual person with legal-domain
+  judgment, and real LLM calls over real documents to generate the labels being
+  reviewed in the first place.
+- **Task 8 + Task 9b** (training, real-weights guard test): needs the real ~600MB
+  `fastino/GLiNER2-Guardrails-PII-Multi` checkpoint downloaded, `torch`/`transformers`/
+  `peft` installed (confirmed absent this session), and GPU or a long CPU run.
+- **Task 10** (evaluation): depends on Task 8's trained adapter existing first.
