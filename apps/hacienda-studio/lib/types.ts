@@ -41,8 +41,26 @@ export interface ProgressUpdate {
   message?: string;
 }
 
+/**
+ * Mirrors the `WasmEntityCategory` enum. The engine rejects the whole NER
+ * result when a bridge returns a name outside this set — the failure surfaces
+ * as an opaque "Unknown error" against the document — so the vocabulary is
+ * pinned in the type system rather than left as `string`.
+ */
+export type NerCategory =
+  | "person"
+  | "organization"
+  | "location"
+  | "date"
+  | "time"
+  | "money"
+  | "percent"
+  | "email"
+  | "phone"
+  | "url";
+
 export interface AppConfig {
-  nerCategories: string[];
+  nerCategories: NerCategory[];
   outputFormat: "markdown" | "plain" | "json";
   chunkSize: number;
   enableTranscription: boolean;
@@ -70,7 +88,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     "organization",
     "location",
     "email",
-    "phone_number",
+    "phone",
   ],
   outputFormat: "markdown",
   chunkSize: 1000,

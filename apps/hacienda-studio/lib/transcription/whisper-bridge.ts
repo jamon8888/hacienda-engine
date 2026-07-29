@@ -46,7 +46,9 @@ export class WhisperBridge {
   }
 
   async transcribeAudio(
-    audioBytes: Uint8Array,
+    // Not a bare Uint8Array: that widens to Uint8Array<ArrayBufferLike>, which
+    // may be backed by a SharedArrayBuffer and is not a valid BlobPart.
+    audioBytes: Uint8Array<ArrayBuffer>,
     mimeType: string,
     config: TranscriptionConfig,
   ): Promise<TranscriptionResult> {

@@ -17,6 +17,13 @@ import {
   WasmNerBackendKind,
 } from "@xberg-io/xberg-wasm";
 import initWasm from "@xberg-io/xberg-wasm";
+// Let the bundler resolve and emit the binary. The previous absolute
+// "/node_modules/@xberg-io/…/xberg_wasm_bg.wasm" only ever existed on a dev
+// server: in production that path is answered by the SPA fallback with
+// index.html, and WebAssembly rejects it as "expected magic word 00 61 73 6d,
+// found 3c 21 64 6f".
+import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
+import { extractEntities } from "../lib/ner-bridge";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -39,6 +46,22 @@ function slugify(text: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .substring(0, 64);
+}
+
+const MA_TERMS =
+  /\b(m&a|merger|acquisition|acquirer|acquired|acquires|target|spa|share purchase|earnout|indemnification|representation and warranty|material adverse change|break fee|closing condition|deal value|purchase price)\b/;
+const FS_TERMS =
+  /\b(private equity|venture capital|limited partner|general partner|carried interest|management fee|nav|irr|dpi|tvpi|portfolio company|fund size|capital commitment)\b/;
+
+/**
+ * Assign a vertical to entities the taxonomy does not recognise, based on the
+ * vocabulary of the surrounding document.
+ */
+function classifyDocumentVertical(markdown: string): string {
+  const text = markdown.toLowerCase();
+  if (MA_TERMS.test(text)) return "m&a";
+  if (FS_TERMS.test(text)) return "financial_services";
+  return "shared";
 }
 
 function deduplicateEntities(entities: Entity[]): Entity[] {
@@ -104,160 +127,8 @@ function buildGlossary(entities: Entity[]): string {
 }
 
 async function initEngine(): Promise<void> {
-  const wasmUrl = new URL(
-    "/node_modules/@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm",
-    self.location.origin,
-  );
-  console.log("[Worker] WASM URL:", wasmUrl.href);
-  const wasmResp = await fetch(wasmUrl);
-  console.log(
-    "[Worker] WASM fetch status:",
-    wasmResp.status,
-    "content-type:",
-    wasmResp.headers.get("content-type"),
-  );
-  await initWasm({ module_or_path: wasmResp });
-  console.log("[Worker] WASM engine initialized");
+  await initWasm({ module_or_path: fetch(xbergWasmUrl) });
 }
-
-const createNerBridge = async (text: string, categories: string[]) => {
-  const compromise = await import("compromise");
-  const doc = compromise.default(text);
-  const entities = [];
-
-  if (categories.includes("person")) {
-    doc
-      .people()
-      .out("array")
-      .forEach((text: string) => {
-        entities.push({
-          label: "person",
-          text,
-          start: 0,
-          end: text.length,
-          score: 0.9,
-        });
-      });
-  }
-  if (categories.includes("organization")) {
-    doc
-      .organizations()
-      .out("array")
-      .forEach((text: string) => {
-        entities.push({
-          label: "organization",
-          text,
-          start: 0,
-          end: text.length,
-          score: 0.9,
-        });
-      });
-  }
-  if (categories.includes("location")) {
-    doc
-      .places()
-      .out("array")
-      .forEach((text: string) => {
-        entities.push({
-          label: "location",
-          text,
-          start: 0,
-          end: text.length,
-          score: 0.9,
-        });
-      });
-  }
-  if (categories.includes("email")) {
-    const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-    let match;
-    while ((match = emailRegex.exec(text)) !== null) {
-      entities.push({
-        label: "email",
-        text: match[0],
-        start: match.index,
-        end: match.index + match[0].length,
-        score: 0.9,
-      });
-    }
-  }
-  if (categories.includes("phone_number")) {
-    const phoneRegex =
-      /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
-    let match;
-    while ((match = phoneRegex.exec(text)) !== null) {
-      entities.push({
-        label: "phone_number",
-        text: match[0],
-        start: match.index,
-        end: match.index + match[0].length,
-        score: 0.8,
-      });
-    }
-  }
-  if (categories.includes("date")) {
-    doc
-      .dates()
-      .out("array")
-      .forEach((text: string) => {
-        entities.push({
-          label: "date",
-          text,
-          start: 0,
-          end: text.length,
-          score: 0.8,
-        });
-      });
-  }
-  if (categories.includes("money")) {
-    doc
-      .money()
-      .out("array")
-      .forEach((text: string) => {
-        entities.push({
-          label: "money",
-          text,
-          start: 0,
-          end: text.length,
-          score: 0.8,
-        });
-      });
-  }
-  if (categories.includes("percent")) {
-    doc
-      .percentages()
-      .out("array")
-      .forEach((text: string) => {
-        entities.push({
-          label: "percent",
-          text,
-          start: 0,
-          end: text.length,
-          score: 0.8,
-        });
-      });
-  }
-  if (categories.includes("url")) {
-    const urlRegex = /https?:\/\/[^\s]+/g;
-    let match;
-    while ((match = urlRegex.exec(text)) !== null) {
-      entities.push({
-        label: "url",
-        text: match[0],
-        start: match.index,
-        end: match.index + match[0].length,
-        score: 0.9,
-      });
-    }
-  }
-
-  return entities.map((e) => ({
-    category: e.label,
-    text: e.text,
-    start: e.start,
-    end: e.end,
-    confidence: e.score,
-  }));
-};
 
 async function processFile(
   input: FileInput,
@@ -315,7 +186,7 @@ async function processFile(
 
     const engine = new XbergEngine(
       { bridgeTimeoutMs: 30000 },
-      { ner: { ner: createNerBridge } },
+      { ner: { ner: extractEntities } },
     );
 
     const result = await engine.extract(extractInput, extractConfig);
@@ -333,7 +204,7 @@ async function processFile(
   // Run NER on the markdown (works for both transcription and extraction)
   const nerEngine = new XbergEngine(
     { bridgeTimeoutMs: 30000 },
-    { ner: { ner: createNerBridge } },
+    { ner: { ner: extractEntities } },
   );
 
   const nerResults = await nerEngine.ner(markdown, {
@@ -364,54 +235,25 @@ async function processFile(
 
   postProgress({ file: input.name, stage: "ner", percent: 80 });
 
+  // Classify the document once — the fallback below depends only on the
+  // document text, so it does not need recomputing for every entity.
+  const documentVertical = classifyDocumentVertical(markdown);
+
   // Enrich entities with vertical metadata and register them
   const enrichedEntities: Entity[] = [];
   for (const entity of entities) {
-    // Determine vertical based on entity type and document context
-    let verticalMeta = verticalDict.lookup(entity.name.toLowerCase());
-
-    // If not found in dictionary, classify based on entity type and document context
-    if (!verticalMeta) {
-      // Check if document contains M&A terms
-      const text = markdown.toLowerCase();
-      const hasMATerms =
-        /\b(m&a|merger|acquisition|acquirer|acquired|acquires|target|spa|share purchase|earnout|indemnification|representation and warranty|material adverse change|break fee|closing condition|deal value|purchase price)\b/.test(
-          markdown,
-        );
-      const hasFSTerms =
-        /\b(private equity|venture capital|limited partner|general partner|carried interest|management fee|nav|irr|dpi|tvpi|portfolio company|limited partner|general partner|fund size|capital commitment)\b/.test(
-          markdown,
-        );
-
-      if (hasMATerms) {
-        verticalMeta = {
-          canonical: "m&a_entity",
-          vertical: "m&a",
-          sector: "m&a",
-          roles: [],
-        };
-      } else if (hasFSTerms) {
-        verticalMeta = {
-          canonical: "fs_entity",
-          vertical: "financial_services",
-          sector: "financial_services",
-          roles: [],
-        };
-      } else {
-        verticalMeta = {
-          canonical: "shared_entity",
-          vertical: "shared",
-          sector: "shared",
-          roles: [],
-        };
-      }
-    }
+    // Determine vertical based on entity type, falling back to document context
+    const verticalMeta = verticalDict.lookup(entity.name.toLowerCase()) ?? {
+      canonical: `${documentVertical}_entity`,
+      vertical: documentVertical,
+      roles: [],
+    };
 
     const enrichedEntity: Entity = {
       ...entity,
-      vertical: verticalMeta?.vertical || "shared",
-      sector: verticalMeta?.sector,
-      roles: verticalMeta?.roles || [],
+      vertical: verticalMeta.vertical,
+      sector: verticalMeta.sector,
+      roles: verticalMeta.roles || [],
     };
     enrichedEntities.push(enrichedEntity);
 
@@ -532,14 +374,16 @@ async function processFiles(
   zip.file("_manifest.json", JSON.stringify(manifest, null, 2));
 
   // Add entities registry to zip
-  const registryJson = registry.toJSON();
-  if (config.enableTranscription) {
-    registryJson.transcription = {
-      model: config.transcriptionModel,
-      language: config.transcriptionLanguage,
-      enabled: true,
-    };
-  }
+  const registryJson = {
+    ...registry.toJSON(),
+    ...(config.enableTranscription && {
+      transcription: {
+        model: config.transcriptionModel,
+        language: config.transcriptionLanguage,
+        enabled: true,
+      },
+    }),
+  };
   zip.file("entities-registry.json", JSON.stringify(registryJson, null, 2));
 
   // Add KG exports

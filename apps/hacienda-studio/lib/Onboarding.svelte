@@ -27,7 +27,7 @@
 		<header>
 			<h1 id="onboarding-title">
 				<span class="icon" aria-hidden="true">🔒</span>
-				xberg-studio — 100% Local AI in Your Browser
+				Hacienda Studio — 100% Local AI in Your Browser
 			</h1>
 			<p class="subtitle">Your files <strong>NEVER leave this tab</strong>. All processing runs locally via WebAssembly.</p>
 		</header>
@@ -160,7 +160,8 @@
 		color: var(--color-muted);
 	}
 
-	.asset-status.ready {
+	/* `ready` sits on the <li>, not on the status span. */
+	li.ready .asset-status {
 		color: var(--color-success);
 	}
 

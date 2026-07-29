@@ -1,12 +1,9 @@
 import { defineConfig } from "vitest/config";
-import { svelte } from "@sveltejs/vite-plugin-svelte";
 
 export default defineConfig({
-  plugins: [svelte()],
   test: {
-    include: ["lib/**/*.{test,spec}.{ts,tsx}", "tests/**/*.{test,spec}.{ts,tsx}"],
-    environment: "jsdom",
-    globals: true,
-    setupFiles: ["./tests/setup.ts"],
+    // Playwright owns the browser-level tests under tests/e2e.
+    include: ["lib/**/*.{test,spec}.ts", "worker/**/*.{test,spec}.ts"],
+    environment: "node",
   },
 });

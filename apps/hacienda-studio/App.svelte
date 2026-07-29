@@ -4,6 +4,7 @@
 	import ProgressBar from './lib/ProgressBar.svelte';
 	import ConfigPanel from './lib/ConfigPanel.svelte';
 	import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from './lib/asset-loader';
+	import { DEFAULT_CONFIG } from './lib/types';
 	import type { AppConfig, FileInput, ProcessedFile, ProgressUpdate } from './lib/types';
 
 	let onboardingComplete = $state(false);
@@ -11,13 +12,13 @@
 	let files = $state<File[]>([]);
 	let progress = $state<Map<string, ProgressUpdate>>(new Map());
 	let results = $state<ProcessedFile[]>([]);
-	let config = $state<AppConfig>({
-		nerCategories: ['person', 'organization', 'location', 'email', 'phone_number'],
-		outputFormat: 'markdown',
-		chunkSize: 1000
-	});
+	let config = $state<AppConfig>({ ...DEFAULT_CONFIG });
 	let showConfig = $state(false);
 	let error = $state<string | null>(null);
+	// The drop zone renders before the worker finishes its handshake, and the
+	// handshake is slow — it compiles a 48 MB WASM module. Dropping a file into
+	// that window used to throw on a null worker and silently do nothing.
+	let workerReady = $state(false);
 	let worker: Worker | null = null;
 
 	onMount(async () => {
@@ -39,6 +40,7 @@
 			worker!.postMessage({ type: 'init' });
 		});
 		worker.onmessage = handleWorkerMessage;
+		workerReady = true;
 	});
 
 	async function preloadAssets() {
@@ -130,6 +132,7 @@
 
 	function onDrop(event: DragEvent): void {
 		event.preventDefault();
+		if (!workerReady) return;
 		if (event.dataTransfer?.files) handleFiles(event.dataTransfer.files);
 	}
 
@@ -157,7 +160,7 @@
 		<Onboarding {assets} onComplete={() => { onboardingComplete = true; localStorage.setItem('xberg-studio-visited', 'true'); }} />
 	{:else}
 		<header class="header">
-			<h1>xberg-studio</h1>
+			<h1>Hacienda Studio</h1>
 			<button class="config-toggle" onclick={() => showConfig = !showConfig} aria-expanded={showConfig}>
 				⚙ Config
 			</button>
@@ -171,11 +174,11 @@
 		{/if}
 
 		<main class="main">
-			<section class="drop-zone" ondrop={onDrop} ondragover={onDragOver}>
-				<input type="file" id="file-input" multiple accept=".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html" class="file-input" onchange={(e) => { const files = (e.target as HTMLInputElement).files; if (files) handleFiles(files); }} aria-label="Choose files" />
+			<section class="drop-zone" role="group" aria-label="Upload documents" ondrop={onDrop} ondragover={onDragOver}>
+				<input type="file" id="file-input" multiple disabled={!workerReady} accept=".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html" class="file-input" onchange={(e) => { const files = (e.target as HTMLInputElement).files; if (files) handleFiles(files); }} aria-label="Choose files" />
 				<label for="file-input" class="drop-label">
 					<span class="drop-icon" aria-hidden="true">📄</span>
-					<p>Drop files here or click to browse</p>
+					<p>{workerReady ? 'Drop files here or click to browse' : 'Starting the local engine…'}</p>
 					<p class="drop-hint">PDF, Office, Email, Images, Subtitles, Code — up to 50MB each</p>
 				</label>
 			</section>

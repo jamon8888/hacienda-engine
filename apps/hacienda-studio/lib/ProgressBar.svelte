@@ -1,8 +1,9 @@
 <script lang="ts">
-	import type { ProgressUpdate, FileInput } from './types';
+	import type { ProgressUpdate } from './types';
 
 	interface Props {
-		file: FileInput;
+		/** Named loosely so both a DOM File and a worker FileInput satisfy it. */
+		file: { name: string };
 		update: ProgressUpdate;
 	}
 

@@ -1,44 +1,14 @@
-import { createReadStream, existsSync, statSync } from "node:fs";
-import { dirname, join, normalize } from "node:path";
-import { fileURLToPath } from "node:url";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
-const appRoot = dirname(fileURLToPath(import.meta.url));
-const workspaceRoot = join(appRoot, "..", "..");
-
-/**
- * npm workspaces hoists dependencies to the workspace root, leaving
- * apps/hacienda-studio/node_modules empty. Vite's dev server roots at the app
- * directory, so the `/node_modules/@xberg-io/xberg-wasm/…` URL that the wasm
- * glue emits misses and the SPA fallback answers with index.html. Serve those
- * requests from the hoisted location instead. Production builds are unaffected
- * — Rollup resolves and emits the .wasm itself.
- */
-function serveHoistedNodeModules(): Plugin {
-  return {
-    name: "serve-hoisted-node-modules",
-    apply: "serve",
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        const url = req.url?.split("?")[0];
-        if (!url?.startsWith("/node_modules/")) return next();
-
-        const abs = normalize(join(workspaceRoot, url));
-        if (!abs.startsWith(workspaceRoot)) return next();
-        if (existsSync(join(appRoot, url))) return next();
-        if (!existsSync(abs) || !statSync(abs).isFile()) return next();
-
-        if (abs.endsWith(".wasm")) res.setHeader("Content-Type", "application/wasm");
-        createReadStream(abs).pipe(res);
-      });
-    },
-  };
-}
+const CROSS_ORIGIN_ISOLATION = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+};
 
 export default defineConfig({
   base: "/",
-  plugins: [svelte(), serveHoistedNodeModules()],
+  plugins: [svelte()],
   optimizeDeps: {
     // Both packages resolve their .wasm via new URL(..., import.meta.url).
     // Pre-bundling rewrites that base to .vite/deps/, so the request misses
@@ -48,7 +18,9 @@ export default defineConfig({
   },
   build: {
     target: "esnext",
-    outDir: "../../dist/apps/hacienda-studio",
+    // Inside the package so Turborepo can cache it — task outputs are resolved
+    // relative to the package directory.
+    outDir: "dist",
     emptyOutDir: true,
     rollupOptions: {
       output: {
@@ -59,20 +31,11 @@ export default defineConfig({
       },
     },
   },
-  server: {
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
-    },
-    proxy: {
-      "/api/huggingface": {
-        target: "https://huggingface.co",
-        changeOrigin: true,
-        followRedirects: true,
-        rewrite: (path) => path.replace(/^\/api\/huggingface/, ""),
-      },
-    },
-  },
+  // SharedArrayBuffer requires cross-origin isolation. These have to be real
+  // HTTP headers — the equivalent <meta http-equiv> tags are ignored by
+  // browsers — so whatever serves dist/ in production must send them too.
+  server: { headers: CROSS_ORIGIN_ISOLATION },
+  preview: { headers: CROSS_ORIGIN_ISOLATION },
   worker: {
     format: "es",
     plugins: () => [],

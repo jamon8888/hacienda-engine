@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { AppConfig } from './types';
+	import type { AppConfig, NerCategory } from './types';
 
 	interface Props {
 		config: AppConfig;
@@ -7,22 +7,20 @@
 
 	let { config }: Props = $props();
 
-	const allCategories = [
+	// Only categories the engine's vocabulary accepts and the worker's NER
+	// bridge actually produces. Offering anything else (full_name, company,
+	// address, …) makes the engine reject the entire NER result, which the app
+	// surfaces as an opaque "Unknown error" against the document.
+	const allCategories: Array<{ key: NerCategory; label: string; group: string }> = [
 		{ key: 'person', label: 'Person', group: 'Person' },
-		{ key: 'full_name', label: 'Full Name', group: 'Person' },
-		{ key: 'first_name', label: 'First Name', group: 'Person' },
-		{ key: 'last_name', label: 'Last Name', group: 'Person' },
 		{ key: 'organization', label: 'Organization', group: 'Organization' },
-		{ key: 'company', label: 'Company', group: 'Organization' },
 		{ key: 'location', label: 'Location', group: 'Location' },
-		{ key: 'city', label: 'City', group: 'Location' },
-		{ key: 'state_or_region', label: 'State/Region', group: 'Location' },
-		{ key: 'country', label: 'Country', group: 'Location' },
 		{ key: 'email', label: 'Email', group: 'Contact' },
-		{ key: 'phone_number', label: 'Phone', group: 'Contact' },
-		{ key: 'address', label: 'Address', group: 'Contact' },
+		{ key: 'phone', label: 'Phone', group: 'Contact' },
+		{ key: 'url', label: 'URL', group: 'Contact' },
 		{ key: 'date', label: 'Date', group: 'Temporal' },
-		{ key: 'money', label: 'Money', group: 'Financial' }
+		{ key: 'money', label: 'Money', group: 'Financial' },
+		{ key: 'percent', label: 'Percent', group: 'Financial' }
 	];
 
 	const grouped = Object.groupBy(allCategories, (c) => c.group);
@@ -57,7 +55,7 @@
 
 	let showConfig = $state(false);
 
-	function toggleCategory(key: string) {
+	function toggleCategory(key: NerCategory) {
 		const idx = config.nerCategories.indexOf(key);
 		if (idx >= 0) config.nerCategories.splice(idx, 1);
 		else config.nerCategories.push(key);
@@ -143,8 +141,8 @@
 
 	<section>
 		<h3>🏷️ Vertical NER</h3>
-		<div class="field">
-			<label>Enabled Verticals</label>
+		<fieldset class="field">
+			<legend>Enabled Verticals</legend>
 			<div class="checkbox-group">
 				{#each ['m&a', 'financial_services', 'shared'] as v}
 					<label>
@@ -153,7 +151,7 @@
 					</label>
 				{/each}
 			</div>
-		</div>
+		</fieldset>
 	</section>
 
 	<section>

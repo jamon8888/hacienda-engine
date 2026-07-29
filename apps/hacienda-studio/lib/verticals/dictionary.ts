@@ -3,13 +3,19 @@ import { VerticalTaxonomy, VerticalEntityMetadata } from "./index";
 export class VerticalDictionary {
   private map: Map<string, VerticalEntityMetadata> = new Map();
 
+  /**
+   * `taxonomy.sectors` lists the industry sectors a vertical covers; it says
+   * nothing about any individual entity type. Deriving a per-entity `sector`
+   * from it stamped every M&A entity `technology`, which then propagated into
+   * the exported knowledge graph as fact. Sector is left unset until a
+   * document-level classifier can supply it.
+   */
   constructor(taxonomies: VerticalTaxonomy[]) {
     for (const taxonomy of taxonomies) {
       for (const entityType of taxonomy.entityTypes) {
         this.map.set(entityType.toLowerCase(), {
           canonical: entityType,
           vertical: taxonomy.vertical,
-          sector: taxonomy.sectors[0],
         });
         // Add common aliases
         const aliases = this.getAliases(entityType);
@@ -17,7 +23,6 @@ export class VerticalDictionary {
           this.map.set(alias.toLowerCase(), {
             canonical: entityType,
             vertical: taxonomy.vertical,
-            sector: taxonomy.sectors[0],
           });
         }
       }

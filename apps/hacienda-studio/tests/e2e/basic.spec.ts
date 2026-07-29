@@ -29,6 +29,8 @@ test.describe("xberg-studio", () => {
     // Onboarding should NOT appear; drop zone should be visible
     await page.waitForSelector(".drop-zone", { timeout: 10000 });
     await expect(page.locator(".onboarding-overlay")).not.toBeVisible();
+    // The drop zone announces itself as busy until the worker handshake lands.
+    await page.waitForSelector('input[type="file"]:not([disabled])');
     await expect(page.locator("text=Drop files here")).toBeVisible();
   });
 
@@ -38,7 +40,7 @@ test.describe("xberg-studio", () => {
     });
     await page.goto("/");
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForSelector(".drop-zone", { timeout: 10000 });
+    await page.waitForSelector('input[type="file"]:not([disabled])');
 
     await page.setInputFiles('input[type="file"]', {
       name: "test.exe",

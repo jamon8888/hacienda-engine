@@ -5,14 +5,52 @@ const DB_VERSION = 1;
 const MODEL_STORE = "models";
 const TESSDATA_STORE = "tessdata";
 
-// GLiNER2 model from xberg-wasm (ner-candle-wasm feature)
-// Using the new NerModel class from @xberg-io/xberg-wasm
-// In dev, use Vite proxy to bypass HuggingFace CORS restrictions
-const HF_BASE =
-  "/api/huggingface/fastino/GLiNER2-Guardrails-PII-Multi/resolve/main";
-const MODEL_URL = `${HF_BASE}/model.safetensors`;
-const TOKENIZER_URL = `${HF_BASE}/tokenizer.json`;
-const CONFIG_URL = `${HF_BASE}/config.json`;
+/**
+ * GLiNER2 weights for the xberg-wasm `NerModel`. These are public model files —
+ * no document content is transmitted, only downloaded. huggingface.co serves
+ * them with permissive CORS headers, so they are fetched directly rather than
+ * through a dev proxy: a proxy that only exists in dev leaves production
+ * resolving the same URL against the SPA fallback.
+ *
+ * Override the base to self-host the weights, e.g. for firms that require all
+ * traffic to stay within the EU.
+ */
+const MODEL_BASE =
+  import.meta.env.VITE_MODEL_BASE_URL ??
+  "https://huggingface.co/fastino/GLiNER2-Guardrails-PII-Multi/resolve/main";
+const MODEL_URL = `${MODEL_BASE}/model.safetensors`;
+const TOKENIZER_URL = `${MODEL_BASE}/tokenizer.json`;
+// The encoder config (mdeberta-v3-base), not the top-level extractor config —
+// NerModel.load reads hidden_size, layer counts and vocab size from this.
+const ENCODER_CONFIG_URL = `${MODEL_BASE}/encoder_config/config.json`;
+
+/**
+ * A URL that does not resolve is answered by the SPA fallback with index.html
+ * and HTTP 200, so `response.ok` alone does not prove an asset was returned —
+ * the HTML reaches the consumer disguised as model weights and fails much
+ * later, somewhere unrelated. Reject non-asset responses at the boundary.
+ */
+export async function fetchAsset(url: string): Promise<Uint8Array> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("text/html")) {
+    throw new Error(
+      `Expected an asset at ${url} but the server returned HTML — the URL does not resolve.`,
+    );
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes[0] === 0x3c) {
+    throw new Error(
+      `Expected an asset at ${url} but the response body begins with '<' — the URL does not resolve.`,
+    );
+  }
+  return bytes;
+}
 
 async function getDB() {
   return openDB(DB_NAME, DB_VERSION, {
@@ -54,20 +92,11 @@ export async function loadNerModel(): Promise<{
     return { model, tokenizer, encoderConfig: config };
   }
 
-  // Fetch from HuggingFace CDN
-  const [modelRes, tokenizerRes, configRes] = await Promise.all([
-    fetch(MODEL_URL),
-    fetch(TOKENIZER_URL),
-    fetch(CONFIG_URL),
+  const [modelData, tokenizerData, configData] = await Promise.all([
+    fetchAsset(MODEL_URL),
+    fetchAsset(TOKENIZER_URL),
+    fetchAsset(ENCODER_CONFIG_URL),
   ]);
-
-  if (!modelRes.ok || !tokenizerRes.ok || !configRes.ok) {
-    throw new Error("Failed to download NER model from HuggingFace");
-  }
-
-  const modelData = new Uint8Array(await modelRes.arrayBuffer());
-  const tokenizerData = new Uint8Array(await tokenizerRes.arrayBuffer());
-  const configData = new Uint8Array(await configRes.arrayBuffer());
 
   // Cache in IndexedDB
   const tx = db.transaction(MODEL_STORE, "readwrite");
