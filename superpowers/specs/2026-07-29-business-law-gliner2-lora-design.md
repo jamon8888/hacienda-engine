@@ -117,8 +117,6 @@ entityTypes:
   - renewal_clause
   - termination_clause
   - termination_for_cause
-  - governing_law
-  - jurisdiction
   - dispute_resolution_mechanism
   - arbitration_clause
   - venue
@@ -135,7 +133,6 @@ entityTypes:
   - notice_provision
   - payment_terms
   - penalty_clause
-  - regulator
   - compliance_obligation
 
 relationships:
@@ -147,6 +144,20 @@ relationships:
   - assigns_rights_to
   - subject_to_regulation_by
 ```
+
+> **Review note (2026-07-29):** `governing_law`, `jurisdiction`, and `regulator` were
+> deliberately dropped from this list — they already exist verbatim in `m&a.yaml`
+> (`regulator` also in `shared.yaml`), and `VerticalDictionary`'s lookup map
+> (`apps/hacienda-studio/lib/verticals/dictionary.ts:16`) is a flat `Map` keyed by
+> lowercased entity name: whichever taxonomy is loaded last in `index.ts`'s array wins
+> silently for a shared key. Redefining them here would make their vertical attribution
+> depend on load order instead of being correct. They remain reachable through the
+> existing taxonomies without duplication. `indemnification_clause` was kept distinct
+> from m&a's `indemnification` rather than merged, since collapsing them would attribute
+> every business-law indemnification clause to the `m&a` vertical — a real gap (business
+> law and M&A doc taxonomies duplicate a concept with no shared owner), but resolving it
+> properly is cross-vertical entity resolution, already scoped as future work in §15, not
+> this spec.
 
 **Registration** (mirrors the existing pattern in
 `apps/hacienda-studio/lib/verticals/index.ts`, which bundles taxonomies at build time
