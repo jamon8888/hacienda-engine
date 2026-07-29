@@ -277,36 +277,82 @@ data — since that's the only slice with a trustworthy label.
 ## 9. LoRA Training Contract — matching hacienda's existing loader
 
 This is the section that has to be exactly right, because nothing downstream validates it
-except a load-time failure. `xberg-gliner`'s `LoraAdapter::from_bytes`
-(`superpowers/plans/01-core-pipeline.md:1026`) deserializes `adapter_config.json` into:
+except a load-time failure.
+
+> **Correction (2026-07-29, verified against source):** the original version of this
+> section described a `base_model_name` field and an equality-based load-time guard,
+> sourced from `superpowers/plans/01-core-pipeline.md`'s pseudocode — that file documents
+> the superseded `pii-fastino` crate, not what `hacienda-core` actually calls today. The
+> real contract, read directly from the `xberg` git dependency pinned at tag `v1.0.2`
+> (`crates/xberg-gliner/src/candle/lora.rs` and `candle/model.rs`, commit `9dcc864`), is
+> materially different and weaker than originally written here. Corrected below.
+
+`xberg-gliner`'s `LoraAdapter::load` (`candle/lora.rs:84`) deserializes `adapter_config.json`
+into:
 
 ```rust
 pub struct LoraConfig {
     pub r: usize,
     pub lora_alpha: f64,
     pub target_modules: Option<Vec<String>>,
+    pub base_model_name_or_path: Option<String>,  // note: _or_path, not base_model_name
     pub fan_in_fan_out: bool,
-    pub base_model_name: Option<String>,
 }
 ```
 
-Training-side requirements this implies:
+**The base-model guard is a bidirectional substring check against a directory basename, and
+it is optional.** `Gliner2Candle::load_adapter` (`candle/model.rs:137`):
 
-- **`base_model_name`** must equal the exact identifier of the base weights hacienda loads
-  (`fastino/GLiNER2-Guardrails-PII-Multi`) — this is "the base-model-name guard" referenced
-  in `hacienda-cli-api-integration-design.md` §11.1; a mismatch is a deliberate load-time
-  rejection, not a bug to work around.
+```rust
+if let Some(adapter_base) = adapter.config.base_model_name_or_path.as_deref()
+    && !self.model_id.contains(adapter_base)
+    && !adapter_base.contains(&self.model_id)
+{
+    return Err(/* "adapter trained on '{adapter_base}', current model is '{model_id}'.
+                   Refusing to merge; remove base_model_name_or_path ... to bypass." */);
+}
+```
+
+Three consequences that change how training must set this field:
+
+- **`model_id` is the base model directory's basename** (`model_dir.file_name()`,
+  `candle/model.rs:199`), not a HuggingFace-style slug. A model loaded from
+  `/models/gliner2-guardrails-pii-multi/` has `model_id =
+  "gliner2-guardrails-pii-multi"` — nothing containing a `/` will ever match it exactly;
+  containment is what has to hold, not equality.
+- **The check is case-sensitive `str::contains` in both directions.** `adapter_config.json`
+  must set `base_model_name_or_path` to a string that is a substring of the deployed model
+  directory's basename, or vice versa — e.g. `"gliner2-guardrails-pii-multi"` (matching
+  case, matching substring) works; the HF-style mixed-case slug
+  `"fastino/GLiNER2-Guardrails-PII-Multi"` does **not** contain, and is not contained by,
+  a lowercase directory name — it would be rejected as a false mismatch. Pin the exact
+  deployed directory basename as the training-time constant, not the HF slug.
+- **The guard is skipped entirely if the field is absent.** The error message itself says
+  "remove `base_model_name_or_path` from `adapter_config.json` to bypass" — this is a
+  documented, intentional escape hatch, not a hole. The training pipeline must set the
+  field deliberately; omitting it by oversight silently disables the only cross-model
+  sanity check that exists.
+
+The one check that is unconditional, not opt-in, is structural: `merge_into_base`
+(`candle/lora.rs:246`) rejects an adapter if any of its target modules has no matching key
+in the base `model.safetensors` — "adapter targets module '{path}' but no matching key
+found in base safetensors." This is what actually catches "trained against a different
+architecture"; the name guard above only catches "pointed at a differently-named directory
+with the same architecture."
+
+Remaining requirements, unchanged from the original draft:
+
 - **`target_modules`** must name modules that actually exist in the DeBERTa-v2 encoder
-  (attention projections: `query_proj`, `key_proj`, `value_proj`). This must be verified
-  against the real module names in the merged base checkpoint before training, not assumed
-  from HF's generic DeBERTa docs — a mismatched name fails silently at merge time in some
-  PEFT-adjacent tooling rather than erroring.
-- Weights export as standard PEFT-format `adapter_model.safetensors`, with LoRA A/B tensor
-  keys following the `module_path.lora_A.weight` / `.lora_B.weight` convention that
-  `parse_lora_key` (same file) expects.
+  (attention projections: `query_proj`, `key_proj`, `value_proj`) — verified against the
+  real module names in the merged base checkpoint before training, not assumed from HF's
+  generic DeBERTa docs. `merge_into_base`'s structural check (above) is what turns a wrong
+  guess into a load-time error instead of a silent no-op.
+- Weights export as standard PEFT-format `adapter_model.safetensors`, keys following
+  `base_model.model.<module_path>.lora_{A,B}.weight`, **F32 only** — `lora.rs`'s loader
+  rejects any other dtype outright (`candle/lora.rs:127`).
 - Rank/alpha are training hyperparameters, not architectural constraints from hacienda's
-  side — pick from standard ranges (`r=8–16`, `alpha=16–32`) and tune against §10's held-out
-  F1, not against convention.
+  side — pick from standard ranges (`r=8–16`, `alpha=16–32`) and tune against §11's held-out
+  F1, not against convention. `r=0` is rejected at load (`candle/lora.rs:94`).
 
 Training itself: `peft.LoraConfig` against `fastino-ai/GLiNER2`'s own training script, base
 weights frozen, only the LoRA A/B matrices updated.
@@ -340,12 +386,21 @@ routing and admission control there already account for "more adapters than `m&a
   context, unresolvable match dropped); taxonomy whitelist rejection; word-token
   round-trip assertion (§8); `business_law.yaml` passes the same `requireStringList`
   validation `index.test.ts` already runs for `m&a`/`financial_services`.
-- **Integration:** load a fixture adapter directory through the existing `--lora-dir` CLI
-  flag / `ModelConfig.lora_adapter_dir` path in CI, asserting the `base_model_name` guard
-  actually rejects a mismatched adapter — this is the one behavior from §9 the Rust side
-  can and should verify in CI, since a silent regression there is exactly the "advertises
-  model-backed detection while running regex-only" failure mode §13 of the integration
-  design already flags as an open risk.
+- **Integration (cheap, real weights not required):** `NerDetector::from_candle_local`
+  must return `Err(PiiError::Ner)`, not panic, for a nonexistent or malformed
+  `model_dir`/`lora_adapter_dir` — the load-failure-must-not-look-like-success concern
+  §13 of the integration design flags as an open risk. This is checkable with no model
+  weights at all and belongs in this repo's default `cargo test`.
+- **Integration (requires real weights, not CI-default):** actually exercising
+  `base_model_name_or_path`'s substring guard (§9) end-to-end needs a loaded ~600MB
+  GLiNER2 base model plus a real PEFT adapter — `xberg-gliner`'s own equivalent test,
+  `base_model_extracts_entities_and_adapter_changes_output`
+  (`crates/xberg-gliner/tests/candle_smoke.rs`), is `#[ignore]`d and driven by
+  `GLINER2_CANDLE_MODEL_DIR`/`GLINER2_TEST_ADAPTER_DIR` env vars for exactly this reason.
+  hacienda should follow the same pattern rather than inventing a lighter-weight
+  substitute that can't actually exercise the real merge path — see the implementation
+  plan's Task 9 for the concrete split between what runs in default CI and what needs a
+  weights-provisioned job.
 - **Golden files:** a small hand-labeled document set per practice area, held out entirely
   from the auto-labeling loop, used as the stable regression target across training
   iterations.
@@ -360,14 +415,19 @@ routing and admission control there already account for "more adapters than `m&a
 | `target_modules` naming mismatch against the real DeBERTa-v2 checkpoint | Verify against the actual merged base checkpoint's tensor names before training, not HF's generic docs. |
 | Label taxonomy drift between `business_law.yaml` and future verticals | New entity types get a relationships/overlap review against `m&a.yaml`/`financial_services.yaml` before merge, same as this spec did in §4. |
 | Adapter cache growth once more than 2 verticals exist | Already owned by `hacienda-cli-api-integration-design.md` §12.4; not re-solved here. |
+| `base_model_name_or_path`'s guard is a case-sensitive substring check against a directory basename, and is skipped entirely if the field is omitted (§9) — weaker than "exact identifier match" | Pin the deployed model directory's literal basename as the training-time constant (not the HF slug); never omit the field from `adapter_config.json`; the structural module-match check in `merge_into_base` is the one guard that isn't optional. |
 
 ## 14. Acceptance Criteria
 
 - [ ] `business_law.yaml` added and passing `index.test.ts`'s taxonomy validation
 - [ ] Auto-labeling pipeline produces a JSONL dataset in GLiNER2's word-token span format
 - [ ] Held-out human-reviewed test set exists, disjoint from all auto-labeled/training data
-- [ ] Trained adapter's `adapter_config.json` round-trips through `LoraAdapter::from_bytes`
-      with the correct `base_model_name` guard behavior verified in CI
+- [ ] Trained adapter's `adapter_config.json` sets `base_model_name_or_path` to the deployed
+      model directory's literal basename (not the HF slug), verified by loading it through
+      `LoraAdapter::load` against a real (non-CI, weights-provisioned) base model
+- [ ] `NerDetector::from_candle_local` returns `Err(PiiError::Ner)` rather than panicking for
+      a malformed model/adapter directory — verified in default CI with no model weights
+      required (see implementation plan Task 9)
 - [ ] Held-out F1 exceeds the zero-shot base-model baseline (§11) for every label in the
       taxonomy, or the label is flagged and excluded rather than shipped silently weak
 - [ ] `harvey-labs` train/held-out task-ID split is documented and enforced by the pipeline,
