@@ -246,6 +246,23 @@ impl HaciendaFacade {
         }
     }
 
+    /// The current head of the audit hash chain, or `None` when auditing is disabled.
+    ///
+    /// Every content-bearing API response carries this so a client can prove which chain
+    /// state produced a given output. Deliberately not capability-guarded: the tip is an
+    /// opaque hash that reveals nothing about the entries behind it, and gating it would
+    /// mean a caller with `documents:process` but not `audit:read` could not obtain the
+    /// evidence for its own result.
+    ///
+    /// `None` is honest rather than convenient: a client must be able to tell "auditing
+    /// is off, this result has no chain evidence" from "the chain is empty".
+    pub async fn audit_tip(&self) -> Result<Option<String>, HaciendaError> {
+        match &self.audit_store {
+            Some(store) => Ok(Some(store.tip().await?)),
+            None => Ok(None),
+        }
+    }
+
     /// Verify the audit chain has not been tampered with.
     ///
     /// A facade with no audit store configured trivially returns `Ok(())`. The
@@ -624,6 +641,10 @@ mod tests {
             self.inner.entries().await
         }
 
+        async fn tip(&self) -> Result<String, AuditError> {
+            self.inner.tip().await
+        }
+
         async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             self.inner.seals().await
         }
@@ -729,6 +750,10 @@ mod tests {
 
         async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
             Ok(Vec::new())
+        }
+
+        async fn tip(&self) -> Result<String, AuditError> {
+            Ok(crate::audit::GENESIS_HASH.to_owned())
         }
 
         async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {

@@ -55,6 +55,30 @@ pub trait AuditStore: Send + Sync {
     /// makes the common case (recent activity) cheap without loading all history.
     async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError>;
 
+    /// The current head of this store's hash chain.
+    ///
+    /// Cheap by design: it reads one field rather than materialising the segment, because
+    /// every content-bearing API response carries it. A client that records the tip
+    /// alongside a result can later prove which chain state produced that output, which
+    /// is the evidence a DORA audit asks for.
+    ///
+    /// # Why this is not simply the open segment's tip
+    ///
+    /// Each segment's entry chain restarts at [`GENESIS_HASH`]; continuity across
+    /// segments is carried by the *seal* chain, not the entry chain. So an open segment
+    /// with nothing in it yet — the state right after a rotation, or after recovery
+    /// sealed an orphan — reports genesis even though the store holds history. Handing
+    /// that back would tell a client "nothing has ever been recorded" moments after its
+    /// own document was, and two results either side of a rotation would carry the same
+    /// tip. The head therefore falls through to the newest seal when the open segment is
+    /// empty.
+    ///
+    /// A genuinely empty store returns [`GENESIS_HASH`], not an error: "nothing recorded
+    /// yet" is a legitimate chain state.
+    ///
+    /// [`GENESIS_HASH`]: crate::audit::GENESIS_HASH
+    async fn tip(&self) -> Result<String, AuditError>;
+
     /// Every seal this store can see, oldest first.
     ///
     /// The seals form a hash chain. Pass the slice to [`verify_seal_chain`] to confirm
@@ -193,6 +217,19 @@ impl AuditStore for InMemoryAuditStore {
             .as_ref()
             .map(|segment| segment.entries().to_vec())
             .unwrap_or_default())
+    }
+
+    async fn tip(&self) -> Result<String, AuditError> {
+        let state = self.state();
+        match state.open.as_ref() {
+            Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
+            // Empty open segment, or no open segment at all: the newest seal is the head.
+            _ => Ok(state
+                .sealed
+                .last()
+                .map(|(seal, _)| seal.sealed_tip.clone())
+                .unwrap_or_else(|| crate::audit::GENESIS_HASH.to_owned())),
+        }
     }
 
     async fn seals(&self) -> Result<Vec<SegmentSeal>, AuditError> {
@@ -392,6 +429,55 @@ mod tests {
 
     fn make_store() -> InMemoryAuditStore {
         InMemoryAuditStore::with_node_id(NodeId::new("test-node"), "test-config")
+    }
+
+    /// The tip is the evidence an API response hands back with every result, so it has to
+    /// agree with the chain it claims to describe: genesis before anything is written,
+    /// and the newest entry's `chain_hash` afterwards. A tip that lagged behind the chain
+    /// would let a client "prove" a result against a state that never produced it.
+    #[tokio::test]
+    async fn should_report_genesis_then_track_the_newest_entry() {
+        let store = make_store();
+        assert_eq!(store.tip().await.unwrap(), crate::audit::GENESIS_HASH);
+
+        let first = store.append(vec![make_input("a")]).await.unwrap();
+        assert_eq!(store.tip().await.unwrap(), first[0].chain_hash);
+
+        let second = store.append(vec![make_input("b")]).await.unwrap();
+        assert_eq!(store.tip().await.unwrap(), second[0].chain_hash);
+        assert_ne!(first[0].chain_hash, second[0].chain_hash);
+    }
+
+    /// Closing seals the open segment. The chain did not disappear, so the tip must be
+    /// the seal's, not a reset to genesis — otherwise a result issued just before
+    /// shutdown could not be tied to the record that proves it.
+    #[tokio::test]
+    async fn should_report_the_seal_tip_after_close() {
+        let store = make_store();
+        let entries = store.append(vec![make_input("a")]).await.unwrap();
+        let seal = store.close().await.unwrap();
+
+        assert_eq!(seal.sealed_tip, entries[0].chain_hash);
+        assert_eq!(store.tip().await.unwrap(), seal.sealed_tip);
+    }
+
+    /// Rotation opens an empty successor whose own entry chain starts at genesis. The
+    /// reported head must not fall back to genesis with it: a caller that processed a
+    /// document before the rotation and another that queried after would otherwise be
+    /// handed the same "empty chain" evidence.
+    #[tokio::test]
+    async fn should_not_reset_to_genesis_when_rotation_opens_an_empty_segment() {
+        let store = make_store();
+        let entries = store.append(vec![make_input("a")]).await.unwrap();
+        let seal = store.rotate().await.unwrap();
+
+        assert_eq!(store.tip().await.unwrap(), seal.sealed_tip);
+        assert_ne!(store.tip().await.unwrap(), crate::audit::GENESIS_HASH);
+
+        // Once the successor has entries of its own, it takes over again.
+        let after = store.append(vec![make_input("b")]).await.unwrap();
+        assert_eq!(store.tip().await.unwrap(), after[0].chain_hash);
+        assert_ne!(after[0].chain_hash, entries[0].chain_hash);
     }
 
     // ── Step 1: object-safety check ──────────────────────────────────────────

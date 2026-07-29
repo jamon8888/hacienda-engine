@@ -432,6 +432,20 @@ impl AuditStore for FileAuditStore {
             .unwrap_or_default())
     }
 
+    async fn tip(&self) -> Result<String, AuditError> {
+        self.check_not_poisoned()?;
+        let state = self.state();
+        match state.open.as_ref() {
+            Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
+            // Empty open segment, or no open segment at all: the newest seal is the head.
+            _ => Ok(state
+                .sealed
+                .last()
+                .map(|seal| seal.sealed_tip.clone())
+                .unwrap_or_else(|| crate::audit::GENESIS_HASH.to_owned())),
+        }
+    }
+
     async fn seals(&self) -> Result<Vec<SegmentSeal>, AuditError> {
         self.check_not_poisoned()?;
         let state = self.state();
@@ -972,6 +986,28 @@ mod tests {
             pipeline_version: "1.0".into(),
             config_hash: CONFIG.into(),
         }
+    }
+
+    /// The durable backend must report the same tip the in-memory one does, including
+    /// across a reopen: a client that recorded the tip before a restart has to be able to
+    /// match it against the chain the recovered store presents.
+    #[tokio::test]
+    async fn should_report_a_tip_that_survives_a_reopen() {
+        let dir = TempDir::new("tip-across-reopen");
+        let store = make_store(&dir);
+        assert_eq!(store.tip().await.unwrap(), crate::audit::GENESIS_HASH);
+
+        let entries = store.append(vec![make_input("a")]).await.unwrap();
+        let tip = store.tip().await.unwrap();
+        assert_eq!(tip, entries[0].chain_hash);
+        drop(store);
+
+        let reopened = FileAuditStore::open(dir.path(), NodeId::new(NODE), CONFIG).expect("reopen");
+        assert_eq!(
+            reopened.tip().await.unwrap(),
+            tip,
+            "recovery must reach the same chain head the client recorded"
+        );
     }
 
     // ── Step 6 tests ─────────────────────────────────────────────────────────
