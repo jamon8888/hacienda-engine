@@ -7,11 +7,13 @@
 use crate::pii::config::PipelineConfig;
 use crate::pii::engine::RegexEngine;
 use crate::pii::merge::{merge_entities, MergedEntity};
-use crate::pii::ner::NerDetector;
+use crate::pii::ner::{to_pii_category, NerDetector};
 use crate::pii::types::{MergeConfig, MergePriority};
 use crate::pii::PiiError;
-use crate::redaction::{RedactionAuditEntry, RedactionEngine};
+use crate::redaction::pseudonym::category_label;
+use crate::redaction::{Pseudonymiser, RedactionAuditEntry, RedactionEngine, RedactionMode};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Detection and redaction for one configuration.
@@ -60,7 +62,7 @@ impl PiiPipeline {
         } else {
             None
         };
-        Self::assemble(config, detector)
+        Self::assemble(config, detector, None)
     }
 
     /// Build a pipeline around a caller-supplied detector.
@@ -75,13 +77,61 @@ impl PiiPipeline {
         config: PipelineConfig,
         detector: Option<NerDetector>,
     ) -> Result<Self, PiiError> {
-        Self::assemble(config, detector)
+        Self::assemble(config, detector, None)
+    }
+
+    /// [`PiiPipeline::new`], plus the key set needed to mint reversible pseudonym tokens.
+    ///
+    /// Required when the configuration selects
+    /// [`RedactionMode::Pseudonymize`](crate::redaction::RedactionMode::Pseudonymize);
+    /// `new` and `with_detector` pass `None` and will fail for that mode rather than
+    /// quietly masking instead.
+    ///
+    /// The `Arc` is shared rather than cloned per pipeline: every pipeline in a batch run
+    /// must mint the same token for the same value, or cross-document co-reference — the
+    /// point of the mode — breaks.
+    ///
+    /// # Errors
+    ///
+    /// As [`PiiPipeline::new`], plus
+    /// [`RedactionError::MissingPseudonymKey`](crate::redaction::RedactionError::MissingPseudonymKey)
+    /// if the mode needs a key and `pseudonymiser` is `None`.
+    pub fn with_pseudonymiser(
+        config: PipelineConfig,
+        pseudonymiser: Option<Arc<Pseudonymiser>>,
+    ) -> Result<Self, PiiError> {
+        let detector = if config.model.enabled {
+            Some(load_detector(&config)?)
+        } else {
+            None
+        };
+        Self::assemble(config, detector, pseudonymiser)
+    }
+
+    /// [`PiiPipeline::with_detector`], plus the pseudonymisation key set.
+    ///
+    /// # Errors
+    ///
+    /// As [`PiiPipeline::with_pseudonymiser`], without the model-loading failures.
+    pub fn with_detector_and_pseudonymiser(
+        config: PipelineConfig,
+        detector: Option<NerDetector>,
+        pseudonymiser: Option<Arc<Pseudonymiser>>,
+    ) -> Result<Self, PiiError> {
+        Self::assemble(config, detector, pseudonymiser)
     }
 
     fn assemble(
         config: PipelineConfig,
         ner_detector: Option<NerDetector>,
+        pseudonymiser: Option<Arc<Pseudonymiser>>,
     ) -> Result<Self, PiiError> {
+        if config.redaction.mode == RedactionMode::Pseudonymize {
+            if let Some(detector) = &ner_detector {
+                validate_ner_labels_for_pseudonymize(detector)?;
+            }
+        }
+
         let merge_config = MergeConfig {
             overlap_threshold: config.merge_overlap_threshold,
             priority: if config.regex_first {
@@ -96,7 +146,7 @@ impl PiiPipeline {
             regex_engine: RegexEngine::new()?,
             ner_detector,
             merge_config,
-            redaction_engine: RedactionEngine::new(config.redaction.clone()),
+            redaction_engine: RedactionEngine::new(config.redaction.clone(), pseudonymiser)?,
             config,
         })
     }
@@ -121,7 +171,7 @@ impl PiiPipeline {
         let (entities, mut metrics) = self.detect(text).await?;
 
         let redaction_start = Instant::now();
-        let redaction = self.redaction_engine.redact(text, &entities);
+        let redaction = self.redaction_engine.redact(text, &entities)?;
         metrics.redaction_ms = redaction_start.elapsed().as_millis() as u64;
         metrics.entities_redacted = redaction.metrics.entities_redacted;
         metrics.total_ms = start.elapsed().as_millis() as u64;
@@ -193,6 +243,33 @@ fn load_detector(_config: &PipelineConfig) -> Result<NerDetector, PiiError> {
          detector via PiiPipeline::with_detector"
             .into(),
     ))
+}
+
+/// Validate that every entity category configured on `detector` can be encoded in a
+/// pseudonym token.
+///
+/// Only [`PiiCategory::Custom`] values can be problematic — the built-in categories are
+/// all plain identifiers with no delimiter characters. This function is called at
+/// construction time when the mode is `Pseudonymize`, so a bad label is rejected before
+/// any document is processed.
+///
+/// # Errors
+///
+/// [`PiiError::InvalidEntityLabel`] naming the first label that fails.
+fn validate_ner_labels_for_pseudonymize(detector: &NerDetector) -> Result<(), PiiError> {
+    for category in detector.configured_categories() {
+        let pii_category = to_pii_category(category);
+        if let Err(e) = category_label(&pii_category) {
+            let (label, reason) = match e {
+                crate::redaction::PseudonymError::UnsupportedCategory { category, reason } => {
+                    (category, reason)
+                }
+                other => (pii_category.to_string(), other.to_string()),
+            };
+            return Err(PiiError::InvalidEntityLabel { label, reason });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -348,6 +425,92 @@ mod tests {
     fn should_prefer_regex_spans_when_regex_first_is_set() {
         let pipeline = PiiPipeline::with_detector(config(), None).unwrap();
         assert_eq!(pipeline.merge_config.priority, MergePriority::RegexFirst);
+    }
+
+    #[test]
+    fn should_refuse_to_build_when_a_custom_entity_category_label_contains_a_token_delimiter_and_mode_is_pseudonymize(
+    ) {
+        use crate::pii::types::PiiCategory;
+        use crate::redaction::pseudonym::{EnvKeyResolver, ACTIVE_KEY_VAR, KEY_BYTES};
+
+        let pseudonymiser = {
+            let resolver = EnvKeyResolver::with_lookup(|name| match name {
+                ACTIVE_KEY_VAR => Some("k1".to_string()),
+                "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+                _ => None,
+            });
+            Some(Arc::new(
+                crate::redaction::Pseudonymiser::new(&resolver, &[]).unwrap(),
+            ))
+        };
+
+        let bad_category = PiiCategory::Custom("has:colon".into());
+        let detector = NerDetector::new(Arc::new(StubBackend(vec![]))).with_categories(vec![
+            xberg::types::entity::EntityCategory::Custom("has:colon".into()),
+        ]);
+
+        let pipeline_config = PipelineConfig {
+            redaction: crate::redaction::RedactionConfig {
+                mode: RedactionMode::Pseudonymize,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = PiiPipeline::with_detector_and_pseudonymiser(
+            pipeline_config,
+            Some(detector),
+            pseudonymiser,
+        );
+        assert!(
+            result.is_err(),
+            "pipeline construction must fail for a label containing ':'"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("has:colon") || msg.contains("colon"),
+            "error should name the offending label: {msg}"
+        );
+        // Also verify that a valid custom label succeeds with Pseudonymize
+        let _ = bad_category;
+    }
+
+    #[test]
+    fn should_accept_a_custom_entity_category_with_a_valid_label_in_pseudonymize_mode() {
+        use crate::redaction::pseudonym::{EnvKeyResolver, ACTIVE_KEY_VAR, KEY_BYTES};
+
+        let pseudonymiser = {
+            let resolver = EnvKeyResolver::with_lookup(|name| match name {
+                ACTIVE_KEY_VAR => Some("k1".to_string()),
+                "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+                _ => None,
+            });
+            Some(Arc::new(
+                crate::redaction::Pseudonymiser::new(&resolver, &[]).unwrap(),
+            ))
+        };
+
+        let detector = NerDetector::new(Arc::new(StubBackend(vec![]))).with_categories(vec![
+            xberg::types::entity::EntityCategory::Custom("employee_id".into()),
+        ]);
+
+        let pipeline_config = PipelineConfig {
+            redaction: crate::redaction::RedactionConfig {
+                mode: RedactionMode::Pseudonymize,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(
+            PiiPipeline::with_detector_and_pseudonymiser(
+                pipeline_config,
+                Some(detector),
+                pseudonymiser
+            )
+            .is_ok(),
+            "a label with no delimiters must be accepted"
+        );
     }
 
     #[test]

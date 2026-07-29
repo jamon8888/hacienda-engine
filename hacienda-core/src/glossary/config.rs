@@ -13,7 +13,7 @@ pub enum LinkStyle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GlossaryConfig {
     pub enabled: bool,
     pub link_style: LinkStyle,

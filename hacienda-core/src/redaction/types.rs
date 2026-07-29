@@ -7,11 +7,19 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum RedactionMode {
     /// Replace with the category's redaction template, e.g. `[EMAIL]`.
+    ///
+    /// The default, because it is the only mode that is both irreversible and needs no
+    /// configuration. A default of [`RedactionMode::Pseudonymize`] would mean the
+    /// out-of-the-box path depends on a secret the operator has not yet set.
+    #[default]
     Mask,
     /// Replace with a short blake3 digest of the original span.
     Hash,
-    /// Replace with a category placeholder that keeps the span recognisable, e.g. `[EMAIL:****]`.
-    #[default]
+    /// Replace with a keyed, reversible token, e.g. `[EMAIL:k1:MZXW6YTB...]`.
+    ///
+    /// Equal values get equal tokens, so a reader can follow one pseudonymous person
+    /// through a corpus, and a holder of the key can reverse it. Requires a key: see
+    /// [`RedactionEngine::new`](crate::redaction::RedactionEngine::new).
     Pseudonymize,
     /// Delete the span entirely.
     Remove,
@@ -37,6 +45,7 @@ impl std::str::FromStr for RedactionMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RedactionConfig {
     pub mode: RedactionMode,
     /// Template used when `mode` is [`RedactionMode::Custom`].
@@ -45,14 +54,25 @@ pub struct RedactionConfig {
     pub custom_template: Option<String>,
     /// Keep the shape of the original span (length, separators) where the mode allows it.
     pub preserve_format: bool,
+    /// Which pseudonymisation key new tokens are minted under, when `mode` is
+    /// [`RedactionMode::Pseudonymize`]. `None` means "whichever key the resolver reports
+    /// as active".
+    ///
+    /// This is an *identifier*, never key material. The struct is serialised and printed
+    /// by `config show`; putting a secret in it would put that secret in every dumped
+    /// config, log line, and support bundle. Key material reaches the engine only through
+    /// a [`KeyResolver`](crate::redaction::KeyResolver).
+    #[serde(default)]
+    pub key_id: Option<String>,
 }
 
 impl Default for RedactionConfig {
     fn default() -> Self {
         Self {
-            mode: RedactionMode::Pseudonymize,
+            mode: RedactionMode::default(),
             custom_template: None,
             preserve_format: true,
+            key_id: None,
         }
     }
 }
@@ -68,7 +88,14 @@ pub struct RedactionResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedactionAuditEntry {
     pub category: String,
-    pub action: RedactionMode,
+    /// The rewrite that was applied — not merely the mode that was configured.
+    ///
+    /// [`RedactionAction::Custom`](crate::audit::RedactionAction::Custom) carries the
+    /// template text, because "a custom template was used" does not answer the question
+    /// an auditor is asking. Built by
+    /// [`RedactionEngine`](crate::redaction::RedactionEngine), the only place the
+    /// template is in scope.
+    pub action: crate::audit::RedactionAction,
     /// Which detector produced the span. Needed to attribute a redaction in the
     /// persistent audit chain without re-running detection.
     pub source: crate::pii::types::EntitySource,
@@ -121,7 +148,32 @@ mod tests {
     }
 
     #[test]
-    fn should_default_to_pseudonymize() {
-        assert_eq!(RedactionConfig::default().mode, RedactionMode::Pseudonymize);
+    fn should_default_to_mask_rather_than_a_mode_that_needs_a_secret() {
+        // Pseudonymize was the default and could not work without a key it had no way to
+        // obtain, so it silently emitted a constant placeholder instead.
+        assert_eq!(RedactionConfig::default().mode, RedactionMode::Mask);
+    }
+
+    #[test]
+    fn should_not_carry_key_material_in_the_serialised_config() {
+        // `config show` prints this struct. Only the key *id* may appear here.
+        let json = serde_json::to_string(&RedactionConfig {
+            mode: RedactionMode::Pseudonymize,
+            key_id: Some("k1".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(json.contains("\"key_id\":\"k1\""), "{json}");
+        assert!(!json.to_lowercase().contains("material"), "{json}");
+        assert!(!json.to_lowercase().contains("secret"), "{json}");
+    }
+
+    #[test]
+    fn should_accept_a_config_written_before_key_id_existed() {
+        let cfg: RedactionConfig = serde_json::from_str(
+            r#"{"mode":"mask","custom_template":null,"preserve_format":true}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.key_id, None);
     }
 }

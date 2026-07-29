@@ -11,8 +11,21 @@ use crate::review::ReviewConfig;
 use serde::{Deserialize, Serialize};
 use xberg::ExtractionConfig;
 
+/// # Unknown keys are rejected
+///
+/// This type and every hacienda-owned config below it carry `deny_unknown_fields`, so a
+/// misspelt key fails the load instead of being discarded. Silently discarding produces
+/// a file that says a control is configured and a process in which it is not — the
+/// failure shape the CLI spec (§6.3) names as the most common "why is this not
+/// redacting" incident.
+///
+/// The usual objection is forward compatibility: a file written for a newer hacienda
+/// stops loading on an older one. That trade is already made for us — xberg's
+/// [`ExtractionConfig`] declares `deny_unknown_fields`, so `[extraction]` is strict
+/// today. Leaving hacienda's own sections permissive would make the section we do not
+/// own the stricter one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HaciendaConfig {
     pub extraction: ExtractionConfig,
     /// Detection and redaction. `None` extracts without touching PII.

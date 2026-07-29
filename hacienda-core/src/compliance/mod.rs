@@ -17,6 +17,7 @@ pub use model_card::{generate_model_card, ModelCard};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ComplianceConfig {
     /// Model the generated artefacts describe.
     pub model_name: String,

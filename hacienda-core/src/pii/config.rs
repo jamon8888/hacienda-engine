@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// Effective configuration for one [`crate::pii::PiiPipeline`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Prefer deterministic regex spans over model spans when the two overlap.
     pub regex_first: bool,
@@ -39,7 +39,7 @@ impl Default for PipelineConfig {
 /// The model is loaded from a local directory rather than a hub id: detection runs
 /// on-premise and must not reach the network at inference time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
     /// When false the pipeline is regex-only. Nothing is loaded.
     pub enabled: bool,
@@ -165,7 +165,8 @@ mod tests {
         let config: PipelineConfig = toml::from_str("regex_first = false\n").unwrap();
         assert!(!config.regex_first);
         // Untouched sections keep their defaults rather than failing to deserialize.
-        assert_eq!(config.redaction.mode, RedactionMode::Pseudonymize);
+        assert_eq!(config.redaction.mode, RedactionMode::default());
+        assert_eq!(config.redaction.mode, RedactionMode::Mask);
     }
 
     #[test]

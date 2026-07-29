@@ -117,8 +117,6 @@ enabled_reports = ["DPIA", "ModelCard", "DORA", "AIAct", "Checklist"]
 
 [audit]
 enabled = true
-log_path = "audit.log"
-format = "jsonl"
 
 [review]
 enabled = true

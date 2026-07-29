@@ -1,27 +1,58 @@
-//! In-memory review queue for human-in-the-loop PII decisions.
+//! Human review queue — policy wrapper around a [`ReviewStore`].
+//!
+//! [`ReviewQueue`] is responsible for deciding *whether* a detection needs review and
+//! *which priority and deadline* to assign it. It is not responsible for storing the result:
+//! that is the job of the [`ReviewStore`] it holds.
+//!
+//! Separating policy from persistence means the same queue logic works unchanged in front of
+//! an in-memory store (the default, appropriate for CLI use), a file store (Task 5), or a
+//! Postgres store (Phase 6).
+//!
+//! [`ReviewStore`]: crate::review::store::ReviewStore
 
 use chrono::{Duration, Utc};
-use std::sync::Mutex;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::review::error::ReviewError;
+use crate::review::store::{InMemoryReviewStore, ReviewStore};
 use crate::review::types::{
     Priority, QueueStats, ReviewConfig, ReviewDecision, ReviewQueueItem, ReviewRequest,
     ReviewStatus,
 };
 
-/// Thread-safe queue of low-confidence detections awaiting human review.
+/// Policy wrapper around a [`ReviewStore`].
+///
+/// Holds the configuration that governs when an item enters the queue and what priority and
+/// deadline it gets. The actual persistence of items is delegated to the store.
+///
+/// # Constructors
+///
+/// - [`ReviewQueue::new`] — default in-memory store, suitable for tests and CLI use.
+/// - [`ReviewQueue::with_store`] — supply an explicit store (file, Postgres, or a test double).
 pub struct ReviewQueue {
-    items: Mutex<Vec<ReviewQueueItem>>,
+    store: Arc<dyn ReviewStore>,
     config: ReviewConfig,
 }
 
 impl ReviewQueue {
+    /// Create a queue backed by a fresh in-memory store.
+    ///
+    /// Review state will be lost when this value is dropped. For processes that must survive
+    /// a restart use [`with_store`](Self::with_store) and pass a durable backend.
     pub fn new(config: ReviewConfig) -> Self {
         Self {
-            items: Mutex::new(Vec::new()),
+            store: Arc::new(InMemoryReviewStore::new()),
             config,
         }
+    }
+
+    /// Create a queue backed by the given store.
+    ///
+    /// Use this when the caller needs to swap in a file or database backend, or to share a
+    /// store with other parts of the system (e.g., the facade in Task 7).
+    pub fn with_store(config: ReviewConfig, store: Arc<dyn ReviewStore>) -> Self {
+        Self { store, config }
     }
 
     /// Whether a detection at `confidence` is uncertain enough to need review.
@@ -30,7 +61,19 @@ impl ReviewQueue {
     }
 
     /// Add a detection to the queue and return the item created for it.
-    pub fn submit(&self, request: ReviewRequest) -> ReviewQueueItem {
+    ///
+    /// Policy lives here: `id`, `priority`, `deadline`, and `created_at` are all set in
+    /// this method before the item is handed to the store. The store records exactly what it
+    /// receives and returns it unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backing store returns. This was infallible while the queue owned its
+    /// own `Vec`, and became fallible when the store seam was introduced — a durable
+    /// backend can fail to write. The error is propagated rather than absorbed: an item
+    /// that never reached the store is an item no reviewer will ever see, and reporting
+    /// that as success would hide a compliance failure behind a clean return value.
+    pub async fn submit(&self, request: ReviewRequest) -> Result<ReviewQueueItem, ReviewError> {
         let deadline = self
             .config
             .deadline_hours
@@ -55,8 +98,8 @@ impl ReviewQueue {
             decided_at: None,
             comment: None,
         };
-        self.lock().push(item.clone());
-        item
+
+        self.store.submit(item).await
     }
 
     /// Record a reviewer's decision, moving the item to its terminal status.
@@ -65,34 +108,14 @@ impl ReviewQueue {
     ///
     /// - [`ReviewError::NotFound`] if no item has that id.
     /// - [`ReviewError::AlreadyDecided`] if the item already carries a decision.
-    pub fn decide(
+    pub async fn decide(
         &self,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
         comment: &str,
     ) -> Result<ReviewQueueItem, ReviewError> {
-        let mut items = self.lock();
-        let item = items
-            .iter_mut()
-            .find(|i| i.id == id)
-            .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
-
-        if item.decision.is_some() {
-            return Err(ReviewError::AlreadyDecided(id.to_string()));
-        }
-
-        item.decision = Some(decision);
-        item.status = match decision {
-            ReviewDecision::Approve => ReviewStatus::Approved,
-            ReviewDecision::Reject => ReviewStatus::Rejected,
-            ReviewDecision::Modify => ReviewStatus::Modified,
-        };
-        item.decided_by = Some(reviewer.to_string());
-        item.decided_at = Some(Utc::now().to_rfc3339());
-        item.comment = Some(comment.to_string());
-
-        Ok(item.clone())
+        self.store.decide(id, decision, reviewer, comment).await
     }
 
     /// Assign a reviewer, moving a pending item to [`ReviewStatus::InReview`].
@@ -101,54 +124,55 @@ impl ReviewQueue {
     ///
     /// - [`ReviewError::NotFound`] if no item has that id.
     /// - [`ReviewError::InvalidTransition`] if the item is not pending.
-    pub fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
-        let mut items = self.lock();
-        let item = items
-            .iter_mut()
-            .find(|i| i.id == id)
-            .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
-
-        if item.status != ReviewStatus::Pending {
-            return Err(ReviewError::InvalidTransition {
-                from: item.status.to_string(),
-                to: ReviewStatus::InReview.to_string(),
-            });
-        }
-
-        item.assigned_reviewer = Some(reviewer.to_string());
-        item.status = ReviewStatus::InReview;
-
-        Ok(item.clone())
+    pub async fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
+        self.store.assign(id, reviewer).await
     }
 
     /// List items, optionally restricted to a single status.
-    pub fn list(&self, filter: Option<ReviewStatus>) -> Vec<ReviewQueueItem> {
-        let items = self.lock();
-        match filter {
-            Some(status) => items
-                .iter()
-                .filter(|i| i.status == status)
-                .cloned()
-                .collect(),
-            None => items.clone(),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backing store returns.
+    ///
+    /// This deliberately does **not** collapse a store failure into an empty list. An
+    /// empty list is a meaningful answer — "nothing awaits review" — and a backend that
+    /// cannot be read must not be able to impersonate it. A reviewer shown an empty queue
+    /// by a broken store would reasonably conclude there was no work outstanding.
+    pub async fn list(
+        &self,
+        filter: Option<ReviewStatus>,
+    ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
+        self.store.list(filter).await
     }
 
-    pub fn get(&self, id: &str) -> Option<ReviewQueueItem> {
-        self.lock().iter().find(|i| i.id == id).cloned()
+    /// Retrieve a single item by id.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backing store returns. Note the nesting: `Ok(None)` means the store
+    /// was read and holds no such item, while `Err(_)` means it could not be read at all.
+    /// Flattening the two would let an unreadable store answer "no such item".
+    pub async fn get(&self, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
+        self.store.get(id).await
     }
 
-    pub fn stats(&self) -> QueueStats {
-        let items = self.lock();
-        let count = |status: ReviewStatus| items.iter().filter(|i| i.status == status).count();
-        QueueStats {
-            total: items.len(),
-            pending: count(ReviewStatus::Pending),
-            in_review: count(ReviewStatus::InReview),
-            approved: count(ReviewStatus::Approved),
-            rejected: count(ReviewStatus::Rejected),
-            modified: count(ReviewStatus::Modified),
-        }
+    /// Return counts of items in each status.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backing store returns. As with [`list`](Self::list), a failure must
+    /// not present as all-zero counts — that is indistinguishable from an empty queue.
+    pub async fn stats(&self) -> Result<QueueStats, ReviewError> {
+        self.store.stats().await
+    }
+
+    /// Release the backing store's resources. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`ReviewStore::close`] returns.
+    pub async fn close(&self) -> Result<(), ReviewError> {
+        self.store.close().await
     }
 
     /// Map a detection confidence onto a review priority.
@@ -164,12 +188,6 @@ impl ReviewQueue {
         } else {
             Priority::Low
         }
-    }
-
-    /// A poisoned queue mutex means a reviewer thread panicked mid-update; the
-    /// remaining items are still valid, so recover rather than propagating the panic.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<ReviewQueueItem>> {
-        self.items.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -194,34 +212,44 @@ mod tests {
         }
     }
 
-    #[test]
-    fn should_queue_a_submitted_item_as_pending() {
+    #[tokio::test]
+    async fn should_queue_a_submitted_item_as_pending() {
         let queue = ReviewQueue::default();
-        let item = queue.submit(request(0.4));
+        let item = queue.submit(request(0.4)).await.expect("submit");
         assert_eq!(item.status, ReviewStatus::Pending);
-        assert_eq!(queue.stats().pending, 1);
+        assert_eq!(queue.stats().await.expect("stats").pending, 1);
     }
 
-    #[test]
-    fn should_assign_a_deadline_from_the_config() {
+    #[tokio::test]
+    async fn should_assign_a_deadline_from_the_config() {
         let queue = ReviewQueue::new(ReviewConfig {
             deadline_hours: Some(4),
             ..Default::default()
         });
-        assert!(queue.submit(request(0.4)).deadline.is_some());
+        assert!(queue
+            .submit(request(0.4))
+            .await
+            .expect("submit")
+            .deadline
+            .is_some());
     }
 
-    #[test]
-    fn should_leave_the_deadline_unset_when_none_is_configured() {
+    #[tokio::test]
+    async fn should_leave_the_deadline_unset_when_none_is_configured() {
         let queue = ReviewQueue::new(ReviewConfig {
             deadline_hours: None,
             ..Default::default()
         });
-        assert!(queue.submit(request(0.4)).deadline.is_none());
+        assert!(queue
+            .submit(request(0.4))
+            .await
+            .expect("submit")
+            .deadline
+            .is_none());
     }
 
-    #[test]
-    fn should_flag_detections_below_the_confidence_threshold_for_review() {
+    #[tokio::test]
+    async fn should_flag_detections_below_the_confidence_threshold_for_review() {
         let queue = ReviewQueue::new(ReviewConfig {
             confidence_threshold: 0.6,
             ..Default::default()
@@ -230,8 +258,8 @@ mod tests {
         assert!(!queue.needs_review(0.6));
     }
 
-    #[test]
-    fn should_derive_priority_from_confidence() {
+    #[tokio::test]
+    async fn should_derive_priority_from_confidence() {
         assert_eq!(
             ReviewQueue::priority_from_confidence(0.1),
             Priority::Critical
@@ -241,92 +269,214 @@ mod tests {
         assert_eq!(ReviewQueue::priority_from_confidence(0.9), Priority::Low);
     }
 
-    #[test]
-    fn should_move_an_approved_item_out_of_pending() {
+    #[tokio::test]
+    async fn should_move_an_approved_item_out_of_pending() {
         let queue = ReviewQueue::default();
-        let item = queue.submit(request(0.4));
+        let item = queue.submit(request(0.4)).await.expect("submit");
         let decided = queue
             .decide(&item.id, ReviewDecision::Approve, "dpo", "looks right")
+            .await
             .unwrap();
 
         assert_eq!(decided.status, ReviewStatus::Approved);
         assert_eq!(decided.decided_by.as_deref(), Some("dpo"));
-        let stats = queue.stats();
+        let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.pending, 0);
         assert_eq!(stats.approved, 1);
     }
 
-    #[test]
-    fn should_reject_a_second_decision_on_the_same_item() {
+    #[tokio::test]
+    async fn should_reject_a_second_decision_on_the_same_item() {
         let queue = ReviewQueue::default();
-        let item = queue.submit(request(0.4));
+        let item = queue.submit(request(0.4)).await.expect("submit");
         queue
             .decide(&item.id, ReviewDecision::Approve, "dpo", "")
+            .await
             .unwrap();
         assert!(matches!(
-            queue.decide(&item.id, ReviewDecision::Reject, "dpo", ""),
+            queue
+                .decide(&item.id, ReviewDecision::Reject, "dpo", "")
+                .await,
             Err(ReviewError::AlreadyDecided(_))
         ));
     }
 
-    #[test]
-    fn should_report_not_found_for_an_unknown_id() {
+    #[tokio::test]
+    async fn should_report_not_found_for_an_unknown_id() {
         let queue = ReviewQueue::default();
         assert!(matches!(
-            queue.decide("nope", ReviewDecision::Approve, "dpo", ""),
+            queue
+                .decide("nope", ReviewDecision::Approve, "dpo", "")
+                .await,
             Err(ReviewError::NotFound(_))
         ));
-        assert!(queue.get("nope").is_none());
+        assert!(queue.get("nope").await.expect("get").is_none());
     }
 
-    #[test]
-    fn should_move_an_assigned_item_into_review() {
+    #[tokio::test]
+    async fn should_move_an_assigned_item_into_review() {
         let queue = ReviewQueue::default();
-        let item = queue.submit(request(0.4));
-        let assigned = queue.assign(&item.id, "bob").unwrap();
+        let item = queue.submit(request(0.4)).await.expect("submit");
+        let assigned = queue.assign(&item.id, "bob").await.unwrap();
         assert_eq!(assigned.status, ReviewStatus::InReview);
         assert_eq!(assigned.assigned_reviewer.as_deref(), Some("bob"));
     }
 
-    #[test]
-    fn should_refuse_to_assign_an_item_that_is_no_longer_pending() {
+    #[tokio::test]
+    async fn should_refuse_to_assign_an_item_that_is_no_longer_pending() {
         let queue = ReviewQueue::default();
-        let item = queue.submit(request(0.4));
-        queue.assign(&item.id, "bob").unwrap();
+        let item = queue.submit(request(0.4)).await.expect("submit");
+        queue.assign(&item.id, "bob").await.unwrap();
         assert!(matches!(
-            queue.assign(&item.id, "carol"),
+            queue.assign(&item.id, "carol").await,
             Err(ReviewError::InvalidTransition { .. })
         ));
     }
 
-    #[test]
-    fn should_list_only_items_matching_the_status_filter() {
+    #[tokio::test]
+    async fn should_list_only_items_matching_the_status_filter() {
         let queue = ReviewQueue::default();
-        let a = queue.submit(request(0.4));
-        queue.submit(request(0.4));
-        queue.assign(&a.id, "bob").unwrap();
+        let a = queue.submit(request(0.4)).await.expect("submit");
+        queue.submit(request(0.4)).await.expect("submit");
+        queue.assign(&a.id, "bob").await.unwrap();
 
-        assert_eq!(queue.list(None).len(), 2);
-        assert_eq!(queue.list(Some(ReviewStatus::Pending)).len(), 1);
-        assert_eq!(queue.list(Some(ReviewStatus::InReview)).len(), 1);
+        assert_eq!(queue.list(None).await.expect("list").len(), 2);
+        assert_eq!(
+            queue
+                .list(Some(ReviewStatus::Pending))
+                .await
+                .expect("list")
+                .len(),
+            1
+        );
+        assert_eq!(
+            queue
+                .list(Some(ReviewStatus::InReview))
+                .await
+                .expect("list")
+                .len(),
+            1
+        );
     }
 
-    #[test]
-    fn should_accept_concurrent_submissions_from_many_threads() {
-        let queue = std::sync::Arc::new(ReviewQueue::default());
-        let handles: Vec<_> = (0..8)
-            .map(|_| {
-                let queue = std::sync::Arc::clone(&queue);
-                std::thread::spawn(move || {
-                    for _ in 0..25 {
-                        queue.submit(request(0.4));
-                    }
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
+    /// Two concurrent reviewers both try to assign themselves to the same pending item.
+    ///
+    /// The CAS in `InMemoryReviewStore::assign` guarantees exactly one wins. This test is
+    /// the regression net for the refactor from `Mutex<Vec>` in `ReviewQueue` to
+    /// `Arc<dyn ReviewStore>`: if the refactor degrades `assign` into a read-then-write
+    /// pair, both callers will observe `Pending` and both will succeed, breaking this
+    /// assertion. Eight tasks amplify the race far enough to surface it reliably.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn should_let_exactly_one_of_two_concurrent_assignments_win() {
+        use tokio::sync::Barrier;
+
+        const TASKS: usize = 8;
+        let queue = Arc::new(ReviewQueue::default());
+        let item = queue.submit(request(0.4)).await.expect("submit");
+        let id = item.id.clone();
+        let barrier = Arc::new(Barrier::new(TASKS));
+
+        let mut handles = Vec::with_capacity(TASKS);
+        for t in 0..TASKS {
+            let queue = Arc::clone(&queue);
+            let barrier = Arc::clone(&barrier);
+            let id = id.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                queue.assign(&id, &format!("reviewer-{t}")).await
+            }));
         }
-        assert_eq!(queue.stats().total, 200);
+
+        let mut results = Vec::with_capacity(TASKS);
+        for h in handles {
+            results.push(h.await.expect("task must not panic"));
+        }
+
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        let err_count = results
+            .iter()
+            .filter(|r| matches!(r, Err(ReviewError::InvalidTransition { .. })))
+            .count();
+
+        assert_eq!(ok_count, 1, "exactly one assignment should win");
+        assert_eq!(
+            err_count,
+            TASKS - 1,
+            "all other attempts must get InvalidTransition"
+        );
+
+        let winner = results.into_iter().find_map(|r| r.ok()).unwrap();
+        let stored = queue.get(&id).await.expect("get").expect("the item exists");
+        assert_eq!(stored.assigned_reviewer, winner.assigned_reviewer);
+        assert_eq!(stored.status, ReviewStatus::InReview);
+    }
+
+    /// Two concurrent reviewers both try to decide on the same item.
+    ///
+    /// The CAS in `InMemoryReviewStore::decide` guarantees exactly one wins. This is the
+    /// decision-path counterpart to `should_let_exactly_one_of_two_concurrent_assignments_win`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn should_let_exactly_one_of_two_concurrent_decisions_win() {
+        use tokio::sync::Barrier;
+
+        const TASKS: usize = 8;
+        let queue = Arc::new(ReviewQueue::default());
+        let item = queue.submit(request(0.4)).await.expect("submit");
+        let id = item.id.clone();
+        let barrier = Arc::new(Barrier::new(TASKS));
+
+        let mut handles = Vec::with_capacity(TASKS);
+        for t in 0..TASKS {
+            let queue = Arc::clone(&queue);
+            let barrier = Arc::clone(&barrier);
+            let id = id.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                queue
+                    .decide(&id, ReviewDecision::Approve, &format!("reviewer-{t}"), "ok")
+                    .await
+            }));
+        }
+
+        let mut results = Vec::with_capacity(TASKS);
+        for h in handles {
+            results.push(h.await.expect("task must not panic"));
+        }
+
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        let err_count = results
+            .iter()
+            .filter(|r| matches!(r, Err(ReviewError::AlreadyDecided(_))))
+            .count();
+
+        assert_eq!(ok_count, 1, "exactly one decision should win");
+        assert_eq!(
+            err_count,
+            TASKS - 1,
+            "all other attempts must get AlreadyDecided"
+        );
+
+        let winner = results.into_iter().find_map(|r| r.ok()).unwrap();
+        let stored = queue.get(&id).await.expect("get").expect("the item exists");
+        assert_eq!(stored.decided_by, winner.decided_by);
+        assert_eq!(stored.status, ReviewStatus::Approved);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_accept_concurrent_submissions_from_many_threads() {
+        let queue = Arc::new(ReviewQueue::default());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let queue = Arc::clone(&queue);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..25 {
+                    queue.submit(request(0.4)).await.expect("submit");
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(queue.stats().await.expect("stats").total, 200);
     }
 }

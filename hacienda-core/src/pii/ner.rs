@@ -51,6 +51,11 @@ impl NerDetector {
         self
     }
 
+    /// The entity categories this detector is configured to request from the backend.
+    pub(crate) fn configured_categories(&self) -> &[EntityCategory] {
+        &self.categories
+    }
+
     /// Load the Candle GLiNER2 backend from a local model directory, optionally
     /// merging a LoRA adapter.
     ///
@@ -117,7 +122,7 @@ fn to_model_entity(entity: Entity) -> ModelEntity {
 ///
 /// Categories with no PII counterpart (Money, Percent, Date, Time) are carried through
 /// as `Custom` rather than dropped, so a caller redacting everything still sees them.
-fn to_pii_category(category: &EntityCategory) -> PiiCategory {
+pub(crate) fn to_pii_category(category: &EntityCategory) -> PiiCategory {
     match category {
         EntityCategory::Person => PiiCategory::Person,
         EntityCategory::Organization => PiiCategory::Organization,

@@ -21,7 +21,7 @@
 //! let result = facade.process(ExtractInput::from_uri("contract.pdf")).await?;
 //! // `content` is already redacted; the raw text never left the call.
 //! println!("{}", result.extraction.results[0].content);
-//! facade.verify_audit()?;
+//! facade.verify_audit().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -32,6 +32,8 @@ pub mod config;
 pub mod error;
 pub mod facade;
 pub mod glossary;
+#[cfg(feature = "jobs")]
+pub mod jobs;
 pub mod pii;
 pub mod redaction;
 pub mod review;

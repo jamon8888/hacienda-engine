@@ -72,4 +72,17 @@ pub enum PiiError {
 
     #[error(transparent)]
     Redaction(#[from] crate::redaction::RedactionError),
+
+    /// A configured entity label is unusable under
+    /// [`RedactionMode::Pseudonymize`](crate::redaction::RedactionMode::Pseudonymize).
+    ///
+    /// The label is part of the pseudonym token format (`[CATEGORY:key_id:body]`). Any
+    /// label containing `[`, `:`, or `]` cannot be encoded without producing a token that
+    /// cannot be parsed back. Rejecting at construction time surfaces the misconfiguration
+    /// immediately rather than failing mid-batch when the label is first encountered.
+    #[error(
+        "entity label '{label}' cannot be used with Pseudonymize mode: {reason} \
+         (labels must not contain '[', ':', or ']')"
+    )]
+    InvalidEntityLabel { label: String, reason: String },
 }

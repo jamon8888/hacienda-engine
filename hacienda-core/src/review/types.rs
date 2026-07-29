@@ -100,6 +100,7 @@ pub struct QueueStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ReviewConfig {
     /// Detections at or above this confidence never enter the queue.
     pub confidence_threshold: f32,

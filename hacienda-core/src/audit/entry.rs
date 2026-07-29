@@ -14,18 +14,14 @@ pub enum RedactionAction {
     Custom(String),
 }
 
-impl From<crate::redaction::RedactionMode> for RedactionAction {
-    fn from(mode: crate::redaction::RedactionMode) -> Self {
-        use crate::redaction::RedactionMode;
-        match mode {
-            RedactionMode::Mask => Self::Mask,
-            RedactionMode::Hash => Self::Hash,
-            RedactionMode::Pseudonymize => Self::Pseudonymize,
-            RedactionMode::Remove => Self::Remove,
-            RedactionMode::Custom => Self::Custom("template".into()),
-        }
-    }
-}
+// There is deliberately no `From<RedactionMode> for RedactionAction`.
+//
+// The conversion cannot be total: `Custom` carries the template that was applied, and a
+// mode does not determine one. The impl that used to live here filled the gap with the
+// literal string "template", which made every Custom redaction in the chain identical and
+// so answered none of the questions the field exists to answer.
+//
+// `RedactionEngine::audit_action` performs the conversion where the template is in scope.
 
 /// Which detector produced the entity the entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,16 +177,7 @@ mod tests {
         assert_ne!(a.chain_hash, b.chain_hash);
     }
 
-    #[test]
-    fn should_map_redaction_modes_onto_audit_actions() {
-        use crate::redaction::RedactionMode;
-        assert_eq!(
-            RedactionAction::from(RedactionMode::Mask),
-            RedactionAction::Mask
-        );
-        assert_eq!(
-            RedactionAction::from(RedactionMode::Remove),
-            RedactionAction::Remove
-        );
-    }
+    // The mode-to-action mapping moved to `RedactionEngine::audit_action` along with the
+    // `From` impl it used to test; coverage lives in
+    // `redaction::engine::tests::should_record_the_applied_action_for_every_mode`.
 }

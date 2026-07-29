@@ -6,6 +6,7 @@ use crate::audit::error::AuditError;
 /// Chain hash that precedes the first entry.
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+#[derive(Debug)]
 pub struct AuditChain {
     entries: Vec<AuditEntry>,
     last_chain_hash: String,

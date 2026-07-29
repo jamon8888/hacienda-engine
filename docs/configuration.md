@@ -18,8 +18,6 @@ enabled_reports = ["DPIA", "ModelCard", "DORA", "AIAct", "Checklist"]
 
 [audit]
 enabled = true
-log_path = "audit.log"
-format = "jsonl"
 
 [review]
 enabled = true
@@ -96,11 +94,6 @@ rate_limit_rpm = 100
 
 [audit]
 enabled = true
-log_path = "/var/log/hacienda/audit.log"
-max_size_mb = 100
-max_files = 30
-rotation = "daily"
-hash_algorithm = "blake3"
 
 [models]
 cache_dir = "/var/lib/hacienda/models"

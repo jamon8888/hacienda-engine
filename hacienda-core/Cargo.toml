@@ -6,13 +6,18 @@ description = "PII, compliance, audit, review, and glossary core for hacienda"
 license.workspace = true
 
 [features]
-default = []
+default = ["jobs"]
 # Enables the Candle GLiNER2 NER backend (with LoRA adapter support) through xberg.
 ner-candle = ["xberg/ner-candle"]
+# Async job tracking seam for Phase 4's HTTP endpoints. On by default.
+jobs = []
 
 [dependencies]
+aes-siv = { workspace = true }
+async-trait = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
+data-encoding = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,9 +25,11 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+unicode-normalization = { workspace = true }
 uuid = { workspace = true }
 xberg = { workspace = true }
+zeroize = { workspace = true }
 
-[dev-dependencies]
-# Test doubles implement xberg's async `NerBackend` trait, which is `async_trait`-based.
-async-trait = { workspace = true }
+# No `[dev-dependencies]`: `async-trait` used to live here for test doubles implementing
+# xberg's async `NerBackend` trait, but the `AuditStore`/`JobStore` traits made it a real
+# dependency. Regular dependencies are available to tests, so repeating it would be noise.

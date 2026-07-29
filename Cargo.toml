@@ -14,11 +14,18 @@ license = "Apache-2.0"
 #
 # Entries are kept alphabetical for `cargo sort`.
 [workspace.dependencies]
+# Deterministic (synthetic-IV) AEAD for reversible pseudonymisation — see
+# superpowers/plans/2026-07-28-phase0-pseudonymisation.md. Pinned to the 0.7 stable line
+# on purpose: crates.io reports 0.8.0-rc.3 as latest, and a pre-release AEAD has no place
+# in a compliance control.
+aes-siv = "0.7"
 anyhow = "1.0"
 async-trait = "0.1"
 blake3 = "1.5"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# base32 for pseudonym tokens (BASE32_NOPAD — no `=` to escape inside a token).
+data-encoding = "2.11"
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -27,6 +34,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", 
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# NFKC normalisation. Part of the pseudonym token contract: it decides which spellings
+# co-refer, so changing it later re-derives every token ever emitted.
+unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 # xberg
 #
@@ -51,6 +61,9 @@ xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", feature
     "ner",
     "tokio-runtime",
 ] }
+# Key material must not survive a drop. `PseudonymKey` holds the secret that
+# de-pseudonymises an entire corpus.
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 # Profiles must live in the workspace root manifest. Cargo silently ignores
 # `[profile.*]` in path dependencies, so the tuning in ../xberg/Cargo.toml has never

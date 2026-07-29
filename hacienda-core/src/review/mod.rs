@@ -6,10 +6,14 @@
 
 pub mod error;
 pub mod queue;
+pub mod store;
+pub mod store_file;
 pub mod types;
 
 pub use error::ReviewError;
 pub use queue::ReviewQueue;
+pub use store::{InMemoryReviewStore, ReviewStore};
+pub use store_file::FileReviewStore;
 pub use types::{
     Priority, QueueStats, ReviewConfig, ReviewDecision, ReviewQueueItem, ReviewRequest,
     ReviewStatus,

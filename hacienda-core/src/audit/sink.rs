@@ -1,4 +1,12 @@
 //! Durable destinations for audit entries.
+//!
+#![allow(deprecated)]
+//! # Deprecation notice
+//!
+//! [`AuditSink`] and [`FileSink`] are deprecated as of 0.1.0. Use [`crate::audit::AuditStore`]
+//! and [`crate::audit::FileAuditStore`] instead. [`FileSink`] calls `BufWriter::flush` but
+//! never calls `sync_data`, so it does not survive a power loss. The new store layer fsyncs
+//! after every batch (under the default [`crate::audit::SyncPolicy::EveryBatch`]).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -8,6 +16,11 @@ use crate::audit::chain::AuditChain;
 use crate::audit::entry::AuditEntry;
 use crate::audit::error::AuditError;
 
+#[deprecated(
+    since = "0.1.0",
+    note = "use AuditStore and FileAuditStore; FileSink does not fsync and does not survive \
+            power loss"
+)]
 pub trait AuditSink {
     /// Persist a single entry.
     fn write(&mut self, entry: &AuditEntry) -> Result<(), AuditError>;
@@ -20,6 +33,17 @@ pub trait AuditSink {
 /// Appends JSON-lines to a file, rotating once the file exceeds `max_size` bytes.
 ///
 /// Rotation keeps at most `max_files` segments: `path`, `path.1`, ... `path.{max_files-1}`.
+///
+/// # Deprecation notice
+///
+/// Use [`crate::audit::FileAuditStore`] instead. `FileSink` calls `BufWriter::flush` on
+/// rotation but never calls `File::sync_data()`, so the data it writes may be lost on a
+/// power failure. `FileAuditStore` calls `sync_data` after every batch.
+#[deprecated(
+    since = "0.1.0",
+    note = "use AuditStore and FileAuditStore; FileSink does not fsync and does not survive \
+            power loss"
+)]
 pub struct FileSink {
     writer: BufWriter<File>,
     path: PathBuf,
@@ -138,6 +162,7 @@ impl AuditSink for FileSink {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::audit::entry::{AuditEntryInput, EntitySource, RedactionAction};
