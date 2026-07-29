@@ -14,7 +14,9 @@ pub mod store;
 pub mod store_file;
 
 pub use chain::{AuditChain, GENESIS_HASH};
-pub use entry::{compute_chain_hash, AuditEntry, AuditEntryInput, EntitySource, RedactionAction};
+pub use entry::{
+    compute_chain_hash, AuditEntry, AuditEntryInput, ChainHashFields, EntitySource, RedactionAction,
+};
 pub use error::AuditError;
 pub use export::{export, export_csv, export_json, export_json_lines, ExportFormat};
 pub use segment::{compute_seal_hash, verify_seal_chain, NodeId, Segment, SegmentSeal};

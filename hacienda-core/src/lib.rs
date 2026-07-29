@@ -42,4 +42,6 @@ pub mod review;
 pub use auth::{AuthContext, AuthzError, Caller, Capability, CapabilitySet};
 pub use config::HaciendaConfig;
 pub use error::HaciendaError;
-pub use facade::{HaciendaFacade, HaciendaMetadata, HaciendaResult};
+pub use facade::{
+    HaciendaFacade, HaciendaMetadata, HaciendaResult, SpanText, TextRedactResult, TextScanResult,
+};

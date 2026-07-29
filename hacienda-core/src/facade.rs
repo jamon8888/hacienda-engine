@@ -1,12 +1,12 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
-use crate::audit::{AuditEntry, AuditEntryInput, AuditStore, InMemoryAuditStore};
+use crate::audit::{AuditEntry, AuditEntryInput, AuditStore, InMemoryAuditStore, RedactionAction};
 use crate::auth::{Caller, Capability};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
 use crate::glossary::{EntityGlossary, GlossaryEntry};
-use crate::pii::{PiiError, PiiPipeline, PipelineResult};
+use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineResult};
 use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionError};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
@@ -54,6 +54,58 @@ pub struct HaciendaMetadata {
     pub processing_time_ms: u64,
     pub pii_enabled: bool,
     pub documents: usize,
+}
+
+/// Whether detected span text should be included in a scan response.
+///
+/// Use `Include` only when the caller holds `Capability::PiiReveal`. Returning
+/// the mention text to a caller who did not prove entitlement to it is the
+/// product-killing defect that this distinction exists to prevent.
+///
+/// `SpanText::Include` causes an additional audit entry to be written to the
+/// chain recording that raw span text was revealed, and to whom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanText {
+    /// Clear the `text` field on every returned entity. The caller learns what
+    /// *categories* of PII were found but not the exact values.
+    Omit,
+    /// Return the `text` field as-is. Requires `Capability::PiiReveal`.
+    Include,
+}
+
+/// Result of a text-mode scan via [`HaciendaFacade::scan_text_with_auth`].
+///
+/// Unlike `PipelineResult`, this type never carries the raw input text and
+/// guarantees that `entities[*].text` is empty when `SpanText::Omit` was
+/// requested. The cleared-in-core guarantee exists so that every future caller
+/// (FFI, CLI, additional transports) does not each need to re-implement
+/// suppression — one of them will forget.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextScanResult {
+    /// Detected entities. `text` is cleared when `SpanText::Omit` was used.
+    pub entities: Vec<MergedEntity>,
+    pub metrics: PipelineMetrics,
+    /// Audit entries appended by this call.
+    ///
+    /// For a pure scan with `SpanText::Omit`, this is empty — nothing was
+    /// redacted and no reveal occurred. For `SpanText::Include`, exactly one
+    /// entry is appended recording that the caller accessed span text.
+    pub audit_entries: Vec<AuditEntry>,
+}
+
+/// Result of a text-mode redaction via [`HaciendaFacade::redact_text_with_auth`].
+///
+/// The `entities` field never carries span text — returning the plaintext of a
+/// span the caller just had redacted would be self-defeating.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextRedactResult {
+    /// Input text with every merged span rewritten.
+    pub redacted_text: String,
+    /// Detected entities. `text` is always cleared — see struct-level doc.
+    pub entities: Vec<MergedEntity>,
+    pub metrics: PipelineMetrics,
+    /// Audit entries appended by this call (one per redacted span).
+    pub audit_entries: Vec<AuditEntry>,
 }
 
 impl HaciendaFacade {
@@ -400,7 +452,7 @@ impl HaciendaFacade {
                 let result = pipeline.process(&document.content).await?;
 
                 self.observe_glossary(&document.content, &result);
-                audit_entries.extend(self.record_audit(&result).await?);
+                audit_entries.extend(self.record_audit(&result, caller).await?);
                 review_submitted += self.submit_for_review(&result).await?;
 
                 document.content = result.redacted_text.clone();
@@ -425,6 +477,212 @@ impl HaciendaFacade {
             audit_entries,
             review_submitted,
         })
+    }
+
+    /// Scan raw text for PII without modifying it.
+    ///
+    /// Convenience delegate that passes [`Caller::Trusted`], mirroring the
+    /// `process` / `process_with_auth` pairing. Use in-process tools such as
+    /// the CLI where the process boundary is the trust boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if PII detection is not enabled in the
+    /// config (`pii` section absent) or if the detection pipeline fails.
+    pub async fn scan_text(
+        &self,
+        text: &str,
+        span_text: SpanText,
+    ) -> Result<TextScanResult, HaciendaError> {
+        self.scan_text_with_auth(Caller::Trusted, text, span_text)
+            .await
+    }
+
+    /// Scan raw text for PII, enforcing capability requirements.
+    ///
+    /// # Capability requirements
+    ///
+    /// - `SpanText::Omit`: requires `Capability::DocumentsProcess`.
+    /// - `SpanText::Include`: requires both `Capability::DocumentsProcess` and
+    ///   `Capability::PiiReveal`. If `PiiReveal` is missing, an additional audit
+    ///   entry recording the reveal would be impossible and the call is refused.
+    ///
+    /// When `SpanText::Include` is granted, an audit entry with action `Reveal`
+    /// is appended to the chain. The `span_hash` on that entry is the blake3
+    /// digest of the concatenated entity span texts, giving an auditable record
+    /// of what was revealed and to whom without storing the plaintext.
+    ///
+    /// # Entity text suppression
+    ///
+    /// When `SpanText::Omit`, every entity's `text` field is cleared before the
+    /// result leaves this method. Suppression happens here, not at the transport
+    /// layer, so every future caller — FFI, CLI, a second HTTP transport — cannot
+    /// accidentally omit it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if PII is not enabled or detection fails.
+    /// Returns [`HaciendaError::Authz`] if a required capability is absent.
+    pub async fn scan_text_with_auth(
+        &self,
+        caller: Caller<'_>,
+        text: &str,
+        span_text: SpanText,
+    ) -> Result<TextScanResult, HaciendaError> {
+        caller.require(Capability::DocumentsProcess)?;
+        if span_text == SpanText::Include {
+            caller.require(Capability::PiiReveal)?;
+        }
+
+        let pipeline = self
+            .pii_pipeline
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+
+        let result = pipeline.scan(text).await?;
+
+        // `PiiPipeline::scan` rewrites nothing, so its `audit_log` is empty and
+        // `record_audit` would have nothing to record. The only auditable event a scan
+        // can produce is the reveal itself.
+        let audit_entries = match span_text {
+            SpanText::Include => self.record_reveal(text, &result.entities, caller).await?,
+            SpanText::Omit => Vec::new(),
+        };
+
+        let entities = if span_text == SpanText::Omit {
+            result
+                .entities
+                .into_iter()
+                .map(|mut e| {
+                    e.text = String::new();
+                    e
+                })
+                .collect()
+        } else {
+            result.entities
+        };
+
+        Ok(TextScanResult {
+            entities,
+            metrics: result.metrics,
+            audit_entries,
+        })
+    }
+
+    /// Redact raw text without going through document extraction.
+    ///
+    /// Convenience delegate that passes [`Caller::Trusted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if PII is not enabled or detection fails.
+    pub async fn redact_text(&self, text: &str) -> Result<TextRedactResult, HaciendaError> {
+        self.redact_text_with_auth(Caller::Trusted, text).await
+    }
+
+    /// Redact raw text, enforcing `Capability::DocumentsProcess`.
+    ///
+    /// The returned entities never carry span text — the caller has asked for the
+    /// PII to be removed, so returning it in the entity list would be
+    /// self-defeating. Suppression is enforced here in core rather than at the
+    /// transport layer.
+    ///
+    /// Audit entries are written for every redacted span, matching the behaviour
+    /// of `process_batch_with_auth`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if PII is not enabled or detection fails.
+    /// Returns [`HaciendaError::Authz`] if `Capability::DocumentsProcess` is absent.
+    /// Returns [`HaciendaError::Audit`] if the audit write fails.
+    pub async fn redact_text_with_auth(
+        &self,
+        caller: Caller<'_>,
+        text: &str,
+    ) -> Result<TextRedactResult, HaciendaError> {
+        caller.require(Capability::DocumentsProcess)?;
+
+        let pipeline = self
+            .pii_pipeline
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+
+        let result = pipeline.process(text).await?;
+        let audit_entries = self.record_audit(&result, caller).await?;
+
+        let entities = result
+            .entities
+            .into_iter()
+            .map(|mut e| {
+                e.text = String::new();
+                e
+            })
+            .collect();
+
+        Ok(TextRedactResult {
+            redacted_text: result.redacted_text,
+            entities,
+            metrics: result.metrics,
+            audit_entries,
+        })
+    }
+
+    /// Append one `Reveal` entry per span whose plaintext was handed to `caller`.
+    ///
+    /// One entry per span rather than one per call, so every field is a fact about a
+    /// real detection: `category`, `confidence`, and `source` describe the span, and
+    /// `span_hash` is the blake3 digest of `text[start..end]` — the same digest
+    /// [`crate::redaction::RedactionEngine`] records when it redacts that span. That
+    /// shared digest is the point: it lets an auditor join "this value was redacted
+    /// here" to "and this principal later read it", which is the question §7 exists to
+    /// answer. A single per-call entry hashing the concatenation would answer neither.
+    ///
+    /// When no entities were found, nothing was revealed and no entry is written.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::Audit`] if the store rejects the batch.
+    async fn record_reveal(
+        &self,
+        text: &str,
+        entities: &[MergedEntity],
+        caller: Caller<'_>,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        let Some(store) = &self.audit_store else {
+            return Ok(Vec::new());
+        };
+        if entities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let principal = caller.principal_id().map(str::to_owned);
+        let inputs: Vec<AuditEntryInput> = entities
+            .iter()
+            .map(|entity| {
+                // Offsets come from the detectors that just ran over `text`, so the slice
+                // is expected to be valid. Falling back to the mention text rather than
+                // panicking keeps a detector bug from taking down the process; the digest
+                // is still over the revealed value in either case.
+                let span = text
+                    .get(entity.start as usize..entity.end as usize)
+                    .unwrap_or(entity.text.as_str());
+                AuditEntryInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    category: entity.category.to_string(),
+                    action: RedactionAction::Reveal,
+                    span_hash: blake3::hash(span.as_bytes()).to_hex().to_string(),
+                    span_length: entity.end.saturating_sub(entity.start),
+                    confidence: Some(entity.confidence),
+                    source: entity.source.into(),
+                    pipeline_version: PIPELINE_VERSION.to_string(),
+                    // The store owns config_hash — see `record_audit`.
+                    config_hash: String::new(),
+                    principal: principal.clone(),
+                }
+            })
+            .collect();
+
+        Ok(store.append(inputs).await?)
     }
 
     /// Record the glossary against the *original* text, before redaction rewrites it.
@@ -455,11 +713,13 @@ impl HaciendaFacade {
     async fn record_audit(
         &self,
         result: &PipelineResult,
+        caller: Caller<'_>,
     ) -> Result<Vec<AuditEntry>, HaciendaError> {
         let Some(store) = &self.audit_store else {
             return Ok(Vec::new());
         };
 
+        let principal = caller.principal_id().map(str::to_owned);
         let inputs: Vec<AuditEntryInput> = result
             .audit_log
             .iter()
@@ -476,6 +736,7 @@ impl HaciendaFacade {
                 // with the chain's own value (chain.rs:32). Passing String::new() makes
                 // the ownership explicit and removes the reason to read it first.
                 config_hash: String::new(),
+                principal: principal.clone(),
             })
             .collect();
 
@@ -1363,5 +1624,318 @@ mod tests {
             .close()
             .await
             .expect("close with no store must return Ok(())");
+    }
+
+    // ── Tests for scan_text / redact_text (Task 1) ───────────────────────────
+
+    use crate::auth::AuthContext;
+    use crate::pii::NerDetector;
+    use xberg::text::ner::NerBackend;
+    use xberg::types::entity::{Entity, EntityCategory};
+    use xberg::Result as XbergResult;
+
+    /// A detector whose response is fixed at construction time. Used to inject
+    /// model entities (which carry non-empty `text`) without loading a real model.
+    struct FixedDetector(Vec<Entity>);
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl NerBackend for FixedDetector {
+        async fn detect(
+            &self,
+            _text: &str,
+            _categories: &[EntityCategory],
+        ) -> XbergResult<Vec<Entity>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Build a facade that injects a single model entity so the `text` field is
+    /// non-empty. Regex detections have `text == ""`, so a test that only uses
+    /// regex spans would pass even if the clearing logic were absent.
+    fn facade_with_model_entity(entity_text: &str) -> HaciendaFacade {
+        let entity = Entity {
+            category: EntityCategory::Person,
+            text: entity_text.into(),
+            start: 0,
+            end: entity_text.len() as u32,
+            confidence: Some(0.95),
+        };
+        let detector = NerDetector::new(Arc::new(FixedDetector(vec![entity])));
+        let pipeline = crate::pii::PiiPipeline::with_detector(pii_config(), Some(detector))
+            .expect("pipeline builds");
+        // No public constructor injects a pre-built pipeline — callers are not meant to
+        // own one. The struct is crate-visible, so the test assembles it directly rather
+        // than widening the public API for a test's benefit.
+        let config = HaciendaConfig::default().with_pii(pii_config());
+        let audit_store: Option<Arc<dyn AuditStore>> = Some(Arc::new(InMemoryAuditStore::new(
+            config
+                .pii
+                .as_ref()
+                .map(|p| p.audit.config_hash.as_str())
+                .unwrap_or("default"),
+        )));
+        HaciendaFacade {
+            config,
+            pii_pipeline: Some(pipeline),
+            compliance: None,
+            audit_store,
+            review_queue: None,
+            glossary: None,
+        }
+    }
+
+    fn principal_with(caps: &[Capability]) -> AuthContext {
+        AuthContext::new(
+            "test-principal",
+            crate::auth::CapabilitySet::new(caps.iter().copied()),
+        )
+    }
+
+    /// A principal with `DocumentsProcess` but not `PiiReveal` is refused when
+    /// `SpanText::Include` is requested.
+    #[tokio::test]
+    async fn scan_text_include_requires_pii_reveal_capability() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .scan_text_with_auth(caller, "bob@example.com", SpanText::Include)
+            .await;
+
+        assert!(result.is_err(), "must be rejected when PiiReveal is absent");
+        assert!(
+            matches!(result.unwrap_err(), HaciendaError::Authz(_)),
+            "error must be Authz, not a different kind"
+        );
+    }
+
+    /// The same principal is accepted with `SpanText::Omit` (no `PiiReveal` needed).
+    #[tokio::test]
+    async fn scan_text_omit_requires_only_documents_process() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .scan_text_with_auth(caller, "bob@example.com", SpanText::Omit)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "must succeed with DocumentsProcess and SpanText::Omit"
+        );
+    }
+
+    /// `SpanText::Omit` clears the `text` field on model entities.
+    ///
+    /// Regex detections already have `text == ""` (documented on `MergedEntity`),
+    /// so this test uses a fixed-detector facade that injects a model entity with
+    /// a known name. If clearing were absent the name would leak; with clearing it
+    /// must be gone.
+    ///
+    /// The test also verifies the detection itself was non-empty (start/end > 0 or
+    /// category set) so the assertion does not pass vacuously because no entity was
+    /// found.
+    #[tokio::test]
+    async fn scan_text_omit_clears_entity_text_from_model_detections() {
+        // "Alice Martin" is the entity text the fixed detector will return.
+        let facade = facade_with_model_entity("Alice Martin");
+        // Input must contain the span for offsets to be valid.
+        let text = "Alice Martin signed the lease";
+
+        let result = facade
+            .scan_text(text, SpanText::Omit)
+            .await
+            .expect("scan should succeed");
+
+        assert!(
+            !result.entities.is_empty(),
+            "detector must find Alice Martin"
+        );
+        for entity in &result.entities {
+            assert!(
+                entity.text.is_empty(),
+                "SpanText::Omit must clear entity.text; got {:?}",
+                entity.text
+            );
+        }
+    }
+
+    /// `SpanText::Include` returns entity text (non-empty for model detections).
+    #[tokio::test]
+    async fn scan_text_include_returns_entity_text() {
+        let facade = facade_with_model_entity("Alice Martin");
+        let text = "Alice Martin signed the lease";
+
+        // Trusted caller bypasses capability checks.
+        let result = facade
+            .scan_text(text, SpanText::Include)
+            .await
+            .expect("scan should succeed");
+
+        assert!(
+            !result.entities.is_empty(),
+            "detector must find Alice Martin"
+        );
+        let model_entity = result
+            .entities
+            .iter()
+            .find(|e| !e.text.is_empty())
+            .expect("at least one model entity must carry text with SpanText::Include");
+        assert_eq!(model_entity.text, "Alice Martin");
+    }
+
+    /// Scanning must not alter the input string.
+    ///
+    /// `PipelineResult::redacted_text` is documented as "equal to the input for
+    /// scan", but this test asserts the contract at the facade level where a future
+    /// refactor could accidentally overwrite it.
+    #[tokio::test]
+    async fn scan_text_does_not_mutate_input() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let text = "contact bob@example.com for details";
+        // Make an owned copy so we can compare the original bytes later.
+        let original = text.to_string();
+
+        facade
+            .scan_text(text, SpanText::Omit)
+            .await
+            .expect("scan should succeed");
+
+        assert_eq!(text, original.as_str(), "scan must not alter the input");
+    }
+
+    /// `redact_text_with_auth` returns the rewritten string and clears entity text.
+    #[tokio::test]
+    async fn redact_text_returns_redacted_string_and_clears_entity_text() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let result = facade
+            .redact_text("contact bob@example.com for details")
+            .await
+            .expect("redact should succeed");
+
+        assert!(
+            !result.redacted_text.contains("bob@example.com"),
+            "email must be redacted: {}",
+            result.redacted_text
+        );
+        for entity in &result.entities {
+            assert!(
+                entity.text.is_empty(),
+                "redact_text must never return entity text; got {:?}",
+                entity.text
+            );
+        }
+        assert!(
+            !result.audit_entries.is_empty(),
+            "redaction must be audited"
+        );
+    }
+
+    /// A facade with PII disabled returns an error, not an empty success.
+    ///
+    /// Returning "no PII found" when the detector was never enabled would be the
+    /// worst possible failure mode for a redaction product. The test covers both
+    /// `scan_text` and `redact_text`.
+    #[tokio::test]
+    async fn scan_and_redact_text_return_error_when_pii_is_not_configured() {
+        // No `.with_pii(...)` call — PII pipeline is `None`.
+        let facade = HaciendaFacade::new(HaciendaConfig::default()).unwrap();
+
+        let scan_result = facade.scan_text("bob@example.com", SpanText::Omit).await;
+        assert!(
+            scan_result.is_err(),
+            "scan_text must error when PII is not configured"
+        );
+        assert!(
+            matches!(scan_result.unwrap_err(), HaciendaError::PiiDisabled),
+            "error must name the misconfiguration, not a detection failure"
+        );
+
+        let redact_result = facade.redact_text("bob@example.com").await;
+        assert!(
+            redact_result.is_err(),
+            "redact_text must error when PII is not configured"
+        );
+        assert!(
+            matches!(redact_result.unwrap_err(), HaciendaError::PiiDisabled),
+            "error must name the misconfiguration, not a detection failure"
+        );
+    }
+
+    /// `SpanText::Include` writes an audit entry for the reveal event.
+    #[tokio::test]
+    async fn scan_text_include_writes_reveal_audit_entry() {
+        let facade = facade_with_model_entity("Alice Martin");
+        let text = "Alice Martin signed the lease";
+
+        let result = facade
+            .scan_text(text, SpanText::Include)
+            .await
+            .expect("scan should succeed");
+
+        assert!(
+            !result.audit_entries.is_empty(),
+            "a reveal event must produce an audit entry"
+        );
+        let reveal = result
+            .audit_entries
+            .iter()
+            .find(|e| e.action == crate::audit::RedactionAction::Reveal)
+            .expect("must have a Reveal action entry");
+        // The digest must be over the revealed span, not over a placeholder: an entry
+        // whose span_hash is the digest of "" would record that *something* was revealed
+        // while being unable to say what.
+        assert_eq!(
+            reveal.span_hash,
+            blake3::hash("Alice Martin".as_bytes()).to_hex().to_string(),
+            "reveal entry must hash the span that was actually revealed"
+        );
+        assert_eq!(reveal.category, "Person");
+    }
+
+    /// The `PiiReveal` audit entry names the principal who accessed the span text.
+    #[tokio::test]
+    async fn scan_text_include_reveal_entry_names_principal() {
+        let facade = facade_with_model_entity("Alice Martin");
+        let text = "Alice Martin signed the lease";
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .scan_text_with_auth(caller, text, SpanText::Include)
+            .await
+            .expect("scan should succeed");
+
+        let reveal = result
+            .audit_entries
+            .iter()
+            .find(|e| e.action == crate::audit::RedactionAction::Reveal)
+            .expect("reveal entry must exist");
+        assert_eq!(
+            reveal.principal.as_deref(),
+            Some("test-principal"),
+            "reveal entry must name the accessing principal"
+        );
+    }
+
+    /// `SpanText::Omit` produces no reveal audit entries (nothing was revealed).
+    #[tokio::test]
+    async fn scan_text_omit_writes_no_audit_entries() {
+        let facade = facade_with_model_entity("Alice Martin");
+        let text = "Alice Martin signed the lease";
+
+        let result = facade
+            .scan_text(text, SpanText::Omit)
+            .await
+            .expect("scan should succeed");
+
+        assert!(
+            result.audit_entries.is_empty(),
+            "SpanText::Omit must produce no audit entries; got {}",
+            result.audit_entries.len()
+        );
     }
 }

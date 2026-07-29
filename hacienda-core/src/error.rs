@@ -19,6 +19,16 @@ pub enum HaciendaError {
 
     #[error(transparent)]
     Authz(#[from] crate::auth::AuthzError),
+
+    /// A detection or redaction operation was requested but no `[pii]` section is
+    /// configured, so there is no pipeline to run.
+    ///
+    /// This is an error rather than an empty result on purpose. Reporting "no PII found"
+    /// because the detector was never enabled is indistinguishable, to the caller, from
+    /// a clean document — and it is the failure mode that gets privileged material
+    /// disclosed.
+    #[error("PII detection is not enabled: add a [pii] section to the configuration")]
+    PiiDisabled,
 }
 
 impl From<xberg::XbergError> for HaciendaError {

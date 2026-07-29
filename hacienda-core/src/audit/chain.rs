@@ -52,15 +52,8 @@ impl AuditChain {
             });
         }
 
-        let expected_hash = compute_chain_hash(
-            &self.last_chain_hash,
-            self.seq,
-            &entry.id,
-            &entry.category,
-            &entry.action,
-            &entry.span_hash,
-            &entry.config_hash,
-        );
+        let expected_hash =
+            compute_chain_hash(&self.last_chain_hash, self.seq, entry.chain_hash_fields());
 
         if entry.chain_hash != expected_hash {
             return Err(AuditError::ChainIntegrity {
@@ -86,15 +79,8 @@ impl AuditChain {
         let mut prev_hash = GENESIS_HASH.to_string();
 
         for (index, entry) in self.entries.iter().enumerate() {
-            let expected_hash = compute_chain_hash(
-                &prev_hash,
-                index as u64,
-                &entry.id,
-                &entry.category,
-                &entry.action,
-                &entry.span_hash,
-                &entry.config_hash,
-            );
+            let expected_hash =
+                compute_chain_hash(&prev_hash, index as u64, entry.chain_hash_fields());
 
             if entry.chain_hash != expected_hash {
                 return Err(AuditError::ChainIntegrity {
@@ -148,6 +134,7 @@ mod tests {
             source: EntitySource::Regex,
             pipeline_version: "1.0".into(),
             config_hash: String::new(),
+            principal: None,
         }
     }
 

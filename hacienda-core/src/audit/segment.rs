@@ -467,6 +467,7 @@ mod tests {
             source: EntitySource::Regex,
             pipeline_version: "1.0".into(),
             config_hash: config().into(),
+            principal: None,
         }
     }
 
