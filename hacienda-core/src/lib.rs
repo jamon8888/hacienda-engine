@@ -27,6 +27,7 @@
 //! ```
 
 pub mod audit;
+pub mod auth;
 pub mod compliance;
 pub mod config;
 pub mod error;
@@ -38,6 +39,7 @@ pub mod pii;
 pub mod redaction;
 pub mod review;
 
+pub use auth::{AuthContext, AuthzError, Caller, Capability, CapabilitySet};
 pub use config::HaciendaConfig;
 pub use error::HaciendaError;
 pub use facade::{HaciendaFacade, HaciendaMetadata, HaciendaResult};

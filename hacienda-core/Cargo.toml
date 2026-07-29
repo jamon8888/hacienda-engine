@@ -15,6 +15,7 @@ jobs = []
 [dependencies]
 aes-siv = { workspace = true }
 async-trait = { workspace = true }
+axum = { version = "0.8", features = ["macros"] }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 data-encoding = { workspace = true }
@@ -30,6 +31,12 @@ uuid = { workspace = true }
 xberg = { workspace = true }
 zeroize = { workspace = true }
 
-# No `[dev-dependencies]`: `async-trait` used to live here for test doubles implementing
-# xberg's async `NerBackend` trait, but the `AuditStore`/`JobStore` traits made it a real
-# dependency. Regular dependencies are available to tests, so repeating it would be noise.
+[dev-dependencies]
+# `ServiceExt::oneshot`, to drive the auth middleware through a real `Router`. Unit-testing
+# the route-matching helper alone cannot catch a middleware that forwards to `next` on the
+# path where it should refuse, which is precisely the bug this exercises.
+tower = { version = "0.5", features = ["util"] }
+
+# Note: `async-trait` is not repeated here. It used to be a dev-dependency for test doubles
+# implementing xberg's async `NerBackend` trait, but the `AuditStore`/`JobStore` traits made
+# it a real dependency, and regular dependencies are already available to tests.

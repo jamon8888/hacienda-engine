@@ -1,6 +1,7 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
 use crate::audit::{AuditEntry, AuditEntryInput, AuditStore, InMemoryAuditStore};
+use crate::auth::{Caller, Capability};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
@@ -209,6 +210,17 @@ impl HaciendaFacade {
         self.review_queue.as_ref()
     }
 
+    /// Get the review queue with authentication context.
+    ///
+    /// Requires `review:decide` capability.
+    pub fn review_queue_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<&ReviewQueue>, HaciendaError> {
+        caller.require(Capability::ReviewDecide)?;
+        Ok(self.review_queue.as_ref())
+    }
+
     /// A snapshot of the open segment's audit entries.
     ///
     /// Returns only the open segment. For the full history across sealed segments,
@@ -217,6 +229,17 @@ impl HaciendaFacade {
     /// Returns an empty `Vec` when auditing is not configured — callers do not need to
     /// distinguish "no store" from "store with no entries yet".
     pub async fn audit_entries(&self) -> Result<Vec<AuditEntry>, HaciendaError> {
+        self.audit_entries_with_auth(Caller::Trusted).await
+    }
+
+    /// Get audit entries with authentication context.
+    ///
+    /// Requires `audit:read` capability.
+    pub async fn audit_entries_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
         match &self.audit_store {
             Some(store) => Ok(store.entries().await?),
             None => Ok(Vec::new()),
@@ -235,6 +258,14 @@ impl HaciendaFacade {
     /// Returns [`HaciendaError::Audit`] naming the first entry or seal whose hash does
     /// not match the chain.
     pub async fn verify_audit(&self) -> Result<(), HaciendaError> {
+        self.verify_audit_with_auth(Caller::Trusted).await
+    }
+
+    /// Verify audit chain with authentication context.
+    ///
+    /// Requires `audit:read` capability.
+    pub async fn verify_audit_with_auth(&self, caller: Caller<'_>) -> Result<(), HaciendaError> {
+        caller.require(Capability::AuditRead)?;
         match &self.audit_store {
             Some(store) => Ok(store.verify().await?),
             None => Ok(()),
@@ -273,6 +304,14 @@ impl HaciendaFacade {
     ///
     /// [`FileAuditStore`]: crate::audit::FileAuditStore
     pub async fn close(&self) -> Result<(), HaciendaError> {
+        self.close_with_auth(Caller::Trusted).await
+    }
+
+    /// Close stores with authentication context.
+    ///
+    /// Requires `audit:read` capability (for sealing audit chain).
+    pub async fn close_with_auth(&self, caller: Caller<'_>) -> Result<(), HaciendaError> {
+        caller.require(Capability::AuditRead)?;
         let audit = match &self.audit_store {
             Some(store) => store.close().await.map(|_| ()).map_err(HaciendaError::from),
             None => Ok(()),
@@ -298,6 +337,18 @@ impl HaciendaFacade {
         self.process_batch(vec![input]).await
     }
 
+    /// Process with authentication context, checking required capabilities.
+    ///
+    /// Requires `documents:process` capability.
+    pub async fn process_with_auth(
+        &self,
+        caller: Caller<'_>,
+        input: ExtractInput,
+    ) -> Result<HaciendaResult, HaciendaError> {
+        caller.require(Capability::DocumentsProcess)?;
+        self.process_batch_with_auth(caller, vec![input]).await
+    }
+
     /// Process several inputs as one extraction, sharing the audit chain and glossary.
     ///
     /// # Errors
@@ -307,6 +358,18 @@ impl HaciendaFacade {
         &self,
         inputs: Vec<ExtractInput>,
     ) -> Result<HaciendaResult, HaciendaError> {
+        self.process_batch_with_auth(Caller::Trusted, inputs).await
+    }
+
+    /// Process batch with authentication context, checking required capabilities.
+    ///
+    /// Requires `documents:process` capability.
+    pub async fn process_batch_with_auth(
+        &self,
+        caller: Caller<'_>,
+        inputs: Vec<ExtractInput>,
+    ) -> Result<HaciendaResult, HaciendaError> {
+        caller.require(Capability::DocumentsProcess)?;
         let start = std::time::Instant::now();
 
         let mut extraction = extract_all(inputs, &self.config).await?;

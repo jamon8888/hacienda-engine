@@ -16,6 +16,9 @@ pub enum HaciendaError {
 
     #[error(transparent)]
     Review(#[from] crate::review::ReviewError),
+
+    #[error(transparent)]
+    Authz(#[from] crate::auth::AuthzError),
 }
 
 impl From<xberg::XbergError> for HaciendaError {
