@@ -11,7 +11,7 @@ on:
 
 jobs:
   clippy:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -21,7 +21,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -35,7 +35,7 @@ jobs:
   # which have ever existed as cargo features. `cargo hack --each-feature` derives the
   # set from the manifests, so it cannot go stale, and it runs as a single job.
   feature-matrix:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -46,7 +46,7 @@ jobs:
       - run: cargo hack check -p hacienda -p hacienda-core --each-feature
 
   test-bindings:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
