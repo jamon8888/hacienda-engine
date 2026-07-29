@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recommended rather than required, because opening a store already recovers a segment left
   open by a previous run. There is deliberately no `Drop` impl — `Drop` cannot await, and
   `block_on` inside it panics when called from within a Tokio runtime.
+- **`hacienda` binary (`hacienda-cli` crate).** Argument surface only so far: `extract`,
+  `scan`, and `config show` parse and exit 70 ("not implemented yet"). `clap` is a
+  dependency of `hacienda-cli` alone, so library consumers of `hacienda` and
+  `hacienda-core` do not acquire it through Cargo feature unification.
+- `--concurrency` on `extract` and `scan` counts hacienda's own PII workers. It is a
+  separate budget from xberg's `extraction.concurrency.max_threads`, which caps Rayon,
+  ONNX intra-op, and batch-document parallelism together, and it does not write it.
 - `ReviewStore::close`, with a default no-op body, plus `ReviewQueue::close`.
   `HaciendaFacade::close` now closes the review store as well as the audit store.
   Both closes are attempted even if the first fails, so one broken backend cannot make

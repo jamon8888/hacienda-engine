@@ -265,6 +265,16 @@ a single file maps 1:1 to what exists today:
 `hacienda config show` must report **where each value came from**. Silent config
 precedence is the most common source of "why is this not redacting" incidents.
 
+One value is deliberately **outside** this chain: the pseudonymisation key of
+§12.3.1. It is referenced by `key_id` here and resolved from a KMS or secret
+store, never carried as a config value — otherwise a `--flag` or environment
+variable could substitute the key that determines whether two documents
+co-refer, and `config show` would print the secret that de-pseudonymises the
+whole corpus. `config show` reports the active `key_id` and the resolver, never
+key material. Concurrency has a similar caveat: `--concurrency` is bounded by
+audit-append serialisation (§9, Phase 2), and that ceiling must be stated in
+`--help` rather than left to be discovered.
+
 ---
 
 ## 7. Security Model
@@ -289,34 +299,54 @@ credible.
 
 Preconditions, not design questions. Ordered by severity.
 
-1. **Audit is RAM-only.** `AuditSink` and `FileSink` exist
+1. ~~**Audit is RAM-only.** `AuditSink` and `FileSink` exist
    (`audit/sink.rs:11,23`) but `facade.rs` never references them. A restart
    discards the entire tamper-evident chain. Acceptable for a one-shot CLI;
    a compliance defect for a long-running server, since DORA requires a durable
-   audit trail. **Blocks `hacienda serve`.**
+   audit trail. **Blocks `hacienda serve`.**~~
+   **Closed 2026-07-28** by Phase 1
+   (`superpowers/plans/2026-07-28-phase1-store-layer.md`). The facade holds
+   `Option<Arc<dyn AuditStore>>`; `FileAuditStore` writes segmented JSON-lines under a
+   per-node directory and recovers a segment left open by a previous run. `FileSink`
+   survives for callers who want a flat log but is no longer on the facade's path.
 
-2. **No persistence seam for review state.** `ReviewQueue` is in-memory. Review
+2. ~~**No persistence seam for review state.** `ReviewQueue` is in-memory. Review
    decisions are the human-in-the-loop evidence; losing them on restart defeats
-   the purpose. Needs a `ReviewStore` trait alongside `AuditSink`.
+   the purpose. Needs a `ReviewStore` trait alongside `AuditSink`.~~
+   **Closed 2026-07-28** by Phase 1. `ReviewStore` is the seam and `ReviewQueue` is now a
+   policy wrapper over it; `FileReviewStore` persists an append-only event log and replays
+   it on open. `ReviewQueue::list` no longer collapses a backend failure into an empty
+   list — a store that cannot be read must not be able to impersonate an empty queue.
 
-3. **Batch processing is sequential.** `process_batch` awaits each document in
+3. **Batch processing is sequential.** (#30) `process_batch` awaits each document in
    turn. Fine for CLI, and it is the throughput ceiling for a server.
 
-4. **The audit chain is a global write lock.** Every document serializes through
+4. **The audit chain is a global write lock.** (#31) Every document serializes through
    one mutex. Correct today — locks are not held across `.await`, so there is no
    `!Send` future or deadlock — but it is where concurrency will queue.
 
-5. **`record_audit` locks twice** in consecutive statements (once for
+5. ~~**`record_audit` locks twice** in consecutive statements (once for
    `config_hash()`, once for the guard). Safe, because the first temporary drops
-   at the semicolon, but fragile enough to trip a later editor.
+   at the semicolon, but fragile enough to trip a later editor.~~
+   **Closed 2026-07-28** by Phase 1 — by deletion rather than by reordering. The first
+   acquisition existed only to read `config_hash` and stamp it onto each input, and
+   `AuditChain::push` overwrites that field with the chain's own value anyway
+   (`audit/chain.rs:32`). The read was a no-op that cost a lock, so `record_audit` now
+   passes `String::new()` and makes the store's ownership of the field explicit.
 
-6. **No authn/authz exists at all.** §7 is unimplemented.
+6. **No authn/authz exists at all.** (#32) §7 is unimplemented.
 
-7. **`Pseudonymize` does not pseudonymise** — `redaction/engine.rs:93` emits a
+7. ~~**`Pseudonymize` does not pseudonymise** — `redaction/engine.rs:93` emits a
    per-category constant, and it is the **default** mode. Correctness, compliance
-   and scaling defect in one. Full analysis in §12.3.
+   and scaling defect in one. Full analysis in §12.3.~~
+   **Closed 2026-07-28** by Phase 0
+   (`superpowers/plans/2026-07-28-phase0-pseudonymisation.md`). `Pseudonymize` now emits
+   `[CATEGORY:key_id:base32]` over AES-256-SIV per §12.3, the default moved to `Mask`, and
+   `RedactionEngine::new` fails rather than degrading to masking when no key is supplied.
+   Key rotation, reveal, and the `KeyResolver` seam ship with it; the `pii:reveal`
+   endpoint that calls `reveal` remains Phase 3.
 
-8. **The upstream adapter cache is unbounded** — `CANDLE_BACKEND_CACHE` never
+8. **The upstream adapter cache is unbounded** (#33) — `CANDLE_BACKEND_CACHE` never
    evicts, so per-tenant LoRA adapters accumulate merged weights for process
    lifetime. Cannot be fixed upstream; must be bounded by routing (§12.4).
 
@@ -330,11 +360,11 @@ Every gap in §8 maps to a phase. A gap with no phase is a gap nobody owns.
 |---|---|---|---|
 | 0 | Real pseudonymisation via deterministic AEAD (§12.3); rename or remove the misleading default | Gap 7 | — |
 | 1 | Segment model + `AuditStore` / `ReviewStore` / `JobStore` traits; in-memory and file backends. Collapse the `record_audit` double lock while in the file. | Gaps 1, 2, 5 | — |
-| 2 | `hacienda-cli` with `extract`, `scan`, `config show`, `--concurrency` | Gap 3 | Phases 0, 1 |
+| 2 | `hacienda-cli` with `extract`, `scan`, `config show`, `--concurrency`. Also produces the audit-contention measurement that gates Phase 6. | Gap 3 | Phases 0, 1 |
 | 3 | Capability model of §7 + authn/authz middleware | Gap 6 | — |
 | 4 | `hacienda-api` content endpoints + `hacienda serve`, allowlist only | — | Phases 1, 3 |
 | 5 | Audit / review / compliance endpoints; `hacienda audit verify` across segments | — | Phases 3, 4 |
-| 6 | Postgres store backend; `--shard`; adapter-aware routing | Gaps 4, 8 | Phase 4 **and** a measurement showing it matters |
+| 6 | Postgres store backend; `--shard`; adapter-aware routing; audit-append contention fix | Gaps 4, 8 | Phase 4, **or earlier** if Phase 2's measurement crosses the threshold below |
 | 7 | `xberg-passthrough` feature | — | Demonstrated demand |
 
 Three ordering choices are deliberate:
@@ -347,10 +377,29 @@ rather than retrofitted per endpoint; shipping endpoints first guarantees the
 retrofit. The content endpoints already need `documents:process`, so there is no
 version of Phase 4 that legitimately predates it.
 
-**Phase 6 last, and gated on measurement.** Gap 4 is a throughput concern, not a
+**Phase 6 last, but Phase 2 owns the gate.** Gap 4 is a throughput concern, not a
 correctness one — the audit chain serialises on one mutex, but it is *correct*.
-Optimising before Phase 4 provides a load surface to measure against is
-guesswork. The gate is a benchmark, not a hunch.
+Optimising it before there is a load surface to measure against is guesswork.
+
+The trap is that Phase 2 is what *creates* the load. §8 gap 4 says the mutex "is
+where concurrency will queue"; `--concurrency N` is what puts N workers behind a
+single audit append. Gap 3's fix is precisely what makes gap 4 bite. Scheduling
+concurrency in Phase 2 and the mutex in Phase 6 therefore ships a known
+bottleneck and then waits four phases for someone to rediscover it — the same
+shape of defect as an unsatisfiable gate, just inverted.
+
+So the measurement is a Phase 2 deliverable, not a hope. Phase 2 must report, for
+a fixed corpus:
+
+- wall-clock at `--concurrency` 1, 2, 4, and CPU count;
+- the fraction of per-document wall time spent blocked on the audit mutex.
+
+If throughput fails to reach 2x at CPU count, or audit-lock wait exceeds 20% of
+per-document time, Phase 6's audit work is unblocked immediately and is **not**
+held behind Phase 4 — only the Postgres and routing parts of Phase 6 keep that
+dependency. Until the threshold is crossed, `--concurrency` still defaults to CPU
+count, but `hacienda extract --help` and §6.3 must name audit append as the
+serialisation point, so the ceiling is documented rather than discovered.
 
 **Phase 0 is new and comes first.** Gap 7 is not a scaling issue that can wait
 for Phase 6: pseudonymisation is the *default* redaction mode, so every document
@@ -454,22 +503,88 @@ reintroduce the bottleneck and add a single point of failure.
 
 **Resolution: segmented chains.** Each writer owns its own chain segment.
 
+> **Amended 2026-07-28 by Phase 1, Task 1.** The design below was implemented with one
+> deliberate strengthening: segments carry a **seal hash** that commits to their own
+> metadata, including the back-pointer. See "Amendment: the seal hash" after the checks.
+> The shipped shape is `SegmentSeal` in `hacienda-core/src/audit/segment.rs`.
+
 ```text
 Segment {
   segment_id, node_id, config_hash,
-  prev_segment_tip: Option<Hash>,   // links this node's previous segment
-  entries: [...],                   // internally hash-chained (unchanged)
-  sealed_tip: Hash,
+  entries: [...],        // internally hash-chained, sequence numbers restart at 0
+  opened_at,
+}
+
+SegmentSeal {                        // what a sealed segment leaves behind
+  segment_id, node_id, config_hash,
+  prev_seal_hash: Option<Hash>,      // links this node's previous segment
+  sealed_tip: Hash,                  // the segment's final entry hash
+  entry_count: u64,
   opened_at, sealed_at,
+  seal_hash: Hash,                   // commits to every field above
 }
 ```
+
+Sequence numbers restart at 0 in each segment rather than continuing globally, because
+`AuditChain::verify` recomputes each hash using the entry's *array index*
+(`audit/chain.rs:88`). That also forces the inter-segment link out of the entry hashes and
+into the seal, which is where `prev_seal_hash` comes from.
 
 Verification becomes three independent checks:
 
 1. Each segment verifies internally — `AuditChain::verify()`, unchanged.
-2. Each node's segments link: `prev_segment_tip == previous.sealed_tip`.
+2. The seals form their own chain. Split into **2a self-consistency** and **2b linkage**
+   below; the original single check — `prev_segment_tip == previous.sealed_tip` — is not
+   sufficient, and the next subsection explains why.
 3. Periodic **anchors** record a merkle root over all live segment tips,
    giving a global tamper-evident checkpoint without serialising the write path.
+
+#### Amendment: the seal hash
+
+**Check 2 as originally written does not detect truncation.** An attacker who deletes a
+node's oldest segment and blanks the successor's `prev_segment_tip` produces a chain that
+passes check 2 cleanly, because a segment whose back-pointer is `None` is indistinguishable
+from a legitimate first segment. Checks 1 and 3 do not help: check 1 is internal to a
+segment, and check 3 only covers segments that are still live at anchor time. Deleting the
+oldest record of a document's handling is precisely the attack a compliance audit log
+exists to make evident.
+
+Implemented resolution: each seal commits to every one of its own fields, including its
+back-pointer.
+
+```text
+seal_hash = blake3(
+    prev_seal_hash ‖ segment_id ‖ node_id ‖ config_hash ‖
+    sealed_tip ‖ entry_count ‖ opened_at ‖ sealed_at
+)
+```
+
+String fields are length-prefixed in the preimage so that `("ab","c")` and `("a","bc")`
+cannot collide. (`AuditChain`'s own `compute_chain_hash` needs no such prefixing — it uses
+self-delimiting fixed-width integers.)
+
+Check 2 accordingly becomes two checks, implemented as `verify_seal_chain`:
+
+- **2a. Self-consistency** — recompute each `seal_hash` from its fields and compare. Any
+  altered field, including `entry_count` or `prev_seal_hash`, is caught here.
+- **2b. Linkage** — each seal's `prev_seal_hash` equals the preceding seal's `seal_hash`.
+  This is what closes the truncation hole. An attacker who deletes a segment and recomputes
+  the survivors' seal hashes to restore self-consistency still cannot produce a link to a
+  segment that is no longer present.
+
+Neither check touches `AuditChain`, which is unmodified as check 1 requires. The cost is
+one blake3 call per seal — per *segment*, not per entry.
+
+Two smaller notes on the shipped implementation:
+
+- `entry_count` in the preimage is **not** a distinct security property; `sealed_tip`
+  already changes when entries are removed. It is there so a store can assert the
+  invariant at recovery and report "segment holds 37 entries, its seal records 40"
+  rather than an opaque hash mismatch. Diagnosis, not detection.
+- Entry sequence numbers are **per-segment**, starting at 0. This is forced, not chosen:
+  `AuditChain::verify` recomputes each hash using the entry's array index as its sequence
+  number, so any global numbering would fail its own verification. It is also why the
+  inter-segment link has to live in the seal rather than in the entry hashes.
 
 This is defensible because DORA and GDPR require that a record exists, is
 unaltered, and can be produced — **not** that all records share one global total
@@ -527,7 +642,7 @@ collapses to one token.
 The fix is also what makes it scale. Derive, never store:
 
 ```text
-token = base32( AES-SIV( tenant_key, category || normalize(text) ) )[..n]
+token = key_id || ":" || base32( AES-SIV( key(key_id), aad = category, pad(normalize(text)) ) )
 ```
 
 Deterministic authenticated encryption (SIV / synthetic-IV AEAD) is stable across
@@ -539,6 +654,69 @@ spec says it must not be.
 
 The tenant key is configuration and a secret, not runtime state, so it does not
 reintroduce coordination.
+
+#### 12.3.1 The three load-bearing parameters
+
+`normalize`, the token encoding, and the key are not implementation details. Each
+must be pinned before Phase 0 ships, because changing any of them after the first
+corpus is redacted silently invalidates every token already emitted.
+
+**`normalize` decides what counts as the same person.** `Jean Dupont`,
+`jean dupont` and `Jean  Dupont` must collapse to one token; `Jean Dupont` and
+`J. Dupont` must not, because merging two distinct identities is a worse failure
+than failing to link one. Minimum: Unicode NFKC, case-fold, collapse internal
+whitespace, trim. Anything beyond that is category-specific — lowercasing an
+email domain but not its local part, stripping separators from a phone number —
+and belongs to the category, not to a global function. Normalisation is part of
+the token contract; changing it later re-derives every token in the corpus.
+
+**Token length is not free, and must not be truncated.** An earlier draft of this
+section specified truncating the SIV output to a fixed 80 bits, with a
+birthday-collision bound to justify the length. That is incompatible with §12.3.2:
+truncating a ciphertext discards exactly the bits decryption needs, so a truncated
+token cannot be revealed. Reversibility and short fixed-width tokens are mutually
+exclusive here, and the Studio spec's reversibility promise decides it — **the
+full SIV output is emitted, no truncation**.
+
+Two consequences follow, and neither should be discovered during implementation:
+
+- *Collisions cease to be a concern.* SIV is injective for a fixed key, so two
+  distinct values cannot share a token. The birthday analysis simply does not
+  apply once truncation is gone.
+- *Token length leaks plaintext length.* Deterministic encryption already leaks
+  equality, which is the property being bought. Length is an **additional** leak
+  and is not free: a 6-character token in a `FULL_NAME` slot narrows the
+  candidate set. Mitigate by padding to 16-byte buckets before encryption, so
+  length discloses a bucket rather than a value. Padding must be unambiguous
+  (PKCS#7 or equivalent) or reveal cannot strip it.
+
+If a deployment genuinely wants short fixed-width tokens and can give up reveal,
+that is a *different mode* with a different construction (a truncated keyed MAC,
+where the collision bound above does apply). It must be named separately rather
+than folded into `Pseudonymize`, because the two have different legal characters
+under §12.3's Art. 4(5) analysis. Out of scope for Phase 0.
+
+**The key must be identified in the token, not merely held in config.** Rotation
+is otherwise indistinguishable from corruption: every token changes at once, and
+documents redacted either side of the rotation stop co-referring with no signal
+that anything happened — destroying the cross-node consistency that is the entire
+justification for this construction, just along the time axis instead of the node
+axis. Prefix the token with a short key id (`[EMAIL:k1:...]`) so mixed-vintage
+corpora are self-describing, `pii:reveal` can select the right key, and rotation
+becomes additive rather than a corpus rewrite. Retired keys must be retained as
+long as the corpora they redacted: a deleted key is a permanently un-revealable
+corpus, which turns a right-of-access request under GDPR Art. 15 into a
+compliance failure of its own.
+
+#### 12.3.2 Reveal is decryption, and the key is the crown jewel
+
+Because AES-SIV is invertible, `pii:reveal` (§7) is a decryption, not a mapping
+lookup — which is what keeps the design stateless. The corollary is that the
+tenant key alone is sufficient to de-pseudonymise the entire corpus. It is the
+highest-value secret in the system and must be treated as such: sourced from a
+KMS or equivalent, never from the config file that §6.3's precedence chain reads
+(and therefore never from a value that a `--flag` or environment variable can
+override), and every reveal recorded as an audited event.
 
 ### 12.4 Adapter-aware routing — where LoRA meets scaling
 

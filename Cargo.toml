@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["hacienda", "hacienda-core"]
+members = ["hacienda", "hacienda-cli", "hacienda-core"]
 exclude = ["packages/*"]
 
 [workspace.package]
@@ -24,6 +24,10 @@ async-trait = "0.1"
 blake3 = "1.5"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# CLI argument parsing. Deliberately a dependency of `hacienda-cli` alone — §4 of the
+# integration design rejects feature-gating this inside `hacienda`, because Cargo
+# feature unification would pull clap into every library consumer.
+clap = { version = "4", features = ["derive", "env"] }
 # base32 for pseudonym tokens (BASE32_NOPAD — no `=` to escape inside a token).
 data-encoding = "2.11"
 regex = "1.10"
