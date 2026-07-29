@@ -1,0 +1,21 @@
+[package]
+name = "hacienda-cli"
+version.workspace = true
+edition.workspace = true
+description = "Command-line interface for hacienda — redaction-by-default document extraction"
+license.workspace = true
+
+# The binary is `hacienda`, not `hacienda-cli`. The crate name is split off only to keep
+# clap out of the library's dependency graph (integration design §4); the name a user
+# types should not carry that detail.
+[[bin]]
+name = "hacienda"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+hacienda = { path = "../hacienda" }
+hacienda-core = { path = "../hacienda-core" }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }

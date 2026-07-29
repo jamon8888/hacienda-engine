@@ -43,6 +43,11 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-store/
+.turbo/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
 
 # Ruby
 .bundle/
@@ -110,3 +115,12 @@ temp/
 # IDE specific
 .vscode/settings.json
 .idea/workspace.xml
+
+# BEGIN ai-rulez (DO NOT EDIT - managed by ai-rulez)
+.ai-rulez/.generated-manifest.json
+.claude/
+.codex/
+.mcp.json
+AGENTS.md
+CLAUDE.md
+# END ai-rulez

@@ -48,14 +48,74 @@ disable = ["MD012", "MD013", "MD024", "MD033", "MD036", "MD041", "MD046", "MD051
 
 [lint.typos]
 extend_words = [
-  "ake", "algoritmos", "arange", "bre", "caf", "charater", "chlidren", "cliper", "cursos",
-  "delocate", "docling", "edn", "ein", "excepcional", "execpt", "extention", "faiure", "fith",
-  "flate", "formated", "headerr", "helo", "hocr", "hom", "inh", "internacional", "ist",
-  "kreuzberg", "layrnorm", "legt", "markitdown", "ment", "mis", "mmaped", "multline", "odf",
-  "onnx", "openwebui", "opf", "ove", "ower", "pard", "portait", "programa", "pymupdf",
-  "relatie", "rumdl", "seperator", "ser", "similarily", "siz", "specifing", "splitted",
-  "substract", "surrealdb", "tbe", "tesseract", "tha", "thr", "threed", "ths", "thw",
-  "traineddata", "tre", "unparseable", "utiliza", "webui", "yor"
+  "ake",
+  "algoritmos",
+  "arange",
+  "bre",
+  "caf",
+  "charater",
+  "chlidren",
+  "cliper",
+  "cursos",
+  "delocate",
+  "docling",
+  "edn",
+  "ein",
+  "excepcional",
+  "execpt",
+  "extention",
+  "faiure",
+  "fith",
+  "flate",
+  "formated",
+  "headerr",
+  "helo",
+  "hocr",
+  "hom",
+  "inh",
+  "internacional",
+  "ist",
+  "kreuzberg",
+  "layrnorm",
+  "legt",
+  "markitdown",
+  "ment",
+  "mis",
+  "mmaped",
+  "multline",
+  "odf",
+  "onnx",
+  "openwebui",
+  "opf",
+  "ove",
+  "ower",
+  "pard",
+  "portait",
+  "programa",
+  "pymupdf",
+  "relatie",
+  "rumdl",
+  "seperator",
+  "ser",
+  "similarily",
+  "siz",
+  "specifing",
+  "splitted",
+  "substract",
+  "surrealdb",
+  "tbe",
+  "tesseract",
+  "tha",
+  "thr",
+  "threed",
+  "ths",
+  "thw",
+  "traineddata",
+  "tre",
+  "unparseable",
+  "utiliza",
+  "webui",
+  "yor",
 ]
 
 [lint.typos.extend_identifiers]
@@ -75,6 +135,11 @@ use_default_ignores = true
 preserve_patterns = ["SAFETY", "SPDX", "Copyright", "License", "licensed under"]
 
 [per-file-ignores]
+# turbo.json and tsconfig.json are JSONC — Turborepo and TypeScript both officially
+# support comments there. oxc parses them as strict JSON and reports the comments as
+# `parse-error`, which is a false positive rather than a real defect.
+"**/tsconfig.json" = ["parse-error"]
+"turbo.json" = ["parse-error"]
 "**/api.py" = ["F401", "I001", "TC006", "UP035"]
 "**/*.pyi" = ["A002", "F401", "I001", "PYI033", "TC006", "UP035"]
 "**/options.py" = ["F401", "I001", "RUF100"]

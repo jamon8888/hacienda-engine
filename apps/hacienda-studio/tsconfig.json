@@ -1,0 +1,31 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    // Inherits target ES2022 from the workspace root; esbuild rejects ES2024
+    // when it reads it back out of tsconfig, and no ES2024 syntax is in use.
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "jsx": "preserve",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["lib/*"]
+    }
+  },
+  "include": [
+    "*.ts",
+    "*.svelte",
+    "app.d.ts",
+    "lib/**/*",
+    "worker/**/*",
+    "tests/**/*"
+  ],
+  "exclude": ["node_modules", "dist", "build"]
+}

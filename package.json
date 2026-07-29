@@ -1,0 +1,27 @@
+{
+  "name": "hacienda-engine",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "build:apps": "turbo run build --filter=@hacienda-engine/hacienda-studio",
+    "lint": "turbo run lint",
+    "lint:fix": "turbo run lint:fix",
+    "format": "turbo run format",
+    "format:check": "turbo run format:check",
+    "check": "turbo run check",
+    "test": "turbo run test:unit test:e2e",
+    "test:unit": "turbo run test:unit",
+    "test:e2e": "turbo run test:e2e",
+    "test:ui": "turbo run test:ui"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.6.0"
+  },
+  "packageManager": "npm@10.0.0"
+}

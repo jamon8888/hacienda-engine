@@ -1,0 +1,48 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"],
+      // The model host is baked into the bundle, so it has to be part of the
+      // cache key — otherwise a changed host silently reuses a stale build.
+      "env": ["VITE_*"],
+      "cache": true
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {
+      "outputs": [],
+      "cache": true
+    },
+    "lint:fix": {
+      "cache": false
+    },
+    "check": {
+      "outputs": [],
+      "cache": true
+    },
+    "format": {
+      "cache": false
+    },
+    "format:check": {
+      "cache": true
+    },
+    "test:unit": {
+      "outputs": [],
+      "cache": true
+    },
+    "test:e2e": {
+      "env": ["VITE_*"],
+      "outputs": ["test-results/**", "playwright-report/**"],
+      "cache": true
+    },
+    "test:ui": {
+      "cache": false
+    }
+  },
+  "globalEnv": ["NODE_ENV", "CI"],
+  "globalDependencies": [".env*"]
+}

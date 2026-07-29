@@ -1,57 +1,39 @@
+//! Span redaction with a per-result blake3 hash chain.
+
 pub mod engine;
-pub mod fpe;
-pub mod patterns;
+pub mod pseudonym;
+pub mod types;
 
-use pii_redaction::{RedactionConfig, RedactionEngine, RedactionMode, RedactionResult};
+pub use engine::RedactionEngine;
+pub use pseudonym::{
+    EnvKeyResolver, KeyId, KeyResolver, PseudonymError, PseudonymKey, Pseudonymiser,
+    ACTIVE_KEY_VAR, KEY_BYTES, KEY_VAR_PREFIX,
+};
+pub use types::{
+    RedactionAuditEntry, RedactionConfig, RedactionMetrics, RedactionMode, RedactionResult,
+};
 
-pub struct RedactionEngineWrapper {
-    inner: RedactionEngine,
-}
+use thiserror::Error;
 
-impl RedactionEngineWrapper {
-    pub fn new(config: RedactionConfig) -> Self {
-        Self {
-            inner: RedactionEngine::new(config),
-        }
-    }
+#[derive(Debug, Error)]
+pub enum RedactionError {
+    #[error(
+        "unknown redaction mode: '{0}' (expected mask, hash, pseudonymize, remove, or custom)"
+    )]
+    UnknownMode(String),
 
-    pub fn redact(&self, text: &str) -> RedactionResult {
-        self.inner.redact(text)
-    }
-}
+    /// Refuses to build a `Pseudonymize` engine with no key.
+    ///
+    /// Deliberately not a fallback to masking. Masking and pseudonymisation are different
+    /// controls with different legal consequences (GDPR Art. 4(5)), and quietly applying
+    /// the weaker one would leave an operator believing they hold reversible output when
+    /// the value is gone for good.
+    #[error(
+        "redaction mode 'pseudonymize' requires a pseudonymisation key, and none was supplied \
+         (set {ACTIVE_KEY_VAR}, or choose mode 'mask')"
+    )]
+    MissingPseudonymKey,
 
-pub struct RedactionConfig {
-    pub mode: RedactionMode,
-    pub fpe_key: Option<String>,
-    pub custom_template: Option<String>,
-    pub preserve_format: bool,
-}
-
-pub enum RedactionMode {
-    Mask,
-    Hash,
-    Pseudonymize,
-    Remove,
-    Custom,
-}
-
-#[derive(Debug)]
-pub struct RedactionResult {
-    pub text: String,
-    pub entities: Vec<RedactionEntity>,
-    pub metrics: RedactionMetrics,
-}
-
-#[derive(Debug)]
-pub struct RedactionEntity {
-    pub category: String,
-    pub start: usize,
-    pub end: usize,
-    pub replacement: String,
-}
-
-#[derive(Debug)]
-pub struct RedactionMetrics {
-    pub entities_detected: usize,
-    pub entities_redacted: usize,
+    #[error(transparent)]
+    Pseudonym(#[from] PseudonymError),
 }

@@ -1,0 +1,169 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit was already installed on this repo but had no config, so it ran on
+# "Configuration used: defaults" and skipped essentially every PR for two reasons:
+#
+#   1. Defaults only auto-review PRs whose base IS the default branch. This repo stacks
+#      feature branches (#10 targets feat/studio-integration, not main), so those were
+#      skipped with "Auto reviews are disabled on base/target branches other than the
+#      default branch". `auto_review.base_branches` below fixes that.
+#   2. The account is on the Free plan and hit "Review limit reached" (#8). Config cannot
+#      raise that cap, so the settings below are tuned to spend the quota on source that
+#      matters instead of generated and vendored files.
+
+language: en-US
+
+reviews:
+  # "chill" keeps CodeRabbit from opening a wall of nits on every PR; it still reports
+  # real defects. Use "assertive" if reviews feel too permissive.
+  profile: chill
+
+  # Never let the bot block a merge — it advises, humans decide.
+  request_changes_workflow: false
+
+  high_level_summary: true
+  collapse_walkthrough: false
+  poem: false
+
+  # Keep the status comment. While the account is rate limited this is the only signal
+  # that a review was skipped rather than silently clean.
+  review_status: true
+
+  auto_review:
+    enabled: true
+
+    # THE key setting. Accepts regex; ".*" matches every base branch, so stacked PRs
+    # targeting other feature branches get reviewed instead of skipped.
+    base_branches:
+      - ".*"
+
+    # Drafts are excluded on purpose: PR #9 is a draft, and on the Free plan every
+    # review of an in-progress branch burns quota needed for real PRs. Flip to true if
+    # you want drafts covered too.
+    drafts: false
+
+    # Re-reviewing on every push is the main quota drain on the Free plan. With this
+    # off, a PR is reviewed once; push more commits and re-trigger deliberately with
+    # "@coderabbitai review".
+    auto_incremental_review: false
+
+  # Free tier caps how much a single review will look at, so keep generated, vendored
+  # and build output out of the way. Everything not excluded here is still reviewed.
+  path_filters:
+    - "!**/node_modules/**"
+    - "!**/target/**"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/.turbo/**"
+    - "!**/test-results/**"
+    - "!**/playwright-report/**"
+    - "!**/coverage/**"
+    # Alef owns packages/** and e2e/**; they are regenerated from fixtures and carry a
+    # generated-code header. Reviewing them comments on output nobody edits by hand.
+    - "!packages/**"
+    - "!e2e/**"
+    - "!**/_generated/**"
+    - "!.alef/**"
+    # Lockfiles are decided by the resolver, not by a reviewer.
+    - "!**/*.lock"
+    - "!**/Cargo.lock"
+    - "!**/package-lock.json"
+    - "!**/pnpm-lock.yaml"
+    # Agent/tooling config and planning docs, not shipped code.
+    - "!.ai-rulez/**"
+    - "!superpowers/**"
+    - "!docs/superpowers/**"
+    - "!**/*.min.js"
+    - "!**/fixtures/**"
+    - "!**/testdata/**"
+
+  # Encode this repo's actual conventions so reviews argue from the project's rules
+  # rather than generic style opinions. Sourced from CLAUDE.md.
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        Rust 2024 edition, zero-warnings policy.
+
+        - No `.unwrap()`, `.expect()` or panics in library code. Use `Result<T, E>` with
+          thiserror, and propagate with `?`.
+        - Every `unsafe` block needs a `// SAFETY:` comment stating the invariants it
+          relies on. Flag any that lack one.
+        - Errors must carry context: the operation, the input, the root cause, and a
+          suggestion. Flag bare error returns that lose the originating context.
+        - All public types must be Send + Sync. Extraction paths are async: never block
+          the runtime, use `tokio::task::spawn_blocking` for CPU-bound or FFI work.
+        - Never pass `Vec` or `HashMap` across an FFI boundary.
+        - Untrusted input: validate MIME type from content, never trust the file
+          extension, and cap archive size, compression ratio, file count and nesting
+          depth via SecurityLimits.
+        - No magic numbers (use named constants), no global mutable state, no bare
+          catch-all error handling.
+        - Getters are `field()` not `get_field()`; conversions follow `as_`/`to_`/`into_`.
+        - Public items need rustdoc; examples should use `?` rather than `unwrap`.
+
+    - path: "**/*.{ts,svelte}"
+      instructions: |
+        TypeScript is strict (`strict: true` plus `noUncheckedIndexedAccess`).
+
+        - Never `any` — use `unknown` plus a type guard.
+        - Flag non-null assertions (`!`), type assertions (`as`), and `@ts-ignore`.
+        - Prefer `interface` over `type` for object shapes; use `import type` for
+          type-only imports; use discriminated unions instead of `enum`.
+        - ESM only. Use the `node:` prefix for core modules and `fetch` over axios.
+        - Validate external input at system boundaries with zod.
+        - Expected errors belong in discriminated unions; throw only for the unexpected.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        - Pin third-party actions and keep them current.
+        - Never expose secrets in `run:` blocks or step outputs.
+        - Feature/permission matrices must be derivable from the manifests rather than
+          hardcoded — a hand-maintained list of cargo features silently went stale here
+          before and every leg of the job failed on features that did not exist.
+        - Prefer least-privilege `permissions:` blocks on each job.
+
+    - path: "**/{Cargo.toml,Cargo.lock}"
+      instructions: |
+        - Profiles only take effect in the workspace root manifest; cargo silently
+          ignores `[profile.*]` in path dependencies. Flag profile blocks added to
+          member or path-dependency manifests.
+        - Feature additions to the `xberg` dependency need a matching call site. The
+          feature list is deliberately minimal because embeddings/reranker/captioning
+          drag in ONNX Runtime, ndarray and liter-llm.
+        - Version in the root Cargo.toml is the single source of truth for every binding
+          package. Breaking changes need a major bump and a CHANGELOG.md entry.
+
+    - path: "**/*.{test,spec}.{ts,rs}"
+      instructions: |
+        - Assert exact expected values, not just truthiness.
+        - Tests must be independent and idempotent — no shared mutable state, no
+          reliance on execution order, and clean up anything created.
+        - Cover error paths and edge cases, not only the happy path.
+        - Do not assert on mock behaviour instead of real behaviour, and do not test
+          implementation details.
+
+  tools:
+    clippy:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    oxc:
+      enabled: true
+    markdownlint:
+      enabled: true
+    # Secret scanning: the repo rule is zero hardcoded credentials, so keep both on.
+    gitleaks:
+      enabled: true
+    checkov:
+      enabled: true
+    hadolint:
+      enabled: true
+    semgrep:
+      enabled: true
+    osvScanner:
+      enabled: true
+
+chat:
+  auto_reply: true

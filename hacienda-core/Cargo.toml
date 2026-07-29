@@ -2,40 +2,34 @@
 name = "hacienda-core"
 version.workspace = true
 edition.workspace = true
-description = "PII/Compliance/Audit/Review/Glossary core for hacienda"
+description = "PII, compliance, audit, review, and glossary core for hacienda"
 license.workspace = true
 
 [features]
-default = ["pii", "compliance", "audit", "review", "glossary"]
-pii = ["pii-pipeline", "pii-config"]
-compliance = ["pii-compliance", "pii"]
-audit = ["pii-audit"]
-review = ["pii-review"]
-glossary = ["fuzzy-matcher"]
+default = ["jobs"]
+# Enables the Candle GLiNER2 NER backend (with LoRA adapter support) through xberg.
+ner-candle = ["xberg/ner-candle"]
+# Async job tracking seam for Phase 4's HTTP endpoints. On by default.
+jobs = []
 
 [dependencies]
-# xberg
-xberg = { workspace = true, features = ["ner", "redaction"] }
-
-# PII ecosystem
-pii-pipeline = { workspace = true, optional = true }
-pii-config = { workspace = true, optional = true }
-pii-compliance = { workspace = true, optional = true }
-pii-audit = { workspace = true, optional = true }
-pii-review = { workspace = true, optional = true }
-pii-redaction = { workspace = true }
-pii-fastino = { workspace = true }
-
-# Standard
+aes-siv = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+data-encoding = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-bytes = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
+unicode-normalization = { workspace = true }
+uuid = { workspace = true }
+xberg = { workspace = true }
+zeroize = { workspace = true }
 
-# Glossary
-fuzzy-matcher = { version = "0.3", optional = true }
+# No `[dev-dependencies]`: `async-trait` used to live here for test doubles implementing
+# xberg's async `NerBackend` trait, but the `AuditStore`/`JobStore` traits made it a real
+# dependency. Regular dependencies are available to tests, so repeating it would be noise.

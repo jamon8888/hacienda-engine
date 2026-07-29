@@ -1,19 +1,29 @@
+//! Glossary generation settings.
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlossaryConfig {
-    pub enabled: bool,
-    pub link_style: LinkStyle,
-    pub min_confidence: f32,
-    pub min_count: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Markup used when linking a mention back to its glossary entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkStyle {
+    #[default]
     Markdown,
     Html,
     Wiki,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GlossaryConfig {
+    pub enabled: bool,
+    pub link_style: LinkStyle,
+    /// Mentions detected below this confidence are not recorded.
+    pub min_confidence: f32,
+    /// Terms seen fewer than this many times are not published or linked.
+    ///
+    /// A glossary of one-off mentions is noise, and every published term is one more
+    /// place a real name can resurface in a document that was supposed to be redacted.
+    pub min_count: usize,
 }
 
 impl Default for GlossaryConfig {

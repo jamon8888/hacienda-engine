@@ -1,31 +1,25 @@
+//! The single error type crossing the [`crate::HaciendaFacade`] boundary.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HaciendaError {
-    #[error("extraction failed: {0}")]
-    Extraction(String),
+    /// Document extraction failed inside xberg.
+    #[error("extraction failed")]
+    Extraction(#[source] Box<xberg::XbergError>),
 
-    #[error("pii pipeline failed: {0}")]
-    Pii(String),
+    #[error(transparent)]
+    Pii(#[from] crate::pii::PiiError),
 
-    #[error("compliance failed: {0}")]
-    Compliance(String),
+    #[error(transparent)]
+    Audit(#[from] crate::audit::AuditError),
 
-    #[error("audit failed: {0}")]
-    Audit(String),
-
-    #[error("review failed: {0}")]
-    Review(String),
-
-    #[error("glossary failed: {0}")]
-    Glossary(String),
-
-    #[error("configuration error: {0}")]
-    Config(String),
+    #[error(transparent)]
+    Review(#[from] crate::review::ReviewError),
 }
 
 impl From<xberg::XbergError> for HaciendaError {
-    fn from(e: xberg::XbergError) -> Self {
-        HaciendaError::Extraction(e.to_string())
+    fn from(source: xberg::XbergError) -> Self {
+        HaciendaError::Extraction(Box::new(source))
     }
 }

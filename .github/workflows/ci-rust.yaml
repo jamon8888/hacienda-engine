@@ -10,36 +10,47 @@ on:
     branches: [main]
 
 jobs:
-  rust:
-    runs-on: ubuntu-24.04-arm
+  clippy:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout dependency repos
-        id: deps
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg.git ../xberg
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-        if: steps.deps.outcome == 'success'
-      - name: Clippy
-        if: steps.deps.outcome == 'success'
-        run: cargo clippy -p hacienda -p hacienda-core --all-targets --all-features -- -D warnings
-      - name: Test
-        if: steps.deps.outcome == 'success'
-        run: cargo test -p hacienda -p hacienda-core --all-features
-      - name: Feature matrix
-        if: steps.deps.outcome == 'success'
-        run: |
-          for feat in xberg-full pii compliance audit review glossary dev; do
-            echo "Checking feature: $feat"
-            cargo check -p hacienda -p hacienda-core --features $feat
-          done
-      - name: Skip notice
-        if: steps.deps.outcome != 'success'
-        run: echo "::notice::Dependency repos not available - Rust checks skipped. Run locally with task setup."
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  # Enumerating features by hand drifted badly: this matrix spent 7 runners checking
+  # "xberg-full", "pii", "compliance", "audit", "review", "glossary" and "dev", none of
+  # which have ever existed as cargo features. `cargo hack --each-feature` derives the
+  # set from the manifests, so it cannot go stale, and it runs as a single job.
+  feature-matrix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-hack
+      - run: cargo hack check -p hacienda -p hacienda-core --each-feature
+
+  test-bindings:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features -- --test-threads=1

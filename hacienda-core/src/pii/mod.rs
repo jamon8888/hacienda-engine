@@ -1,172 +1,88 @@
-mod config;
-mod pipeline;
-mod xberg_integration;
+//! PII detection: deterministic patterns, a statistical NER backend, and the merge
+//! step that reconciles them.
+//!
+//! The two detectors are deliberately independent. [`engine::RegexEngine`] finds spans
+//! with a fixed, auditable pattern set; [`ner::NerDetector`] delegates inference to an
+//! `xberg` backend. [`merge::merge_entities`] resolves their overlaps, and
+//! [`pipeline::PiiPipeline`] runs the whole sequence including redaction.
 
-pub use config::*;
-pub use pipeline::*;
-pub use xberg_integration::*;
+pub mod config;
+pub mod engine;
+pub mod merge;
+pub mod ner;
+pub mod patterns;
+pub mod pipeline;
+pub mod types;
 
-use pii_config::PipelineConfig as PiiPipelineConfig;
-use pii_pipeline::PiiPipeline;
+pub use config::{CliOverrides, ModelConfig, PipelineConfig};
+pub use engine::RegexEngine;
+pub use merge::{merge_entities, MergedEntity};
+pub use ner::NerDetector;
+pub use patterns::builtin_patterns;
+pub use pipeline::{PiiPipeline, PipelineMetrics, PipelineResult};
+pub use types::{
+    EntitySource, MergeConfig, MergePriority, ModelEntity, PatternMeta, PiiCategory, RegexEntity,
+};
 
-pub struct PiiPipelineWrapper {
-    inner: PiiPipeline,
-}
+use thiserror::Error;
 
-impl PiiPipelineWrapper {
-    pub fn new(config: PipelineConfig) -> Result<Self, String> {
-        let pii_config: PiiPipelineConfig = config.into();
-        let inner = PiiPipeline::new(pii_config)
-            .map_err(|e| format!("Failed to create PII pipeline: {}", e))?;
-        Ok(Self { inner })
-    }
+/// Every way the detection pipeline can fail.
+#[derive(Debug, Error)]
+pub enum PiiError {
+    /// A detection pattern did not compile. Carries the category so a bad
+    /// caller-supplied pattern can be identified without re-running the set.
+    #[error("pattern for category '{category}' failed to compile")]
+    Pattern {
+        category: String,
+        #[source]
+        source: regex::Error,
+    },
 
-    pub fn process(&self, text: &str) -> Result<PipelineResult, String> {
-        self.inner.process(text).map_err(|e| e.to_string())
-    }
-}
+    /// The NER backend failed to load or to run.
+    ///
+    /// Boxed because `xberg::XbergError` is large relative to the other variants.
+    #[error("{message}")]
+    Ner {
+        message: String,
+        #[source]
+        source: Box<xberg::XbergError>,
+    },
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct PipelineResult {
-    pub redacted_text: String,
-    pub entities: Vec<PipelineEntity>,
-    pub audit_log: Vec<PipelineAuditEntry>,
-    pub metrics: PipelineMetrics,
-}
+    /// The configuration asks for a model the build cannot provide.
+    ///
+    /// Loading a model is feature-gated, so a config that enables one is a hard
+    /// error rather than a silent downgrade to regex-only detection — under-detecting
+    /// PII without saying so is the worst possible failure mode here.
+    #[error("model backend unavailable: {0}")]
+    ModelUnavailable(String),
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct PipelineEntity {
-    pub category: String,
-    pub start: u32,
-    pub end: u32,
-    pub confidence: f32,
-}
+    #[error("reading configuration from {path}")]
+    ConfigIo {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct PipelineAuditEntry {
-    pub category: String,
-    pub span_hash: String,
-    pub chain_hash: String,
-}
+    #[error("parsing configuration from {path}")]
+    ConfigParse {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct PipelineMetrics {
-    pub regex_ms: u64,
-    pub model_ms: u64,
-    pub merge_ms: u64,
-    pub redaction_ms: u64,
-    pub total_ms: u64,
-    pub entities_detected: u32,
-    pub entities_redacted: u32,
-}
+    #[error(transparent)]
+    Redaction(#[from] crate::redaction::RedactionError),
 
-impl From<pii_pipeline::PipelineResult> for PipelineResult {
-    fn from(r: pii_pipeline::PipelineResult) -> Self {
-        Self {
-            redacted_text: r.redacted_text,
-            entities: r
-                .entities
-                .into_iter()
-                .map(|e| PipelineEntity {
-                    category: e.category,
-                    start: e.start,
-                    end: e.end,
-                    confidence: e.confidence,
-                })
-                .collect(),
-            audit_log: r
-                .audit_log
-                .into_iter()
-                .map(|e| PipelineAuditEntry {
-                    category: e.category,
-                    span_hash: e.span_hash,
-                    chain_hash: e.chain_hash,
-                })
-                .collect(),
-            metrics: PipelineMetrics {
-                regex_ms: r.metrics.regex_ms,
-                model_ms: r.metrics.model_ms,
-                merge_ms: r.metrics.merge_ms,
-                redaction_ms: r.metrics.redaction_ms,
-                total_ms: r.metrics.total_ms,
-                entities_detected: r.metrics.entities_detected,
-                entities_redacted: r.metrics.entities_redacted,
-            },
-        }
-    }
-}
-
-impl From<hacienda_core::config::pii::PipelineConfig> for pii_config::PipelineConfig {
-    fn from(c: hacienda_core::config::pii::PipelineConfig) -> Self {
-        Self {
-            regex_first: c.regex_first,
-            model_threshold_default: c.model_threshold_default,
-            merge_overlap_threshold: c.merge_overlap_threshold,
-            redaction: c.redaction.into(),
-            audit: c.audit.into(),
-            model: c.model.into(),
-        }
-    }
-}
-
-impl From<hacienda_core::config::pii::RedactionProfile> for pii_config::RedactionConfig {
-    fn from(p: hacienda_core::config::pii::RedactionProfile) -> Self {
-        match p {
-            hacienda_core::config::pii::RedactionProfile::Default => Self::default(),
-            hacienda_core::config::pii::RedactionProfile::PCI => Self {
-                mode: "pseudonymize".into(),
-                fpe_key_b64: None,
-                custom_template: None,
-                preserve_format: true,
-            },
-            hacienda_core::config::pii::RedactionProfile::HIPAA => Self {
-                mode: "remove".into(),
-                fpe_key_b64: None,
-                custom_template: None,
-                preserve_format: false,
-            },
-            hacienda_core::config::pii::RedactionProfile::GDPR => Self {
-                mode: "pseudonymize".into(),
-                fpe_key_b64: None,
-                custom_template: None,
-                preserve_format: true,
-            },
-            hacienda_core::config::pii::RedactionProfile::Custom(c) => Self {
-                mode: "custom".into(),
-                fpe_key_b64: None,
-                custom_template: Some(c.patterns.join("|")),
-                preserve_format: true,
-            },
-        }
-    }
-}
-
-impl From<hacienda_core::config::pii::ModelConfig> for pii_config::ModelConfig {
-    fn from(c: hacienda_core::config::pii::ModelConfig) -> Self {
-        Self {
-            enabled: c.enabled,
-            model_id: c.model_id,
-            revision: c.revision,
-            device: c.device,
-            dtype: c.dtype,
-            thresholds_file: c.thresholds_file,
-            max_seq_len: c.max_seq_len,
-            batch_size: c.batch_size,
-        }
-    }
-}
-
-impl From<hacienda_core::config::audit::AuditConfig> for pii_config::AuditConfig {
-    fn from(c: hacienda_core::config::audit::AuditConfig) -> Self {
-        Self {
-            enabled: c.enabled,
-            log_path: c.log_path,
-            format: c.format,
-            rotation: c.rotation,
-            max_files: c.max_files,
-            max_file_size_mb: c.max_file_size_mb,
-            include_span_hash: c.include_span_hash,
-            hash_algorithm: c.hash_algorithm,
-        }
-    }
+    /// A configured entity label is unusable under
+    /// [`RedactionMode::Pseudonymize`](crate::redaction::RedactionMode::Pseudonymize).
+    ///
+    /// The label is part of the pseudonym token format (`[CATEGORY:key_id:body]`). Any
+    /// label containing `[`, `:`, or `]` cannot be encoded without producing a token that
+    /// cannot be parsed back. Rejecting at construction time surfaces the misconfiguration
+    /// immediately rather than failing mid-batch when the label is first encountered.
+    #[error(
+        "entity label '{label}' cannot be used with Pseudonymize mode: {reason} \
+         (labels must not contain '[', ':', or ']')"
+    )]
+    InvalidEntityLabel { label: String, reason: String },
 }
