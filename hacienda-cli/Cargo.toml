@@ -16,6 +16,10 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+# Config discovery falls back to the platform config directory when no project-local
+# hacienda.{toml,yaml,json} is found — see hacienda-cli/src/config.rs. Mirrors
+# xberg's own ExtractionConfig::discover().
+dirs = "6"
 hacienda = { path = "../hacienda" }
 hacienda-api = { path = "../hacienda-api" }
 # `jobs` is required by `serve`, which constructs the API's job store. hacienda-api
@@ -25,8 +29,13 @@ hacienda-core = { path = "../hacienda-core", features = ["jobs"] }
 num_cpus = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# YAML config file support, so hacienda.yaml discovers alongside hacienda.toml/.json.
+serde_yaml_ng = "0.10"
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 xberg = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

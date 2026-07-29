@@ -1,7 +1,9 @@
 //! Command implementations for the hacienda CLI.
 
-use crate::cli::{ConcurrencyArgs, ExtractArgs, Format, Mode, ScanArgs, ServeArgs};
+use crate::cli::{ConcurrencyArgs, ExtractArgs, Format, ScanArgs, ServeArgs};
+use crate::config::load_config;
 use anyhow::{Context, Result};
+use hacienda::audit::{export_json, AuditChain};
 use hacienda::{HaciendaConfig, HaciendaFacade};
 use hacienda_api::{ApiLimits, ApiState};
 use hacienda_core::auth::AuthState;
@@ -9,70 +11,10 @@ use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::RedactionMode;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task;
-use tracing::warn;
 use xberg::ExtractInput;
-
-/// Load configuration with precedence: defaults < file < --config < --config-json < CLI flags
-fn load_config(
-    config_path: Option<PathBuf>,
-    config_json: Option<String>,
-    extract_args: Option<&ExtractArgs>,
-    scan_args: Option<&ScanArgs>,
-) -> Result<HaciendaConfig> {
-    let mut config = HaciendaConfig::default();
-
-    // Load from file if specified
-    if let Some(path) = config_path {
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading config file {}", path.display()))?;
-        config = toml::from_str(&content)
-            .with_context(|| format!("parsing config file {}", path.display()))?;
-    }
-
-    // Overlay inline JSON if provided
-    if let Some(json) = config_json {
-        let json_config: HaciendaConfig =
-            serde_json::from_str(&json).context("parsing --config-json")?;
-        config = json_config;
-    }
-
-    // Apply CLI overrides from extract args
-    if let Some(args) = extract_args {
-        if let Some(pii) = config.pii.as_mut() {
-            if let Some(mode) = args.mode {
-                pii.redaction.mode = match mode {
-                    Mode::Mask => RedactionMode::Mask,
-                    Mode::Hash => RedactionMode::Hash,
-                    Mode::Pseudonymize => RedactionMode::Pseudonymize,
-                };
-            }
-            if let Some(threshold) = args.threshold {
-                pii.model_threshold_default = threshold;
-            }
-            if let Some(dir) = args.model_dir.clone() {
-                pii.model.model_dir = Some(dir);
-                pii.model.enabled = true;
-            }
-            if let Some(dir) = args.lora_dir.clone() {
-                pii.model.lora_adapter_dir = Some(dir);
-            }
-        }
-    }
-
-    // Apply CLI overrides from scan args
-    if let Some(args) = scan_args {
-        if let Some(pii) = config.pii.as_mut() {
-            if let Some(threshold) = args.threshold {
-                pii.model_threshold_default = threshold;
-            }
-        }
-    }
-
-    Ok(config)
-}
 
 fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
     args.concurrency.unwrap_or_else(num_cpus::get)
@@ -398,12 +340,6 @@ pub async fn run_extract(
 ) -> Result<()> {
     let config = load_config(config_path, config_json, Some(&args), None)?;
 
-    let pii_config = config.pii.clone().unwrap_or_else(|| {
-        let mut p = PipelineConfig::default();
-        p.redaction.mode = RedactionMode::Mask;
-        p
-    });
-
     // Validate --no-redact requires explicit acknowledgement
     if args.no_redact && !args.i_accept_unredacted_pii {
         anyhow::bail!(
@@ -411,9 +347,38 @@ pub async fn run_extract(
         );
     }
 
+    // `--no-redact` skips the PII stage entirely (`pii: None`), not just the redaction
+    // step within it — a mode/threshold flag surviving alongside `--no-redact` would
+    // silently imply detection still ran. Below, `--audit-out` is refused in that case:
+    // there is nothing to audit when the stage that writes audit entries never runs.
+    let pii_config = if args.no_redact {
+        None
+    } else {
+        Some(config.pii.clone().unwrap_or_else(|| {
+            let mut p = PipelineConfig::default();
+            p.redaction.mode = RedactionMode::Mask;
+            p
+        }))
+    };
+
+    if let Some(dir) = &args.audit_out {
+        let audit_enabled = pii_config.as_ref().is_some_and(|p| p.audit.enabled);
+        if !audit_enabled {
+            anyhow::bail!(
+                "--audit-out {} requires PII auditing to be enabled, but this run has none: {}",
+                dir.display(),
+                if args.no_redact {
+                    "--no-redact skips the PII stage entirely"
+                } else {
+                    "[pii.audit] enabled = false in the effective configuration"
+                }
+            );
+        }
+    }
+
     let facade = Arc::new(HaciendaFacade::new(HaciendaConfig {
         extraction: config.extraction,
-        pii: Some(pii_config),
+        pii: pii_config,
         compliance: config.compliance,
         review: config.review,
         glossary: config.glossary,
@@ -475,13 +440,45 @@ pub async fn run_extract(
         }
     }
 
-    // Write audit output if requested
-    if let Some(audit_out) = args.audit_out {
-        // This would need facade access to the audit store
-        // For now, we can't easily get the chain out without adding a method
-        warn!("--audit-out not yet implemented (needs facade audit_store access)");
-        let _ = audit_out; // suppress unused warning
+    if let Some(audit_out) = &args.audit_out {
+        write_audit_chain(&facade, audit_out).await?;
     }
+
+    Ok(())
+}
+
+/// Write this run's audit entries to `dir` as a single pretty-printed JSON array.
+///
+/// The facade built by `run_extract` is fresh per invocation, so `facade.audit_entries()`
+/// already scopes to exactly this run — no separate `FileAuditStore`/`NodeId` durability
+/// machinery is needed for a one-shot CLI command. `AuditChain::append` re-verifies each
+/// entry's hash linkage on the way out, so a chain that failed to round-trip cleanly is
+/// caught here rather than handed to an auditor.
+async fn write_audit_chain(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
+    let entries = facade
+        .audit_entries()
+        .await
+        .context("reading this run's audit entries")?;
+    let config_hash = facade
+        .config()
+        .pii
+        .as_ref()
+        .map(|p| p.audit.config_hash.clone())
+        .unwrap_or_else(|| "default".to_string());
+
+    let mut chain = AuditChain::new(config_hash);
+    for entry in entries {
+        chain
+            .append(entry)
+            .context("the audit chain does not verify")?;
+    }
+
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating audit output directory {}", dir.display()))?;
+    let bytes = export_json(&chain).context("serialising the audit chain")?;
+    let out_path = dir.join("audit.json");
+    std::fs::write(&out_path, bytes)
+        .with_context(|| format!("writing audit chain to {}", out_path.display()))?;
 
     Ok(())
 }
