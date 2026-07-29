@@ -62,4 +62,12 @@ pub struct Job {
     pub result_json: Option<String>,
     /// Human-readable failure reason, populated on `Failed`.
     pub error: Option<String>,
+    /// Principal that created the job.
+    ///
+    /// `None` means the job was submitted by a trusted in-process caller (CLI,
+    /// desktop app, test) — mirroring `Caller::Trusted` / `Caller::principal_id()`.
+    /// The transport layer uses this to return 404 rather than 403 to a tenant who
+    /// requests another tenant's job, preventing IDOR (OWASP A01). The store
+    /// records the value; enforcement is the transport's responsibility.
+    pub owner: Option<String>,
 }

@@ -31,7 +31,16 @@ use uuid::Uuid;
 #[async_trait]
 pub trait JobStore: Send + Sync {
     /// Create a new job in the `Queued` state.
-    async fn create(&self) -> Result<Job, JobError>;
+    ///
+    /// `owner` is the principal id of the caller who submitted the job. Pass
+    /// `None` for trusted in-process callers (CLI, desktop app). The transport
+    /// layer uses this field to enforce per-tenant isolation — a principal who
+    /// requests a job they do not own receives 404 rather than 403 so that the
+    /// existence of another tenant's job is not disclosed (OWASP A01).
+    ///
+    /// The store records the value without enforcing it; isolation belongs at
+    /// the transport layer where the HTTP status code is chosen.
+    async fn create(&self, owner: Option<String>) -> Result<Job, JobError>;
 
     /// Retrieve a job by id, returning `None` if it does not exist.
     async fn get(&self, id: &str) -> Result<Option<Job>, JobError>;
@@ -81,7 +90,7 @@ fn now_rfc3339() -> String {
 
 #[async_trait]
 impl JobStore for InMemoryJobStore {
-    async fn create(&self) -> Result<Job, JobError> {
+    async fn create(&self, owner: Option<String>) -> Result<Job, JobError> {
         let id = Uuid::new_v4().to_string();
         let now = now_rfc3339();
         let job = Job {
@@ -91,6 +100,7 @@ impl JobStore for InMemoryJobStore {
             updated_at: now,
             result_json: None,
             error: None,
+            owner,
         };
         // Take the guard, insert, drop — no .await while held.
         let mut guard = self
@@ -190,18 +200,40 @@ mod tests {
     #[tokio::test]
     async fn should_create_a_job_in_the_queued_state() {
         let store = InMemoryJobStore::new();
-        let job = store.create().await.unwrap();
+        let job = store.create(None).await.unwrap();
         assert_eq!(job.status, JobStatus::Queued);
         assert!(job.result_json.is_none());
         assert!(job.error.is_none());
+        assert!(job.owner.is_none());
         // id is a valid UUID v4
         assert!(Uuid::parse_str(&job.id).is_ok());
     }
 
     #[tokio::test]
+    async fn should_preserve_owner_on_create() {
+        let store = InMemoryJobStore::new();
+        let job = store.create(Some("alice".into())).await.unwrap();
+        assert_eq!(job.owner.as_deref(), Some("alice"));
+
+        // get round-trips the owner unchanged
+        let fetched = store.get(&job.id).await.unwrap().unwrap();
+        assert_eq!(fetched.owner.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn should_accept_no_owner_for_trusted_callers() {
+        let store = InMemoryJobStore::new();
+        let job = store.create(None).await.unwrap();
+        assert!(job.owner.is_none());
+
+        let fetched = store.get(&job.id).await.unwrap().unwrap();
+        assert!(fetched.owner.is_none());
+    }
+
+    #[tokio::test]
     async fn should_refuse_a_transition_from_an_unexpected_status() {
         let store = InMemoryJobStore::new();
-        let job = store.create().await.unwrap();
+        let job = store.create(None).await.unwrap();
 
         // Trying to transition from Running when it's actually Queued must fail.
         let err = store
@@ -230,7 +262,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn should_let_exactly_one_of_two_workers_claim_a_queued_job() {
         let store = Arc::new(InMemoryJobStore::new());
-        let job = store.create().await.unwrap();
+        let job = store.create(None).await.unwrap();
         let id = job.id.clone();
 
         let store1 = Arc::clone(&store);
@@ -266,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn should_record_the_error_when_a_job_fails() {
         let store = InMemoryJobStore::new();
-        let job = store.create().await.unwrap();
+        let job = store.create(None).await.unwrap();
 
         store
             .transition(&job.id, JobStatus::Queued, JobStatus::Running)
