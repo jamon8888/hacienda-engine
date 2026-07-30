@@ -299,11 +299,18 @@ async function processFile(
   // `linkEntities` has already turned NER spans into `[text](entity:type/slug)` links.
   // A PII span that overlaps a link's visible text rewrites inside the link syntax too
   // (e.g. an IBAN digit run inside both a phone-entity link's text and its `entity:`
-  // target), corrupting the link rather than just masking prose. Redacting before
-  // linking instead would need entity offsets recomputed against the redacted text —
-  // exactly Track F4's "offset problem", which Track L7 is scoped to investigate
-  // (`WasmRedactionConfig.preserveOffsets` may already solve it on the Rust side). Do
-  // not hand-roll an offset fix here; wait for L7.
+  // target), corrupting the link rather than just masking prose. This is Track F4's
+  // "offset problem": don't hand-roll a fix here.
+  //
+  // Track L7 checked xberg-wasm's `WasmRedactionConfig.preserveOffsets` as a possible
+  // shortcut and ruled it out (see the plan doc's L7 entry) — it's a third, unrelated PII
+  // engine, and it wouldn't have prevented this bug anyway: the corruption isn't an
+  // offset shift, it's a plain-text PII match firing on both the link text and the
+  // `entity:` slug once they're in the same spliced string. The actual fix is
+  // reordering: collect PII spans and entity-link spans separately, both against the
+  // original unlinked `markdown`, merge/resolve overlaps once, then splice a single time
+  // — not two sequential passes each mutating the live string. Left for whoever
+  // implements F4.
   let piiEntitiesFound = 0;
   if (config.enablePiiDetection) {
     postProgress({ file: input.name, stage: "pii", percent: 85 });

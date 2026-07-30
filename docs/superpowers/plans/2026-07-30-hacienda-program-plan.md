@@ -882,11 +882,65 @@ after. L1 is a measurement, not a build.
       side). Documented at the call site in `worker/pipeline.ts` rather than patched ad hoc;
       left open for L7.
 
-- [ ] **L7. Reconsider `preserveOffsets` against Track F4.**
+- [x] **L7. Reconsider `preserveOffsets` against Track F4.**
       `WasmRedactionConfig` already exposes `preserveOffsets`, and `WasmRedactionFinding`
       carries `start`/`end`/`category`/`strategy`/`replacementToken`. F4's offset problem may
       be substantially solved on the Rust side already. **Read that implementation before
       designing F4's overlay** — this could remove the hardest item in the plan.
+
+      **Done 2026-07-30 — investigated, does not remove F4. Corrected below; do not carry
+      the "may already solve it" hedge in `worker/pipeline.ts` forward as encouragement to
+      reach for xberg's redactor.**
+
+      First correction to the premise itself: `WasmRedactionConfig`/`WasmRedactionFinding`
+      (`node_modules/@xberg-io/xberg-wasm/pkg/web/xberg_wasm.d.ts:3476-3554`) belong to
+      **`@xberg-io/xberg-wasm`**, the prebuilt npm package — not to `hacienda-wasm`, the
+      crate Track L2-L6 built and wired to Studio. It's a *third* PII implementation: its
+      own `WasmPiiCategory` enum (13 categories — email/phone/ssn/card/postal/ip/iban/bic/
+      dob/person/org/location/custom — a strict subset of `hacienda-core::pii::PiiCategory`'s
+      ~20, missing exactly the ones C2 cares about, EU VAT and driver's license) running as
+      a post-processor inside xberg's own `extract(input, config)` call, configured via
+      `WasmExtractConfig.redaction`. Reaching for it would reintroduce the two-engines
+      problem C1's decision was written to end — three engines, now — for zero coverage
+      gain, since L6 already wired Studio to the engine `cargo test`'s corpus asserts
+      against.
+
+      Second, and more direct: `WasmRedactionReport`'s own doc comment settles what
+      `preserveOffsets` can and can't do. *"Offsets are relative to the original
+      pre-redaction `content` and are intended for audit reconstruction only — the original
+      bytes are dropped at the end of the pipeline."* That's a one-shot destructive
+      redaction with an audit trail attached — structurally identical to what
+      `hacienda-wasm`'s `scan()`/`process()` already return today (`PipelineResult` with
+      `entities: PiiEntity[]` carrying `start`/`end`, plus `redacted_text`). Whatever
+      `preserveOffsets` toggles (likely length-preserving replacement, unverified — no
+      Rust source for `xberg-wasm` is checked out in this repo, only the compiled
+      `.d.ts`/`.wasm`; `xberg-io/xberg` is a separate repo not in this session's scope), it
+      does not give Studio a live source-text-plus-overlay architecture. Findings are
+      reported once, against text about to be discarded, not held for later re-rendering.
+
+      Third: L6's actual bug isn't an offset-shift bug, so a length-preserving replacement
+      wouldn't have prevented it. `linkEntities` (`worker/pipeline.ts:83-98`) splices
+      `[matched](entity:${type}/${slug})` into the string — and the corruption seen in
+      manual testing, `[[CARD:****]](entity:phone/[CARD:****])`, happened because the
+      *slug itself* embedded the same PII-looking digit run as the link text (a
+      misclassified NER entity whose derived slug was the IBAN digits). A regex-based PII
+      pass over the already-linked markdown has no way to know "this occurrence is inside a
+      synthetic URI, don't touch it" from "this occurrence is prose" — it matches both, and
+      the zip's `entities-registry.json` still carries the unredacted slug regardless.
+      Preserving byte offsets does nothing to stop a plain-text search from firing twice on
+      structurally different parts of the same string.
+
+      **What actually moves F4 forward:** `hacienda-wasm`'s `PipelineResult.entities` is
+      already the overlay shape F4 asks for — spans with category/start/end, independent of
+      any splicing. L6 immediately throws that away by running PII detection *after*
+      `linkEntities` has already spliced, on the spliced string. F4's fix is a reordering +
+      merge, not a new primitive to import: run entity-linking's span collection and PII
+      detection both against the original unlinked `markdown`, producing two independent
+      span lists, resolve overlaps between them once (a PII span inside a would-be entity
+      link should suppress or absorb that link, not run through it twice), and splice the
+      merged result exactly once. That merge/precedence rule is the actual undesigned work
+      F4 names — not present in this repo, in xberg, or in hacienda-core, and out of scope
+      for L7 (investigation only, per this item's own text). Left for whoever picks up F4.
 
 ---
 
