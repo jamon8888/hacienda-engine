@@ -401,10 +401,36 @@ Current suite: 3 Playwright specs, 5 vitest files. The e2e pipeline test passes 
 extraction works. Nothing asserts PII, redaction, transcription, or that a toggle does
 anything — which is precisely why 31 unchecked boxes coexisted with substantial working code.
 
-- [ ] **D1. Assert toggles have effect.** For each of `enablePiiDetection`,
+- [x] **D1. Assert toggles have effect.** For each of `enablePiiDetection`,
       `redactPiiInOutput`, `enableTranscription`, `enableVerticalNer`: one test where the
       output differs with the flag on and off. A dead toggle then fails a test instead of
       shipping.
+
+      **Done 2026-07-30.** Correction first: `enableVerticalNer` does not exist in
+      `AppConfig` — the real config key is `enabledVerticals: ("m&a" | "financial_services" |
+      "shared")[]`, a multi-select, not a boolean. Checking it turned up exactly what D1
+      exists to catch: **it was dead**, in the same family as A1-A4.
+      `processFiles`/`worker/pipeline.ts` loaded all three vertical taxonomies
+      unconditionally (`["m&a", "financial_services", "shared"].map(loadVerticalTaxonomy)`),
+      ignoring `config.enabledVerticals` entirely — the "Vertical NER" checkboxes in
+      `ConfigPanel.svelte` did nothing. Fixed to `config.enabledVerticals.map(...)`.
+
+      New `tests/e2e/toggles.spec.ts` (4 tests, on/off pairs) for `enablePiiDetection` and
+      `redactPiiInOutput` — the two toggles a full pipeline run can assert on
+      deterministically. `enabledVerticals`'s effect is asserted instead in
+      `lib/verticals/dictionary.test.ts` (2 new cases: a restricted taxonomy set excludes
+      that vertical's terms; an empty set resolves nothing) — a full e2e test would depend on
+      the heuristic NER bridge happening to extract a taxonomy term as a named entity, which
+      is not reliable enough to assert against. `enableTranscription`'s effect is folded into
+      **D3** below rather than duplicated here, since D3 already needs an audio fixture and a
+      fresh page per toggle state.
+
+      **Verified for real**: all 4 new e2e tests pass, plus the 2 existing egress/pipeline
+      e2e tests unaffected (12/12 full e2e suite with a temporary
+      `launchOptions.executablePath` pointed at this sandbox's Chromium build, reverted
+      before committing — not a committed change, same as prior sessions' e2e verification).
+      65/65 `vitest run` (up from 63; the 2 new `dictionary.test.ts` cases), `svelte-check`
+      0 errors, `tsc --noEmit` clean, production `vite build` clean.
 - [ ] **D2. French-language NER fixture** (supports B2).
 - [ ] **D3. Audio fixture through the full pipeline** (supports A3; the old plan's Phase 5
       referenced an `audio/mpeg` fixture that was never added).

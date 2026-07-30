@@ -419,8 +419,15 @@ async function processFiles(
   console.log("[Worker] processFiles STARTED for", files.length, "files");
 
   // Initialize vertical dictionary and registry
+  //
+  // Track D1 found `config.enabledVerticals` was never read here — every
+  // taxonomy loaded regardless of what the "Vertical NER" checkboxes in
+  // ConfigPanel.svelte said, another dead toggle in the same family A1-A4
+  // fixed. An empty selection is not an error case: it means no taxonomy
+  // vocabulary is consulted, so every entity falls through to
+  // classifyDocumentVertical's document-level fallback below.
   const taxonomies = await Promise.all(
-    ["m&a", "financial_services", "shared"].map((v) => loadVerticalTaxonomy(v)),
+    config.enabledVerticals.map((v) => loadVerticalTaxonomy(v)),
   );
   const verticalDict = new VerticalDictionary(taxonomies);
   const registry = new BatchEntityRegistry();
