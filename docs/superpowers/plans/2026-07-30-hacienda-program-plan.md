@@ -814,10 +814,10 @@ The core product. Design the output format before writing pipeline code.
 - [ ] Skip/report unsupported files rather than failing the batch — a real folder contains
       `.DS_Store`, images, and things Studio cannot extract.
 
-### I2. The vault layout — the thing to get right
+### I2. The vault layout — the thing to get right — DECIDED 2026-07-30
 
-Proposed zip structure. This is a design proposal, not a finding; disagree with it before it
-gets built:
+Proposed zip structure. **Accepted as proposed**, per the person who owns this call — this is
+now the contract all three surfaces (Studio, CLI, API) must emit, not a finding to revisit:
 
 ```text
 README.md                    ← what this bundle is, how an agent should use it
@@ -834,18 +834,32 @@ kg-export/{neo4j.cypher,networkx.json,rdf.ttl}
       (`worker/pipeline.ts:93`), which nothing outside Studio can resolve. Relative paths are
       followable by a Claude Desktop agent with filesystem access, and by Obsidian, and by
       anything else that reads a markdown folder.
+
+      **Interim state (G2/G3, merged before I2 was decided):** links currently point to
+      in-document `<a id>` anchors in each file's own `## Entities` glossary section, not to
+      separate per-entity files — a narrower fix for the unresolvable `entity:` scheme that
+      didn't yet assume this layout. **Still open, blocking I1/I3/I4**: replacing that with
+      real `entities/<slug>.md` files and rewriting links to point at them across documents.
 - [ ] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
       than merely readable: the agent can open `entities/acme-sas.md` and find every document
       mentioning it. The data already exists — `BatchEntityRegistry` plus
       `inferRelationships` — it is currently only serialised to `entities-registry.json` and
-      to the KG exports, which an agent will not naturally read.
+      to the KG exports, which an agent will not naturally read. **Still open** — no
+      `entities/` directory is generated yet.
 - [ ] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
       (`worker/pipeline.ts:118`) becomes a local summary; the global glossary is the index.
-- [ ] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
-      folder of prose and ignores the registry and graph files entirely.
-- [ ] *Open question:* should redaction/pseudonymisation state be recorded in the bundle —
-      i.e. does the vault declare which entities were pseudonymised and under which key id?
-      Useful for provenance, but it is also a map of where the sensitive material was.
+      **Still open** — today's `## Entities` sections are per-document only, no global
+      `GLOSSARY.md` is emitted.
+- [x] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
+      folder of prose and ignores the registry and graph files entirely. **Done via G3** —
+      `README.md` ships at the zip root.
+- [x] *Open question, resolved 2026-07-30:* should redaction/pseudonymisation state be
+      recorded in the bundle — i.e. does the vault declare which entities were pseudonymised
+      and under which key id? **Decided: no.** The vault stays silent on redaction/
+      pseudonymisation state; it must not become a map of where the sensitive material was,
+      even without the plaintext itself. Provenance, if ever needed, is a separate concern for
+      the audit chain (Track I2/G's audit-export question, still open per C3), not the vault
+      contract.
 
 ### I3. Finder-like browser
 
