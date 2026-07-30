@@ -66,7 +66,7 @@ test.describe("folder upload (Track I1)", () => {
 
       const root = basename(dir);
       const notePath = entryNames.find((name) =>
-        name.endsWith(`${root}/sub/note.md`),
+        name.endsWith(`documents/${root}/sub/note.md`),
       );
       expect(notePath, entryNames.join(", ")).toBeTruthy();
       expect(

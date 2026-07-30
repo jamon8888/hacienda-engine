@@ -109,7 +109,8 @@ test.describe("PII redaction export contract", () => {
 
     const IBAN = "FR7630006000011234567890189";
     const files = [
-      "protocole.md",
+      "documents/protocole.md",
+      "GLOSSARY.md",
       "entities-registry.json",
       "kg-export/neo4j.cypher",
       "kg-export/networkx.json",
@@ -122,7 +123,21 @@ test.describe("PII redaction export contract", () => {
       );
     }
 
-    const markdown = await zip.file("protocole.md")!.async("string");
+    // Track I2's entities/ files are per-entity, not enumerable by a fixed
+    // name — check every one that was actually produced, same contract as
+    // the fixed-name files above. Excludes the `entities/` directory entry
+    // itself (`zip.file()` returns null for a directory, not a file).
+    const entityFiles = Object.keys(zip.files).filter(
+      (name) => name.startsWith("entities/") && !zip.files[name].dir,
+    );
+    for (const name of entityFiles) {
+      const contents = await zip.file(name)!.async("string");
+      expect(contents, `${name} must not contain the redacted IBAN`).not.toContain(
+        IBAN,
+      );
+    }
+
+    const markdown = await zip.file("documents/protocole.md")!.async("string");
     expect(markdown).toContain("[IBAN:****]");
   });
 });

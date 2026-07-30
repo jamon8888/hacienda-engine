@@ -36,7 +36,7 @@ import {
   loadVerticalTaxonomy,
   VerticalEntityMetadata,
 } from "../lib/verticals/index";
-import { BatchEntityRegistry } from "../lib/registry";
+import { BatchEntityRegistry, type RegistryEntity } from "../lib/registry";
 import { KGExporter } from "../lib/kg-export";
 import { WhisperBridge } from "../lib/transcription/whisper-bridge";
 import type { TranscriptionResult } from "../lib/transcription/types";
@@ -128,19 +128,36 @@ interface RenderSpan {
 }
 
 /**
- * Track G2: `entity:` was a custom URI scheme nothing outside Studio
- * understands — a link like `[Acme SAS](entity:organization/acme-sas)` does
- * nothing in Claude Desktop or any other markdown viewer. In-document anchors
- * into the "## Entities" glossary make the exported markdown self-contained
- * instead. Uses an explicit `<a id="...">` rather than relying on a
- * renderer's auto-slugified heading anchors: CommonMark/GFM pass raw inline
- * HTML through verbatim, so the link target is exactly what this app put
- * there, not dependent on matching some renderer's specific slugification
- * algorithm (which would also silently break on two entities that happen to
- * slugify to the same heading text).
+ * Track I2 supersedes G2's in-document anchors: `entities/<type>-<slug>.md`
+ * is a real file, followable by anything that reads a markdown folder
+ * (Claude Desktop with filesystem access, Obsidian, a plain `ls`), not just
+ * a same-page fragment. Type-prefixed rather than the plan's literal
+ * `entities/acme-sas.md` example, because a bare slug collides across types
+ * (an `organization` and a `location` can slugify to the same string) — the
+ * same collision risk G2's anchor scheme already had to account for.
  */
-function entityAnchorId(entity: Pick<Entity, "type" | "slug">): string {
-  return `entity-${entity.type}-${entity.slug}`;
+function entityFileName(entity: Pick<Entity, "type" | "slug">): string {
+  return `${entity.type}-${entity.slug}.md`;
+}
+
+/**
+ * Every document lives at `documents/<relative path>.md`; every entity file
+ * lives at `entities/<type>-<slug>.md`, one directory below the zip root.
+ * `docPath` is always `documents/...`, so the number of `../` segments
+ * needed to reach the zip root is exactly `docPath`'s segment count minus
+ * one (the filename itself doesn't count, "documents" does).
+ */
+export function relativeEntityLink(
+  docPath: string,
+  entity: Pick<Entity, "type" | "slug">,
+): string {
+  const ups = "../".repeat(docPath.split("/").length - 1);
+  return `${ups}entities/${entityFileName(entity)}`;
+}
+
+/** The inverse direction: from `entities/<file>.md` back to a `documents/...` path. */
+function relativeDocLink(docPath: string): string {
+  return `../${docPath}`;
 }
 
 /**
@@ -162,6 +179,7 @@ export function renderAnnotatedMarkdown(
   markdown: string,
   entities: Entity[],
   piiFindings: PiiEntity[],
+  docPath: string,
 ): string {
   const piiSpans: RenderSpan[] = piiFindings.map((f) => ({
     start: f.start,
@@ -177,7 +195,8 @@ export function renderAnnotatedMarkdown(
       e.spans.map((s) => ({
         start: s.start,
         end: s.end,
-        render: (matched: string) => `[${matched}](#${entityAnchorId(e)})`,
+        render: (matched: string) =>
+          `[${matched}](${relativeEntityLink(docPath, e)})`,
       })),
     )
     .filter((s) => !overlapsPii(s));
@@ -259,10 +278,18 @@ ${documents} and ${entityCount} distinct ${entities} across them.
 
 ## What's in here
 
-- **\`*.md\`** — one file per source document. Each has YAML frontmatter
-  (source name, type, processing time, PII count) followed by the extracted
-  content with named entities linked into the \`## Entities\` glossary at the
-  bottom of that same file via in-document anchors (\`#entity-type-slug\`).
+- **\`documents/\`** — one markdown file per source document, at the same
+  relative path it was uploaded from. Each has YAML frontmatter (source name,
+  type, processing time, PII count) followed by the extracted content, with
+  named entities linked to their file under \`entities/\`, and a local
+  \`## Entities\` summary at the bottom.
+- **\`entities/\`** — one file per distinct entity across the whole batch:
+  type, vertical, roles, aliases, and a backlink to every document that
+  mentions it. This is what makes the bundle RAG-ready rather than merely
+  readable — open \`entities/organization-acme-sas.md\` and find every
+  document naming Acme SAS, without reading every file in \`documents/\`.
+- **\`GLOSSARY.md\`** — the index into \`entities/\`, grouped by type. Start
+  here for "what entities does this bundle know about".
 - **\`_manifest.json\`** — the file list for this batch, with per-file entity
   counts.
 - **\`entities-registry.json\`** — every entity across the whole batch, with
@@ -278,19 +305,79 @@ ${documents} and ${entityCount} distinct ${entities} across them.
 ## Reading this bundle
 
 For cross-document questions (shared entities, relationships between
-documents), start from \`entities-registry.json\` or \`kg-export/\`, not by
-reading every \`.md\` file. For a single document's content, its own \`.md\`
-file is self-contained — frontmatter, prose, and glossary together.
+documents), start from \`GLOSSARY.md\`, \`entities/\`, \`entities-registry.json\`
+or \`kg-export/\`, not by reading every file in \`documents/\`. For a single
+document's content, its own \`.md\` file is self-contained — frontmatter,
+prose, and local entity summary together.
 `;
 }
 
-function buildGlossary(entities: Entity[]): string {
+function buildGlossary(entities: Entity[], docPath: string): string {
   if (entities.length === 0) return "";
   let md = "\n## Entities\n\n";
   for (const e of entities) {
     const verticalInfo =
       e.vertical && e.vertical !== "shared" ? ` [${e.vertical}]` : "";
-    md += `- <a id="${entityAnchorId(e)}"></a>**${e.name}** \`${e.type.charAt(0).toUpperCase() + e.type.slice(1)}${verticalInfo}\` — mentioned ${e.count} time${e.count > 1 ? "s" : ""}\n`;
+    md += `- [${e.name}](${relativeEntityLink(docPath, e)}) \`${e.type.charAt(0).toUpperCase() + e.type.slice(1)}${verticalInfo}\` — mentioned ${e.count} time${e.count > 1 ? "s" : ""}\n`;
+  }
+  return md;
+}
+
+/**
+ * Track I2: "one file per entity, with backlinks." `docLinks` are already
+ * `documents/...` paths (see `processFiles`'s `docPaths` map) — sorted by
+ * the caller so file output is deterministic across runs.
+ */
+export function buildEntityFile(
+  entity: RegistryEntity,
+  docLinks: string[],
+): string {
+  const typeLabel = entity.type.charAt(0).toUpperCase() + entity.type.slice(1);
+  const lines = [`# ${entity.display_name}`, "", `- **Type:** ${typeLabel}`];
+  if (entity.vertical) lines.push(`- **Vertical:** ${entity.vertical}`);
+  if (entity.sector) lines.push(`- **Sector:** ${entity.sector}`);
+  if (entity.roles.length) lines.push(`- **Roles:** ${entity.roles.join(", ")}`);
+  if (entity.aliases.length)
+    lines.push(`- **Aliases:** ${entity.aliases.join(", ")}`);
+  lines.push(
+    `- **Mentions:** ${entity.mention_count} across ${docLinks.length} document${docLinks.length === 1 ? "" : "s"}`,
+  );
+  lines.push("", "## Appears in", "");
+  for (const docPath of docLinks) {
+    lines.push(`- [${docPath.replace(/^documents\//, "")}](${relativeDocLink(docPath)})`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Track I2: "GLOSSARY.md is the entry point" — the global index into
+ * `entities/`, grouped by type and sorted for deterministic output.
+ */
+export function buildGlossaryIndex(entities: RegistryEntity[]): string {
+  if (entities.length === 0) {
+    return "# Glossary\n\nNo entities were detected in this batch.\n";
+  }
+  const byType = new Map<string, RegistryEntity[]>();
+  for (const e of entities) {
+    const list = byType.get(e.type) ?? [];
+    list.push(e);
+    byType.set(e.type, list);
+  }
+  let md =
+    "# Glossary\n\nEvery entity detected across this batch. Open an entry " +
+    "for its full detail and backlinks into the documents that mention it.\n";
+  for (const type of Array.from(byType.keys()).sort()) {
+    const typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
+    md += `\n## ${typeLabel}\n\n`;
+    const sorted = byType
+      .get(type)!
+      .sort((a, b) => a.display_name.localeCompare(b.display_name));
+    for (const e of sorted) {
+      const verticalInfo =
+        e.vertical && e.vertical !== "shared" ? ` — ${e.vertical}` : "";
+      const docCount = e.source_documents.length;
+      md += `- [${e.display_name}](entities/${entityFileName(e)})${verticalInfo}, mentioned ${e.mention_count} time${e.mention_count > 1 ? "s" : ""} across ${docCount} document${docCount === 1 ? "" : "s"}\n`;
+    }
   }
   return md;
 }
@@ -312,6 +399,12 @@ async function processFile(
   whisperBridge: WhisperBridge,
 ): Promise<ProcessedFile> {
   postProgress({ file: input.name, stage: "extract", percent: 10 });
+
+  // Track I2: every document lives under `documents/` in the exported vault,
+  // at the same relative path it was uploaded from — this is the coordinate
+  // both `renderAnnotatedMarkdown`'s body links and `buildGlossary`'s local
+  // summary need to compute a correct `../entities/*.md` relative path.
+  const docPath = "documents/" + input.name.replace(/\.[^.]+$/, ".md");
 
   const isAudio = input.type.startsWith("audio/");
   const isVideo = input.type.startsWith("video/");
@@ -480,10 +573,11 @@ async function processFile(
     markdown,
     deduped,
     config.redactPiiInOutput ? piiFindings : [],
+    docPath,
   );
 
   const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound);
-  const glossary = buildGlossary(deduped);
+  const glossary = buildGlossary(deduped, docPath);
 
   const finalMarkdown = frontmatter + "\n" + linkedMarkdown + glossary;
 
@@ -553,6 +647,11 @@ async function processFiles(
 
   let docCounter = 0;
   const results: ProcessedFile[] = [];
+  // Track I2's backlinks: `RegistryEntity.source_documents` only holds
+  // docIds, not the zip-relative path a link needs to point at. Populated
+  // alongside `results` below, from the same `processed.name` the zip
+  // entries themselves use, so the two can never disagree.
+  const docPaths = new Map<string, string>();
 
   for (const file of files) {
     try {
@@ -573,6 +672,7 @@ async function processFiles(
       );
       // Infer relationships for this document
       registry.inferRelationships(docId);
+      docPaths.set(docId, "documents/" + processed.name);
       results.push(processed);
       self.postMessage({ type: "file-complete", ...processed });
     } catch (error) {
@@ -588,7 +688,7 @@ async function processFiles(
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
   for (const r of results) {
-    zip.file(r.name, r.markdown);
+    zip.file("documents/" + r.name, r.markdown);
   }
   const manifest = {
     files: results.map((r) => ({
@@ -618,6 +718,20 @@ async function processFiles(
       registryJson.entity_registry.entities.length,
     ),
   );
+
+  // Track I2: one file per entity with backlinks, plus the global index.
+  const entitiesFolder = zip.folder("entities");
+  for (const entity of registry.getEntities()) {
+    const docLinks = entity.source_documents
+      .map((docId) => docPaths.get(docId))
+      .filter((p): p is string => !!p)
+      .sort();
+    entitiesFolder?.file(
+      entityFileName(entity),
+      buildEntityFile(entity, docLinks),
+    );
+  }
+  zip.file("GLOSSARY.md", buildGlossaryIndex(registry.getEntities()));
 
   // Add KG exports
   const kgExporter = new KGExporter(registry);

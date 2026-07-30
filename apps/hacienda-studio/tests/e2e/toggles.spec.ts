@@ -44,7 +44,7 @@ async function uploadAndDownload(
     await readFile(await (await download).path()),
   );
   const markdown = await zip
-    .file(fileName.replace(/\.[^.]+$/, ".md"))!
+    .file("documents/" + fileName.replace(/\.[^.]+$/, ".md"))!
     .async("string");
   const frontmatter = markdown.split("---")[1] ?? "";
   return { markdown, frontmatter };

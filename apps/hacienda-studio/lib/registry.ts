@@ -3,6 +3,8 @@ export interface RegistryEntity {
   canonical_name: string;
   display_name: string;
   type: string;
+  /** First mention's slug, per Track I2's `entities/<type>-<slug>.md` file naming. */
+  slug: string;
   vertical: string;
   sector?: string;
   roles: string[];
@@ -50,6 +52,7 @@ export class BatchEntityRegistry {
     canonical_name: string;
     display_name: string;
     type: string;
+    slug: string;
     vertical: string;
     sector?: string;
     roles: string[];
@@ -81,6 +84,7 @@ export class BatchEntityRegistry {
       canonical_name: entity.name,
       display_name: entity.name,
       type: entity.type,
+      slug: entity.slug,
       vertical: metadata.vertical,
       sector: metadata.sector,
       roles: metadata.roles || [],

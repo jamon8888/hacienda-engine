@@ -51,13 +51,14 @@ test.describe("document pipeline", () => {
     const zip = await JSZip.loadAsync(await readFile(await (await download).path()));
     expect(Object.keys(zip.files).sort()).toEqual(
       expect.arrayContaining([
+        "GLOSSARY.md",
         "_manifest.json",
         "entities-registry.json",
-        "note.md",
+        "documents/note.md",
       ]),
     );
 
-    const markdown = await zip.file("note.md")!.async("string");
+    const markdown = await zip.file("documents/note.md")!.async("string");
     expect(markdown).toContain("source: note.txt");
     expect(markdown).toContain("jean.dupont@cabinet-exemple.fr");
 
