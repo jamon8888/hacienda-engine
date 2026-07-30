@@ -33,19 +33,28 @@ zeroize = { workspace = true }
 # wasm32-unknown-unknown at all, and `uuid`'s `v4` feature needs the `js` getrandom
 # backend on wasm32 (Track L3), which the workspace dependency doesn't enable yet.
 # `xberg` is split the same way, mirroring the precedent in xberg's own Cargo.toml: the
-# native side keeps `tokio-runtime`, wasm32 swaps in `wasm-target`. hacienda-core's own
-# wasm32 build only reaches `pii`/`redaction`, which use `xberg::text::ner` and
-# `xberg::types::entity` — the `ner` feature alone, not the full `wasm-target` umbrella
-# (OCR/Excel/layout are facade-only concerns, not yet compiled on wasm32 here).
+# native side keeps `tokio-runtime`.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 xberg = { workspace = true }
 
+# wasm32 gets `xberg/wasm-target`'s components individually rather than the umbrella
+# feature itself, minus `ocr-wasm`. `ocr-wasm` builds `xberg-tesseract` against a WASI
+# SDK C toolchain (`crates/xberg-tesseract/build.rs`, `build_wasm()`) that this repo's
+# CI/dev containers don't provision yet — a `WASI_SDK_PATH` environment gap, not a Rust
+# problem, and the real published `@xberg-io/xberg-wasm` package does build it once that
+# toolchain is present. hacienda-wasm doesn't call extraction/OCR yet (see
+# `crates/hacienda-wasm`), so deferring it costs nothing today; add `ocr-wasm` back once
+# Track I needs xberg's extraction on wasm32 and WASI SDK is provisioned in CI.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", default-features = false, features = [
-    "ner",
+    "no-ort-target",
+    "excel-wasm",
+    "layout-tract",
+    "auto-rotate-tract",
+    "ner-candle-wasm",
 ] }
 
 [dev-dependencies]

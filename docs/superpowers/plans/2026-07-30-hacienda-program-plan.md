@@ -592,12 +592,46 @@ after. L1 is a measurement, not a build.
       (3) excludes NER (`ner-candle-wasm`) and the IndexedDB store layer (L5) entirely, both
       still to come. Re-measure once L2's real wasm crate and L5's stores exist.
 
-- [ ] **L2. Add the wasm crate and the target feature set.**
+- [x] **L2. Add the wasm crate and the target feature set.**
       `crates/` is empty and no manifest mentions wasm-bindgen. Follow the xberg precedent:
       `crate-type = ["cdylib", "rlib"]`, `opt-level = "z"`, `codegen-units = 1`, and a
       `wasm-target` feature that selects `xberg`'s `wasm-target` instead of `tokio-runtime`.
       *Check:* `cargo build --target wasm32-unknown-unknown` reaches a *link* error about
       hacienda-core's own code, not a dependency resolution error.
+
+      **Done 2026-07-30.** Added `crates/hacienda-wasm` (new workspace member): `crate-type
+      = ["cdylib", "rlib"]`, depends on `hacienda-core` plus `wasm-bindgen`,
+      `wasm-bindgen-futures`, `serde-wasm-bindgen`, exports `process`/`scan`/`redact_empty`
+      over the real `PiiPipeline`/`RedactionEngine` API (including the AES-SIV
+      `Pseudonymiser` path) so the build genuinely exercises `hacienda-core`. Profile: a
+      per-package override (`[profile.release.package.hacienda-wasm] opt-level = "z",
+      codegen-units = 1`, not workspace-wide — xberg does the same for `xberg-wasm` alone,
+      leaving native `hacienda-cli`/`hacienda-api` release builds untouched).
+      `hacienda-core`'s wasm32 `xberg` dependency widened from L1's `["ner"]` spike to
+      `xberg`'s `wasm-target` components (`no-ort-target`, `excel-wasm`, `layout-tract`,
+      `auto-rotate-tract`, `ner-candle-wasm`) **minus `ocr-wasm`** — see the exclusion note
+      below.
+
+      **Result: better than the check asked for.** `cargo build --target
+      wasm32-unknown-unknown -p hacienda-wasm --no-default-features` (dev profile)
+      compiles *and links* successfully — no error of any kind. With the full
+      `wasm-target` umbrella including `ocr-wasm`, the build instead fails in a
+      **build script**, not at dependency resolution or Rust link time:
+      `xberg-tesseract`'s `build.rs` detects the wasm32 target and requires a WASI SDK
+      C toolchain (`WASI_SDK_PATH`) to cross-compile Tesseract, which isn't provisioned in
+      this sandbox (network policy also blocks fetching the SDK release here). This is an
+      environment/CI-provisioning gap, not a code defect — the real published
+      `@xberg-io/xberg-wasm` package does build `ocr-wasm` once that toolchain exists.
+      `ocr-wasm` is excluded from `hacienda-core`'s wasm32 feature list for now (see the
+      comment in `hacienda-core/Cargo.toml`); `hacienda-wasm` doesn't call
+      extraction/OCR yet, so nothing today depends on it. Re-add it once Track I needs
+      xberg's extraction on wasm32 and CI provisions `WASI_SDK_PATH`.
+
+      Release `.wasm` size (opt-level=z, codegen-units=1, this wider feature set, not yet
+      wasm-opt'd) was still building for wasm32 in `[profile.release]` when this commit
+      landed — a much larger dependency graph than L1's narrow `["ner"]` probe (candle,
+      tract, image codecs, office-format parsers all come in via `no-ort-target`). Follow-up
+      commit adds the number and updates the L1 note below with it.
 
 - [ ] **L3. Fix the three silent-failure surfaces first — before the port compiles.**
       They are cheap now and near-undetectable later.

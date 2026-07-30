@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
+members = ["crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
 exclude = ["packages/*"]
 
 [workspace.package]
@@ -98,3 +98,11 @@ debug = "line-tables-only"
 
 [profile.test.package."*"]
 debug = false
+
+# `hacienda-wasm` (Track L2) is the one crate whose release artifact is a browser
+# download rather than a server binary, so it alone trades runtime speed for size —
+# mirroring xberg's own `[profile.release.package.xberg-wasm] opt-level = "z"` rather
+# than changing `[profile.release]` (and therefore hacienda-cli/hacienda-api) workspace-wide.
+[profile.release.package.hacienda-wasm]
+opt-level = "z"
+codegen-units = 1

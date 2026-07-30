@@ -1,0 +1,26 @@
+[package]
+name = "hacienda-wasm"
+version.workspace = true
+edition.workspace = true
+description = "wasm32 bindings for hacienda-core's pii/redaction pipeline"
+license.workspace = true
+
+# `cdylib` is the browser-loadable artifact; `rlib` keeps the crate usable as a normal
+# Rust dependency (native `cargo test`/`cargo doc`, no wasm-bindgen JS glue involved).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hacienda-core = { path = "../../hacienda-core", default-features = false }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Same rationale as hacienda-core's wasm32 block: `uuid`'s `v4` feature (pulled in
+# transitively once L3 lands) and any other `getrandom` consumer need the `wasm_js`
+# backend explicitly selected, or the wasm32 build fails to link.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
