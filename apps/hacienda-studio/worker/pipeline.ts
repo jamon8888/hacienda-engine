@@ -24,6 +24,7 @@ import initWasm from "@xberg-io/xberg-wasm";
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
 import { extractEntities } from "../lib/ner-bridge";
+import { initPiiEngine, redactPii, scanForPii } from "../lib/pii-engine";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -96,7 +97,11 @@ function linkEntities(markdown: string, entities: Entity[]): string {
   return result;
 }
 
-function buildFrontmatter(input: FileInput, entities: Entity[]): string {
+function buildFrontmatter(
+  input: FileInput,
+  entities: Entity[],
+  piiEntitiesFound: number,
+): string {
   const entityMeta = entities.map((e) => ({
     name: e.name,
     type: e.type.charAt(0).toUpperCase() + e.type.slice(1),
@@ -111,6 +116,7 @@ function buildFrontmatter(input: FileInput, entities: Entity[]): string {
 source: ${input.name}
 type: ${type}
 processed: ${new Date().toISOString()}
+pii_entities_found: ${piiEntitiesFound}
 entities: ${JSON.stringify(entityMeta)}
 ---`;
 }
@@ -127,7 +133,10 @@ function buildGlossary(entities: Entity[]): string {
 }
 
 async function initEngine(): Promise<void> {
-  await initWasm({ module_or_path: fetch(xbergWasmUrl) });
+  await Promise.all([
+    initWasm({ module_or_path: fetch(xbergWasmUrl) }),
+    initPiiEngine(),
+  ]);
 }
 
 async function processFile(
@@ -278,8 +287,36 @@ async function processFile(
   postProgress({ file: input.name, stage: "ner", percent: 80 });
 
   const deduped = deduplicateEntities(enrichedEntities);
-  const linkedMarkdown = linkEntities(markdown, deduped);
-  const frontmatter = buildFrontmatter(input, deduped);
+  let linkedMarkdown = linkEntities(markdown, deduped);
+
+  // Track A1/A2, redirected to the Rust/wasm engine per Track L6: `enablePiiDetection`
+  // and `redactPiiInOutput` used to be dead config (nothing read them — see
+  // `lib/ConfigPanel.svelte`'s "PII & Compliance" section). `scanForPii`/`redactPii`
+  // run the same regex engine `cargo test`'s PII suite asserts against, compiled to
+  // wasm32 (`crates/hacienda-wasm`), not a second TypeScript implementation.
+  //
+  // Known rough edge, not fixed here: this redacts `linkedMarkdown`, i.e. *after*
+  // `linkEntities` has already turned NER spans into `[text](entity:type/slug)` links.
+  // A PII span that overlaps a link's visible text rewrites inside the link syntax too
+  // (e.g. an IBAN digit run inside both a phone-entity link's text and its `entity:`
+  // target), corrupting the link rather than just masking prose. Redacting before
+  // linking instead would need entity offsets recomputed against the redacted text —
+  // exactly Track F4's "offset problem", which Track L7 is scoped to investigate
+  // (`WasmRedactionConfig.preserveOffsets` may already solve it on the Rust side). Do
+  // not hand-roll an offset fix here; wait for L7.
+  let piiEntitiesFound = 0;
+  if (config.enablePiiDetection) {
+    postProgress({ file: input.name, stage: "pii", percent: 85 });
+    const piiResult = config.redactPiiInOutput
+      ? await redactPii(linkedMarkdown)
+      : await scanForPii(linkedMarkdown);
+    piiEntitiesFound = piiResult.entities.length;
+    if (config.redactPiiInOutput) {
+      linkedMarkdown = piiResult.redacted_text;
+    }
+  }
+
+  const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound);
   const glossary = buildGlossary(deduped);
 
   const finalMarkdown = frontmatter + "\n" + linkedMarkdown + glossary;
@@ -294,6 +331,7 @@ async function processFile(
       source: input.name,
       type: input.type.split("/")[1] || "unknown",
       processed: new Date().toISOString(),
+      piiEntitiesFound,
       entities: deduped.map((e) => ({
         name: e.name,
         type: e.type.charAt(0).toUpperCase() + e.type.slice(1),

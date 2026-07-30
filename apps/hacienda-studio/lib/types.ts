@@ -23,6 +23,8 @@ export interface ProcessedFile {
     source: string;
     type: string;
     processed: string;
+    /** Count from the `hacienda-wasm` PII engine; 0 when detection is disabled. */
+    piiEntitiesFound: number;
     entities: Array<{
       name: string;
       type: string;
@@ -36,7 +38,7 @@ export interface ProcessedFile {
 
 export interface ProgressUpdate {
   file: string;
-  stage: "extract" | "ner" | "link" | "complete" | "error";
+  stage: "extract" | "ner" | "pii" | "link" | "complete" | "error";
   percent: number;
   message?: string;
 }
@@ -83,13 +85,7 @@ export interface OnboardingState {
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
-  nerCategories: [
-    "person",
-    "organization",
-    "location",
-    "email",
-    "phone",
-  ],
+  nerCategories: ["person", "organization", "location", "email", "phone"],
   outputFormat: "markdown",
   chunkSize: 1000,
   enableTranscription: false,

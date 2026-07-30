@@ -7,12 +7,14 @@ vars:
 tasks:
   # Setup
   setup:
-    desc: Install all toolchains (rust, alef, poly, task, cargo-hack)
+    desc: Install all toolchains (rust, alef, poly, task, cargo-hack, wasm-pack)
     cmds:
       - rustup toolchain install nightly
       - cargo install cargo-alef cargo-poly task cargo-hack
       - poly hooks install
       - cargo install cargo-llvm-cov
+      # For `build:wasm` / apps/hacienda-studio's `predev`/`prebuild` (crates/hacienda-wasm).
+      - cargo install wasm-pack
 
   # Development
   dev:
@@ -48,6 +50,11 @@ tasks:
     desc: Build all language bindings
     cmds:
       - alef build --all-targets --release
+
+  build:wasm:
+    desc: Build crates/hacienda-wasm's pkg/ for apps/hacienda-studio (not committed; run before `npm run dev`/`build` there)
+    cmds:
+      - wasm-pack build --target web --no-default-features crates/hacienda-wasm
 
   build:all:
     desc: Build core + all bindings
