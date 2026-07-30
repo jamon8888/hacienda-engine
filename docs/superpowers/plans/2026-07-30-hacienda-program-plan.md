@@ -786,6 +786,23 @@ mmap and needs only numpy.
       (S3/CDN/GitHub release/HF repo) with credentials — "publish the output" was never a
       solved step, just implied by the plan text. Both require a real infra decision and
       access this session doesn't have; deferred rather than guessed at.
+
+      **Publish destination decided 2026-07-30: a new HuggingFace repo**, under the owner's
+      own HF account/org, over self-hosting or standing up S3/CDN. Rationale: `huggingface.co`
+      is already the sole external host in Studio's egress allowlist
+      (`tests/e2e/egress.spec.ts:16`) — publishing there needs no allowlist change and adds no
+      new domain for the secret-professionnel egress constraint to reason about, unlike
+      self-hosting (new bandwidth/cost commitment on Studio's own deployment) or cloud
+      storage + CDN (new infra, new credentials, new allowlisted domain). Once uploaded,
+      `VITE_MODEL_BASE_URL` points at
+      `https://huggingface.co/<owner>/<new-repo>/resolve/main` in place of today's
+      `fastino/GLiNER2-Guardrails-PII-Multi`.
+
+      **Still blocked on execution, not just decision**: uploading requires an HF account
+      with write access, `numpy` (absent here), and network egress to huggingface.co for the
+      upload — none available in this sandbox. The destination is settled; running the
+      script and performing the actual upload is a task for someone with those three things,
+      not further planning.
 - [ ] **H2. Decide whether 614 MB is acceptable.** It is a 2× win, not a solution. If not,
       the manifest at `services/mcp-server/models/manifest.json` shows the fallback they
       chose: `onnx-community/gliner_small-v2.1` with int8 variants — a much smaller model at
