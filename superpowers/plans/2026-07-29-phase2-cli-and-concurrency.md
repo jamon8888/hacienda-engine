@@ -338,38 +338,158 @@ Clippy `--workspace --all-targets -D warnings` clean; `cargo fmt --all --check` 
 
 ### Task 6 — `extract` and `scan`
 
-- [ ] **Step 1 (red).** `scan` on a fixture containing a known email: exits 0, reports the
+- [x] **Step 1 (red).** `scan` on a fixture containing a known email: exits 0, reports the
       detection, and **emits no redacted or unredacted document text**. Assert the absence.
-- [ ] **Step 2 (green).** `hacienda scan <input>...`, `--format text|json`.
-- [ ] **Step 3 (red).** `extract` on the same fixture: the email does not appear in stdout in
+
+      `hacienda-cli/tests/scan.rs`: `should_report_detection_without_emitting_any_document_text`
+      asserts the output contains `"Email"` but never the known fixture email or the fixture's
+      own sentence text.
+- [x] **Step 2 (green).** `hacienda scan <input>...`, `--format text|json`.
+
+      `should_support_json_format_without_emitting_document_text` covers `--format json`
+      separately: one result per input, `pii.entities[].category == "email"`, no raw text.
+- [x] **Step 3 (red).** `extract` on the same fixture: the email does not appear in stdout in
       any mode. Assert per mode — `Mask`, `Hash`, `Pseudonymize` — because they fail
       differently and `Pseudonymize` without a key must error rather than degrade (Phase 0).
-- [ ] **Step 4 (green).** `hacienda extract` with `--mode`, `--threshold`, `--format`,
+
+      `hacienda-cli/tests/extract.rs`: `should_never_emit_the_known_email_in_mask_mode`,
+      `should_never_emit_the_known_email_in_hash_mode`, and
+      `should_refuse_pseudonymize_mode_without_a_key_rather_than_degrade` (the last asserts
+      non-zero exit, not a redacted degrade, with `HACIENDA_PSEUDONYM_ACTIVE_KEY` explicitly
+      removed from the child process env so the assertion doesn't depend on the host).
+- [x] **Step 4 (green).** `hacienda extract` with `--mode`, `--threshold`, `--format`,
       `--audit-out`, `--model-dir`, `--lora-dir`.
-- [ ] **Step 5 (red).** `--no-redact` alone exits non-zero, and the message names both what
+- [x] **Step 5 (red).** `--no-redact` alone exits non-zero, and the message names both what
       would be emitted and `scan` as the alternative (D5).
-- [ ] **Step 6 (green).** `--no-redact` plus its explicit acknowledgement.
-- [ ] **Step 7.** `--audit-out` writes a verifiable chain; assert `verify_audit` passes on
+
+      `should_refuse_no_redact_without_explicit_acknowledgement_and_name_scan` asserts non-zero
+      exit and that the lowercased message contains both `i-accept-unredacted-pii` and `scan`.
+- [x] **Step 6 (green).** `--no-redact` plus its explicit acknowledgement.
+
+      `should_allow_no_redact_with_explicit_acknowledgement` asserts exit 0 and that the raw
+      fixture email **is** present — the escape hatch genuinely emits unredacted text once
+      acknowledged, not a no-op flag.
+- [x] **Step 7.** `--audit-out` writes a verifiable chain; assert `verify_audit` passes on
       what was written, not merely that a file exists.
-- [ ] **Step 8.** The CLI calls `facade.close()` before exit on every path, including the
+
+      Deviation: `HaciendaFacade::verify_audit()` isn't reachable from a separate CLI-process
+      integration test — the facade doesn't survive the CLI's own exit. Instead
+      `should_write_an_audit_chain_that_independently_re_verifies` reads `audit.json`,
+      deserializes it as `Vec<hacienda::audit::AuditEntry>`, rebuilds a fresh `AuditChain` from
+      the first entry's `config_hash`, and re-appends every entry (`AuditChain::append`
+      recomputes and checks chain-hash linkage per call), then calls `AuditChain::verify()`.
+      This satisfies the step's intent — proving the written chain re-verifies independently,
+      not merely that a file exists — without requiring the facade to outlive the process.
+- [x] **Step 8.** The CLI calls `facade.close()` before exit on every path, including the
       error paths. Phase 1 made `close` recommended rather than required, but a CLI that
       leaves a segment open on every error is what turns "recommended" into a recovery cost
       paid on every run.
 
+      `close_after` (`hacienda-cli/src/commands.rs`) wraps both `run_scan` and `run_extract`'s
+      inner logic: it always calls `facade.close()`, returns the close error only if the inner
+      result was `Ok` (a prior error takes priority — it's what the user asked about), and logs
+      rather than shadows a close failure that follows a prior error.
+
+      **Mutation:** forced `extract` to always skip redaction
+      (`if args.no_redact` → `if args.no_redact || true`) and re-ran `tests/extract.rs`. 4 of 6
+      tests failed as expected (`should_never_emit_the_known_email_in_hash_mode`,
+      `should_never_emit_the_known_email_in_mask_mode`,
+      `should_refuse_pseudonymize_mode_without_a_key_rather_than_degrade`,
+      `should_write_an_audit_chain_that_independently_re_verifies`), each printing the leaked
+      raw email in its panic message — confirming these are real regression-catchers, not
+      vacuous assertions. Reverted; `grep -n "no_redact || true"` confirmed clean afterward.
+
 ### Task 7 — Documentation and close-out
 
-- [ ] **Step 1.** CHANGELOG: the new binary, `--concurrency`, and any breaking change Task 4
+- [x] **Step 1.** CHANGELOG: the new binary, `--concurrency`, and any breaking change Task 4
       forced on `process_batch`'s ordering guarantees. If `audit_entries` ordering changed, it
       is **Breaking** and says so — a caller relying on it will not read a note filed under
       Added.
-- [ ] **Step 2.** Strike §8 gap 3 in the spec with a "Closed 2026-07-__ by Phase 2" note, as
+
+      Verified the actual scope of the break by reading `hacienda-core/src/facade.rs` directly
+      rather than assuming D3's blanket statement applies everywhere: `process_batch`'s own
+      audit recording loop is sequential and in input order
+      (`detect_concurrently` collects PII results into a pre-sized, index-ordered `Vec`, but
+      `record_audit` is then called one document at a time in a plain `for` loop). The real
+      ordering break is in the CLI's own concurrent per-file `task::spawn` fan-out in
+      `run_extract`, not inside `process_batch` itself — the CHANGELOG entry says this
+      precisely rather than repeating D3's broader claim. It also states plainly that
+      `AuditEntry.id` is a random UUID (`record_audit` mints it via `Uuid::new_v4()`) with no
+      link back to the source document, so there is currently no way for a caller to recover
+      document-to-entry correspondence after a concurrent run — an earlier draft of this note
+      overclaimed a workaround ("match on `AuditEntry` identity") that doesn't exist; corrected
+      after checking the source.
+- [x] **Step 2.** Strike §8 gap 3 in the spec with a "Closed 2026-07-__ by Phase 2" note, as
       gaps 1, 2, 5, 7 were struck. Close #30.
-- [ ] **Step 3.** Post the measurement to #31 per Task 5 Step 6.
-- [ ] **Step 4.** Verify: full suite, clippy `--all-targets --all-features -D warnings`,
+
+      `gh issue view 30` showed it was already `CLOSED` (auto-closed by an earlier commit's
+      `closes #30` trailer, hash `f0ae489`), so only the spec's §8 gap 3 strikethrough was
+      still needed. Notes the §9 measurement's actual finding: raising `--concurrency` past 1
+      does not reliably reach 2x on this host, and the ceiling is not the audit mutex
+      (`io_order` wait stayed under 0.2% of wall time at every level tested).
+- [x] **Step 3.** Post the measurement to #31 per Task 5 Step 6.
+
+      Already posted (one comment on #31, "Phase 2 measurement (Task 5, §9)") — confirmed via
+      `gh issue view 31 --json comments`, no new action needed.
+- [x] **Step 4.** Verify: full suite, clippy `--all-targets --all-features -D warnings`,
       `cargo fmt --check`. Record the test count against the 222 baseline.
-- [ ] **Step 5.** Completion note: what the measurement said, which mutations were run and what
+
+      `cargo test --workspace`: **337 passed / 2 ignored / 0 failed** across `hacienda`,
+      `hacienda-api`, `hacienda-cli`, `hacienda-core` (lib + integration + doc tests), against
+      the 222 baseline. The 2 ignored are both intentional:
+      `step8_sync_policy_timing` (pre-existing) and
+      `task5_concurrency_and_contention_measurement` (Task 5's `--ignored --nocapture`
+      measurement test). `cargo clippy --workspace --all-targets --all-features -- -D
+      warnings`: clean, zero warnings. `cargo fmt --check` at the workspace root: clean.
+- [x] **Step 5.** Completion note: what the measurement said, which mutations were run and what
       each proved, and every deviation from this plan. Per Phase 1's lesson, do **not** tick a
       test bullet without grepping for the test by name first.
+
+      **What the measurement said (Task 5, §9, posted to #31):** on this repo's dev host (4
+      cores, ~3GB RAM), raising `--concurrency` from 1 to 4 over a fixed 300-document corpus did
+      **not** reach 2x throughput — observed 0.78x–0.91x, worse than sequential in both runs.
+      The throughput leg of §9's OR-gate fails on its own, so Phase 6's audit-append work is
+      unblocked immediately. Critically, the audit mutex is not the cause: `io_order` wait
+      stayed at 0.09%–0.15% of wall time across every concurrency level, while wall time got
+      worse as concurrency rose — pointing at host memory pressure (MemAvailable fell from
+      ~1GB to ~770MB between the two runs), not the audit path. Re-measuring on unconstrained
+      hardware before scoping any Phase 6 fix would avoid solving a memory-pressure problem
+      with a segment-per-writer redesign.
+
+      **Mutations run and what each proved:**
+      - Task 4 Step 6 (prior session): removed `detect_concurrently`'s index-collection and
+        replaced it with push-as-tasks-complete — the input-order test failed, confirming that
+        test genuinely depends on the indexed-`Vec` pattern rather than passing by accident.
+      - Task 6 Step 8 (this session): forced `extract` to always skip redaction
+        (`args.no_redact` → `args.no_redact || true`) — 4 of 6 `tests/extract.rs` tests failed,
+        each with the leaked raw email visible in the panic output, confirming the redaction
+        assertions are real leak-detectors and not vacuous.
+
+      **Deviations from this plan's literal wording:**
+      - Task 6 Step 7: `verify_audit()` is a facade method, unreachable from a separate
+        CLI-process integration test once the process has exited. Substituted an equivalent
+        client-side reconstruction (`AuditChain::new` + repeated `append` + `verify` against
+        the exported `audit.json`), which independently re-verifies the chain-hash linkage —
+        the step's actual intent — without requiring library changes.
+      - Task 7 Step 1: an early draft of the CHANGELOG's breaking-change bullet claimed callers
+        could "match on `AuditEntry` identity" to recover document correspondence after a
+        concurrent run. Checking `record_audit`'s implementation showed `id` is a random
+        `Uuid::new_v4()` with no link to the source document — the draft overclaimed a
+        mitigation that doesn't exist and was rewritten to state the gap honestly instead.
+      - Task 7 Step 2: "Close #30" needed no `gh` action — it was already closed by an earlier
+        commit's `closes #30` trailer. Only the spec's §8 gap 3 strikethrough was live work.
+      - Commit/PR process: this plan assumes a normal commit-then-PR flow. In practice, Task 6's
+        work was committed directly to `main` by the user outside a feature branch (commit
+        `9376c3a`, message reused from an earlier, unrelated commit and not descriptive of its
+        actual diff), so there is no branch to open a PR from for that work. Flagged to the
+        user rather than silently rewriting a pushed commit on a shared branch.
+      - This backfill checks off Task 6's steps (this session's core work, verified against the
+        actual test files and mutation runs) alongside Task 7. It does **not** retroactively
+        check Tasks 3, 4, or 5's boxes, even though their code exists and Task 5's measurement
+        is posted to #31 — those steps were completed in earlier sessions this backfill does
+        not have step-by-step transcript access to, and ticking them here without re-deriving
+        that provenance would be exactly the unverified-checkbox mistake Phase 1 already
+        flagged.
 
 ---
 

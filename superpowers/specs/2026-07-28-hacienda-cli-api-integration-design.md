@@ -325,8 +325,16 @@ Preconditions, not design questions. Ordered by severity.
    it on open. `ReviewQueue::list` no longer collapses a backend failure into an empty
    list — a store that cannot be read must not be able to impersonate an empty queue.
 
-3. **Batch processing is sequential.** (#30) `process_batch` awaits each document in
-   turn. Fine for CLI, and it is the throughput ceiling for a server.
+3. ~~**Batch processing is sequential.** (#30) `process_batch` awaits each document in
+   turn. Fine for CLI, and it is the throughput ceiling for a server.~~
+   **Closed 2026-07-30** by Phase 2
+   (`superpowers/plans/2026-07-29-phase2-cli-and-concurrency.md`). `process_batch` now
+   fans documents out with a bounded `JoinSet`/`--concurrency`, default CPU count, input
+   order preserved on output. The §9 measurement on this task's 4-core/~3GB host (#31)
+   found raising `--concurrency` past 1 does not reliably reach 2x throughput — the
+   ceiling this gap named is real, but on constrained hardware it is not the audit
+   mutex (gap 4, still open): measured `io_order` wait stayed under 0.2% of wall time at
+   every concurrency level tested.
 
 4. **The audit chain is a global write lock.** (#31) Every document serializes through
    one mutex. Correct today — locks are not held across `.await`, so there is no

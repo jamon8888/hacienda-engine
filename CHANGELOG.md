@@ -53,13 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recommended rather than required, because opening a store already recovers a segment left
   open by a previous run. There is deliberately no `Drop` impl — `Drop` cannot await, and
   `block_on` inside it panics when called from within a Tokio runtime.
-- **`hacienda` binary (`hacienda-cli` crate).** Argument surface only so far: `extract`,
-  `scan`, and `config show` parse and exit 70 ("not implemented yet"). `clap` is a
-  dependency of `hacienda-cli` alone, so library consumers of `hacienda` and
-  `hacienda-core` do not acquire it through Cargo feature unification.
-- `--concurrency` on `extract` and `scan` counts hacienda's own PII workers. It is a
-  separate budget from xberg's `extraction.concurrency.max_threads`, which caps Rayon,
-  ONNX intra-op, and batch-document parallelism together, and it does not write it.
+- **`hacienda` binary (`hacienda-cli` crate).** `extract`, `scan`, and `config show` are
+  implemented: `extract` redacts by default and refuses `--no-redact` without
+  `--i-accept-unredacted-pii` (naming `scan` as the honest, no-leak alternative); `scan`
+  detects and reports without ever emitting document text. `clap` is a dependency of
+  `hacienda-cli` alone, so library consumers of `hacienda` and `hacienda-core` do not
+  acquire it through Cargo feature unification.
+- `--concurrency` on `extract` and `scan` bounds documents in flight through hacienda's own
+  PII stage (`PiiPipeline::process`), default CPU count. It is a separate budget from
+  xberg's `extraction.concurrency.max_threads`, which caps Rayon, ONNX intra-op, and
+  batch-document parallelism together, and it does not write it. Measured against a
+  300-document fixed corpus (issue #31): raising it past 1 did not reach 2x throughput on a
+  4-core/~3GB host, and the audit store's `io_order` lock is not why — measured wait stayed
+  under 0.2% of wall time at every level tested. `hacienda extract --help` states this.
+- `extract` and `scan` call `HaciendaFacade::close()` before exit on every path, error
+  paths included, so a durable audit store's segment is always sealed cleanly rather than
+  left for the next process's recovery step.
 - `ReviewStore::close`, with a default no-op body, plus `ReviewQueue::close`.
   `HaciendaFacade::close` now closes the review store as well as the audit store.
   Both closes are attempted even if the first fails, so one broken backend cannot make
@@ -76,6 +85,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `HaciendaFacade::process_batch`'s per-document work (PII detection) now
+  runs concurrently over a bounded worker pool. `HaciendaResult.pii` still holds one result
+  per document in input order — that contract (`facade.rs:39`) is preserved by collecting
+  into a pre-sized slot per index rather than pushing as tasks complete. Audit-entry chain
+  order is a separate guarantee and is **not** preserved across concurrently-processed
+  documents: when `hacienda extract` processes more than one input under `--concurrency` >
+  1 (the default is CPU count), the order entries land in the audit chain — and so in
+  `--audit-out`'s `audit.json` — now reflects completion order, not the order the input
+  files were given in. `AuditEntry` carries no document identifier today (`id` is a random
+  UUID minted at record time), so a caller needing document-to-entry correspondence has no
+  way to recover it from a concurrent run; that gap is not new here, but concurrency is
+  what turns "unused" into "needed."
 - **Breaking:** unknown keys in a config file are now rejected instead of discarded.
   `HaciendaConfig` and every hacienda-owned config below it carry `deny_unknown_fields`.
   A misspelt key previously parsed cleanly and left the control at its default, so the
