@@ -258,7 +258,7 @@ TypeScript pseudonymisation engine is not.
       Without the last clause, someone will keep trying to wire Studio to `/v1/pii/scan`, or
       will "helpfully" port a Rust detector into TypeScript.
 
-- [ ] **C2. Measure the coverage gap; close it only in the direction that survives.**
+- [x] **C2. Measure the coverage gap; close it only in the direction that survives.**
       Rust has 20 patterns across 19 categories (`pii/patterns.rs:9-160`) against the browser's
       9. Rust lacks **EU VAT** and **driver's license** — both present in the browser and both
       relevant to French clients. **Add those two to Rust** (they survive Track L, and they are
@@ -269,6 +269,23 @@ TypeScript pseudonymisation engine is not.
       *Check:* one shared fixture corpus, asserted from both `vitest` and `cargo test`. The
       corpus outlives Track L and becomes its acceptance test — build it now, so the port has
       a target to be measured against.
+
+      **Done 2026-07-30.** Added `PiiCategory::EuVat` (`pii/types.rs`) and its pattern —
+      `(?i)\b(?:AT|BE|...|SK)\d{2,12}\b` over the 27-country EU/EEA VAT-prefix list,
+      `format_preserving: true`, `[VAT:****]` — plus a `DriversLicense` pattern (Rust already
+      had the category, just no pattern for it): `\b[A-Z]\d{7,13}\b`, `[LICENSE:****]`. Both
+      appended to `builtin_patterns()` so existing precedence ("earlier wins on overlap") is
+      undisturbed. Three new unit tests in `pii/engine.rs`, including a Greek-prefix case
+      (`EL` rather than `GR`, per the actual ISO/VIES prefix) to catch a plausible copy-paste
+      mistake.
+
+      `fixtures/pii-corpus.json` (repo root, 25 cases) is the shared corpus: category names
+      in `PiiCategory`'s serde form (snake_case), asserted as an exact-match `HashSet` (not
+      `BTreeSet` — `PiiCategory` has no `Ord`) of detected categories per case. Two runners
+      against the same file: `hacienda-core/tests/pii_corpus.rs` (native, `include_str!`)
+      and `apps/hacienda-studio/lib/pii-engine.test.ts` (`vitest`, against the real compiled
+      `hacienda-wasm` build, not a mock). Both pass 25/25 as of L6's wasm wiring — this
+      check couldn't be fully closed until L6 gave the corpus a wasm build to run against.
 
 - [ ] **C3. Studio gets the real audit trail via Track L, not a second implementation.**
       Previously an open question. It is now answered by the WASM decision: the blake3 chain
@@ -816,12 +833,54 @@ after. L1 is a measurement, not a build.
       `--workspace --all-targets` and `--target wasm32-unknown-unknown` for
       `hacienda-core --lib` and `hacienda-wasm --all-targets`) all stay clean.
 
-- [ ] **L6. Delete the TypeScript engine and switch the call sites.**
+- [x] **L6. Delete the TypeScript engine and switch the call sites.**
       `lib/pii-detector.ts` (`detectPII:22`, `redactPII:39`, zero importers) is deleted rather
       than wired — Track A's toggles resolve to the Rust engine instead. This is the step that
       makes Tracks A2 and F cheaper, which is why A2 should not be built twice.
       *Check:* the C2 shared fixture corpus passes from `vitest` against the WASM build, with
       the same results `cargo test` produces. One corpus, two runners, identical output.
+
+      **Done 2026-07-30.** `lib/pii-detector.ts` deleted (confirmed zero importers repo-wide
+      before deleting). New `lib/pii-engine.ts` wraps `hacienda-wasm`'s `scan()`/`process()` —
+      the same compiled crate L2/L3 built and L5 gave a durable audit store — as
+      `scanForPii()`/`redactPii()`; field names crossing the boundary are `hacienda-core`'s
+      actual Rust field names (no camelCase rename), documented in a comment so nobody
+      "fixes" the casing without also changing Rust.
+
+      `worker/pipeline.ts`'s `initEngine()` now `Promise.all`s the xberg wasm init alongside
+      `initPiiEngine()`. A new `"pii"` stage runs between entity-linking and frontmatter
+      build: `enablePiiDetection`/`redactPiiInOutput` (previously read by nothing —
+      `ConfigPanel.svelte`'s "PII & Compliance" toggles were dead config) now actually call
+      the engine, and `piiEntitiesFound` flows into both the progress event and the output
+      frontmatter (`types.ts`, `ProgressBar.svelte`'s stage label map).
+
+      Build wiring: `hacienda-wasm` added as a `file:../../crates/hacienda-wasm/pkg`
+      dependency; `predev`/`prebuild`/`pretest:unit` run a new `build:wasm` script
+      (`cd crates/hacienda-wasm && wasm-pack build --target web --no-default-features`) since
+      `pkg/` isn't committed, matching the existing `ocr-wasm`/`xberg-wasm` pattern.
+      `vite.config.ts` excludes `hacienda-wasm` from `optimizeDeps` (required for its
+      `?url` wasm import to resolve) and gives it its own `manualChunks` entry. `Taskfile.yml`
+      gained a `build:wasm` task and `wasm-pack` in `setup`.
+
+      **Verified for real, not just compiled:** `cargo test` (native, including the new C2
+      corpus test), `wasm-bindgen-test` (wasm32), `vitest run` (25/25 corpus cases against
+      the real compiled wasm build, not a mock — required switching `import.meta.resolve`,
+      unsupported by vitest's SSR transform, to `createRequire(...).resolve`), `svelte-check`
+      (caught a real error: `ProgressBar.svelte`'s stage-label map didn't have a `"pii"`
+      entry), a full production `vite build`, and a manual Playwright run against the real
+      dev server exercising both `enablePiiDetection` (scan-only) and `redactPiiInOutput`
+      (rewrite-output) paths end-to-end through a real download.
+
+      **Real product bug found via that manual run, deliberately not fixed here:** PII
+      redaction runs on `linkedMarkdown` — *after* `linkEntities` has rewritten NER spans into
+      `[text](entity:type/slug)` links. A PII span overlapping a link's visible text or
+      `entity:` target rewrites inside the link syntax too; observed as
+      `[[CARD:****]](entity:phone/[CARD:****])` from an IBAN digit run inside a misclassified
+      Phone entity's link. This is exactly Track F4's offset problem, not a new one — a real
+      fix needs entity offsets recomputed against redacted text, which is what L7 exists to
+      investigate (`WasmRedactionConfig.preserveOffsets` may already solve it on the Rust
+      side). Documented at the call site in `worker/pipeline.ts` rather than patched ad hoc;
+      left open for L7.
 
 - [ ] **L7. Reconsider `preserveOffsets` against Track F4.**
       `WasmRedactionConfig` already exposes `preserveOffsets`, and `WasmRedactionFinding`
