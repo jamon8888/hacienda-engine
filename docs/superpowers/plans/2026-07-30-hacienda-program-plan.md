@@ -648,7 +648,7 @@ after. L1 is a measurement, not a build.
       measurement needs the actual Studio embedding (single shared `xberg`), which is
       later Track L work (L5/L6), not L2's.
 
-- [ ] **L3. Fix the three silent-failure surfaces first — before the port compiles.**
+- [x] **L3. Fix the three silent-failure surfaces first — before the port compiles.**
       They are cheap now and near-undetectable later.
       **(a) Clock.** Replace `Instant::now()` (`redaction/engine.rs:71`) and `SystemTime::now()`
       (`redaction/engine.rs:190`, `audit/sink.rs:176`, `audit/store_file.rs:1008`) with a
@@ -661,6 +661,65 @@ after. L1 is a measurement, not a build.
       wrong and internally consistent.
       *Check:* a wasm32 test that asserts a redaction round-trip produces a non-1970 timestamp
       and a non-nil UUID. This is the test that catches all three.
+
+      **Done 2026-07-30, and the check test earned its keep — it failed twice for real
+      reasons before passing.**
+
+      **(a) Clock:** added `web-time` (workspace dep) — a drop-in `Instant`/`SystemTime`
+      that passes through to `std::time` natively and backs onto `Performance`/`Date` in
+      the browser. Fixed `redaction/engine.rs`'s two call sites as planned. `audit/sink.rs`
+      and `audit/store_file.rs` were **not** touched: both are `#[cfg(not(target_arch =
+      "wasm32"))]`-gated in their entirety since L1, and their `SystemTime::now()` calls
+      are inside `#[cfg(test)]` temp-dir helpers that do real filesystem I/O — changing
+      them would be pure churn on code that can never run on wasm32 regardless of clock
+      implementation.
+
+      *A fourth clock call site the plan's grep missed*, because it isn't named
+      `redaction/engine.rs`: **`pii/pipeline.rs`'s `process`/`scan`** — the actual browser
+      entry points — had **seven** of their own `Instant::now()` calls timing
+      regex/model/merge/redaction stages, none gated away. The check test caught this on
+      its first real run (`panicked at .../unsupported/time.rs:13:9: time not implemented
+      on this platform`) before any manual review did. Fixed the same way (`web_time`).
+
+      **(b) Randomness:** turned out **not** to need `getrandom`'s `js`/`wasm_js` feature
+      at all. `uuid` 1.24 restructured its own wasm32 randomness to a self-contained
+      `wasm-bindgen` binding straight to `globalThis.crypto.getRandomValues`
+      (`uuid`'s `rng.rs`), gated behind `uuid`'s own `js` feature — enabling that one
+      feature (`hacienda-core/Cargo.toml`, wasm32-only target dependency) was sufficient.
+      With that blocker gone, `audit/chain.rs`, `audit/segment.rs` and `audit/store.rs`
+      (the in-memory `AuditStore`/`AuditChain`, not the file-backed one) no longer needed
+      the wasm32 gate L1 put on them for this reason and are un-gated in `audit/mod.rs` —
+      only `store_file`/`sink`/`export` (real file I/O) remain native-only.
+
+      *A second surface the plan didn't name*: un-gating `audit/segment.rs` exposed
+      **`std::process::id()`**, called from `NodeId::default()` — compiles cleanly on
+      wasm32-unknown-unknown (as L1/L2's builds already showed) but **panics at runtime**
+      ("no pids on this platform"), the check test's second real failure. There's no
+      JS-hosted equivalent to bind to — a browser tab has no OS process — so
+      `audit/segment.rs` now has a `#[cfg(target_arch = "wasm32")]` `process_id()` that
+      returns a fixed `0` rather than fabricating a number that looks like a real pid.
+
+      **(c) Timestamps:** confirmed `chrono`'s defaults (`{ version = "0.4", features =
+      ["serde"] }`, no `default-features = false`) already include `wasmbind`, and added
+      an explicit comment at the dependency declaration warning against ever adding
+      `default-features = false` there. The regression guard is the check test itself: it
+      asserts both `RedactionAuditEntry.timestamp` (from the fixed `web_time` clock) and
+      an `InMemoryAuditStore` segment's `opened_at` (from `chrono::Utc::now()`) are well
+      past the epoch.
+
+      **Check, run for real:** `crates/hacienda-wasm/tests/wasm.rs`, executed via
+      `wasm-bindgen-test-runner` under Node (`wasm-bindgen-cli` 0.2.126, matched to the
+      `wasm-bindgen` crate version in `Cargo.lock`) — not just compiled. It runs a real
+      `PiiPipeline::process` round trip (regex-detects and masks an email, asserting the
+      audit entry's `timestamp` and the rewritten text), then feeds that audit log into a
+      real `InMemoryAuditStore`, closes it, and asserts the sealed segment's `segment_id`
+      parses as a non-nil `Uuid` and its `opened_at` parses as a non-epoch RFC3339
+      timestamp. `cargo test --target wasm32-unknown-unknown -p hacienda-wasm --test wasm`
+      → `test result: ok. 1 passed`. Native `cargo build --workspace`, `cargo test -p
+      hacienda-core pii:: redaction::`, `cargo fmt --check --all`, and `cargo clippy
+      --workspace --all-targets` all stay clean; two pre-existing `audit::store_file`
+      failures (EACCES-simulation tests that don't hold under this sandbox's root user)
+      reproduce identically on the pre-L3 commit and are untouched by this change.
 
 - [ ] **L4. Gate out the server- and disk-only modules.**
       `axum` appears only in `auth/authz.rs` (4 references) — a server-only concept, so

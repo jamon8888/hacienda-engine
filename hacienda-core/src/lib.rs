@@ -28,12 +28,12 @@
 
 pub mod audit;
 // Everything below is server/native-only: `auth` pulls in axum, `facade`/`config`/`error`
-// bind the whole crate (audit stores, review queue, compliance reports) together, and
-// `compliance`, `glossary`, `jobs`, `review` are unused by browser-side PII detection and
-// redaction (see Track L, L1 of the 2026-07-30 hacienda program plan). WASM builds get
-// `pii` and `redaction` plus the slice of `audit` those two modules need
-// (`AuditConfig`, `RedactionAction`) — not the store/chain machinery, which still depends
-// on `uuid`'s missing `js` feature (L3) and is out of scope for the L1 size measurement.
+// bind the whole crate (review queue, compliance reports, the file-backed audit store)
+// together, and `compliance`, `glossary`, `jobs`, `review` are unused by browser-side PII
+// detection and redaction (see Track L of the 2026-07-30 hacienda program plan). WASM
+// builds get `pii`, `redaction`, and `audit` (its `store_file`/`sink`/`export`
+// submodules stay native-only — see `audit/mod.rs` — but the in-memory `AuditStore` and
+// hash chain are wasm32-safe as of Track L3).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod auth;
 #[cfg(not(target_arch = "wasm32"))]

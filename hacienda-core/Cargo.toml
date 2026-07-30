@@ -25,15 +25,20 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = { workspace = true }
+web-time = { workspace = true }
 zeroize = { workspace = true }
 
-# `axum`, `tokio` and `uuid` are native-only: `axum` is the auth middleware's server
-# framework (`auth/authz.rs`, gated out of the crate on wasm32 — see `lib.rs`), `tokio`'s
+# `axum` and `tokio` are native-only: `axum` is the auth middleware's server framework
+# (`auth/authz.rs`, gated out of the crate on wasm32 — see `lib.rs`), and `tokio`'s
 # `rt-multi-thread`/`fs` features that `store_file.rs` needs don't compile for
-# wasm32-unknown-unknown at all, and `uuid`'s `v4` feature needs the `js` getrandom
-# backend on wasm32 (Track L3), which the workspace dependency doesn't enable yet.
-# `xberg` is split the same way, mirroring the precedent in xberg's own Cargo.toml: the
-# native side keeps `tokio-runtime`.
+# wasm32-unknown-unknown at all. `xberg` is split the same way, mirroring the precedent
+# in xberg's own Cargo.toml: the native side keeps `tokio-runtime`.
+#
+# `uuid` is split too, but for a different reason (Track L3): its `v4` feature needs a
+# randomness source, and on wasm32-unknown-unknown that's `uuid`'s own `js` feature — a
+# self-contained `wasm-bindgen` binding straight to `globalThis.crypto.getRandomValues`
+# (`uuid`'s `rng.rs`), not `getrandom`, so no `--cfg getrandom_backend=...` RUSTFLAGS is
+# needed here.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum = { workspace = true }
 tokio = { workspace = true }
@@ -49,6 +54,7 @@ xberg = { workspace = true }
 # `crates/hacienda-wasm`), so deferring it costs nothing today; add `ocr-wasm` back once
 # Track I needs xberg's extraction on wasm32 and WASI SDK is provisioned in CI.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
 xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", default-features = false, features = [
     "no-ort-target",
     "excel-wasm",

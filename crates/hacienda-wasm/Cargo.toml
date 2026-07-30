@@ -17,10 +17,22 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# Same rationale as hacienda-core's wasm32 block: `uuid`'s `v4` feature (pulled in
-# transitively once L3 lands) and any other `getrandom` consumer need the `wasm_js`
-# backend explicitly selected, or the wasm32 build fails to link.
+# `uuid` (Track L3) turned out not to need this — its wasm32 randomness is a
+# self-contained WebCrypto binding, not `getrandom` (see `hacienda-core/Cargo.toml`).
+# Kept as a precaution for any other transitive `getrandom` 0.3+ consumer pulled in by
+# `xberg`'s `wasm-target` features (tract/candle): without the `wasm_js` backend
+# selected, such a consumer fails to *compile* for wasm32-unknown-unknown, and that
+# failure is easy to misread as unrelated to randomness.
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# Used directly by `tests/wasm.rs` to assert the audit segment's uuid/timestamp are
+# real — not to re-implement anything `hacienda-core` already does.
+chrono = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+uuid = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+uuid = { workspace = true, features = ["js"] }

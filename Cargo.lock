@@ -2474,6 +2474,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "uuid",
+ "web-time",
  "xberg",
  "zeroize",
 ]
@@ -2482,9 +2483,11 @@ dependencies = [
 name = "hacienda-wasm"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "getrandom 0.4.3",
  "hacienda-core",
  "serde-wasm-bindgen",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

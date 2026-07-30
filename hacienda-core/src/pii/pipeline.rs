@@ -14,7 +14,7 @@ use crate::redaction::pseudonym::category_label;
 use crate::redaction::{Pseudonymiser, RedactionAuditEntry, RedactionEngine, RedactionMode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 /// Detection and redaction for one configuration.
 pub struct PiiPipeline {

@@ -8,6 +8,7 @@ use super::RedactionError;
 use crate::audit::RedactionAction;
 use crate::pii::merge::MergedEntity;
 use std::sync::Arc;
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Genesis value for the per-result redaction hash chain.
 const GENESIS_CHAIN_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -68,7 +69,7 @@ impl RedactionEngine {
         text: &str,
         entities: &[MergedEntity],
     ) -> Result<RedactionResult, RedactionError> {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
 
         let mut output = String::with_capacity(text.len());
         let mut last_end = 0usize;
@@ -187,8 +188,8 @@ fn chain_next(previous: &str, category: &str, span_hash: &str) -> String {
 }
 
 fn unix_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }

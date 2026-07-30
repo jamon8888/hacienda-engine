@@ -28,6 +28,11 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 blake3 = "1.5"
 bytes = "1"
+# Do not add `default-features = false` here. Defaults include `wasmbind`, which is what
+# makes `Utc::now()` read the real clock (via `js-sys`/`Date`) on wasm32-unknown-unknown
+# instead of silently returning the epoch — every audit and compliance timestamp depends
+# on it (Track L3). `crates/hacienda-wasm`'s wasm32 test asserts a non-1970 timestamp as
+# the regression guard for this.
 chrono = { version = "0.4", features = ["serde"] }
 # CLI argument parsing. Deliberately a dependency of `hacienda-cli` alone — §4 of the
 # integration design rejects feature-gating this inside `hacienda`, because Cargo
@@ -47,6 +52,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # co-refer, so changing it later re-derives every token ever emitted.
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+# Drop-in `Instant`/`SystemTime` for code that must run on both native targets and
+# wasm32-unknown-unknown (Track L3): passes through to `std::time` natively, backs onto
+# `Performance`/`Date` in the browser. `std::time::Instant::now()` panics on wasm32; this
+# is the seam that avoids it without a `#[cfg]` at every call site.
+web-time = "1"
 # xberg
 #
 # Feature set is deliberately minimal: hacienda only consumes `xberg::extract_batch`,
