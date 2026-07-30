@@ -18,7 +18,7 @@
     { "id": "date_of_birth", "text": "born 14/07/1990 in Paris.", "categories": ["date_of_birth"] },
     { "id": "crypto_wallet", "text": "wallet 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa awaits.", "categories": ["crypto_wallet"] },
     { "id": "medical_record_number", "text": "MRN: 123456789 recorded.", "categories": ["medical_record_number"] },
-    { "id": "tax_id", "text": "EIN 12-3456789 filed.", "categories": ["tax_id"] },
+    { "id": "tax_id", "text": "Tax ID 12-3456789 filed.", "categories": ["tax_id"] },
     { "id": "vehicle_vin", "text": "VIN 1HGCM82633A004352 registered.", "categories": ["vehicle_vin"] },
     { "id": "api_key", "text": "api_key: sk_live_51H8xyzABCDEFGHIJKLMNOPQR set.", "categories": ["api_key"] },
     { "id": "secret_token", "text": "password: hunter2ExtraLongSecretValue set.", "categories": ["secret_token"] },
