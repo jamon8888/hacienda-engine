@@ -1,19 +1,24 @@
 # hacienda
 
-> **xberg + PII/Compliance Distribution** — GDPR/DORA/AI Act compliant document intelligence
+> GDPR/DORA/AI Act compliant document intelligence
 
-A downstream distribution of [xberg](https://github.com/xberg-io/xberg) that adds a complete PII detection, redaction, compliance, audit, and review pipeline — without modifying xberg core.
+hacienda extracts text and structure from a wide range of document formats and turns that extraction into a complete, regulator-ready pipeline: personal-data detection, redaction, human review, tamper-evident audit, and generated compliance artefacts — all in one system.
 
 ## Features
 
-| Category          | Capabilities                                             |
-| ----------------- | -------------------------------------------------------- |
-| **PII Detection** | 42 regex patterns + GLiNER2 ML model (42 entity types)   |
-| **Redaction**     | 5 modes: Mask, Hash, Pseudonymize (FPE), Remove, Custom  |
-| **Compliance**    | DPIA, Model Card, DORA, AI Act checklists, GDPR Articles |
-| **Audit**         | Hash-chained immutable log (blake3), CSV/JSON export     |
-| **Review**        | Human-in-the-loop queue (Approve/Reject/Modify)          |
-| **Glossary**      | Entity linking, Markdown/HTML/Wiki link injection        |
+| Category                      | Capabilities                                             |
+| ------------------------------ | --------------------------------------------------------- |
+| **Extraction**                | 97+ file formats (documents, images, audio/video, email, archives, code) |
+| **Enrichment**                | NER, classification, captioning, summarization, translation |
+| **Chunking / Search**         | Chunking, embeddings, reranking                          |
+| **Plugin architecture**       | Custom OCR, extractor, embedding, reranker, tokenizer, validator, and renderer backends |
+| **PII Detection**             | 42 regex patterns + GLiNER2 ML model (42 entity types)   |
+| **Redaction**                 | 5 modes: Mask, Hash, Pseudonymize (reversible, AES-256-SIV, key-rotatable), Remove, Custom |
+| **Compliance**                | DPIA, Model Card, DORA, AI Act checklists, GDPR Articles |
+| **Audit**                     | Segmented, hash-chained (blake3) tamper-evident log with durable file backend, CSV/JSON export |
+| **Review**                    | Human-in-the-loop queue (Approve/Reject/Modify), durable store |
+| **Glossary**                  | Entity linking, Markdown/HTML/Wiki link injection        |
+| **Studio** *(in development)* | Browser workspace for local, zero-egress redaction — in-browser extraction/NER, knowledge-graph export |
 
 ## Quick Start
 
@@ -66,7 +71,8 @@ docker run --rm -v $(pwd):/data ghcr.io/jamon8888/hacienda:latest \
 ┌─────────────────────────────────────────────────────────────┐
 │                        hacienda                              │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │ pub use xberg::*;              // 100% xberg API       │  │
+│  │ pub mod extract  { ... }       // 97+ format extraction │  │
+│  │ pub mod enrich   { ... }       // NER/classify/caption  │  │
 │  │ pub use hacienda_core::*;      // PII/Compliance/Audit  │  │
 │  │ pub mod cli { ... }            // hacienda CLI          │  │
 │  │ pub mod api { ... }            // REST API + PII routes │  │
@@ -78,25 +84,18 @@ docker run --rm -v $(pwd):/data ghcr.io/jamon8888/hacienda:latest \
 │  │ Pipeline │ │ Engine   │ │Generator │ │  Chain       │    │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────┘    │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐    │
-│  │ Review   │ │ Glossary │ │ Profiles │ │  xberg       │    │
-│  │ Queue    │ │ Linker   │ │ PCI/HIPAA│ │ Integration  │    │
+│  │ Review   │ │ Glossary │ │ Profiles │ │  Extraction  │    │
+│  │ Queue    │ │ Linker   │ │ PCI/HIPAA│ │  Engine      │    │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────┐
-│                         xberg (upstream)                     │
-│  • 97 format extraction  • Plugin system (PostProcessor)    │
-│  • 17+ language bindings • CLI, REST API, MCP               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Zero upstream changes** — hacienda extends xberg via:
+**Built to be extended** — the pipeline is driven entirely through public extension points, so new detectors, formats, and post-processing steps plug in without touching the core:
 
 - `PostProcessor` trait (Late stage, priority 60)
 - `NerBackend` trait for custom GLiNER models
 - `RedactionConfig::custom_terms` / `custom_patterns`
-- Global plugin registries
+- Global plugin registries for OCR, extraction, embedding, reranking, tokenizing, validation, and rendering backends
 
 ## Configuration
 
@@ -230,9 +229,3 @@ Apache-2.0 — see [LICENSE](LICENSE) for details.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Related
-
-- [xberg](https://github.com/xberg-io/xberg) — Upstream document intelligence platform
-- [xberg-pii-ecosystem](https://github.com/xberg-io/xberg-pii-ecosystem) — PII crate ecosystem
-- [Compliance Spec](superpowers/specs/2025-07-24-xberg-pii-ecosystem-design.md)
