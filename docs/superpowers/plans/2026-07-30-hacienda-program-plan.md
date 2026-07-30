@@ -561,7 +561,7 @@ stops having a PII implementation and starts calling the one in `hacienda-core`.
 Sequence the steps so the *answer to "does this fit?"* arrives before the porting work, not
 after. L1 is a measurement, not a build.
 
-- [ ] **L1. Measure the budget before designing the port.**
+- [x] **L1. Measure the budget before designing the port.**
       `xberg_wasm_bg.wasm` is 48,060,064 bytes against jsDelivr's 50 MB per-file cap — ~1.9 MB
       of headroom. Build `hacienda-core` for `wasm32-unknown-unknown` with everything gated
       off except `pii/` and `redaction/`, and record the `.wasm` delta.
@@ -569,6 +569,28 @@ after. L1 is a measurement, not a build.
       delivery mechanism" and self-hosting is forced** — Studio's allowlist already permits its
       own origin, and `VITE_MODEL_BASE_URL` (`asset-loader.ts:19`) shows the pattern. Do not
       start L4 until this number exists.
+
+      **Measured 2026-07-30: 1,227,264 bytes (~1.17 MB).** Method: `hacienda-core` gated to
+      `pii`/`redaction` plus the slice of `audit` they need (`AuditConfig`,
+      `entry::RedactionAction` — not the chain/store/segment machinery, which needs `uuid`'s
+      `js` feature per L3 and is out of scope here); `axum`, `tokio`, `uuid` moved to
+      `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`; `xberg` split the same way,
+      native keeps `tokio-runtime`, wasm32 gets `default-features = false, features = ["ner"]`
+      (not the full `wasm-target` umbrella — OCR/Excel/layout are facade-only and not compiled
+      here). Linked as a standalone `cdylib` (`opt-level = "z"`, `lto = true`,
+      `codegen-units = 1`, `panic = "abort"`, `strip = true`) via a throwaway crate (not
+      committed) that calls `PiiPipeline::scan` and `RedactionEngine::redact` under all four
+      modes — including the AES-SIV `Pseudonymiser` path — through a manual single-poll
+      executor, so the linker can't dead-code-eliminate them. Result: **fits inside the ~1.9 MB
+      headroom on its own**, with ~713 KB of headroom left over.
+
+      Caveats that keep this a lower bound, not the final delta: (1) no `wasm-opt`/
+      `wasm-bindgen` in this environment, so there's no post-link DCE/`-Oz` pass — xberg's own
+      build applies one; (2) standalone link, not merged into `xberg_wasm_bg.wasm` — a real
+      merge could dedupe shared deps (`serde`, `regex`, `blake3`, ...) already present in that
+      binary and shrink the true delta, or wasm-bindgen glue could add a modest amount back;
+      (3) excludes NER (`ner-candle-wasm`) and the IndexedDB store layer (L5) entirely, both
+      still to come. Re-measure once L2's real wasm crate and L5's stores exist.
 
 - [ ] **L2. Add the wasm crate and the target feature set.**
       `crates/` is empty and no manifest mentions wasm-bindgen. Follow the xberg precedent:

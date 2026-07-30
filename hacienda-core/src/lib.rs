@@ -27,21 +27,39 @@
 //! ```
 
 pub mod audit;
+// Everything below is server/native-only: `auth` pulls in axum, `facade`/`config`/`error`
+// bind the whole crate (audit stores, review queue, compliance reports) together, and
+// `compliance`, `glossary`, `jobs`, `review` are unused by browser-side PII detection and
+// redaction (see Track L, L1 of the 2026-07-30 hacienda program plan). WASM builds get
+// `pii` and `redaction` plus the slice of `audit` those two modules need
+// (`AuditConfig`, `RedactionAction`) — not the store/chain machinery, which still depends
+// on `uuid`'s missing `js` feature (L3) and is out of scope for the L1 size measurement.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod auth;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod compliance;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod config;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod facade;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod glossary;
-#[cfg(feature = "jobs")]
+#[cfg(all(feature = "jobs", not(target_arch = "wasm32")))]
 pub mod jobs;
 pub mod pii;
 pub mod redaction;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod review;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use auth::{AuthContext, AuthzError, Caller, Capability, CapabilitySet};
+#[cfg(not(target_arch = "wasm32"))]
 pub use config::HaciendaConfig;
+#[cfg(not(target_arch = "wasm32"))]
 pub use error::HaciendaError;
+#[cfg(not(target_arch = "wasm32"))]
 pub use facade::{
     HaciendaFacade, HaciendaMetadata, HaciendaResult, SpanText, TextRedactResult, TextScanResult,
 };
