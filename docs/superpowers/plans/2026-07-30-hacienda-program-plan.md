@@ -562,7 +562,7 @@ generic primitives it carries domain components Studio would otherwise build fro
 `csv-viewer`, `file-dropzone`, `file-upload`, `file-system`, `bounding-box-citations`,
 `document-splits`, `data-grid`, `schema-builder`.
 
-- [ ] **E1. Decide the framework. Blocking — everything in Track E and F depends on it.**
+- [x] **E1. Decide the framework. Blocking — everything in Track E and F depends on it.**
       shadcn/ui is React-only; Radix has no Svelte build. In Svelte the option is
       shadcn-svelte, a separate port — meaning hacienda-private's screens get *reimplemented*,
       not reused, and the domain components above have no equivalent at all.
@@ -581,6 +581,17 @@ generic primitives it carries domain components Studio would otherwise build fro
       `components/ui/file-system.tsx` — **4,586 lines** of virtualized file browser. Rewriting
       that in Svelte dwarfs the 653 lines of Svelte that would be discarded, and it is only
       one of 40 components.
+
+      **Decided 2026-07-30: React + shadcn/ui, per the recommendation above** — plain Vite,
+      not Next, to keep the existing Vite worker setup and avoid dragging in routing machinery
+      this app doesn't need. Studio's shell (the 4 `.svelte` components, 653 lines, no
+      Tailwind) gets rebuilt in React and adopts `hacienda-private`'s 40 vendored shadcn/ui
+      components as-is, including `file-system.tsx` unmodified rather than reimplemented.
+      Everything framework-agnostic (`worker/pipeline.ts`, `kg-export.ts`, `ner-bridge.ts`,
+      `verticals/`, `registry.ts`) is unaffected and ports as-is into the new shell. This
+      unblocks E2 (design tokens) and E3 (screens); Track F (PII review UX, pseudonymization,
+      CodeMirror editor) can now proceed against a concrete component set instead of a
+      hypothetical one.
 
 - [ ] **E2. Port the design tokens first, independently of E1.** Tailwind config + CSS
       variables are framework-agnostic and can land before any component work.
