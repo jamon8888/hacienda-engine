@@ -310,13 +310,51 @@ multilingual and PII-specific.
       slow test is flaky under parallel load on this host, passes in isolation, confirmed by
       rerunning both before and after removing the dependency).
 
-- [ ] **B2. Call `createNerBackend()` and route the bridge through it.**
+- [x] **B2. Call `createNerBackend()` and route the bridge through it.**
       `worker/pipeline.ts:204-212` constructs `XbergEngine` with `{ner:{ner: extractEntities}}`.
       Load the model bytes in the worker (IndexedDB is worker-accessible, so `loadNerModel()`
       can be called there) and substitute `runtime.detect`. Keep `extractEntities` as the
       fallback when the model is unavailable — that path is what A4 must surface.
       *Check:* a French fixture naming `Maître Jean Dupont` and `Acme SAS` yields a `person`
       and an `organization`. Assert this fails against compromise.js first.
+
+      **Done 2026-07-30 — wiring only; neural inference quality unverified, see below.**
+      `worker/pipeline.ts` now loads the model once (`loadNerRuntime()`, lazy-attempt +
+      cached result, never throws) and reads xberg-wasm's own doc comment on
+      `NerModel.detect()` literally: "call it directly," not through `XbergEngine`'s
+      `injection.ner` bridge — that bridge exists for JS-side implementations needing
+      promise/timeout plumbing an in-WASM model doesn't need. New `nerBridge(text,
+      categories)` tries `runtime.detect()` first, falls back to `extractEntities` (regex/
+      compromise) when the model never loaded or a single inference call throws — both
+      injection sites (`engine.extract()`'s `nerConfig` and the standalone `nerEngine.ner()`
+      call) now use it, for consistency, though only the standalone call's result is actually
+      consumed. `createNerBackend()`'s return type tightened from `Promise<any>` to
+      `Promise<NerModel>` while touching its only caller.
+
+      `loadNerRuntime()` runs eagerly in `initEngine()` (parallel with wasm/PII-engine init),
+      reading from the same IndexedDB database `App.svelte`'s onboarding preload already
+      populated — in the common case this is a cache read, not a second download.
+
+      **The Check as written cannot be run here**: it needs the model to actually download
+      and run inference, and this sandbox's `huggingface.co` is blocked (same wall as D3).
+      What *is* verified, for real: the fallback path. `worker/pipeline.test.ts` mocks
+      `loadNerModel` to reject (this sandbox's actual, current outcome, not a hypothetical)
+      and asserts `nerBridge` returns exactly what `extractEntities` would — 2 new cases,
+      70/70 full suite. A manual browser run (fresh session, real network failure, not
+      mocked) confirmed: the "Neural NER backend unavailable" warning logs exactly once
+      (`loadNerRuntime`'s attempt-once guard holds under real worker execution, not just the
+      mocked test), zero page errors, and the document processes to the same output D2
+      already documented for the fallback bridge (misclassifying "Jean Dupont" as an
+      organization) — proving the wiring doesn't break anything when the model is
+      unavailable, without proving what happens when it loads. `tsc --noEmit`,
+      `svelte-check`, `typos`, and a production `vite build` all clean.
+
+      **What's still unverified and needs a network-enabled environment**: whether
+      `NerModel.load()` actually succeeds against the real GLiNER2 weights, whether
+      `detect()`'s output shape matches the doc comment in practice, and the Check's literal
+      French person/organization assertion. Do not treat this item as proof Track B's actual
+      goal (better-than-compromise.js NER) is delivered — only that the plumbing is in place
+      and fails safe.
 
 - [ ] **B3. Resolve model delivery — 1.23 GB is not shippable.**
       Unquantized safetensors, fetched from huggingface.co on first run. Options: quantized

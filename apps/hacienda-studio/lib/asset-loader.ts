@@ -1,4 +1,5 @@
 import { openDB } from "idb";
+import type { NerModel } from "@xberg-io/xberg-wasm";
 
 const DB_NAME = "xberg-studio-assets";
 const DB_VERSION = 1;
@@ -118,7 +119,7 @@ export async function createNerBackend(
   model: Uint8Array,
   tokenizer: Uint8Array,
   encoderConfig: Uint8Array,
-): Promise<any> {
+): Promise<NerModel> {
   // Use the new NerModel from xberg-wasm (ner-candle-wasm feature)
   const { NerModel } = await import("@xberg-io/xberg-wasm");
   const runtime = await NerModel.load({

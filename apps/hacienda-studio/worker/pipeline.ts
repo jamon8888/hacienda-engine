@@ -23,7 +23,8 @@ import initWasm from "@xberg-io/xberg-wasm";
 // index.html, and WebAssembly rejects it as "expected magic word 00 61 73 6d,
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
-import { extractEntities } from "../lib/ner-bridge";
+import { extractEntities, type BridgeEntity } from "../lib/ner-bridge";
+import { loadNerModel, createNerBackend } from "../lib/asset-loader";
 import {
   initPiiEngine,
   redactPii,
@@ -198,10 +199,63 @@ function buildGlossary(entities: Entity[]): string {
   return md;
 }
 
+// Track B1's decision: xberg-wasm's `NerModel` (GLiNER2-Guardrails-PII,
+// multilingual) is the neural NER backend, not `@lmoe/gliner-onnx` (dropped,
+// unused). Loaded once; `loadNerModel()` reads from the same IndexedDB
+// database `App.svelte`'s onboarding preload already populated, so this is
+// almost always a cache read, not a second download. Never throws — a
+// failure (network, or a model that was never cached because onboarding's
+// own download failed, per Track A4) leaves `nerRuntime` `null` and
+// `nerBridge` below falls back to the regex/compromise bridge, same
+// degraded-mode shape as everywhere else this session touched.
+let nerRuntime: Awaited<ReturnType<typeof createNerBackend>> | null = null;
+let nerRuntimeLoadAttempted = false;
+
+async function loadNerRuntime(): Promise<typeof nerRuntime> {
+  if (nerRuntimeLoadAttempted) return nerRuntime;
+  nerRuntimeLoadAttempted = true;
+  try {
+    const { model, tokenizer, encoderConfig } = await loadNerModel();
+    nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
+    console.log("[Worker] Neural NER backend loaded");
+  } catch (e) {
+    console.warn(
+      "[Worker] Neural NER backend unavailable, falling back to regex/compromise bridge:",
+      e,
+    );
+  }
+  return nerRuntime;
+}
+
+/**
+ * Track B2: the real NER path. Not routed through `XbergEngine`'s
+ * `injection.ner` promise-bridge when the model is loaded — xberg's own
+ * `NerModel.detect()` doc comment says that bridge exists for JS-side
+ * implementations needing the timeout/promise plumbing an in-WASM model
+ * needs none of, so `detect()` is called directly. Falls back to
+ * `extractEntities` (regex/compromise, English-only per Track D2) when the
+ * model never loaded, or when a single inference call itself fails.
+ */
+export async function nerBridge(
+  text: string,
+  categories: string[],
+): Promise<BridgeEntity[]> {
+  const runtime = await loadNerRuntime();
+  if (runtime) {
+    try {
+      return await runtime.detect(text, { categories });
+    } catch (e) {
+      console.warn("[Worker] Neural NER inference failed, falling back:", e);
+    }
+  }
+  return extractEntities(text, categories);
+}
+
 async function initEngine(): Promise<void> {
   await Promise.all([
     initWasm({ module_or_path: fetch(xbergWasmUrl) }),
     initPiiEngine(),
+    loadNerRuntime(),
   ]);
 }
 
@@ -261,7 +315,7 @@ async function processFile(
 
     const engine = new XbergEngine(
       { bridgeTimeoutMs: 30000 },
-      { ner: { ner: extractEntities } },
+      { ner: { ner: nerBridge } },
     );
 
     const result = await engine.extract(extractInput, extractConfig);
@@ -279,7 +333,7 @@ async function processFile(
   // Run NER on the markdown (works for both transcription and extraction)
   const nerEngine = new XbergEngine(
     { bridgeTimeoutMs: 30000 },
-    { ner: { ner: extractEntities } },
+    { ner: { ner: nerBridge } },
   );
 
   const nerResults = await nerEngine.ner(markdown, {

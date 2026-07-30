@@ -1,6 +1,18 @@
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, vi } from "vitest";
 import type { Entity } from "../lib/types";
 import type { PiiEntity } from "../lib/pii-engine";
+import { extractEntities } from "../lib/ner-bridge";
+
+// Track B2: `nerBridge` tries the real neural model first and falls back to
+// `extractEntities` (regex/compromise) when it's unavailable. Mocked to
+// always fail here — this suite has no real model bytes to load, and a
+// failing load is also this repo's own sandbox's actual, current behavior
+// (huggingface.co is blocked), so this exercises the fallback path for real
+// rather than skipping it.
+vi.mock("../lib/asset-loader", () => ({
+  loadNerModel: vi.fn().mockRejectedValue(new Error("model host unreachable")),
+  createNerBackend: vi.fn(),
+}));
 
 // `pipeline.ts` assigns `self.onmessage` at module scope (it's a worker entry
 // point). Stub `self` before importing it dynamically so that assignment has
@@ -8,12 +20,12 @@ import type { PiiEntity } from "../lib/pii-engine";
 // `import` would run pipeline.ts's module body before this stub takes effect.
 let renderAnnotatedMarkdown: typeof import("./pipeline").renderAnnotatedMarkdown;
 let filterExportableEntities: typeof import("./pipeline").filterExportableEntities;
+let nerBridge: typeof import("./pipeline").nerBridge;
 
 beforeAll(async () => {
   (globalThis as { self?: unknown }).self = globalThis;
-  ({ renderAnnotatedMarkdown, filterExportableEntities } = await import(
-    "./pipeline"
-  ));
+  ({ renderAnnotatedMarkdown, filterExportableEntities, nerBridge } =
+    await import("./pipeline"));
 });
 
 function piiEntity(overrides: Partial<PiiEntity>): PiiEntity {
@@ -214,5 +226,27 @@ describe("filterExportableEntities (Track A2)", () => {
     );
 
     expect(result).toEqual([misclassifiedPhone]);
+  });
+});
+
+describe("nerBridge (Track B2)", () => {
+  it("falls back to extractEntities when the neural model fails to load", async () => {
+    const text = "Contact Jean Dupont at jean.dupont@cabinet-exemple.fr.";
+    const categories = ["person", "email"];
+
+    const expected = await extractEntities(text, categories);
+    const actual = await nerBridge(text, categories);
+
+    expect(actual).toEqual(expected);
+  });
+
+  it("does not retry a failed load on a second call — same fallback result", async () => {
+    const text = "Acme SAS acquired Beta SARL.";
+    const categories = ["organization"];
+
+    const first = await nerBridge(text, categories);
+    const second = await nerBridge(text, categories);
+
+    expect(second).toEqual(first);
   });
 });
