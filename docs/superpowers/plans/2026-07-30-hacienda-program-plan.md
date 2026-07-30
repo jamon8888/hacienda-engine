@@ -819,17 +819,65 @@ mmap and needs only numpy.
 
 The core product. Design the output format before writing pipeline code.
 
-### I1. Folder ingest
+### I1. Folder ingest — DONE 2026-07-30
 
-- [ ] Add `webkitdirectory` to the file input and carry `file.webkitRelativePath` through
+- [x] Add `webkitdirectory` to the file input and carry `file.webkitRelativePath` through
       `FileInput` so the source tree survives into the output. Today only `multiple` is set
       and relative paths are discarded.
-- [ ] Ingest is sequential (`for (const file of files)`, `worker/pipeline.ts:331`). A folder
+
+      **Done.** Rather than a second `<input type="file">` (every e2e test's
+      `input[type="file"]` selector assumes exactly one element exists), `App.svelte` toggles
+      `webkitdirectory` on the *same* `#file-input` via a `folderMode` flag, flipped by an
+      "or choose a folder" button next to the existing label. `lib/file-filter.ts`'s new
+      `effectiveFileName()` prefers `webkitRelativePath` over `.name` — used everywhere a
+      filename crosses a boundary: the `FileInput.name` sent to the worker, the
+      `progress`/`ProgressBar` Map key (previously keyed by bare `file.name`, which would have
+      silently never matched a folder-uploaded file's progress messages — caught before it
+      shipped, not after), and the batch-completion counter. `worker/pipeline.ts` needed no
+      change: `r.name` already becomes the zip entry path via `zip.file(r.name, ...)`, and
+      JSZip treats `/` in that path as folder nesting, so a relative path in `input.name`
+      produces a nested zip entry for free. **Not done**: drag-and-drop folder traversal —
+      `onDrop` still reads `dataTransfer.files` flat, so a dragged folder is not (yet) walked
+      recursively; only the explicit folder-picker button carries `webkitRelativePath`.
+- [x] Ingest is sequential (`for (const file of files)`, `worker/pipeline.ts:331`). A folder
       of a hundred documents with a 614 MB model loaded will be slow and gives no way to
       cancel. Decide whether to parallelise or just report honest per-file progress; do not
       leave a progress bar that stalls for minutes with no explanation.
-- [ ] Skip/report unsupported files rather than failing the batch — a real folder contains
+
+      **Decided: honest per-file progress, not parallelisation.** The single loaded WASM
+      NER/PII engine instance is not built for concurrent inference calls, and true
+      parallelism would need multiple Workers — out of scope here. The per-file progress
+      cards already update through real stages as `processFile` runs (not new); what was
+      missing for a large folder was any sense of overall progress. Added a
+      `{completed} / {total} processed` summary line, shown whenever more than one file is
+      queued, computed from the same `progress` Map. Cancellation remains unimplemented.
+- [x] Skip/report unsupported files rather than failing the batch — a real folder contains
       `.DS_Store`, images, and things Studio cannot extract.
+
+      **Done.** `isJunkFile()` (`lib/file-filter.ts`) silently drops OS noise (dotfiles,
+      `Thumbs.db`, `desktop.ini`) before validation — a real folder's `.DS_Store` was never a
+      file the user meant to include, so it isn't reported as skipped, just excluded.
+      Genuinely unsupported files (wrong type/too large) already didn't fail the batch
+      (`validateFile` filtered them client-side before this change) but only surfaced as a
+      per-file error banner that overwrote itself on every subsequent file — useless for a
+      folder with several. Now: exactly one rejected file (the existing, tested single-file
+      case) keeps its precise message; more than one is reported as a count
+      ("Skipped 2 unsupported and 1 system files.").
+
+      **Verified for real**: `lib/file-filter.test.ts` (7 cases: relative-path preference,
+      junk-file detection including nested-path basenames). New
+      `tests/e2e/folder-upload.spec.ts` builds an actual temp directory (`sub/note.txt`,
+      `.DS_Store`, `mystery.xyz`), uploads it through the folder picker using Playwright's
+      directory-path `setInputFiles` (which populates `webkitRelativePath` the same way a
+      real browser directory picker does — not simulated), and asserts all three claims
+      against the real downloaded zip: the nested path survives (`.../sub/note.md`), the
+      junk and unsupported files are absent, and the skip-notice text names both counts. Run
+      for real (temporary sandbox-only `wasm-opt = false` and Chromium `executablePath`,
+      both reverted before commit, same pattern as every other verification in this PR) —
+      5/5 across `basic.spec.ts` + the new spec, and the full existing e2e suite
+      (`toggles`, `egress`, `pipeline`, `audio` — 11 more tests) re-run clean to confirm no
+      regression from re-keying the progress Map. `vitest run` 77/77, `svelte-check` 0
+      errors, `tsc --noEmit` clean, production `vite build` clean, `typos` clean.
 
 ### I2. The vault layout — the thing to get right — DECIDED 2026-07-30
 

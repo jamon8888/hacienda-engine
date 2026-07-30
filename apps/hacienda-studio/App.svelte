@@ -4,6 +4,7 @@
 	import ProgressBar from './lib/ProgressBar.svelte';
 	import ConfigPanel from './lib/ConfigPanel.svelte';
 	import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from './lib/asset-loader';
+	import { effectiveFileName, isJunkFile } from './lib/file-filter';
 	import { DEFAULT_CONFIG } from './lib/types';
 	import type { AppConfig, FileInput, ProcessedFile, ProgressUpdate } from './lib/types';
 
@@ -15,6 +16,14 @@
 	let config = $state<AppConfig>({ ...DEFAULT_CONFIG });
 	let showConfig = $state(false);
 	let error = $state<string | null>(null);
+	// Toggles the *same* `#file-input` element between file- and
+	// directory-picking rather than adding a second `<input type="file">` —
+	// every e2e test's `input[type="file"]` selector assumes there is exactly
+	// one, and a second element would make that selector ambiguous.
+	let folderMode = $state(false);
+	// Folder drops routinely carry OS noise and unsupported files; report the
+	// count once instead of a per-file error banner that just overwrites itself.
+	let skipNotice = $state<string | null>(null);
 	// `assets.nerModel` stays true even when the neural backend failed to load, because
 	// the app has a legitimate regex-only fallback and onboarding must not get stuck on a
 	// blocked model download. This flag is what actually records the failure.
@@ -106,19 +115,44 @@
 		}
 	}
 
-	async function handleFiles(fileList: FileList | FileList | File[]): Promise<void> {
+	async function handleFiles(fileList: FileList | File[]): Promise<void> {
 		console.log('[App] handleFiles called with', fileList.length, 'files');
 		const fileArray = Array.from(fileList);
 		const validFiles: File[] = [];
+		let skippedJunk = 0;
+		const unsupported: string[] = [];
 
 		for (const file of fileArray) {
+			const name = effectiveFileName(file);
+			if (isJunkFile(name)) {
+				skippedJunk++;
+				continue;
+			}
 			const validation = validateFile(file);
-			console.log('[App] validateFile:', file.name, file.type, validation);
+			console.log('[App] validateFile:', name, file.type, validation);
 			if (!validation.valid) {
-				error = validation.error || 'Invalid file';
+				unsupported.push(validation.error || 'Invalid file');
+				console.warn('[App] skipping unsupported file:', name, validation.error);
 				continue;
 			}
 			validFiles.push(file);
+		}
+
+		const totalSkipped = unsupported.length + skippedJunk;
+		if (fileArray.length === 1 && unsupported.length === 1) {
+			// A single rejected file keeps the precise reason (existing UX
+			// contract), e.g. "Unsupported file type: application/x-msdownload".
+			error = unsupported[0];
+			skipNotice = null;
+		} else if (totalSkipped > 0) {
+			// A folder's worth of rejects gets a count instead of one banner
+			// overwriting itself once per file.
+			const skipParts: string[] = [];
+			if (unsupported.length > 0) skipParts.push(`${unsupported.length} unsupported`);
+			if (skippedJunk > 0) skipParts.push(`${skippedJunk} system`);
+			skipNotice = `Skipped ${skipParts.join(' and ')} file${totalSkipped === 1 ? '' : 's'}.`;
+		} else {
+			skipNotice = null;
 		}
 
 		if (validFiles.length === 0) return;
@@ -126,9 +160,12 @@
 		files = [...files, ...validFiles];
 		error = null;
 
-		// Send to worker
+		// Send to worker — `name` carries the folder-relative path when the
+		// file came from a directory picker, so it survives into the worker's
+		// output filename (and, via JSZip's own path handling, the exported
+		// zip's folder structure) rather than being flattened to a basename.
 		const fileInputs = await Promise.all(validFiles.map(async f => ({
-			name: f.name,
+			name: effectiveFileName(f),
 			bytes: await f.arrayBuffer(),
 			type: f.type || 'application/octet-stream'
 		})));
@@ -160,6 +197,23 @@
 	function clearError(): void {
 		error = null;
 	}
+
+	function clearSkipNotice(): void {
+		skipNotice = null;
+	}
+
+	function toggleFolderMode(event: MouseEvent): void {
+		event.preventDefault();
+		folderMode = !folderMode;
+	}
+
+	// `progress` is keyed by whatever name the worker was sent — the
+	// folder-relative path for a directory upload, the basename otherwise —
+	// so lookups have to use the same key, not `file.name`, or every
+	// folder-uploaded file's progress card silently never appears.
+	let completedCount = $derived(
+		files.filter(f => progress.get(effectiveFileName(f))?.stage === 'complete').length
+	);
 </script>
 
 <div class="app">
@@ -180,21 +234,34 @@
 			</div>
 		{/if}
 
+		{#if skipNotice}
+			<div class="skip-notice" role="status">
+				<span>ℹ️ {skipNotice}</span>
+				<button onclick={clearSkipNotice} aria-label="Dismiss">✕</button>
+			</div>
+		{/if}
+
 		<main class="main">
 			<section class="drop-zone" role="group" aria-label="Upload documents" ondrop={onDrop} ondragover={onDragOver}>
-				<input type="file" id="file-input" multiple disabled={!workerReady} accept=".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html,.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv" class="file-input" onchange={(e) => { const files = (e.target as HTMLInputElement).files; if (files) handleFiles(files); }} aria-label="Choose files" />
+				<input type="file" id="file-input" multiple webkitdirectory={folderMode ? true : undefined} disabled={!workerReady} accept={folderMode ? undefined : ".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html,.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv"} class="file-input" onchange={(e) => { const files = (e.target as HTMLInputElement).files; if (files) handleFiles(files); (e.target as HTMLInputElement).value = ''; }} aria-label={folderMode ? 'Choose a folder' : 'Choose files'} />
 				<label for="file-input" class="drop-label">
-					<span class="drop-icon" aria-hidden="true">📄</span>
-					<p>{workerReady ? 'Drop files here or click to browse' : 'Starting the local engine…'}</p>
+					<span class="drop-icon" aria-hidden="true">{folderMode ? '📁' : '📄'}</span>
+					<p>{workerReady ? (folderMode ? 'Drop a folder here or click to browse' : 'Drop files here or click to browse') : 'Starting the local engine…'}</p>
 					<p class="drop-hint">PDF, Office, Email, Images, Audio/Video, Subtitles, Code — up to 50MB each</p>
 				</label>
+				<button type="button" class="mode-toggle" disabled={!workerReady} onclick={toggleFolderMode}>
+					{folderMode ? 'or choose individual files' : 'or choose a folder'}
+				</button>
 			</section>
 
 			{#if files.length > 0}
+				{#if files.length > 1}
+					<p class="batch-summary" aria-live="polite">{completedCount} / {files.length} processed</p>
+				{/if}
 				<section class="progress-section" aria-live="polite">
 					{#each files as file}
-						{#if progress.has(file.name)}
-							<ProgressBar file={file} update={progress.get(file.name)!} />
+						{#if progress.has(effectiveFileName(file))}
+							<ProgressBar file={{ name: effectiveFileName(file) }} update={progress.get(effectiveFileName(file))!} />
 						{/if}
 					{/each}
 				</section>
@@ -223,6 +290,12 @@
 	.config-toggle:hover { background: var(--color-primary); }
 	.error-banner { display: flex; justify-content: space-between; align-items: center; padding: var(--spacing) calc(var(--spacing) * 2); background: rgba(248, 81, 73, 0.15); border-bottom: 1px solid var(--color-error); color: var(--color-error); }
 	.error-banner button { color: inherit; font-size: 1.2rem; line-height: 1; }
+	.skip-notice { display: flex; justify-content: space-between; align-items: center; padding: var(--spacing) calc(var(--spacing) * 2); background: var(--color-surface); border-bottom: 1px solid var(--color-border); color: var(--color-muted); font-size: 0.85rem; }
+	.skip-notice button { color: inherit; font-size: 1.2rem; line-height: 1; }
+	.mode-toggle { display: block; margin: calc(var(--spacing) * 1.5) auto 0; padding: 0; background: none; color: var(--color-muted); font-size: 0.8rem; text-decoration: underline; }
+	.mode-toggle:hover { color: var(--color-primary); }
+	.mode-toggle:disabled { opacity: 0.6; cursor: not-allowed; }
+	.batch-summary { text-align: center; font-size: 0.85rem; color: var(--color-muted); margin-top: calc(var(--spacing) * 2); margin-bottom: calc(var(--spacing) * -1); }
 	.main { flex: 1; padding: calc(var(--spacing) * 3) calc(var(--spacing) * 2); max-width: 800px; margin: 0 auto; width: 100%; }
 	.drop-zone { border: 2px dashed var(--color-border); border-radius: 12px; padding: calc(var(--spacing) * 4) var(--spacing); text-align: center; transition: border-color 0.2s, background 0.2s; background: var(--color-surface); cursor: pointer; }
 	.drop-zone:hover { border-color: var(--color-primary); background: rgba(88, 166, 255, 0.05); }
