@@ -12,6 +12,7 @@ use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use tokio::task::JoinSet;
 use xberg::{extract, ExtractInput, ExtractionResult};
 
 /// Version recorded on every audit entry so a record can be tied to the code that made it.
@@ -19,7 +20,9 @@ const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct HaciendaFacade {
     config: HaciendaConfig,
-    pii_pipeline: Option<PiiPipeline>,
+    /// `Arc`-wrapped so [`Self::detect_concurrently`] can hand each spawned task its own
+    /// cheap clone without cloning the pipeline itself (`PiiPipeline` is not `Clone`).
+    pii_pipeline: Option<Arc<PiiPipeline>>,
     compliance: Option<ComplianceGenerator>,
     /// The persistence backend for the tamper-evident audit log.
     ///
@@ -204,7 +207,8 @@ impl HaciendaFacade {
             .pii
             .clone()
             .map(|c| PiiPipeline::with_pseudonymiser(c, pseudonymiser.clone()))
-            .transpose()?;
+            .transpose()?
+            .map(Arc::new);
 
         // Auditing without detection would record nothing, so the store follows the
         // pipeline rather than being independently switchable.
@@ -448,9 +452,14 @@ impl HaciendaFacade {
         let mut review_submitted = 0;
 
         if let Some(pipeline) = &self.pii_pipeline {
-            for document in &mut extraction.results {
-                let result = pipeline.process(&document.content).await?;
+            let detections = self
+                .detect_concurrently(pipeline, &extraction.results)
+                .await?;
 
+            // `detect_concurrently` guarantees `detections.len() == extraction.results.len()`
+            // and input order (D3), so zipping is safe and every document below is still
+            // audited and reviewed on this task, one at a time, exactly as before.
+            for (document, result) in extraction.results.iter_mut().zip(detections) {
                 self.observe_glossary(&document.content, &result);
                 audit_entries.extend(self.record_audit(&result, caller).await?);
                 review_submitted += self.submit_for_review(&result).await?;
@@ -781,6 +790,77 @@ impl HaciendaFacade {
         }
         Ok(count)
     }
+
+    /// Run `pipeline.process` over every document, bounded by
+    /// `pipeline.config().concurrency`, and return one result per document in the same
+    /// order as `documents` — the contract [`HaciendaResult::pii`] documents.
+    ///
+    /// Only detection itself runs on a spawned task. Audit, glossary, and review
+    /// recording stay on the caller's task in `process_batch_with_auth`, run once per
+    /// result after this method returns them in order — so those side effects keep
+    /// their original one-per-document, input-order behaviour no matter how detection
+    /// completes. `self` therefore never needs to cross a spawn boundary; only
+    /// `Arc<PiiPipeline>` does, which the Step 1 spike already proved is `Send + Sync`.
+    ///
+    /// A `concurrency` of `0` is treated as `1` — a limit that could schedule nothing
+    /// would make every batch hang forever, which is a worse failure mode than the
+    /// sequential behaviour a caller most likely meant.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`HaciendaError::Pii`] raised by any document's detection.
+    /// Documents already spawned when that happens are still awaited and their
+    /// results discarded — nothing here can leave a straggler task detached.
+    async fn detect_concurrently(
+        &self,
+        pipeline: &Arc<PiiPipeline>,
+        documents: &[xberg::ExtractedDocument],
+    ) -> Result<Vec<PipelineResult>, HaciendaError> {
+        let limit = pipeline.config().concurrency.max(1);
+        let texts: Vec<String> = documents.iter().map(|d| d.content.clone()).collect();
+        let total = texts.len();
+
+        let mut slots: Vec<Option<PipelineResult>> =
+            std::iter::repeat_with(|| None).take(total).collect();
+        let mut set: JoinSet<(usize, Result<PipelineResult, PiiError>)> = JoinSet::new();
+        let mut next = 0;
+
+        while next < total && set.len() < limit {
+            spawn_detection(&mut set, pipeline, &texts, next);
+            next += 1;
+        }
+
+        while let Some(joined) = set.join_next().await {
+            let (index, outcome) = joined.expect("pii detection task must not panic");
+            slots[index] = Some(outcome?);
+            if next < total {
+                spawn_detection(&mut set, pipeline, &texts, next);
+                next += 1;
+            }
+        }
+
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.expect("every index is filled before join_next returns None"))
+            .collect())
+    }
+}
+
+/// Spawn one detection task for `texts[index]`, tagged with `index` so the joining side
+/// in [`HaciendaFacade::detect_concurrently`] can place the result regardless of which
+/// task finishes first.
+fn spawn_detection(
+    set: &mut JoinSet<(usize, Result<PipelineResult, PiiError>)>,
+    pipeline: &Arc<PiiPipeline>,
+    texts: &[String],
+    index: usize,
+) {
+    let pipeline = Arc::clone(pipeline);
+    let text = texts[index].clone();
+    set.spawn(async move {
+        let result = pipeline.process(&text).await;
+        (index, result)
+    });
 }
 
 async fn extract_all(
@@ -1677,7 +1757,7 @@ mod tests {
         )));
         HaciendaFacade {
             config,
-            pii_pipeline: Some(pipeline),
+            pii_pipeline: Some(Arc::new(pipeline)),
             compliance: None,
             audit_store,
             review_queue: None,
@@ -1936,6 +2016,249 @@ mod tests {
             result.audit_entries.is_empty(),
             "SpanText::Omit must produce no audit entries; got {}",
             result.audit_entries.len()
+        );
+    }
+
+    // ── Concurrency spike (Task 4, Step 1 — closes #30) ─────────────────────────
+    //
+    // Throwaway proof-of-compile, not part of `process_batch_with_auth`. Every
+    // `.process()` call and every `record_audit` / `observe_glossary` /
+    // `submit_for_review` call below runs on an independently spawned task, holding
+    // only `Arc<PiiPipeline>` and `Arc<HaciendaFacade>`. If this stops compiling,
+    // some field inside `PiiPipeline` (most likely `NerDetector`'s boxed backend) or
+    // inside `HaciendaFacade` (the audit store, glossary mutex, or review queue) is
+    // not `Send + Sync`, and the pool shape planned for Step 4 must change.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spike_pii_pipeline_and_facade_survive_concurrent_spawns() {
+        use tokio::task::JoinSet;
+
+        const DOCS: usize = 8;
+        let texts = [
+            "write to bob@example.com today",
+            "contact alice@example.com now",
+            "reach carol@example.com please",
+            "email dave@example.com asap",
+        ];
+
+        let pipeline = Arc::new(PiiPipeline::with_detector(pii_config(), None).unwrap());
+
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        // Force every regex detection (confidence 1.0) into the review queue, so the
+        // spike exercises `submit_for_review` as well as `record_audit`.
+        config.review = Some(ReviewConfig {
+            confidence_threshold: 1.5,
+            deadline_hours: Some(1),
+        });
+        config.glossary = Some(GlossaryConfig::default());
+        let facade = Arc::new(HaciendaFacade::new(config).unwrap());
+
+        let mut set: JoinSet<Result<usize, HaciendaError>> = JoinSet::new();
+        for i in 0..DOCS {
+            let pipeline = Arc::clone(&pipeline);
+            let facade = Arc::clone(&facade);
+            let text = texts[i % texts.len()].to_string();
+            set.spawn(async move {
+                let result = pipeline.process(&text).await?;
+                facade.observe_glossary(&text, &result);
+                let audit_entries = facade.record_audit(&result, Caller::Trusted).await?;
+                let submitted = facade.submit_for_review(&result).await?;
+                Ok(audit_entries.len() + submitted)
+            });
+        }
+
+        let mut activity = 0;
+        while let Some(res) = set.join_next().await {
+            activity += res
+                .expect("spawned task must not panic")
+                .expect("stage must not error");
+        }
+
+        assert_eq!(
+            activity,
+            DOCS * 2,
+            "each of the {DOCS} documents should record one audit entry and one review submission"
+        );
+    }
+
+    // ── Task 4, Step 2 — pii results stay in input order under concurrency > 1 ──
+    //
+    // A detector that sleeps for a caller-supplied duration before returning, keyed by
+    // which document's text it was asked to detect on. Document 0 sleeps longest and
+    // document 3 does not sleep at all, so under real concurrency document 0 is the
+    // *last* task to finish even though it must be the *first* entry in
+    // `HaciendaResult::pii` (the contract documented on that field). A collector that
+    // pushes results as they finish — the naive, easy-to-write alternative to indexed
+    // collection — would return document 3's content first and document 0's last; only
+    // collecting by index returns them in input order regardless of completion order.
+    struct DelayedDetector {
+        delays: Vec<(&'static str, std::time::Duration)>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl NerBackend for DelayedDetector {
+        async fn detect(
+            &self,
+            text: &str,
+            _categories: &[EntityCategory],
+        ) -> XbergResult<Vec<Entity>> {
+            if let Some((_, delay)) = self.delays.iter().find(|(tag, _)| text.contains(tag)) {
+                tokio::time::sleep(*delay).await;
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    /// Build a facade around a hand-assembled pipeline, bypassing `HaciendaFacade::new`
+    /// the same way `facade_with_model_entity` does above — there is no public
+    /// constructor that accepts both a caller-supplied detector and a non-default
+    /// `concurrency`, and there does not need to be one just for this test.
+    fn facade_with_pipeline(
+        pipeline: PiiPipeline,
+        audit_store: Option<Arc<dyn AuditStore>>,
+    ) -> HaciendaFacade {
+        let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
+        HaciendaFacade {
+            config,
+            pii_pipeline: Some(Arc::new(pipeline)),
+            compliance: None,
+            audit_store,
+            review_queue: None,
+            glossary: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_return_pii_results_in_input_order_under_concurrency() {
+        const TAGS: [&str; 4] = ["doc-0", "doc-1", "doc-2", "doc-3"];
+        let texts: Vec<String> = TAGS
+            .iter()
+            .map(|tag| format!("{tag} contains no personal data at all"))
+            .collect();
+
+        let detector = NerDetector::new(Arc::new(DelayedDetector {
+            delays: vec![
+                ("doc-0", std::time::Duration::from_millis(300)),
+                ("doc-1", std::time::Duration::from_millis(200)),
+                ("doc-2", std::time::Duration::from_millis(100)),
+                ("doc-3", std::time::Duration::from_millis(0)),
+            ],
+        }));
+
+        let mut config = pii_config();
+        config.concurrency = 4; // >= document count, so every task is in flight at once
+        let pipeline = PiiPipeline::with_detector(config, Some(detector)).unwrap();
+        let facade = facade_with_pipeline(pipeline, None);
+
+        let inputs = texts.iter().map(|t| text_input(t)).collect();
+        let result = facade.process_batch(inputs).await.unwrap();
+
+        let redacted: Vec<&str> = result
+            .pii
+            .iter()
+            .map(|r| r.redacted_text.as_str())
+            .collect();
+        let expected: Vec<&str> = texts.iter().map(String::as_str).collect();
+        assert_eq!(
+            redacted, expected,
+            "pii results must stay in input order even though doc-0 (index 0) is the \
+             slowest task to finish and doc-3 (index 3) is the fastest"
+        );
+    }
+
+    // ── Task 4, Step 3 — every document is audited exactly once under concurrency > 1 ──
+    //
+    // Reuses `CountingAuditStore` (defined above for the sequential version of this same
+    // invariant). A worker pool that silently drops a document — e.g. on a full bounded
+    // channel — is a compliance defect, not a performance one: this asserts an exact
+    // count equal to the number of documents, not merely "at least one" or "no panic".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_audit_every_document_exactly_once_under_concurrency() {
+        const DOCS: usize = 8;
+        let counting_store = Arc::new(CountingAuditStore::new());
+
+        let mut config = pii_config();
+        config.concurrency = 4;
+        let facade = HaciendaFacade::with_stores(
+            HaciendaConfig::default().with_pii(config),
+            Some(Arc::clone(&counting_store) as Arc<dyn AuditStore>),
+            None,
+        )
+        .unwrap();
+
+        let inputs = (0..DOCS)
+            .map(|i| text_input(&format!("user{i}@example.com")))
+            .collect();
+        facade.process_batch(inputs).await.unwrap();
+
+        assert_eq!(
+            counting_store.append_call_count(),
+            DOCS,
+            "every document must be audited exactly once, even under concurrency"
+        );
+    }
+
+    // ── Task 4, Step 6 (strengthening) — the concurrency limit is actually enforced ──
+    //
+    // Step 6's mutation exercise (setting `limit = usize::MAX` by hand) left every
+    // existing test green, which per the plan means "the bound is untested and Step 3
+    // needs strengthening" — `should_audit_every_document_exactly_once_under_concurrency`
+    // proves the pool doesn't *drop* documents, but a pool that ignores its configured
+    // limit and runs everything at once would pass it too. This test tracks how many
+    // detections are simultaneously in flight and asserts the observed peak equals the
+    // configured limit exactly: not "at most", which an accidentally-serial pool would
+    // also satisfy, and not "at least", which an unbounded pool would also satisfy.
+    struct TrackingDetector {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        delay: std::time::Duration,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl NerBackend for TrackingDetector {
+        async fn detect(
+            &self,
+            _text: &str,
+            _categories: &[EntityCategory],
+        ) -> XbergResult<Vec<Entity>> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn should_bound_in_flight_detections_to_the_configured_concurrency_limit() {
+        const DOCS: usize = 8;
+        const LIMIT: usize = 2;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let detector = NerDetector::new(Arc::new(TrackingDetector {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+            delay: std::time::Duration::from_millis(50),
+        }));
+
+        let mut config = pii_config();
+        config.concurrency = LIMIT;
+        let pipeline = PiiPipeline::with_detector(config, Some(detector)).unwrap();
+        let facade = facade_with_pipeline(pipeline, None);
+
+        let inputs = (0..DOCS)
+            .map(|i| text_input(&format!("doc {i} has no personal data")))
+            .collect();
+        facade.process_batch(inputs).await.unwrap();
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            LIMIT,
+            "peak in-flight detections must equal the configured concurrency limit \
+             ({LIMIT}) — not fewer (the pool would be under-using its budget) and not \
+             more (the pool would be ignoring it), across {DOCS} documents"
         );
     }
 }

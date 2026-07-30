@@ -19,6 +19,15 @@ pub struct PipelineConfig {
     pub redaction: RedactionConfig,
     pub audit: AuditConfig,
     pub model: ModelConfig,
+    /// How many documents [`crate::HaciendaFacade::process_batch_with_auth`] runs
+    /// through this pipeline at once.
+    ///
+    /// `1` is the default and preserves the pipeline's original strictly-sequential
+    /// behaviour. Raising it bounds a worker pool over the batch's documents — it does
+    /// not change what is returned: results still come back in input order (see
+    /// `HaciendaResult::pii`) and every document is still audited and reviewed exactly
+    /// once, regardless of completion order.
+    pub concurrency: usize,
 }
 
 impl Default for PipelineConfig {
@@ -30,6 +39,7 @@ impl Default for PipelineConfig {
             redaction: RedactionConfig::default(),
             audit: AuditConfig::default(),
             model: ModelConfig::default(),
+            concurrency: 1,
         }
     }
 }
@@ -123,6 +133,10 @@ mod tests {
         assert!(config.regex_first);
         assert!(!config.model.enabled);
         assert!(config.model.model_dir.is_none());
+        assert_eq!(
+            config.concurrency, 1,
+            "default concurrency must preserve the original sequential behaviour"
+        );
     }
 
     #[test]
