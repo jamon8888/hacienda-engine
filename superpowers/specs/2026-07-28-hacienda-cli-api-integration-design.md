@@ -271,9 +271,16 @@ store, never carried as a config value — otherwise a `--flag` or environment
 variable could substitute the key that determines whether two documents
 co-refer, and `config show` would print the secret that de-pseudonymises the
 whole corpus. `config show` reports the active `key_id` and the resolver, never
-key material. Concurrency has a similar caveat: `--concurrency` is bounded by
-audit-append serialisation (§9, Phase 2), and that ceiling must be stated in
-`--help` rather than left to be discovered.
+key material. Concurrency has a similar caveat: Phase 2's §9 measurement (Task 5,
+issue #31) found that raising `--concurrency` past 1 does not reliably improve
+throughput on constrained hardware — a 300-document fixed corpus reached 0.78x–0.91x
+at CPU count across two runs, never 2x. The audit store's `io_order` lock is *not*
+the cause: measured wait stayed under 0.2% of wall time at every concurrency level
+tested, ruling out audit-append serialisation as the ceiling this spec originally
+assumed. The throughput shortfall alone crosses §9's threshold, so Phase 6's
+audit-append work is unblocked immediately (not held behind Phase 4), but the actual
+bottleneck is not yet root-caused — `--help` states this rather than repeating the
+disproven audit-append explanation.
 
 ---
 

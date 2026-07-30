@@ -150,9 +150,12 @@ pub struct ConcurrencyArgs {
     /// one lives at `extraction.concurrency.max_threads` in the config file and is not
     /// changed by this flag. Run `hacienda config show` to see both.
     ///
-    /// Raising it past a few workers yields less than it looks like it should: every
-    /// document's audit entry is appended through one segment, and that append is
-    /// serialised and fsynced. Audit append is the ceiling.
+    /// Measured against a 300-document fixed corpus (§9, Phase 2, tracking issue #31):
+    /// raising this past 1 did not reach 2x throughput at CPU count, and in some runs
+    /// made wall time worse. The audit store's `io_order` lock is not the reason — its
+    /// measured wait stayed under 0.2% of wall time at every concurrency level tested.
+    /// Do not expect this flag alone to scale throughput; the ceiling on constrained
+    /// hardware is elsewhere and is not yet root-caused.
     #[arg(long, value_name = "N")]
     pub concurrency: Option<usize>,
 }
