@@ -20,6 +20,25 @@ hacienda extracts text and structure from a wide range of document formats and t
 | **Glossary**                  | Entity linking, Markdown/HTML/Wiki link injection        |
 | **Studio** *(in development)* | Browser workspace for local, zero-egress redaction — in-browser extraction/NER, knowledge-graph export |
 
+## Supported Formats
+
+97+ input formats:
+
+| Category                | Formats                                                                    |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| **Word processing**     | `.docx`, `.docm`, `.doc`, `.dotx`, `.dotm`, `.dot`, `.odt`, `.pages`        |
+| **Spreadsheets**        | `.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.xla`, `.xlam`, `.xltm`, `.xltx`, `.xlt`, `.ods`, `.numbers` |
+| **Presentations**       | `.pptx`, `.pptm`, `.ppt`, `.ppsx`, `.potx`, `.potm`, `.pot`, `.odp`, `.key` |
+| **PDF & eBooks**        | `.pdf` (text + OCR for scanned pages), `.epub`, `.fb2`                     |
+| **Email**               | `.eml`, `.msg`, `.pst` — headers, HTML/plain body, attachments             |
+| **Archives**            | `.zip`, `.tar`, `.tgz`, `.gz`, `.7z` — recursive extraction                |
+| **Subtitles / audio-video** | `.srt`, `.vtt`, `.ass`, `.ssa`; transcription for `.mp3`, `.m4a`, `.wav`, `.webm`, `.mp4` |
+| **Images (OCR)**        | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.tiff`, `.tif`, `.svg`   |
+| **Web & markup**        | `.html`, `.htm`, `.xhtml`, `.xml`                                          |
+| **Structured data**     | `.json`, `.yaml`, `.yml`, `.toml`, `.csv`, `.tsv`                          |
+| **Plain text**          | `.txt`, `.md`, `.markdown`, `.djot`, `.mdx`, `.rst`, `.org`, `.rtf`        |
+| **Source code**         | 306 programming languages via tree-sitter                                  |
+
 ## Quick Start
 
 ```bash
@@ -96,6 +115,17 @@ docker run --rm -v $(pwd):/data ghcr.io/jamon8888/hacienda:latest \
 - `NerBackend` trait for custom GLiNER models
 - `RedactionConfig::custom_terms` / `custom_patterns`
 - Global plugin registries for OCR, extraction, embedding, reranking, tokenizing, validation, and rendering backends
+
+### Statistical PII detection: GLiNER2 + LoRA
+
+Model-based detection runs alongside the 42 regex patterns, and the two result sets are merged into one entity list per document:
+
+- **Backend** — GLiNER2 served through a Candle inference backend (pure Rust, no Python runtime at inference time).
+- **LoRA adapters** — an adapter (`adapter_config.json` + `adapter_model.safetensors`) is merged into the base model's weights at load time, so inference pays no per-request adapter cost. A base-model-mismatch guard refuses to merge an adapter trained against a different base model rather than silently producing bad weights.
+- **Process-wide caching** — backends are cached and keyed by `(model_dir, lora_adapter_dir)`, so the model load and adapter merge happen once per pair, not once per document.
+- **Selectable per run** — `--model-dir` / `--lora-dir` on the CLI, or `ModelConfig::{model_dir, lora_adapter_dir}` in code/config, choose which base model and adapter pair to load.
+- **Confidence-aware merge** — entities the model reports with no confidence score are treated as certain rather than dropped; where regex and model detections disagree, the regex span wins.
+- **Non-blocking inference** — model calls run through `block_in_place`, so CPU-bound inference doesn't stall the async executor.
 
 ## Configuration
 
