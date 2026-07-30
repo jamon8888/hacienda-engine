@@ -627,11 +627,26 @@ after. L1 is a measurement, not a build.
       extraction/OCR yet, so nothing today depends on it. Re-add it once Track I needs
       xberg's extraction on wasm32 and CI provisions `WASI_SDK_PATH`.
 
-      Release `.wasm` size (opt-level=z, codegen-units=1, this wider feature set, not yet
-      wasm-opt'd) was still building for wasm32 in `[profile.release]` when this commit
-      landed — a much larger dependency graph than L1's narrow `["ner"]` probe (candle,
-      tract, image codecs, office-format parsers all come in via `no-ort-target`). Follow-up
-      commit adds the number and updates the L1 note below with it.
+      **Release `.wasm` size: 18,632,965 bytes (~17.8 MB)** — `cargo build --target
+      wasm32-unknown-unknown -p hacienda-wasm --no-default-features --release`, no
+      `wasm-opt` pass (unavailable in this sandbox). Comfortably under 50 MB as a
+      standalone artifact, but **this number answers a different question than L1's did,
+      and is not a delta to add on top of `xberg_wasm_bg.wasm`'s 48,060,064 bytes.**
+      `wasm-target`'s `no-ort-target` base alone pulls in most of xberg's extraction
+      surface (PDF, Office, email, archives, HTML/XML, calamine) plus `tract`/`candle` for
+      `layout-tract`/`auto-rotate-tract`/`ner-candle-wasm` — i.e. this build recompiles a
+      large fraction of the *same xberg code already inside* `xberg_wasm_bg.wasm`,
+      standalone, because `hacienda-wasm` links its own independent copy of `xberg` rather
+      than sharing Studio's existing one. Track L's actual integration (Studio embeds one
+      compiled artifact, not two `xberg` instances) would not pay for that duplication —
+      the true marginal cost of adding hacienda-core's own code (`pii`/`redaction`/`audit`,
+      none of which xberg already has) on top of Studio's existing bundle is closer to
+      **L1's 1,227,264-byte, narrower-`xberg`-feature measurement** than to this number.
+      Read this 17.8 MB figure as "a fully independent hacienda-wasm bundle, built from
+      scratch, fits under the cap on its own" — useful if Studio ever needs to load it as a
+      separate module — not as "L1's number was wrong." A real merged-artifact
+      measurement needs the actual Studio embedding (single shared `xberg`), which is
+      later Track L work (L5/L6), not L2's.
 
 - [ ] **L3. Fix the three silent-failure surfaces first — before the port compiles.**
       They are cheap now and near-undetectable later.
