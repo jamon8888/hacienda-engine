@@ -1,0 +1,681 @@
+# Hacienda — Program Plan (2026-07-30)
+
+**Supersedes:** `docs/superpowers/plans/2026-07-28-audio-transcription-ner-pii-integration.md`
+(31 checkboxes, 0 checked — see "Why the old plan failed" below).
+
+**Absorbs as Track K:** `docs/superpowers/plans/2026-07-28-pii-candle-phase1-minimal.md`. That
+plan was written when Studio was the only surface; it is still valid but no longer standalone.
+
+**Baseline:** `main` @ `f100934`, plus uncommitted concurrency work in `facade.rs`,
+`pii/config.rs`, `hacienda-cli/src/commands.rs`.
+
+---
+
+## The product
+
+**A folder of documents in; a RAG-ready markdown vault out — with every entity linked, a
+glossary, and PII under the user's control.**
+
+That is the whole product. What changed since the last plan is that this repo now has
+**three surfaces that should all produce it**, and only one of them is in the browser:
+
+| Surface | For | State |
+| --- | --- | --- |
+| `apps/hacienda-studio` | A lawyer with a folder and no install; fully offline | Pipeline works, UI minimal, no vault output |
+| `hacienda-cli` | Scripted/bulk use, CI, a firm's own machine | `extract`, `scan`, `config show`, `serve`; JSON/text output, no vault |
+| `hacienda-api` | Integration into another system | `/v1/documents`, `/v1/documents/async`, `/v1/jobs/{id}`, `/v1/pii/{scan,redact,config}` with capability auth |
+
+Studio's flow — **load models → drop a folder → extract to markdown → browse in a Finder-like
+page → edit to add or remove PII → export the vault** — is the interactive expression of the
+same thing `hacienda extract` should do non-interactively.
+
+**Three consequences that reorganise everything below:**
+
+1. **The vault is the product, not the UI and not the detection.** The zip is what the user
+   keeps and what Claude reads. Design it once (Track I2) and make every surface emit it
+   (Track J).
+2. **The unit of work is a folder.** Studio takes `multiple` files with no directory support
+   (`App.svelte:178` has no `webkitdirectory`) and emits a *flat* zip whose entries keep their
+   source filename — `worker/pipeline.ts:363` writes markdown into a file still called
+   `contract.pdf`. The CLI takes `inputs: Vec<String>` and emits JSON. Neither does
+   folder-in/folder-out today.
+3. **Capability asymmetry is the main risk, and the fix is now decided.** The Rust side has
+   real redaction, AES-SIV reversible pseudonyms, a blake3 audit chain, and 20 regex patterns.
+   Studio has 9 regexes, no audit chain, and no pseudonymisation — but it is the only surface
+   with a neural model, a UI, and the offline guarantee. **As of 2026-07-30 the answer is not
+   to keep both in step but to compile `hacienda-core` to wasm32 and have one engine**
+   (Track L). Track C shrinks to holding the line until that lands.
+
+The good news: the cross-document machinery already exists in Studio. `processFiles`
+(`worker/pipeline.ts:310`) runs a shared `BatchEntityRegistry` across the whole batch and
+calls `registry.inferRelationships(docId)` per document, so entities are already resolved and
+related *across* files, not just within one. That is the hard part of "a folder of linked
+markdown", and it has no equivalent on the Rust side.
+
+---
+
+## Why the old plan failed
+
+Every "create file" step was done; every "integrate into pipeline.ts" step was skipped. The
+plan carried full source for each new file, so the files got written verbatim and the call
+sites never appeared. `pii-detector.ts` matches the plan's Phase 3 block character for
+character, exports both `detectPII` and `redactPII`, and is imported by nothing.
+
+**Consequence for this plan: no code bodies.** Each step names a call site, the file that
+must change, and an observable check. Where code already exists, the step says "call it",
+not "write it".
+
+The old plan also had a real omission, not just skipped steps: it added `isAudio`/`isVideo`
+branching to the worker but never widened the upload gate, so its own transcription feature
+was unreachable even if fully executed.
+
+---
+
+## The constraint that drives everything
+
+`tests/e2e/egress.spec.ts` asserts a host allowlist and states why: clients are avocats and
+experts-comptables bound by secret professionnel (loi n° 71-1130 art. 66-5); document bytes,
+extracted text, entity values and pseudonym mappings must never leave the browser. A request
+to a CDN with a client contract open is a GDPR Chapter V transfer.
+
+**Studio therefore cannot call `hacienda-api`.** `/v1/pii/scan` and `/v1/pii/redact` are real
+and complete (`hacienda-api/src/routes.rs:93-103`, with capability middleware), but they serve
+a different deployment with a different trust model. They are not Studio's backend.
+
+### Decision (2026-07-30): everything compiles to WASM
+
+The previous revision of this plan concluded that the product had two independent PII
+implementations "and will keep having them". **That is reversed.** The browser is the
+privileged target: it is the only one that satisfies secret professionnel without a trust
+argument. So `hacienda-core` compiles to `wasm32-unknown-unknown`, and Studio embeds it
+rather than reimplementing it in TypeScript.
+
+This is not the rewrite it sounds like, for two reasons.
+
+**First, the WASM extraction and detection stack already exists and is already installed.**
+The prebuilt `@xberg-io/xberg-wasm` package is not just a NER model — reading its exports:
+
+| Capability | Export | Status |
+| --- | --- | --- |
+| Document extraction | `extract(input, config)`, `extractBatch(inputs, config)` | Present |
+| Neural NER | `class NerModel` — `load({weights,tokenizer,encoderConfig})`, `detect()` | Present |
+| Redaction engine | `WasmRedactionConfig` (`strategy`, `preserveOffsets`, `customTerms`, `customPatterns`), `WasmRedactionFinding`, `WasmRedactionReport`, `WasmPiiCategory` | Present |
+| OCR / layout | `registerOcrBackend`, `detectLayout`, `detectOrientation` (pure-Rust `tract`) | Present |
+| Zip | `compress(entries, datas)`, `decompress(src, pwd, f)` | Present |
+
+`preserveOffsets` on `WasmRedactionConfig` is worth noting: it is the exact primitive Track F4
+needs for the offset problem, already implemented on the Rust side.
+
+**Second, hacienda-core's wasm32 blockers are a bounded, enumerated list** — not the
+architectural impossibility previously claimed. Verified by reading source:
+
+| Blocker | Where | Why it is tractable |
+| --- | --- | --- |
+| `axum` | `auth/authz.rs` only (4 references) | Server-only concept. `#[cfg]` the module out; nothing else in the crate touches it. |
+| `std::fs` | `audit/sink.rs:11`, `audit/store_file.rs:41`, `audit/segment.rs:76`, `review/store_file.rs:53`, `pii/config.rs:95`, `facade.rs:2430` | All are *store implementations behind existing traits* (`AuditStore`, `ReviewStore`, `JobStore`). WASM gets an IndexedDB impl; the traits do not change. |
+| `tokio` `rt-multi-thread` + `fs` | workspace `Cargo.toml:42` | `spawn_blocking` appears only in `audit/store_file.rs:447,587,652` — inside the file store that is already being gated out. `tokio::sync::Mutex` works on wasm32. |
+| `xberg` with `tokio-runtime` | workspace `Cargo.toml:71` | xberg already ships `wasm-target = ["no-ort-target", "excel-wasm", "ocr-wasm", "layout-tract", "auto-rotate-tract"]` and a `#[cfg(not(feature = "tokio-runtime"))]` sync path. Swap the feature per target. |
+
+**Three silent-failure risks that matter more than the blockers**, because they compile
+cleanly and then produce wrong data rather than an error:
+
+1. **`Instant::now()` at `redaction/engine.rs:71` panics on `wasm32-unknown-unknown`.** This is
+   the one genuine code defect in a module that *must* run in the browser — it is not a file
+   store that can be gated away. `SystemTime::now()` at `redaction/engine.rs:190`,
+   `audit/sink.rs:176` and `audit/store_file.rs:1008` needs the same treatment.
+2. **`uuid` is declared `features = ["v4", "serde"]` with no `js` feature** (workspace
+   `Cargo.toml`). There are 5 `Uuid::new_v4()` call sites, including audit segment IDs
+   (`audit/segment.rs:126`) and review items (`review/queue.rs:84`). Without a `getrandom` JS
+   backend this fails to build on wasm32 — or worse, yields non-random IDs.
+3. **`chrono` currently keeps its default features**, so `wasmbind` is on and `Utc::now()`
+   works. There are 11 `Utc::now()` sites, all of them timestamps in the audit chain, review
+   queue, or compliance report. **Do not add `default-features = false` to `chrono`.** If
+   anyone does, every audit timestamp silently becomes 1970 on wasm32 — a compliance artefact
+   that is wrong and self-consistent, which is the worst kind of wrong.
+
+**The 50 MB cliff.** `xberg_wasm_bg.wasm` is **48,060,064 bytes**. The xberg WASM constraints
+note that jsDelivr enforces a 50 MB per-file cap and that tree-sitter was already dropped to
+stay under it. There is **~1.9 MB of headroom**, and hacienda-core has to fit in it. This —
+not the porting work — is the binding constraint on Track L, and it must be measured before
+the port is designed, not after. Self-hosting the `.wasm` (Studio's allowlist already permits
+its own origin) removes the cap but not the download cost.
+
+**Consequence for the rest of this plan:** Track C changes meaning. It was "stop the two
+engines diverging"; it becomes "collapse them" (see Track L). Any step in Tracks A/B/F that
+reimplements Rust behaviour in TypeScript is now a step that will have to be deleted — prefer
+waiting for Track L over building a second implementation with a shelf life.
+
+---
+
+## Verified state
+
+Confirmed by reading source, not by trusting the previous plan.
+
+| Component | State | Evidence |
+| --- | --- | --- |
+| Document extraction → NER → vertical → KG export | Works | `worker/pipeline.ts:133-307`; `tests/e2e/pipeline.spec.ts` passes |
+| KG export (Cypher / NetworkX / RDF) | Works | `lib/kg-export.ts`, wired at `worker/pipeline.ts:389` |
+| Egress allowlist | Enforced | `tests/e2e/egress.spec.ts` |
+| PII detect + redact (browser) | Written, never called | `lib/pii-detector.ts:22`, `:39` — zero importers |
+| `enablePiiDetection`, `redactPiiInOutput` | Dead toggles | UI at `ConfigPanel.svelte:130`, default at `types.ts:99`; worker never reads either |
+| Neural NER backend | Written, never called | `lib/asset-loader.ts:117` `createNerBackend()` — zero callers |
+| `NerModel` in xberg-wasm rc.42 | Real, matches call site | `xberg_wasm.d.ts:18` — `static load({weights,tokenizer,encoderConfig})`, `detect(text,opts)` |
+| Extraction in WASM | Already shipped, unused by Studio | `xberg_wasm.d.ts:4487` `extract()`, `:4492` `extractBatch()` |
+| Redaction engine in WASM | Already shipped, unused | `WasmRedactionConfig:3476` (incl. `preserveOffsets`), `WasmRedactionFinding:3504`, `WasmPiiCategory:3224` |
+| Zip in WASM | Already shipped, unused | `xberg_wasm.d.ts:4444` `compress()`, `:4457` `decompress()` |
+| WASM artefact size | 48,060,064 bytes vs 50 MB CDN cap | `pkg/web/xberg_wasm_bg.wasm`; cap documented in xberg wasm-constraints |
+| `hacienda-core` on wasm32 | Blocked, but by an enumerated list | `axum` in `auth/authz.rs` only; `std::fs` in 6 store/config sites; `Instant::now()` at `redaction/engine.rs:71` |
+| Actual browser NER | compromise.js, English-only | `lib/ner-bridge.ts:112` — `doc.people()`, `.organizations()`, `.places()` |
+| GLiNER2 weights | Downloaded, unused | `App.svelte:58` calls `loadNerModel()`; 1.23 GB into IndexedDB |
+| `@lmoe/gliner-onnx` | Installed, never imported | `package.json` dependency; zero references in `lib/`, `worker/` |
+| Transcription in worker | Correct but unreachable | `worker/pipeline.ts:143-165`; blocked by upload gate |
+| Upload gate | Excludes audio/video | `App.svelte:178` `accept=`; `asset-loader.ts:157` prefixes |
+| Rust redaction | Real | `redaction/engine.rs` via `pipeline.rs:174`; asserted `pipeline.rs:334` |
+| Rust reversible pseudonyms | Real, AES-SIV | `redaction/pseudonym.rs:520` `reveal()`; round-trip tests `:934`, `:943` |
+| Rust blake3 audit chain | Real, fsynced to disk | `audit/store_file.rs`; `facade.rs:682` stores digests only, never span text |
+| Rust neural NER | Dead in all default builds | `ner-candle` absent from `default = ["jobs"]` (`hacienda-core/Cargo.toml:9`); `pipeline.rs:240` returns `ModelUnavailable` |
+
+---
+
+## Track A — Make the dead configuration real (Studio)
+
+Highest value per unit of work. Every toggle here already exists in the UI and lies to the user.
+
+- [ ] **A1. Call `detectPII` from the worker, gated on `config.enablePiiDetection`.**
+      `worker/pipeline.ts`, after markdown is produced (~line 200, before the NER block).
+      *Check:* a document containing `jean.dupont@cabinet-exemple.fr` yields a PII entity in
+      the result; with the toggle off, it yields none.
+
+- [ ] **A2. Call `redactPII` when `config.redactPiiInOutput` is set.**
+      Must apply to the markdown that reaches the zip, and must run *after* NER so entity
+      offsets are computed against unredacted text. Decide and record what happens to the
+      entity registry and KG export under redaction — exporting a redacted document beside a
+      knowledge graph naming every entity would defeat the feature. *Check:* extend
+      `tests/e2e/egress.spec.ts`'s contract fixture — the downloaded markdown must not contain
+      the IBAN, and the KG export must not reintroduce it.
+
+- [ ] **A3. Widen the upload gate for audio/video.**
+      Add `audio/` and `video/` to `SUPPORTED_MIME_PREFIXES` and matching extensions to
+      `accept=` (`App.svelte:178`). Note `SUPPORTED_MIME_PREFIXES` and `validateFile` are
+      **duplicated verbatim** in `lib/asset-loader.ts:157` and `lib/types.ts:104` — collapse
+      to one before editing, or the fix lands in the copy nobody imports. `App.svelte` imports
+      the `asset-loader` one. *Check:* an `.mp3` reaches `worker/pipeline.ts:149`.
+
+- [ ] **A4. Stop reporting success on model-load failure.**
+      `App.svelte:60-62` catches the download error and sets `assets.nerModel = true` anyway;
+      the outer catch at `:71` does the same. Surface degraded state instead — this is what
+      would hide a Track B regression. *Check:* with the model URL blocked, the UI says the
+      neural backend is unavailable.
+
+---
+
+## Track B — Use the model that is already downloaded (Studio)
+
+This is the fix for the product's worst behaviour, not polish: compromise.js is English-only
+and the documents are French. The downloaded model is `GLiNER2-Guardrails-PII-Multi` —
+multilingual and PII-specific.
+
+- [ ] **B1. Decide the inference backend. Blocking; do this first.**
+      Two paths exist and neither is used. `xberg-wasm`'s `NerModel` — `createNerBackend()` is
+      already written against it and its `detect()` return shape
+      (`{category,text,start,end,confidence}`) already matches what the worker's bridge
+      consumes. Versus `@lmoe/gliner-onnx`, which is installed, unused, and would need ONNX
+      weights rather than the safetensors currently cached.
+      **Recommendation: xberg-wasm; delete the `@lmoe/gliner-onnx` dependency.** It is the one
+      the existing code targets, and carrying two unused neural backends is how this state
+      arose. Record the decision in this file — the reason to revisit is B3, not preference.
+
+- [ ] **B2. Call `createNerBackend()` and route the bridge through it.**
+      `worker/pipeline.ts:204-212` constructs `XbergEngine` with `{ner:{ner: extractEntities}}`.
+      Load the model bytes in the worker (IndexedDB is worker-accessible, so `loadNerModel()`
+      can be called there) and substitute `runtime.detect`. Keep `extractEntities` as the
+      fallback when the model is unavailable — that path is what A4 must surface.
+      *Check:* a French fixture naming `Maître Jean Dupont` and `Acme SAS` yields a `person`
+      and an `organization`. Assert this fails against compromise.js first.
+
+- [ ] **B3. Resolve model delivery — 1.23 GB is not shippable.**
+      Unquantized safetensors, fetched from huggingface.co on first run. Options: quantized
+      weights, a smaller GLiNER2 variant, or self-hosting via the `VITE_MODEL_BASE_URL`
+      override that `asset-loader.ts:19` already provides (EU-resident hosting is a selling
+      point for these clients, not just a size fix). If quantization forces ONNX, B1 reverses.
+      *Check:* record measured first-run download size and time-to-first-document.
+
+---
+
+## Track C — Hold the line until the engines collapse (cross-cutting)
+
+**Revised 2026-07-30.** This track no longer manages a permanent split; it keeps the two
+implementations from diverging *further* during the window before Track L lands, and it is
+retired once Studio runs `hacienda-core` compiled to wasm32.
+
+The rule for that window: **do not close a gap by writing TypeScript that Track L will
+delete.** A missing detector in the browser is cheap to live with for a few weeks; a second
+TypeScript pseudonymisation engine is not.
+
+- [ ] **C1. Write down the split as temporary.** One short section in the Studio README:
+      today browser = offline, neural, no audit chain; CLI/API = server, regex, real audit
+      chain and reversible pseudonyms; **target = one engine, `hacienda-core` on wasm32.**
+      Without the last clause, someone will keep trying to wire Studio to `/v1/pii/scan`, or
+      will "helpfully" port a Rust detector into TypeScript.
+
+- [ ] **C2. Measure the coverage gap; close it only in the direction that survives.**
+      Rust has 20 patterns across 19 categories (`pii/patterns.rs:9-160`) against the browser's
+      9. Rust lacks **EU VAT** and **driver's license** — both present in the browser and both
+      relevant to French clients. **Add those two to Rust** (they survive Track L, and they are
+      the two the French client base actually needs). Do *not* port the 10 the browser is
+      missing — IP, MAC, JWT, API key, secret token, crypto wallet, MRN, VIN, routing number,
+      date of birth — into TypeScript; Track L delivers them for free. Browser BIC maps to Rust
+      `SwiftBic`.
+      *Check:* one shared fixture corpus, asserted from both `vitest` and `cargo test`. The
+      corpus outlives Track L and becomes its acceptance test — build it now, so the port has
+      a target to be measured against.
+
+- [ ] **C3. Studio gets the real audit trail via Track L, not a second implementation.**
+      Previously an open question. It is now answered by the WASM decision: the blake3 chain
+      and AES-SIV reversible pseudonyms come to the browser as the same Rust code, with an
+      IndexedDB `AuditStore` in place of `FileAuditStore`. **Do not build a TypeScript audit
+      chain.** The only open sub-question is *persistence semantics*: a file-backed chain
+      survives the process, an IndexedDB one dies with a cleared browser profile. If Studio
+      output must be legally defensible, the chain has to be exported inside the vault
+      (Track I2 / G) rather than merely retained locally.
+
+---
+
+## Track D — Tests that would have caught this
+
+Current suite: 3 Playwright specs, 5 vitest files. The e2e pipeline test passes and proves
+extraction works. Nothing asserts PII, redaction, transcription, or that a toggle does
+anything — which is precisely why 31 unchecked boxes coexisted with substantial working code.
+
+- [ ] **D1. Assert toggles have effect.** For each of `enablePiiDetection`,
+      `redactPiiInOutput`, `enableTranscription`, `enableVerticalNer`: one test where the
+      output differs with the flag on and off. A dead toggle then fails a test instead of
+      shipping.
+- [ ] **D2. French-language NER fixture** (supports B2).
+- [ ] **D3. Audio fixture through the full pipeline** (supports A3; the old plan's Phase 5
+      referenced an `audio/mpeg` fixture that was never added).
+
+---
+
+## Track E — Adopt the hacienda-private UI (Studio)
+
+Target flow: **upload → detect → pseudonymize → view/edit in a markdown editor with inline PII
+→ download zip → open in Claude Desktop.**
+
+`hacienda-private/apps/web` has 40 vendored components in `components/ui/`. It is real
+shadcn/ui — Radix primitives plus Tailwind CSS variables (`components.json`). Beyond the
+generic primitives it carries domain components Studio would otherwise build from scratch:
+`pdf-viewer`, `docx-viewer`, `docx-editor`, `xlsx-viewer`, `xlsx-editor`, `pptx-viewer`,
+`csv-viewer`, `file-dropzone`, `file-upload`, `file-system`, `bounding-box-citations`,
+`document-splits`, `data-grid`, `schema-builder`.
+
+- [ ] **E1. Decide the framework. Blocking — everything in Track E and F depends on it.**
+      shadcn/ui is React-only; Radix has no Svelte build. In Svelte the option is
+      shadcn-svelte, a separate port — meaning hacienda-private's screens get *reimplemented*,
+      not reused, and the domain components above have no equivalent at all.
+      **Recommendation: rebuild Studio's shell in React and keep the worker pipeline as-is.**
+      The asymmetry is the argument: Studio's entire UI is 653 lines across 4 `.svelte`
+      components with no Tailwind (`app.css` is hand-rolled CSS variables), while everything
+      valuable — `worker/pipeline.ts`, `kg-export.ts`, `ner-bridge.ts`, `verticals/`,
+      `registry.ts`, `pii-detector.ts` — is framework-agnostic TypeScript that ports
+      unchanged. The Svelte layer is the cheapest thing in the system to discard, and the
+      target UI is far larger than what exists.
+      *Counter-argument to weigh:* Studio ships as a static offline bundle; hacienda-private
+      uses Next with `output: "export"`, which is compatible, but adopting Next drags in a
+      heavier build for an app that has no routing needs today. Plain Vite + React + shadcn is
+      the lighter path and keeps the existing Vite worker setup.
+      *Decisive evidence:* the Finder-like page the product needs is
+      `components/ui/file-system.tsx` — **4,586 lines** of virtualized file browser. Rewriting
+      that in Svelte dwarfs the 653 lines of Svelte that would be discarded, and it is only
+      one of 40 components.
+
+- [ ] **E2. Port the design tokens first, independently of E1.** Tailwind config + CSS
+      variables are framework-agnostic and can land before any component work.
+
+- [ ] **E3. Screens.** Upload (`file-dropzone`), processing (`progress`), document view
+      (`resizable` dual-pane), entity/PII panel (`card` + `badge` + `popover`), export.
+      Studio needs no matters/folders/auth — that is hacienda-private's multi-user model and
+      must not be imported along with the components.
+
+---
+
+## Track F — PII review, pseudonymization, and the editor (Studio)
+
+This is the flow the user asked for, and it is where the two apps differ most.
+
+- [ ] **F1. Adopt the PII reveal UX; do not adopt its data model.**
+      `PiiPanel.tsx` is the pattern worth copying: detected spans render as tokens with a
+      `Badge` for the kind, clicking opens a `Popover` that asks for a passphrase, and the
+      plaintext is shown in a `Dialog` and forgotten on close — never persisted. The vault is
+      WebCrypto-sealed client-side. `PiiReviewPanel.tsx` adds accept / correct / reject per
+      detection. All of this is directly applicable to Studio and is the single most valuable
+      thing to port.
+
+- [ ] **F2. Build reversible pseudonymization — it does not exist anywhere in JS yet.**
+      hacienda-private does **redaction only**: opaque stable tokens `{{C0_PERSON_1}}` with
+      no exportable mapping. Reversible pseudonymization exists only in Rust
+      (`redaction/pseudonym.rs:520` `reveal()`, AES-SIV, `[CATEGORY:key_id:BASE32]`), and per
+      the WASM analysis above that code cannot reach the browser. So Studio must implement it
+      in TypeScript against WebCrypto.
+      **Match the Rust token format exactly** so a document pseudonymized in Studio can be
+      revealed by the CLI and vice versa. If that is not wanted, say so explicitly here —
+      silently choosing a different format is how Track C's divergence happens again.
+      *Check:* round-trip a document through Studio pseudonymize → CLI reveal.
+
+- [ ] **F3. CodeMirror 6 markdown editor with inline PII decorations.**
+      Nothing exists to build on: CodeMirror is not a dependency in any repo, and
+      hacienda-private's right pane is a read-only `<pre>` of redacted text rendered with
+      `react-markdown`. Use CodeMirror decorations to render PII spans as inline pills that
+      open the F1 popover.
+      *Check:* editing text before a PII span does not misplace that span's highlight.
+
+- [ ] **F4. Solve the offset problem. This is the hard technical core of Tracks A/E/F.**
+      Four things mutate the same text and all are offset-sensitive: entity linking
+      (`worker/pipeline.ts:82` splices `[text](entity:type/slug)` at byte spans),
+      PII redaction (A2), pseudonymization (F2), and now user edits in CodeMirror. Splicing
+      one invalidates every offset the others hold. Decide a single representation —
+      almost certainly: keep source text immutable, hold spans as a separate overlay, and
+      render links/tokens at display or export time rather than splicing into the string.
+      Doing A2 and F3 without this will produce corrupted output that tests on short fixtures
+      will not catch.
+
+---
+
+## Track G — Export for Claude Desktop (Studio)
+
+Studio is already ahead here and should not import hacienda-private's approach.
+
+Studio's zip already contains markdown with linked entities, `_manifest.json`,
+`entities-registry.json`, and `kg-export/{neo4j.cypher,networkx.json,rdf.ttl}`
+(`worker/pipeline.ts:370-397`). hacienda-private has **no zip export at all** — only a
+"Copy for Claude Desktop" clipboard button and a mirror push to its MCP server.
+
+- [ ] **G1. Preserve entity linking through pseudonymization.** Already implemented at
+      `worker/pipeline.ts:93` as `[Acme SAS](entity:organization/acme-sas)`, with a
+      `## Entities` glossary (`:118`) and entity metadata in frontmatter (`:99`). Pseudonymizing
+      an entity must not orphan its link or its glossary row.
+
+- [ ] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
+      nothing outside Studio understands. Switch to in-document anchors into the `## Entities`
+      glossary, or wikilinks, so the exported markdown is self-contained. *Check:* open the
+      exported markdown in Claude Desktop and follow a link to its glossary entry.
+
+- [ ] **G3. Ship a README in the zip** describing what the bundle is, so a Claude Desktop
+      session has the context to use the registry and KG files rather than only the prose.
+
+*Note:* hacienda-private also exposes a real Claude Desktop MCP integration
+(`services/mcp-server/release/README.md:12-22` — `xberg-mcp mcp` stdio endpoint plus a
+`claude_desktop_config.json`). Studio cannot do this: a browser-only app cannot run a local
+stdio server. The zip is the right answer for Studio, but it means two Claude Desktop stories
+now exist and the zip must stand alone.
+
+---
+
+## Track H — Model delivery, revised (supersedes B3)
+
+**hacienda-private has already solved this and the work is directly reusable.**
+`scripts/models/convert_gliner2_f16.py` converts the F32 checkpoint to F16, and
+`scripts/models/gliner2-guardrails-pii-f16.sha256` records the result:
+**614,224,538 bytes — exactly half of Studio's 1,228,421,964.** The recorded
+`source-sha256` is `82ee0ed2…` against `fastino/GLiNER2-Guardrails-PII-Multi`, i.e. provably
+the same checkpoint Studio downloads today. The script streams one tensor at a time from an
+mmap and needs only numpy.
+
+- [ ] **H1. Reuse the f16 artifact.** Run the existing script, publish the output, point
+      `VITE_MODEL_BASE_URL` (`asset-loader.ts:19`) at it. 1.23 GB → 614 MB for near-zero
+      engineering.
+- [ ] **H2. Decide whether 614 MB is acceptable.** It is a 2× win, not a solution. If not,
+      the manifest at `services/mcp-server/models/manifest.json` shows the fallback they
+      chose: `onnx-community/gliner_small-v2.1` with int8 variants — a much smaller model at
+      some accuracy cost. Evaluate against French legal fixtures before switching, since
+      multilingual quality is the whole point (Track B).
+- [ ] **H3. Note their runtime differs.** hacienda-private loads GLiNER2 in a dedicated Web
+      Worker via `packages/wasm-pipeline/src/gliner2-worker.ts` with a `@xenova/transformers`
+      tokenizer, whereas Studio's `createNerBackend()` targets xberg-wasm's `NerModel`. Both
+      consume the same safetensors. B1 should account for this third option.
+
+---
+
+## Track I — Folder in, vault out
+
+The core product. Design the output format before writing pipeline code.
+
+### I1. Folder ingest
+
+- [ ] Add `webkitdirectory` to the file input and carry `file.webkitRelativePath` through
+      `FileInput` so the source tree survives into the output. Today only `multiple` is set
+      and relative paths are discarded.
+- [ ] Ingest is sequential (`for (const file of files)`, `worker/pipeline.ts:331`). A folder
+      of a hundred documents with a 614 MB model loaded will be slow and gives no way to
+      cancel. Decide whether to parallelise or just report honest per-file progress; do not
+      leave a progress bar that stalls for minutes with no explanation.
+- [ ] Skip/report unsupported files rather than failing the batch — a real folder contains
+      `.DS_Store`, images, and things Studio cannot extract.
+
+### I2. The vault layout — the thing to get right
+
+Proposed zip structure. This is a design proposal, not a finding; disagree with it before it
+gets built:
+
+```text
+README.md                    ← what this bundle is, how an agent should use it
+documents/<source tree>.md   ← one markdown per input, original folder structure preserved
+entities/<slug>.md           ← one file per entity: type, vertical, roles, aliases, backlinks
+GLOSSARY.md                  ← index of every entity, linking into entities/
+_manifest.json
+entities-registry.json
+kg-export/{neo4j.cypher,networkx.json,rdf.ttl}
+```
+
+- [ ] **Links must be relative markdown paths**, e.g. `[Acme SAS](../entities/acme-sas.md)`.
+      This replaces the current `entity:organization/acme-sas` custom scheme
+      (`worker/pipeline.ts:93`), which nothing outside Studio can resolve. Relative paths are
+      followable by a Claude Desktop agent with filesystem access, and by Obsidian, and by
+      anything else that reads a markdown folder.
+- [ ] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
+      than merely readable: the agent can open `entities/acme-sas.md` and find every document
+      mentioning it. The data already exists — `BatchEntityRegistry` plus
+      `inferRelationships` — it is currently only serialised to `entities-registry.json` and
+      to the KG exports, which an agent will not naturally read.
+- [ ] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
+      (`worker/pipeline.ts:118`) becomes a local summary; the global glossary is the index.
+- [ ] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
+      folder of prose and ignores the registry and graph files entirely.
+- [ ] *Open question:* should redaction/pseudonymisation state be recorded in the bundle —
+      i.e. does the vault declare which entities were pseudonymised and under which key id?
+      Useful for provenance, but it is also a map of where the sensitive material was.
+
+### I3. Finder-like browser
+
+- [ ] `hacienda-private/apps/web/components/ui/file-system.tsx` is a **4,586-line virtualized
+      grid/list** file browser, with `file-thumbnail.tsx` (154) and
+      `document-viewer-sidebar.tsx` (112) alongside. Its interface is a flat
+      `FileSystemItem[]` of `{ kind: "folder" | "file", path, key }` (`app/browse/page.tsx`),
+      which Studio can build directly from in-memory batch results — the component itself is
+      not coupled to their API, only their `/browse` page is.
+- [ ] Show per-file state in the browser: extracted / PII count / edited / error. The Finder
+      view is where the user decides which documents need attention, so it has to carry that.
+
+### I4. Per-document PII editing
+
+"Add and remove PII" is two operations, and neither is accept/reject on a fixed list:
+
+- [ ] **Remove** — a false positive is unmarked and the original text stands.
+- [ ] **Add** — the user selects text the model missed and marks it as PII with a category.
+      This is manual annotation, not review of a detection. It is the operation that makes the
+      tool trustworthy for a lawyer, and neither app has it today.
+- [ ] Both require **F4's overlay model**: source text immutable, spans as separate data.
+      Adding a span to spliced text is not implementable; this is why F4 gates the editor.
+- [ ] Edits must survive re-export and be visible in the Finder view.
+
+---
+
+## Track J — Make the CLI emit the same vault
+
+The reframe's main new work. Today `hacienda extract` takes `inputs: Vec<String>` and a
+`--format` of JSON or text (`hacienda-cli/src/cli.rs:110`); it cannot produce a markdown
+folder. If the vault is the product, the CLI not producing one means the product only exists
+in a browser.
+
+- [ ] **J1. `hacienda extract --vault <dir>`** emitting the Track I2 layout — same
+      `documents/`, `entities/`, `GLOSSARY.md`, `kg-export/`. A firm processing 10,000
+      documents overnight should get the same artefact a lawyer gets from dropping a folder.
+- [ ] **J2. Port entity linking, glossary and KG export to Rust — or don't, deliberately.**
+      These exist only in Studio's TypeScript (`worker/pipeline.ts`, `lib/kg-export.ts`,
+      `lib/registry.ts`, `lib/verticals/`). Two honest options: reimplement in Rust (a real
+      cost, and a third divergence surface), or declare the CLI's vault a thinner artefact —
+      markdown plus registry, no cross-document relationship inference. **Decide explicitly.**
+      Silently shipping two different things both called "the vault" is the failure mode.
+- [ ] **J3. The CLI has capabilities Studio cannot have** — `--audit-out` writing a real
+      blake3 chain, reversible pseudonyms, `--no-redact` gated behind
+      `--i-accept-unredacted-pii`. If a vault carries an audit chain when produced by the CLI
+      and not by Studio, the bundle format must say so rather than leaving a consumer to
+      guess.
+- [ ] **J4. `--concurrency` already exists** (uncommitted, `ConcurrencyArgs` at
+      `cli.rs:157`, wired to `PipelineConfig::concurrency`). Studio's batch loop is sequential
+      (`worker/pipeline.ts:331`). Same knob, two behaviours — align the defaults or document
+      why they differ.
+
+---
+
+## Track K — Neural detection on the Rust side
+
+Absorbed from `2026-07-28-pii-candle-phase1-minimal.md`, unchanged in substance and still
+unstarted. Reframed only in priority: it is what closes the largest capability gap between the
+surfaces, since Studio has a neural model and the CLI/API do not.
+
+- [ ] `ner-candle` is not in `default = ["jobs"]` (`hacienda-core/Cargo.toml:9`); nothing
+      constructs the Candle detector at runtime, and `pipeline.rs:240` returns
+      `ModelUnavailable`. `--model-dir` and `--lora-dir` already exist as CLI arguments
+      (`cli.rs:103`, `:107`) with nothing behind them.
+- [ ] Sequence this **after** Track H settles which model artefact ships. Both surfaces should
+      use the same f16 checkpoint rather than each picking one.
+
+---
+
+## Track L — Compile `hacienda-core` to wasm32 (the unification track)
+
+**This is the track the 2026-07-30 decision creates, and it retires Track C.** Target: Studio
+stops having a PII implementation and starts calling the one in `hacienda-core`.
+
+Sequence the steps so the *answer to "does this fit?"* arrives before the porting work, not
+after. L1 is a measurement, not a build.
+
+- [ ] **L1. Measure the budget before designing the port.**
+      `xberg_wasm_bg.wasm` is 48,060,064 bytes against jsDelivr's 50 MB per-file cap — ~1.9 MB
+      of headroom. Build `hacienda-core` for `wasm32-unknown-unknown` with everything gated
+      off except `pii/` and `redaction/`, and record the `.wasm` delta.
+      *Check:* a recorded byte count. If it exceeds the headroom, **L2 becomes "decide the
+      delivery mechanism" and self-hosting is forced** — Studio's allowlist already permits its
+      own origin, and `VITE_MODEL_BASE_URL` (`asset-loader.ts:19`) shows the pattern. Do not
+      start L4 until this number exists.
+
+- [ ] **L2. Add the wasm crate and the target feature set.**
+      `crates/` is empty and no manifest mentions wasm-bindgen. Follow the xberg precedent:
+      `crate-type = ["cdylib", "rlib"]`, `opt-level = "z"`, `codegen-units = 1`, and a
+      `wasm-target` feature that selects `xberg`'s `wasm-target` instead of `tokio-runtime`.
+      *Check:* `cargo build --target wasm32-unknown-unknown` reaches a *link* error about
+      hacienda-core's own code, not a dependency resolution error.
+
+- [ ] **L3. Fix the three silent-failure surfaces first — before the port compiles.**
+      They are cheap now and near-undetectable later.
+      **(a) Clock.** Replace `Instant::now()` (`redaction/engine.rs:71`) and `SystemTime::now()`
+      (`redaction/engine.rs:190`, `audit/sink.rs:176`, `audit/store_file.rs:1008`) with a
+      target-aware clock seam. `redaction/engine.rs` is not gated away — it *must* run in the
+      browser, and `Instant::now()` panics there.
+      **(b) Randomness.** Add the `js` feature to `uuid` for wasm32 (5 `Uuid::new_v4()` sites,
+      including audit segment IDs at `audit/segment.rs:126`).
+      **(c) Timestamps.** Add a regression guard that `chrono` keeps `wasmbind`. 11 `Utc::now()`
+      sites feed audit and compliance timestamps; losing it yields 1970 timestamps that are
+      wrong and internally consistent.
+      *Check:* a wasm32 test that asserts a redaction round-trip produces a non-1970 timestamp
+      and a non-nil UUID. This is the test that catches all three.
+
+- [ ] **L4. Gate out the server- and disk-only modules.**
+      `axum` appears only in `auth/authz.rs` (4 references) — a server-only concept, so
+      `#[cfg]` the module out entirely. `std::fs` appears in `audit/sink.rs:11`,
+      `audit/store_file.rs:41`, `audit/segment.rs:76` (reads `/etc/hostname`),
+      `review/store_file.rs:53`, `pii/config.rs:95`, `facade.rs:2430` (reads `/proc/meminfo`).
+      All are implementations behind traits that already exist — **the traits do not change.**
+      `spawn_blocking` lives only in `audit/store_file.rs:447,587,652`, inside the store being
+      gated out; `tokio::sync::Mutex` (`audit/store_file.rs:179`) works on wasm32 as-is.
+      *Check:* `cargo build --target wasm32-unknown-unknown -p hacienda-core` succeeds.
+
+- [ ] **L5. IndexedDB `AuditStore` / `ReviewStore` / `JobStore`.**
+      The trait seams are the reason this track is tractable — implement against them, do not
+      reshape them. Carries the C3 sub-question: an IndexedDB chain dies with a cleared browser
+      profile, so if Studio output must be legally defensible the chain has to be *exported
+      into the vault*, not merely retained.
+      *Check:* append two audit entries, reload the page, verify the blake3 chain still
+      verifies across the reload.
+
+- [ ] **L6. Delete the TypeScript engine and switch the call sites.**
+      `lib/pii-detector.ts` (`detectPII:22`, `redactPII:39`, zero importers) is deleted rather
+      than wired — Track A's toggles resolve to the Rust engine instead. This is the step that
+      makes Tracks A2 and F cheaper, which is why A2 should not be built twice.
+      *Check:* the C2 shared fixture corpus passes from `vitest` against the WASM build, with
+      the same results `cargo test` produces. One corpus, two runners, identical output.
+
+- [ ] **L7. Reconsider `preserveOffsets` against Track F4.**
+      `WasmRedactionConfig` already exposes `preserveOffsets`, and `WasmRedactionFinding`
+      carries `start`/`end`/`category`/`strategy`/`replacementToken`. F4's offset problem may
+      be substantially solved on the Rust side already. **Read that implementation before
+      designing F4's overlay** — this could remove the hardest item in the plan.
+
+---
+
+## Sequencing
+
+**Two things gate everything, and they are independent — run them in parallel.**
+
+**L1 (measure the wasm budget) starts now.** It is a build and a byte count, it needs no
+design decisions, and its answer changes Track L's shape completely: ~1.9 MB of headroom
+against a 48 MB artefact is the difference between "ship it on the CDN" and "self-hosting is
+mandatory". Nothing downstream should be designed on a guess about this number.
+
+**I2 (the vault layout) remains the keystone decision for the whole repo.** It is the contract
+three surfaces must satisfy; settle it and Tracks G, I, J and half of F follow. Then **E1**
+(framework), **B1/H3** (inference runtime), and **J2** (whether the CLI vault is the full
+artefact or a thinner one).
+
+**F2 is now answered, not open.** Whether Studio's pseudonym tokens interoperate with the Rust
+CLI stops being a design question once both run the same AES-SIV code — Track L makes them
+identical by construction. Do not design a TypeScript token format.
+
+Then: **H1** immediately — it is running an existing script for a 2× win, and it is
+independent of everything else. **A3 → A1 → A4**: smallest diffs, each independently
+observable. **C1 and C2's fixture corpus** are cheap and should not be deferred: C1 is a
+paragraph that prevents the most likely wrong turn, and the corpus becomes Track L's
+acceptance test (L6), so building it early gives the port a target.
+
+**What the WASM decision removes from the critical path:** A2 (make the redact toggle real)
+and F4 (the offset problem) were the two hardest items and are both now Track L's problem
+rather than TypeScript work. A2 should *not* be implemented against `pii-detector.ts` — that
+file is deleted in L6. If A2's compliance risk (a "redact" toggle that silently does nothing)
+must be closed before L6 lands, close it by **disabling the toggle**, not by implementing it
+twice. And read L7 before designing F4: `preserveOffsets` on `WasmRedactionConfig` may already
+solve it.
+
+**B2** should still wait for D1 so the substitution is measurable.
+
+**I2 → I1 → G1/G2 → I3 → I4** is the product spine. Note that I2 and G2 are the same decision
+seen twice (how entities are linked in the exported markdown) — settle it once, in I2.
+
+Track E remains the largest single item. Given the product is folder-in/vault-out with a
+Finder view, the practical question is no longer "Svelte or React" but "start from Studio's
+pipeline and add hacienda-private's UI, or start from hacienda-private's UI and remove its
+server". The second may be shorter: its 40 components, `/browse`, and document viewers already
+exist, and what must be *deleted* (matters, folders, auth, mirror push) is well isolated in
+`lib/api.ts`. Evaluate both before starting E3 — but either way the worker pipeline,
+`kg-export.ts`, `verticals/` and `registry.ts` come from Studio unchanged.
+
+Do not run the full Rust test suite as a matter of course on this host: ~3 GB RAM,
+`cargo clean` costs ~10 minutes. Target `cargo test -p hacienda-core pii::` for C2.
+
+---
+
+## Status convention
+
+Unchecked boxes in the superseded plan turned out to mean "not verified", not "not done" —
+several were complete. **In this document an unchecked box means the *check* line has not been
+observed to pass.** Do not tick a box on the strength of the code existing.
