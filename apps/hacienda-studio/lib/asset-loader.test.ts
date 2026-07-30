@@ -1,5 +1,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { fetchAsset } from "./asset-loader";
+import { fetchAsset, validateFile } from "./asset-loader";
+
+function file(type: string, size = 1024): File {
+  return new File([new Uint8Array(size)], "upload", { type });
+}
 
 function respondWith(
   body: string | Uint8Array<ArrayBuffer>,
@@ -67,6 +71,43 @@ describe("fetchAsset", () => {
 
     expect(JSON.parse(new TextDecoder().decode(bytes))).toEqual({
       hidden_size: 768,
+    });
+  });
+});
+
+/**
+ * Track A3: audio/video were rejected outright before an upload ever reached the
+ * worker. `SUPPORTED_MIME_PREFIXES`/`validateFile` used to be duplicated verbatim
+ * in lib/types.ts (now removed, unimported, dead) — this is the copy `App.svelte`
+ * actually calls.
+ */
+describe("validateFile", () => {
+  it("accepts an audio file", () => {
+    expect(validateFile(file("audio/mpeg"))).toEqual({ valid: true });
+  });
+
+  it("accepts a video file", () => {
+    expect(validateFile(file("video/mp4"))).toEqual({ valid: true });
+  });
+
+  it("still rejects an empty file", () => {
+    expect(validateFile(file("audio/mpeg", 0))).toEqual({
+      valid: false,
+      error: "File is empty",
+    });
+  });
+
+  it("still rejects a file over 50MB", () => {
+    expect(validateFile(file("audio/mpeg", 51 * 1024 * 1024))).toEqual({
+      valid: false,
+      error: "File too large (>50MB)",
+    });
+  });
+
+  it("still rejects an unsupported type", () => {
+    expect(validateFile(file("application/x-executable"))).toEqual({
+      valid: false,
+      error: "Unsupported file type: application/x-executable",
     });
   });
 });

@@ -23,6 +23,8 @@ export interface ProcessedFile {
     source: string;
     type: string;
     processed: string;
+    /** Count from the `hacienda-wasm` PII engine; 0 when detection is disabled. */
+    piiEntitiesFound: number;
     entities: Array<{
       name: string;
       type: string;
@@ -36,7 +38,7 @@ export interface ProcessedFile {
 
 export interface ProgressUpdate {
   file: string;
-  stage: "extract" | "ner" | "link" | "complete" | "error";
+  stage: "extract" | "ner" | "pii" | "link" | "complete" | "error";
   percent: number;
   message?: string;
 }
@@ -83,13 +85,7 @@ export interface OnboardingState {
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
-  nerCategories: [
-    "person",
-    "organization",
-    "location",
-    "email",
-    "phone",
-  ],
+  nerCategories: ["person", "organization", "location", "email", "phone"],
   outputFormat: "markdown",
   chunkSize: 1000,
   enableTranscription: false,
@@ -100,42 +96,3 @@ export const DEFAULT_CONFIG: AppConfig = {
   redactPiiInOutput: false,
   enabledVerticals: ["m&a", "financial_services", "shared"],
 };
-
-export const SUPPORTED_MIME_PREFIXES = [
-  "application/pdf",
-  "application/vnd.openxmlformats-officedocument",
-  "application/msword",
-  "application/vnd.ms-excel",
-  "application/vnd.ms-powerpoint",
-  "application/vnd.oasis.opendocument",
-  "message/rfc822",
-  "application/vnd.ms-outlook",
-  "application/vnd.ms-pki.stl",
-  "text/",
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/tiff",
-  "image/svg+xml",
-  "application/json",
-  "application/xml",
-  "application/zip",
-  "application/x-tar",
-  "application/gzip",
-  "application/x-7z-compressed",
-];
-
-export function validateFile(file: File): { valid: boolean; error?: string } {
-  if (file.size === 0) return { valid: false, error: "File is empty" };
-  if (file.size > 50 * 1024 * 1024)
-    return { valid: false, error: "File too large (>50MB)" };
-  const type = file.type || "";
-  const supported = SUPPORTED_MIME_PREFIXES.some((p) => type.startsWith(p));
-  if (!supported)
-    return {
-      valid: false,
-      error: `Unsupported file type: ${type || file.name}`,
-    };
-  return { valid: true };
-}

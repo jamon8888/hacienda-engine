@@ -4,26 +4,42 @@
 //! entry's hash, so any edit, reorder, or deletion is detectable by [`AuditChain::verify`].
 //! Original spans are never stored — only their blake3 digests.
 
+// `store_file` and `sink` are the only pieces still native-only: they write real files
+// via `tokio`/`std::fs`. `chain`, `segment` and `store` (the in-memory backend) compile
+// on wasm32 as of Track L3 — `segment`'s `Uuid::new_v4()` now resolves via `uuid`'s `js`
+// feature (a self-contained `wasm-bindgen`/WebCrypto binding, see `hacienda-core`'s
+// `Cargo.toml`), and neither `chain` nor `store` ever needed anything wasm32-incompatible
+// in the first place.
 pub mod chain;
 pub mod entry;
 pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod export;
 pub mod segment;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sink;
 pub mod store;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod store_file;
+#[cfg(target_arch = "wasm32")]
+pub mod store_idb;
 
 pub use chain::{AuditChain, GENESIS_HASH};
 pub use entry::{
     compute_chain_hash, AuditEntry, AuditEntryInput, ChainHashFields, EntitySource, RedactionAction,
 };
 pub use error::AuditError;
+#[cfg(not(target_arch = "wasm32"))]
 pub use export::{export, export_csv, export_json, export_json_lines, ExportFormat};
 pub use segment::{compute_seal_hash, verify_seal_chain, NodeId, Segment, SegmentSeal};
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(deprecated)]
 pub use sink::{AuditSink, FileSink};
 pub use store::{AuditStore, InMemoryAuditStore};
+#[cfg(not(target_arch = "wasm32"))]
 pub use store_file::{FileAuditStore, SyncPolicy};
+#[cfg(target_arch = "wasm32")]
+pub use store_idb::IndexedDbAuditStore;
 
 use serde::{Deserialize, Serialize};
 

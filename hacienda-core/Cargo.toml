@@ -15,7 +15,6 @@ jobs = []
 [dependencies]
 aes-siv = { workspace = true }
 async-trait = { workspace = true }
-axum = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 data-encoding = { workspace = true }
@@ -23,13 +22,59 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = { workspace = true }
+web-time = { workspace = true }
+zeroize = { workspace = true }
+
+# `axum` and `tokio` are native-only: `axum` is the auth middleware's server framework
+# (`auth/authz.rs`, gated out of the crate on wasm32 — see `lib.rs`), and `tokio`'s
+# `rt-multi-thread`/`fs` features that `store_file.rs` needs don't compile for
+# wasm32-unknown-unknown at all. `xberg` is split the same way, mirroring the precedent
+# in xberg's own Cargo.toml: the native side keeps `tokio-runtime`.
+#
+# `uuid` is split too, but for a different reason (Track L3): its `v4` feature needs a
+# randomness source, and on wasm32-unknown-unknown that's `uuid`'s own `js` feature — a
+# self-contained `wasm-bindgen` binding straight to `globalThis.crypto.getRandomValues`
+# (`uuid`'s `rng.rs`), not `getrandom`, so no `--cfg getrandom_backend=...` RUSTFLAGS is
+# needed here.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
 uuid = { workspace = true }
 xberg = { workspace = true }
-zeroize = { workspace = true }
+
+# wasm32 gets `xberg/wasm-target`'s components individually rather than the umbrella
+# feature itself, minus `ocr-wasm`. `ocr-wasm` builds `xberg-tesseract` against a WASI
+# SDK C toolchain (`crates/xberg-tesseract/build.rs`, `build_wasm()`) that this repo's
+# CI/dev containers don't provision yet — a `WASI_SDK_PATH` environment gap, not a Rust
+# problem, and the real published `@xberg-io/xberg-wasm` package does build it once that
+# toolchain is present. hacienda-wasm doesn't call extraction/OCR yet (see
+# `crates/hacienda-wasm`), so deferring it costs nothing today; add `ocr-wasm` back once
+# Track I needs xberg's extraction on wasm32 and WASI SDK is provisioned in CI.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", default-features = false, features = [
+    "no-ort-target",
+    "excel-wasm",
+    "layout-tract",
+    "auto-rotate-tract",
+    "ner-candle-wasm",
+] }
+# `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"
+# feature is not a workaround for a bug — `AuditStore` (like every trait using bare
+# `#[async_trait]`) returns `Send`-bounded futures by design, so file/database backends
+# can do their I/O off whatever executor thread runs them. `web_sys`/`js_sys` handles
+# (the `Database` connection, transactions, requests) are `!Send` unconditionally, on
+# every wasm32 target, because `wasm-bindgen` does not special-case the single-threaded
+# case. `SendWrapper` is the standard way to satisfy a `Send` bound around JS handles when
+# the target is actually single-threaded (`wasm32-unknown-unknown` without the `atomics`
+# target feature, which is what this crate builds for) — it just moves the "never
+# actually crosses a thread" invariant from the type system to a runtime assertion that
+# can never fire here.
+indexed_db_futures = { version = "0.6", features = ["serde"] }
+send_wrapper = { version = "0.6", features = ["futures"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot`, to drive the auth middleware through a real `Router`. Unit-testing

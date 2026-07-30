@@ -9,5 +9,16 @@ cli = "cli"
 mcp = "mcp"
 fpe = "fpe"
 drl = "drl"
+# US Employer Identification Number, not a typo for "IN".
+ein = "ein"
+# hacienda-core/src/auth/authn.rs:476 doc comment; "unparsable" is also correct English but
+# not what's written there.
+unparseable = "unparseable"
+# hacienda-core/tests/config_round_trip.rs: deliberately misspelled config keys/values used to
+# assert the parser's error message quotes the bad input verbatim. The misspelling is the
+# point of the test, not a typo to fix.
+frist = "frist"
+reveiw = "reveiw"
+cahce = "cahce"
 
 [default.extend-identifiers]

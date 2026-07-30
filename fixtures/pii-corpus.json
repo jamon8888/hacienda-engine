@@ -1,0 +1,31 @@
+{
+  "$schema": "one shared fixture corpus for Track C2/L6 -- see docs/superpowers/plans/2026-07-30-hacienda-program-plan.md",
+  "description": "Each case's text is expected to detect exactly `categories` (order-independent) via hacienda-core's regex PII engine, asserted identically from `cargo test` (hacienda-core/tests/pii_corpus.rs) and `vitest` (apps/hacienda-studio, once wired) against the wasm32 build. Category names are hacienda_core::pii::PiiCategory's serde form (snake_case) -- the same JSON shape that crosses the wasm-bindgen boundary via `scan()`/`process()`, so there is no separate translation layer to drift. Text is written so it does not incidentally trigger a pattern other than the one under test.",
+  "cases": [
+    { "id": "email", "text": "Contact jane.doe@example.com for details.", "categories": ["email"] },
+    { "id": "phone_intl", "text": "Call +1 415 555 0199 today.", "categories": ["phone_number"] },
+    { "id": "phone_france", "text": "Appelez le +33 1 23 45 67 89.", "categories": ["phone_number"] },
+    { "id": "iban", "text": "IBAN: FR7630006000011234567890189.", "categories": ["iban"] },
+    { "id": "ssn", "text": "SSN 123-45-6789 on file.", "categories": ["ssn"] },
+    { "id": "credit_card", "text": "Card 4111 1111 1111 1111 charged.", "categories": ["credit_card"] },
+    { "id": "routing_number", "text": "Routing 021000021 used.", "categories": ["routing_number"] },
+    { "id": "swift_bic", "text": "BIC DEUTDEFF500 provided.", "categories": ["swift_bic"] },
+    { "id": "ip_v4", "text": "host 203.0.113.42 responded.", "categories": ["ip_address"] },
+    { "id": "ip_v6", "text": "host 2001:0db8:85a3:0000:0000:8a2e:0370:7334 responded.", "categories": ["ip_address"] },
+    { "id": "mac_address", "text": "device 00:1A:2B:3C:4D:5E connected.", "categories": ["mac_address"] },
+    { "id": "url", "text": "See https://example.com/report for details.", "categories": ["url"] },
+    { "id": "passport_number", "text": "Passport A12345678 issued.", "categories": ["passport_number"] },
+    { "id": "date_of_birth", "text": "born 14/07/1990 in Paris.", "categories": ["date_of_birth"] },
+    { "id": "crypto_wallet", "text": "wallet 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa awaits.", "categories": ["crypto_wallet"] },
+    { "id": "medical_record_number", "text": "MRN: 123456789 recorded.", "categories": ["medical_record_number"] },
+    { "id": "tax_id", "text": "Tax ID 12-3456789 filed.", "categories": ["tax_id"] },
+    { "id": "vehicle_vin", "text": "VIN 1HGCM82633A004352 registered.", "categories": ["vehicle_vin"] },
+    { "id": "api_key", "text": "api_key: sk_live_51H8xyzABCDEFGHIJKLMNOPQR set.", "categories": ["api_key"] },
+    { "id": "secret_token", "text": "password: hunter2ExtraLongSecretValue set.", "categories": ["secret_token"] },
+    { "id": "jwt_token", "text": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "categories": ["jwt_token"] },
+    { "id": "eu_vat", "text": "VAT FR12345678901 on the invoice.", "categories": ["eu_vat"] },
+    { "id": "eu_vat_greece", "text": "VAT EL123456789 on the invoice.", "categories": ["eu_vat"] },
+    { "id": "drivers_license", "text": "License A1234567 shown.", "categories": ["drivers_license"] },
+    { "id": "clean_text", "text": "The quarterly report shipped on time and under budget.", "categories": [] }
+  ]
+}

@@ -56,9 +56,27 @@ impl Default for NodeId {
     /// `"unknown-host-<pid>"` — stable within a process but not globally unique.
     fn default() -> Self {
         let host = resolve_hostname();
-        let pid = std::process::id();
+        let pid = process_id();
         Self(format!("{host}-{pid}"))
     }
+}
+
+/// The current process id, or a fixed placeholder on wasm32-unknown-unknown.
+///
+/// `std::process::id()` *compiles* on wasm32-unknown-unknown but panics at runtime
+/// ("no pids on this platform") — one more of the wasm32 silent-failure surfaces Track
+/// L3 exists to close, alongside the clock and `uuid` randomness ones. A browser tab has
+/// no OS process to report, and — unlike the clock or randomness — there is no
+/// JS-hosted equivalent to bind to; `0` is honest about that rather than fabricating a
+/// number that looks like a real pid.
+#[cfg(not(target_arch = "wasm32"))]
+fn process_id() -> u32 {
+    std::process::id()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn process_id() -> u32 {
+    0
 }
 
 impl std::fmt::Display for NodeId {

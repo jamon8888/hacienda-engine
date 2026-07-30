@@ -113,6 +113,33 @@ mod tests {
     }
 
     #[test]
+    fn should_detect_an_eu_vat_number() {
+        // Track C2: the French client base's gap. FR + 11 digits is a real French VAT
+        // shape (2-digit key + SIREN); the pattern itself accepts any EU member code.
+        assert_eq!(
+            categories("VAT FR12345678901 on the invoice"),
+            vec![PiiCategory::EuVat]
+        );
+    }
+
+    #[test]
+    fn should_detect_a_greek_vat_number_under_its_el_prefix() {
+        // Greece's ISO country code is GR, but its VAT prefix is EL -- the one
+        // deliberate exception in the 27-code list, carried over from the browser
+        // detector's regex rather than re-derived, since getting this wrong silently
+        // stops matching a real client's VAT numbers.
+        assert_eq!(categories("EL123456789"), vec![PiiCategory::EuVat]);
+    }
+
+    #[test]
+    fn should_detect_a_drivers_license_number() {
+        assert_eq!(
+            categories("license A1234567 on file"),
+            vec![PiiCategory::DriversLicense]
+        );
+    }
+
+    #[test]
     fn should_return_spans_that_slice_the_source_text() {
         let text = "contact bob@corp.io please";
         let entities = RegexEngine::new().unwrap().find_all(text);

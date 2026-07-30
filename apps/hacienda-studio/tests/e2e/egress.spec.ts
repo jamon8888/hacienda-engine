@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
+import JSZip from "jszip";
 
 /**
  * Hosts the app is permitted to contact. Everything else is a compliance
@@ -69,5 +71,58 @@ test.describe("network egress", () => {
     );
 
     expect(remoteReferences).toEqual([]);
+  });
+});
+
+/**
+ * Track A2's *Check*: redacting the document is not the whole contract if the same
+ * secret ships a second time in entities-registry.json or the KG export. Reuses the
+ * CONTRACT fixture above — it names an IBAN that both the markdown redaction and
+ * the entity-linking pass would otherwise touch (Track F4).
+ */
+test.describe("PII redaction export contract", () => {
+  test("redacted output ships no IBAN in the markdown or the entity/KG export", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("xberg-studio-visited", "true");
+    });
+    await page.goto("/");
+    await page.waitForSelector('input[type="file"]:not([disabled])');
+
+    await page.click("button.config-toggle");
+    await page.check(
+      'label:has-text("Redact PII in Output") input[type="checkbox"]',
+    );
+    await page.keyboard.press("Escape");
+
+    const download = page.waitForEvent("download");
+    await page.setInputFiles('input[type="file"]', {
+      name: "protocole.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from(CONTRACT),
+    });
+
+    const zip = await JSZip.loadAsync(
+      await readFile(await (await download).path()),
+    );
+
+    const IBAN = "FR7630006000011234567890189";
+    const files = [
+      "protocole.md",
+      "entities-registry.json",
+      "kg-export/neo4j.cypher",
+      "kg-export/networkx.json",
+      "kg-export/rdf.ttl",
+    ];
+    for (const name of files) {
+      const contents = await zip.file(name)!.async("string");
+      expect(contents, `${name} must not contain the redacted IBAN`).not.toContain(
+        IBAN,
+      );
+    }
+
+    const markdown = await zip.file("protocole.md")!.async("string");
+    expect(markdown).toContain("[IBAN:****]");
   });
 });

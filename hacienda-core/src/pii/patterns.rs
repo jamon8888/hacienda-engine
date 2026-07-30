@@ -156,6 +156,26 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
             format_preserving: false,
             redact_template: "[JWT]".into(),
         },
+        // EU VAT number (Track C2): a 2-letter member-state code (all 27, `EL` for
+        // Greece) plus 2-12 digits. Placed last so it never pre-empts a more specific
+        // category (IBAN, SWIFT, ...) on an overlapping span — mirrors the browser
+        // detector's `euVat` regex, the pattern this fills the gap left by.
+        PatternMeta {
+            category: PiiCategory::EuVat,
+            pattern: r"(?i)\b(?:AT|BE|BG|CY|CZ|DE|DK|EE|EL|ES|FI|FR|HR|HU|IE|IT|LT|LU|LV|MT|NL|PL|PT|RO|SE|SI|SK)\d{2,12}\b".into(),
+            format_preserving: true,
+            redact_template: "[VAT:****]".into(),
+        },
+        // Driver's license (Track C2): a letter followed by 7-13 digits. Deliberately
+        // broad — license formats vary widely by jurisdiction — and placed last for the
+        // same overlap-precedence reason as EU VAT above; mirrors the browser
+        // detector's `driversLicense` regex.
+        PatternMeta {
+            category: PiiCategory::DriversLicense,
+            pattern: r"\b[A-Z]\d{7,13}\b".into(),
+            format_preserving: true,
+            redact_template: "[LICENSE:****]".into(),
+        },
     ]
 }
 

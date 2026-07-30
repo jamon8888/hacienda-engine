@@ -12,6 +12,7 @@
 	const stageLabels = {
 		extract: 'Extracting text',
 		ner: 'Finding entities',
+		pii: 'Scanning for PII',
 		link: 'Linking entities',
 		complete: 'Complete',
 		error: 'Error'

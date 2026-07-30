@@ -181,12 +181,16 @@ Confirmed by reading source, not by trusting the previous plan.
 
 Highest value per unit of work. Every toggle here already exists in the UI and lies to the user.
 
-- [ ] **A1. Call `detectPII` from the worker, gated on `config.enablePiiDetection`.**
+- [x] **A1. Call `detectPII` from the worker, gated on `config.enablePiiDetection`.**
       `worker/pipeline.ts`, after markdown is produced (~line 200, before the NER block).
       *Check:* a document containing `jean.dupont@cabinet-exemple.fr` yields a PII entity in
       the result; with the toggle off, it yields none.
 
-- [ ] **A2. Call `redactPII` when `config.redactPiiInOutput` is set.**
+      **Done via Track L6** — delivered by wiring `enablePiiDetection` to
+      `scanForPii`/`redactPii` (the compiled `hacienda-wasm` engine), not a TypeScript
+      `detectPII`. Verified by the check above via manual Playwright runs in L6/F4/A2.
+
+- [x] **A2. Call `redactPII` when `config.redactPiiInOutput` is set.**
       Must apply to the markdown that reaches the zip, and must run *after* NER so entity
       offsets are computed against unredacted text. Decide and record what happens to the
       entity registry and KG export under redaction — exporting a redacted document beside a
@@ -194,12 +198,56 @@ Highest value per unit of work. Every toggle here already exists in the UI and l
       `tests/e2e/egress.spec.ts`'s contract fixture — the downloaded markdown must not contain
       the IBAN, and the KG export must not reintroduce it.
 
-- [ ] **A3. Widen the upload gate for audio/video.**
+      **Done 2026-07-30.** The redact call itself came with L6; this closes the "decide and
+      record" half the plan flagged as still open through F4/C1/L7. Decision: an entity is
+      dropped from the frontmatter, the `## Entities` glossary, `entities-registry.json`,
+      and every KG export format if *any* of its mentions overlaps a PII finding —
+      under-including, not partial redaction of the registry row, is the safe default.
+      `worker/pipeline.ts`: `filterExportableEntities` (new, exported, unit-tested)
+      applies this before entities are ever enriched or handed to `registry.addEntity()`,
+      so the exclusion is upstream of every export surface, not a per-file patch. PII
+      detection was moved earlier in `processFile` (before entity enrichment) so its
+      findings exist before that filter runs — same coordinates `renderAnnotatedMarkdown`
+      already used, no new offset math.
+
+      **Verified for real:** `worker/pipeline.test.ts` gained 4 cases for
+      `filterExportableEntities` (drops on overlap, keeps non-overlapping, drops the whole
+      entity for a partial-mentions overlap, no-op in scan-only mode) — 9/9 in that file,
+      58/58 full suite. New Playwright test in `tests/e2e/egress.spec.ts` (`"PII redaction
+      export contract"`, using the same `CONTRACT` fixture the egress tests already share)
+      asserts the downloaded markdown, `entities-registry.json`, and all three
+      `kg-export/*` files contain no occurrence of the fixture's IBAN — run for real
+      (temporarily pointing `launchOptions.executablePath` at this sandbox's pre-installed
+      Chromium build, then reverted; not a committed change) alongside the two existing
+      egress tests, 3/3 passing. Manually re-ran the full L6/F4 browser reproduction
+      (misclassified Phone/Email entities from IBAN/card-number digit runs) and confirmed
+      zero PII needles in markdown, registry, or any KG export file — only the genuine
+      "Jean Dupont" entity survives.
+
+- [x] **A3. Widen the upload gate for audio/video.**
       Add `audio/` and `video/` to `SUPPORTED_MIME_PREFIXES` and matching extensions to
       `accept=` (`App.svelte:178`). Note `SUPPORTED_MIME_PREFIXES` and `validateFile` are
       **duplicated verbatim** in `lib/asset-loader.ts:157` and `lib/types.ts:104` — collapse
       to one before editing, or the fix lands in the copy nobody imports. `App.svelte` imports
       the `asset-loader` one. *Check:* an `.mp3` reaches `worker/pipeline.ts:149`.
+
+      **Done 2026-07-30.** Confirmed the duplication was exactly as described and that
+      nothing imports the `lib/types.ts` copy (`App.svelte` imports `validateFile` from
+      `lib/asset-loader.ts` only; grepped the whole app for other importers — none) — deleted
+      it outright rather than leaving dead code as a second place to forget to update next
+      time. Added `"audio/"`/`"video/"` to `asset-loader.ts`'s `SUPPORTED_MIME_PREFIXES`
+      (the live copy) and `.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv` to
+      `App.svelte`'s `accept=`, plus the drop-zone hint text.
+
+      **Verified**: new `validateFile` tests in `lib/asset-loader.test.ts` (audio and video
+      MIME types accepted; empty/oversized/unsupported-type rejections still behave as
+      before) — 5 new cases, 63/63 full suite. `tsc --noEmit`, `svelte-check`, `typos`, and a
+      production `vite build` all clean. Not independently re-verified with a live browser
+      upload — `validateFile` is the exact function `App.svelte` calls before a file ever
+      reaches the worker, so the unit test is a direct check of the gate itself, not a proxy
+      for it. Did not touch what happens *after* the gate: with `enableTranscription` off
+      (the default), an audio/video file now reaches `engine.extract()` instead of
+      `WhisperBridge`, which is untested territory this item didn't ask about.
 
 - [ ] **A4. Stop reporting success on model-load failure.**
       `App.svelte:60-62` catches the download error and sets `assets.nerModel = true` anyway;
@@ -252,13 +300,25 @@ The rule for that window: **do not close a gap by writing TypeScript that Track 
 delete.** A missing detector in the browser is cheap to live with for a few weeks; a second
 TypeScript pseudonymisation engine is not.
 
-- [ ] **C1. Write down the split as temporary.** One short section in the Studio README:
+- [x] **C1. Write down the split as temporary.** One short section in the Studio README:
       today browser = offline, neural, no audit chain; CLI/API = server, regex, real audit
       chain and reversible pseudonyms; **target = one engine, `hacienda-core` on wasm32.**
       Without the last clause, someone will keep trying to wire Studio to `/v1/pii/scan`, or
       will "helpfully" port a Rust detector into TypeScript.
 
-- [ ] **C2. Measure the coverage gap; close it only in the direction that survives.**
+      **Done 2026-07-30.** `apps/hacienda-studio/README.md` didn't exist; created it with a
+      "Relationship to the CLI/API" section. Written to reflect *today's* split, not the
+      pre-Track-L one this item originally described — most of it has already closed: PII
+      detection/redaction is one engine now (both call `hacienda-core` on wasm32), and the
+      audit chain exists in both (differing in durability, not in kind — C3's still open).
+      What's still genuinely split: reversible pseudonymization (Rust-only, F2 not built)
+      and NER (Studio's live pipeline runs `lib/ner-bridge.ts`'s regex/compromise.js bridge,
+      not xberg-wasm's downloaded-but-uncalled GLiNER2 model, and not `hacienda-core`'s own
+      `ner-candle` — which is compiled out of every default build, not just wasm32). Kept
+      the original's warning against wiring Studio to `/v1/pii/scan` or porting a Rust
+      detector into TypeScript.
+
+- [x] **C2. Measure the coverage gap; close it only in the direction that survives.**
       Rust has 20 patterns across 19 categories (`pii/patterns.rs:9-160`) against the browser's
       9. Rust lacks **EU VAT** and **driver's license** — both present in the browser and both
       relevant to French clients. **Add those two to Rust** (they survive Track L, and they are
@@ -269,6 +329,23 @@ TypeScript pseudonymisation engine is not.
       *Check:* one shared fixture corpus, asserted from both `vitest` and `cargo test`. The
       corpus outlives Track L and becomes its acceptance test — build it now, so the port has
       a target to be measured against.
+
+      **Done 2026-07-30.** Added `PiiCategory::EuVat` (`pii/types.rs`) and its pattern —
+      `(?i)\b(?:AT|BE|...|SK)\d{2,12}\b` over the 27-country EU/EEA VAT-prefix list,
+      `format_preserving: true`, `[VAT:****]` — plus a `DriversLicense` pattern (Rust already
+      had the category, just no pattern for it): `\b[A-Z]\d{7,13}\b`, `[LICENSE:****]`. Both
+      appended to `builtin_patterns()` so existing precedence ("earlier wins on overlap") is
+      undisturbed. Three new unit tests in `pii/engine.rs`, including a Greek-prefix case
+      (`EL` rather than `GR`, per the actual ISO/VIES prefix) to catch a plausible copy-paste
+      mistake.
+
+      `fixtures/pii-corpus.json` (repo root, 25 cases) is the shared corpus: category names
+      in `PiiCategory`'s serde form (snake_case), asserted as an exact-match `HashSet` (not
+      `BTreeSet` — `PiiCategory` has no `Ord`) of detected categories per case. Two runners
+      against the same file: `hacienda-core/tests/pii_corpus.rs` (native, `include_str!`)
+      and `apps/hacienda-studio/lib/pii-engine.test.ts` (`vitest`, against the real compiled
+      `hacienda-wasm` build, not a mock). Both pass 25/25 as of L6's wasm wiring — this
+      check couldn't be fully closed until L6 gave the corpus a wasm build to run against.
 
 - [ ] **C3. Studio gets the real audit trail via Track L, not a second implementation.**
       Previously an open question. It is now answered by the WASM decision: the blake3 chain
@@ -369,7 +446,7 @@ This is the flow the user asked for, and it is where the two apps differ most.
       open the F1 popover.
       *Check:* editing text before a PII span does not misplace that span's highlight.
 
-- [ ] **F4. Solve the offset problem. This is the hard technical core of Tracks A/E/F.**
+- [x] **F4. Solve the offset problem. This is the hard technical core of Tracks A/E/F.**
       Four things mutate the same text and all are offset-sensitive: entity linking
       (`worker/pipeline.ts:82` splices `[text](entity:type/slug)` at byte spans),
       PII redaction (A2), pseudonymization (F2), and now user edits in CodeMirror. Splicing
@@ -378,6 +455,57 @@ This is the flow the user asked for, and it is where the two apps differ most.
       render links/tokens at display or export time rather than splicing into the string.
       Doing A2 and F3 without this will produce corrupted output that tests on short fixtures
       will not catch.
+
+      **Done 2026-07-30, scoped to the two mutators that exist in the pipeline today —
+      entity linking and PII redaction. F2 (pseudonymization) and F3 (CodeMirror editing)
+      aren't built yet; there's nothing for them to merge into until they are. Whoever
+      builds either must extend this pattern, not reintroduce splice-then-mutate.**
+
+      The representation F4 asked for: `renderAnnotatedMarkdown` (`worker/pipeline.ts`)
+      collects entity-link spans and PII-redaction spans as two lists computed against the
+      *same* immutable `markdown` — no splicing happens until both lists exist. PII wins on
+      overlap (`span.start < p.end && p.start < span.end`): an entity-link span that
+      overlaps any redaction span is dropped from the render list rather than spliced, so a
+      redacted span's raw text can never end up duplicated into a link's visible text and
+      its `entity:` slug — which is exactly how L6's corruption happened (PII detection ran
+      on markdown that already had link syntax spliced in, so a matching digit run got
+      rewritten in both places it appeared). The two surviving lists are merged, sorted
+      descending by start, and spliced in one right-to-left pass — same technique the old
+      `linkEntities` used, just fed a merged, pre-filtered span list instead of two
+      sequential passes each mutating the live string.
+
+      `processFile` was reordered to match: PII detection (`scanForPii`/`redactPii`) now
+      runs on the original `markdown`, before `renderAnnotatedMarkdown`, not after a
+      separate `linkEntities` pass. Scan-only mode (`enablePiiDetection` on,
+      `redactPiiInOutput` off) passes an empty finding list into the renderer, so entity
+      links render exactly as before — no redaction findings means no overlaps to resolve.
+
+      **Verified for real:** `worker/pipeline.test.ts` (new — the first unit test for this
+      file; needed a `self` polyfill via dynamic `import()` in `beforeAll`, since the file
+      assigns `self.onmessage` at module scope and Node has no `self`) exercises the exact
+      L6 regression directly — a "phone"-typed entity whose slug is the same digit run a
+      credit-card PII span matches — and asserts the merged output contains neither the raw
+      digits nor a `entity:phone` link, only `[CARD:****]`. Also covers: non-overlapping
+      entity links render unchanged, non-overlapping PII spans redact unchanged, multiple
+      non-overlapping spans of both kinds splice correctly in one pass, and scan-only mode
+      leaves entity links untouched. All 5 pass, plus the full existing suite (54/54),
+      `tsc --noEmit`, `svelte-check` (0 errors), and a production `vite build`, all clean.
+
+      Manually re-ran the L6 browser reproduction (`redactPiiInOutput` on, a document
+      containing an email/IBAN/card-number mixed into text an NER pass misclassifies as
+      phone/organization entities) through the real dev server: output now reads `Contact
+      [Jean Dupont](entity:organization/jean-dupont) at [EMAIL]. ... IBAN [IBAN:****].
+      Card number [CARD:****] on file.` — no raw PII, no `entity:phone/[CARD:****]`-style
+      corruption, confirmed by regex against the downloaded markdown.
+
+      **What's still open, deliberately not touched here:** the frontmatter's `entities`
+      block and the zip's `entities-registry.json`/`kg-export/*` still carry entities'
+      *names* — including ones derived from redacted spans (e.g. an entity literally named
+      `"4111111111111"`) — regardless of what the markdown body shows. That's Track A2's
+      question ("what happens to the entity registry and KG export under redaction —
+      exporting a redacted document beside a knowledge graph naming every entity would
+      defeat the feature"), not F4's; F4 only guarantees the markdown body itself doesn't
+      get corrupted or leak redacted text a second time.
 
 ---
 
@@ -561,7 +689,7 @@ stops having a PII implementation and starts calling the one in `hacienda-core`.
 Sequence the steps so the *answer to "does this fit?"* arrives before the porting work, not
 after. L1 is a measurement, not a build.
 
-- [ ] **L1. Measure the budget before designing the port.**
+- [x] **L1. Measure the budget before designing the port.**
       `xberg_wasm_bg.wasm` is 48,060,064 bytes against jsDelivr's 50 MB per-file cap — ~1.9 MB
       of headroom. Build `hacienda-core` for `wasm32-unknown-unknown` with everything gated
       off except `pii/` and `redaction/`, and record the `.wasm` delta.
@@ -570,14 +698,85 @@ after. L1 is a measurement, not a build.
       own origin, and `VITE_MODEL_BASE_URL` (`asset-loader.ts:19`) shows the pattern. Do not
       start L4 until this number exists.
 
-- [ ] **L2. Add the wasm crate and the target feature set.**
+      **Measured 2026-07-30: 1,227,264 bytes (~1.17 MB).** Method: `hacienda-core` gated to
+      `pii`/`redaction` plus the slice of `audit` they need (`AuditConfig`,
+      `entry::RedactionAction` — not the chain/store/segment machinery, which needs `uuid`'s
+      `js` feature per L3 and is out of scope here); `axum`, `tokio`, `uuid` moved to
+      `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`; `xberg` split the same way,
+      native keeps `tokio-runtime`, wasm32 gets `default-features = false, features = ["ner"]`
+      (not the full `wasm-target` umbrella — OCR/Excel/layout are facade-only and not compiled
+      here). Linked as a standalone `cdylib` (`opt-level = "z"`, `lto = true`,
+      `codegen-units = 1`, `panic = "abort"`, `strip = true`) via a throwaway crate (not
+      committed) that calls `PiiPipeline::scan` and `RedactionEngine::redact` under all four
+      modes — including the AES-SIV `Pseudonymiser` path — through a manual single-poll
+      executor, so the linker can't dead-code-eliminate them. Result: **fits inside the ~1.9 MB
+      headroom on its own**, with ~713 KB of headroom left over.
+
+      Caveats that keep this a lower bound, not the final delta: (1) no `wasm-opt`/
+      `wasm-bindgen` in this environment, so there's no post-link DCE/`-Oz` pass — xberg's own
+      build applies one; (2) standalone link, not merged into `xberg_wasm_bg.wasm` — a real
+      merge could dedupe shared deps (`serde`, `regex`, `blake3`, ...) already present in that
+      binary and shrink the true delta, or wasm-bindgen glue could add a modest amount back;
+      (3) excludes NER (`ner-candle-wasm`) and the IndexedDB store layer (L5) entirely, both
+      still to come. Re-measure once L2's real wasm crate and L5's stores exist.
+
+- [x] **L2. Add the wasm crate and the target feature set.**
       `crates/` is empty and no manifest mentions wasm-bindgen. Follow the xberg precedent:
       `crate-type = ["cdylib", "rlib"]`, `opt-level = "z"`, `codegen-units = 1`, and a
       `wasm-target` feature that selects `xberg`'s `wasm-target` instead of `tokio-runtime`.
       *Check:* `cargo build --target wasm32-unknown-unknown` reaches a *link* error about
       hacienda-core's own code, not a dependency resolution error.
 
-- [ ] **L3. Fix the three silent-failure surfaces first — before the port compiles.**
+      **Done 2026-07-30.** Added `crates/hacienda-wasm` (new workspace member): `crate-type
+      = ["cdylib", "rlib"]`, depends on `hacienda-core` plus `wasm-bindgen`,
+      `wasm-bindgen-futures`, `serde-wasm-bindgen`, exports `process`/`scan`/`redact_empty`
+      over the real `PiiPipeline`/`RedactionEngine` API (including the AES-SIV
+      `Pseudonymiser` path) so the build genuinely exercises `hacienda-core`. Profile: a
+      per-package override (`[profile.release.package.hacienda-wasm] opt-level = "z",
+      codegen-units = 1`, not workspace-wide — xberg does the same for `xberg-wasm` alone,
+      leaving native `hacienda-cli`/`hacienda-api` release builds untouched).
+      `hacienda-core`'s wasm32 `xberg` dependency widened from L1's `["ner"]` spike to
+      `xberg`'s `wasm-target` components (`no-ort-target`, `excel-wasm`, `layout-tract`,
+      `auto-rotate-tract`, `ner-candle-wasm`) **minus `ocr-wasm`** — see the exclusion note
+      below.
+
+      **Result: better than the check asked for.** `cargo build --target
+      wasm32-unknown-unknown -p hacienda-wasm --no-default-features` (dev profile)
+      compiles *and links* successfully — no error of any kind. With the full
+      `wasm-target` umbrella including `ocr-wasm`, the build instead fails in a
+      **build script**, not at dependency resolution or Rust link time:
+      `xberg-tesseract`'s `build.rs` detects the wasm32 target and requires a WASI SDK
+      C toolchain (`WASI_SDK_PATH`) to cross-compile Tesseract, which isn't provisioned in
+      this sandbox (network policy also blocks fetching the SDK release here). This is an
+      environment/CI-provisioning gap, not a code defect — the real published
+      `@xberg-io/xberg-wasm` package does build `ocr-wasm` once that toolchain exists.
+      `ocr-wasm` is excluded from `hacienda-core`'s wasm32 feature list for now (see the
+      comment in `hacienda-core/Cargo.toml`); `hacienda-wasm` doesn't call
+      extraction/OCR yet, so nothing today depends on it. Re-add it once Track I needs
+      xberg's extraction on wasm32 and CI provisions `WASI_SDK_PATH`.
+
+      **Release `.wasm` size: 18,632,965 bytes (~17.8 MB)** — `cargo build --target
+      wasm32-unknown-unknown -p hacienda-wasm --no-default-features --release`, no
+      `wasm-opt` pass (unavailable in this sandbox). Comfortably under 50 MB as a
+      standalone artifact, but **this number answers a different question than L1's did,
+      and is not a delta to add on top of `xberg_wasm_bg.wasm`'s 48,060,064 bytes.**
+      `wasm-target`'s `no-ort-target` base alone pulls in most of xberg's extraction
+      surface (PDF, Office, email, archives, HTML/XML, calamine) plus `tract`/`candle` for
+      `layout-tract`/`auto-rotate-tract`/`ner-candle-wasm` — i.e. this build recompiles a
+      large fraction of the *same xberg code already inside* `xberg_wasm_bg.wasm`,
+      standalone, because `hacienda-wasm` links its own independent copy of `xberg` rather
+      than sharing Studio's existing one. Track L's actual integration (Studio embeds one
+      compiled artifact, not two `xberg` instances) would not pay for that duplication —
+      the true marginal cost of adding hacienda-core's own code (`pii`/`redaction`/`audit`,
+      none of which xberg already has) on top of Studio's existing bundle is closer to
+      **L1's 1,227,264-byte, narrower-`xberg`-feature measurement** than to this number.
+      Read this 17.8 MB figure as "a fully independent hacienda-wasm bundle, built from
+      scratch, fits under the cap on its own" — useful if Studio ever needs to load it as a
+      separate module — not as "L1's number was wrong." A real merged-artifact
+      measurement needs the actual Studio embedding (single shared `xberg`), which is
+      later Track L work (L5/L6), not L2's.
+
+- [x] **L3. Fix the three silent-failure surfaces first — before the port compiles.**
       They are cheap now and near-undetectable later.
       **(a) Clock.** Replace `Instant::now()` (`redaction/engine.rs:71`) and `SystemTime::now()`
       (`redaction/engine.rs:190`, `audit/sink.rs:176`, `audit/store_file.rs:1008`) with a
@@ -591,7 +790,66 @@ after. L1 is a measurement, not a build.
       *Check:* a wasm32 test that asserts a redaction round-trip produces a non-1970 timestamp
       and a non-nil UUID. This is the test that catches all three.
 
-- [ ] **L4. Gate out the server- and disk-only modules.**
+      **Done 2026-07-30, and the check test earned its keep — it failed twice for real
+      reasons before passing.**
+
+      **(a) Clock:** added `web-time` (workspace dep) — a drop-in `Instant`/`SystemTime`
+      that passes through to `std::time` natively and backs onto `Performance`/`Date` in
+      the browser. Fixed `redaction/engine.rs`'s two call sites as planned. `audit/sink.rs`
+      and `audit/store_file.rs` were **not** touched: both are `#[cfg(not(target_arch =
+      "wasm32"))]`-gated in their entirety since L1, and their `SystemTime::now()` calls
+      are inside `#[cfg(test)]` temp-dir helpers that do real filesystem I/O — changing
+      them would be pure churn on code that can never run on wasm32 regardless of clock
+      implementation.
+
+      *A fourth clock call site the plan's grep missed*, because it isn't named
+      `redaction/engine.rs`: **`pii/pipeline.rs`'s `process`/`scan`** — the actual browser
+      entry points — had **seven** of their own `Instant::now()` calls timing
+      regex/model/merge/redaction stages, none gated away. The check test caught this on
+      its first real run (`panicked at .../unsupported/time.rs:13:9: time not implemented
+      on this platform`) before any manual review did. Fixed the same way (`web_time`).
+
+      **(b) Randomness:** turned out **not** to need `getrandom`'s `js`/`wasm_js` feature
+      at all. `uuid` 1.24 restructured its own wasm32 randomness to a self-contained
+      `wasm-bindgen` binding straight to `globalThis.crypto.getRandomValues`
+      (`uuid`'s `rng.rs`), gated behind `uuid`'s own `js` feature — enabling that one
+      feature (`hacienda-core/Cargo.toml`, wasm32-only target dependency) was sufficient.
+      With that blocker gone, `audit/chain.rs`, `audit/segment.rs` and `audit/store.rs`
+      (the in-memory `AuditStore`/`AuditChain`, not the file-backed one) no longer needed
+      the wasm32 gate L1 put on them for this reason and are un-gated in `audit/mod.rs` —
+      only `store_file`/`sink`/`export` (real file I/O) remain native-only.
+
+      *A second surface the plan didn't name*: un-gating `audit/segment.rs` exposed
+      **`std::process::id()`**, called from `NodeId::default()` — compiles cleanly on
+      wasm32-unknown-unknown (as L1/L2's builds already showed) but **panics at runtime**
+      ("no pids on this platform"), the check test's second real failure. There's no
+      JS-hosted equivalent to bind to — a browser tab has no OS process — so
+      `audit/segment.rs` now has a `#[cfg(target_arch = "wasm32")]` `process_id()` that
+      returns a fixed `0` rather than fabricating a number that looks like a real pid.
+
+      **(c) Timestamps:** confirmed `chrono`'s defaults (`{ version = "0.4", features =
+      ["serde"] }`, no `default-features = false`) already include `wasmbind`, and added
+      an explicit comment at the dependency declaration warning against ever adding
+      `default-features = false` there. The regression guard is the check test itself: it
+      asserts both `RedactionAuditEntry.timestamp` (from the fixed `web_time` clock) and
+      an `InMemoryAuditStore` segment's `opened_at` (from `chrono::Utc::now()`) are well
+      past the epoch.
+
+      **Check, run for real:** `crates/hacienda-wasm/tests/wasm.rs`, executed via
+      `wasm-bindgen-test-runner` under Node (`wasm-bindgen-cli` 0.2.126, matched to the
+      `wasm-bindgen` crate version in `Cargo.lock`) — not just compiled. It runs a real
+      `PiiPipeline::process` round trip (regex-detects and masks an email, asserting the
+      audit entry's `timestamp` and the rewritten text), then feeds that audit log into a
+      real `InMemoryAuditStore`, closes it, and asserts the sealed segment's `segment_id`
+      parses as a non-nil `Uuid` and its `opened_at` parses as a non-epoch RFC3339
+      timestamp. `cargo test --target wasm32-unknown-unknown -p hacienda-wasm --test wasm`
+      → `test result: ok. 1 passed`. Native `cargo build --workspace`, `cargo test -p
+      hacienda-core pii:: redaction::`, `cargo fmt --check --all`, and `cargo clippy
+      --workspace --all-targets` all stay clean; two pre-existing `audit::store_file`
+      failures (EACCES-simulation tests that don't hold under this sandbox's root user)
+      reproduce identically on the pre-L3 commit and are untouched by this change.
+
+- [x] **L4. Gate out the server- and disk-only modules.**
       `axum` appears only in `auth/authz.rs` (4 references) — a server-only concept, so
       `#[cfg]` the module out entirely. `std::fs` appears in `audit/sink.rs:11`,
       `audit/store_file.rs:41`, `audit/segment.rs:76` (reads `/etc/hostname`),
@@ -601,7 +859,25 @@ after. L1 is a measurement, not a build.
       gated out; `tokio::sync::Mutex` (`audit/store_file.rs:179`) works on wasm32 as-is.
       *Check:* `cargo build --target wasm32-unknown-unknown -p hacienda-core` succeeds.
 
-- [ ] **L5. IndexedDB `AuditStore` / `ReviewStore` / `JobStore`.**
+      **Already true as of L1/L3 — no new code needed, just the check run for real.**
+      `auth` (axum), `facade` (`/proc/meminfo`), `compliance`, `glossary`, `jobs`, `review`
+      (`review/store_file.rs` included, since the whole `review` module is gated, not just
+      its file-backed store) are all `#[cfg(not(target_arch = "wasm32"))]` in `lib.rs`
+      since L1. `audit`'s `store_file`/`sink`/`export` (the only `std::fs`/`spawn_blocking`
+      users left in `audit` after L3 un-gated `chain`/`segment`/`store`) are gated the same
+      way in `audit/mod.rs`. `pii/config.rs:95`'s `std::fs::read_to_string` is the one
+      `std::fs` call site that *is* compiled on wasm32 — same reasoning as
+      `audit/segment.rs`'s `/etc/hostname` read: it compiles fine (wasm32 `std::fs` exists,
+      it just always errors at runtime, no panic), and nothing in `crates/hacienda-wasm`
+      calls the function that reaches it, so it's inert rather than gated.
+
+      `cargo build --target wasm32-unknown-unknown -p hacienda-core` — **note: no
+      `--no-default-features`, unlike L1/L2/L3's checks** — succeeds: `default = ["jobs"]`
+      doesn't matter here because `jobs`'s `#[cfg]` in `lib.rs` is `all(feature = "jobs",
+      not(target_arch = "wasm32"))`, so the feature being on changes nothing for this
+      target.
+
+- [x] **L5. IndexedDB `AuditStore` / `ReviewStore` / `JobStore`.**
       The trait seams are the reason this track is tractable — implement against them, do not
       reshape them. Carries the C3 sub-question: an IndexedDB chain dies with a cleared browser
       profile, so if Studio output must be legally defensible the chain has to be *exported
@@ -609,18 +885,173 @@ after. L1 is a measurement, not a build.
       *Check:* append two audit entries, reload the page, verify the blake3 chain still
       verifies across the reload.
 
-- [ ] **L6. Delete the TypeScript engine and switch the call sites.**
+      **Done 2026-07-30, `AuditStore` only** — `ReviewStore`/`JobStore` deferred (see
+      below). `hacienda-core/src/audit/store_idb.rs` (wasm32-only): `IndexedDbAuditStore`
+      reuses `audit::store::State` (made `pub(crate)`, not reshaped) rather than
+      re-deriving `InMemoryAuditStore`'s transition logic — it *is* that logic plus a
+      durability step. After every mutating call, the current state is serialized to one
+      IndexedDB record; `open()` reads that record back and replays it through
+      `Segment::append`, the same path `FileAuditStore`'s recovery uses for `.jsonl`
+      files, so a tampered snapshot is caught the same way a tampered file would be.
+      `Segment`'s `prev_seal_hash` isn't stored separately — it's always the most recent
+      sealed segment's `seal_hash`, so persisting it too would just be a second place for
+      it to go stale.
+
+      **The `Send` problem, and why `SendWrapper` is the right tool, not a workaround.**
+      `AuditStore` uses plain `#[async_trait]`, so every method returns a `Send`-bounded
+      future by design — a database backend should be able to run its I/O off whatever
+      executor thread drives it. `indexed_db_futures`'s `Database`/`Transaction`/
+      `ObjectStore` wrap `web_sys`/`js_sys` handles, which are `!Send` unconditionally on
+      every wasm32 target (`wasm-bindgen` does not special-case the non-`atomics`,
+      single-threaded case this crate actually builds for). `send_wrapper::SendWrapper`
+      is the ecosystem-standard answer: it satisfies the `Send` bound by moving the "never
+      actually crosses a thread" invariant from the type system to a same-thread runtime
+      assertion that can never fire on `wasm32-unknown-unknown` without `atomics`. Not
+      reshaping `AuditStore` to drop its `Send` bound (`#[async_trait(?Send)]`) was a
+      deliberate choice — that bound is what lets a *native* backend like
+      `FileAuditStore` do real I/O off-thread, and this module has no business narrowing
+      a guarantee other implementations rely on just because it personally doesn't need
+      it.
+
+      **`ReviewStore`/`JobStore` deferred, not silently dropped.** Both live in modules
+      (`review`, `jobs`) still gated out of wasm32 entirely since L1 — nothing in
+      `crates/hacienda-wasm` exposes review or job-tracking functionality yet (Track A/E/F
+      Studio work hasn't reached that point), so an IndexedDB implementation today would
+      have no caller and no way to be exercised by a real check. Add them alongside
+      whichever Studio track first needs one, following the exact pattern here: reuse the
+      existing trait and in-memory state, add a persistence step, don't reshape.
+
+      **C3 is still open.** This module makes the chain durable *across a reload*, not
+      durable in the sense a compliance record needs — an IndexedDB chain dies with a
+      cleared browser profile. Nothing here decides whether/how the chain gets exported
+      into the vault (Track I2); that product question is exactly as open as it was
+      before this step.
+
+      **Check, run for real — "reload the page" modeled as a fresh store instance against
+      the same IndexedDB database name** (no real browser page-navigation available in
+      this harness; Node has no native IndexedDB either, so the run below uses the
+      `fake-indexeddb` polyfill via `NODE_OPTIONS=--require .../fake-indexeddb/auto`).
+      `crates/hacienda-wasm/tests/idb.rs`: session 1 opens a store, appends two entries,
+      confirms `verify()` and `entries().len() == 2`, captures `tip()`, and is dropped
+      *without* calling `close()` — an unclean tab close is exactly the durability case
+      that matters, not just orderly shutdown. Session 2 opens a fresh
+      `IndexedDbAuditStore` against the same database name, confirms both entries and the
+      same `tip()` survived, and — Track L5's actual check — `verify()` still passes,
+      which specifically exercises the replay-through-`Segment::append` rehydration path,
+      not just raw byte persistence. `cargo test --target wasm32-unknown-unknown -p
+      hacienda-wasm --test idb` → `test result: ok. 1 passed`. Native `cargo build
+      --workspace`, `cargo fmt --check --all`, and `cargo clippy` (both native
+      `--workspace --all-targets` and `--target wasm32-unknown-unknown` for
+      `hacienda-core --lib` and `hacienda-wasm --all-targets`) all stay clean.
+
+- [x] **L6. Delete the TypeScript engine and switch the call sites.**
       `lib/pii-detector.ts` (`detectPII:22`, `redactPII:39`, zero importers) is deleted rather
       than wired — Track A's toggles resolve to the Rust engine instead. This is the step that
       makes Tracks A2 and F cheaper, which is why A2 should not be built twice.
       *Check:* the C2 shared fixture corpus passes from `vitest` against the WASM build, with
       the same results `cargo test` produces. One corpus, two runners, identical output.
 
-- [ ] **L7. Reconsider `preserveOffsets` against Track F4.**
+      **Done 2026-07-30.** `lib/pii-detector.ts` deleted (confirmed zero importers repo-wide
+      before deleting). New `lib/pii-engine.ts` wraps `hacienda-wasm`'s `scan()`/`process()` —
+      the same compiled crate L2/L3 built and L5 gave a durable audit store — as
+      `scanForPii()`/`redactPii()`; field names crossing the boundary are `hacienda-core`'s
+      actual Rust field names (no camelCase rename), documented in a comment so nobody
+      "fixes" the casing without also changing Rust.
+
+      `worker/pipeline.ts`'s `initEngine()` now `Promise.all`s the xberg wasm init alongside
+      `initPiiEngine()`. A new `"pii"` stage runs between entity-linking and frontmatter
+      build: `enablePiiDetection`/`redactPiiInOutput` (previously read by nothing —
+      `ConfigPanel.svelte`'s "PII & Compliance" toggles were dead config) now actually call
+      the engine, and `piiEntitiesFound` flows into both the progress event and the output
+      frontmatter (`types.ts`, `ProgressBar.svelte`'s stage label map).
+
+      Build wiring: `hacienda-wasm` added as a `file:../../crates/hacienda-wasm/pkg`
+      dependency; `predev`/`prebuild`/`pretest:unit` run a new `build:wasm` script
+      (`cd crates/hacienda-wasm && wasm-pack build --target web --no-default-features`) since
+      `pkg/` isn't committed, matching the existing `ocr-wasm`/`xberg-wasm` pattern.
+      `vite.config.ts` excludes `hacienda-wasm` from `optimizeDeps` (required for its
+      `?url` wasm import to resolve) and gives it its own `manualChunks` entry. `Taskfile.yml`
+      gained a `build:wasm` task and `wasm-pack` in `setup`.
+
+      **Verified for real, not just compiled:** `cargo test` (native, including the new C2
+      corpus test), `wasm-bindgen-test` (wasm32), `vitest run` (25/25 corpus cases against
+      the real compiled wasm build, not a mock — required switching `import.meta.resolve`,
+      unsupported by vitest's SSR transform, to `createRequire(...).resolve`), `svelte-check`
+      (caught a real error: `ProgressBar.svelte`'s stage-label map didn't have a `"pii"`
+      entry), a full production `vite build`, and a manual Playwright run against the real
+      dev server exercising both `enablePiiDetection` (scan-only) and `redactPiiInOutput`
+      (rewrite-output) paths end-to-end through a real download.
+
+      **Real product bug found via that manual run, deliberately not fixed here:** PII
+      redaction runs on `linkedMarkdown` — *after* `linkEntities` has rewritten NER spans into
+      `[text](entity:type/slug)` links. A PII span overlapping a link's visible text or
+      `entity:` target rewrites inside the link syntax too; observed as
+      `[[CARD:****]](entity:phone/[CARD:****])` from an IBAN digit run inside a misclassified
+      Phone entity's link. This is exactly Track F4's offset problem, not a new one — a real
+      fix needs entity offsets recomputed against redacted text, which is what L7 exists to
+      investigate (`WasmRedactionConfig.preserveOffsets` may already solve it on the Rust
+      side). Documented at the call site in `worker/pipeline.ts` rather than patched ad hoc;
+      left open for L7.
+
+- [x] **L7. Reconsider `preserveOffsets` against Track F4.**
       `WasmRedactionConfig` already exposes `preserveOffsets`, and `WasmRedactionFinding`
       carries `start`/`end`/`category`/`strategy`/`replacementToken`. F4's offset problem may
       be substantially solved on the Rust side already. **Read that implementation before
       designing F4's overlay** — this could remove the hardest item in the plan.
+
+      **Done 2026-07-30 — investigated, does not remove F4. Corrected below; do not carry
+      the "may already solve it" hedge in `worker/pipeline.ts` forward as encouragement to
+      reach for xberg's redactor.**
+
+      First correction to the premise itself: `WasmRedactionConfig`/`WasmRedactionFinding`
+      (`node_modules/@xberg-io/xberg-wasm/pkg/web/xberg_wasm.d.ts:3476-3554`) belong to
+      **`@xberg-io/xberg-wasm`**, the prebuilt npm package — not to `hacienda-wasm`, the
+      crate Track L2-L6 built and wired to Studio. It's a *third* PII implementation: its
+      own `WasmPiiCategory` enum (13 categories — email/phone/ssn/card/postal/ip/iban/bic/
+      dob/person/org/location/custom — a strict subset of `hacienda-core::pii::PiiCategory`'s
+      ~20, missing exactly the ones C2 cares about, EU VAT and driver's license) running as
+      a post-processor inside xberg's own `extract(input, config)` call, configured via
+      `WasmExtractConfig.redaction`. Reaching for it would reintroduce the two-engines
+      problem C1's decision was written to end — three engines, now — for zero coverage
+      gain, since L6 already wired Studio to the engine `cargo test`'s corpus asserts
+      against.
+
+      Second, and more direct: `WasmRedactionReport`'s own doc comment settles what
+      `preserveOffsets` can and can't do. *"Offsets are relative to the original
+      pre-redaction `content` and are intended for audit reconstruction only — the original
+      bytes are dropped at the end of the pipeline."* That's a one-shot destructive
+      redaction with an audit trail attached — structurally identical to what
+      `hacienda-wasm`'s `scan()`/`process()` already return today (`PipelineResult` with
+      `entities: PiiEntity[]` carrying `start`/`end`, plus `redacted_text`). Whatever
+      `preserveOffsets` toggles (likely length-preserving replacement, unverified — no
+      Rust source for `xberg-wasm` is checked out in this repo, only the compiled
+      `.d.ts`/`.wasm`; `xberg-io/xberg` is a separate repo not in this session's scope), it
+      does not give Studio a live source-text-plus-overlay architecture. Findings are
+      reported once, against text about to be discarded, not held for later re-rendering.
+
+      Third: L6's actual bug isn't an offset-shift bug, so a length-preserving replacement
+      wouldn't have prevented it. `linkEntities` (`worker/pipeline.ts:83-98`) splices
+      `[matched](entity:${type}/${slug})` into the string — and the corruption seen in
+      manual testing, `[[CARD:****]](entity:phone/[CARD:****])`, happened because the
+      *slug itself* embedded the same PII-looking digit run as the link text (a
+      misclassified NER entity whose derived slug was the IBAN digits). A regex-based PII
+      pass over the already-linked markdown has no way to know "this occurrence is inside a
+      synthetic URI, don't touch it" from "this occurrence is prose" — it matches both, and
+      the zip's `entities-registry.json` still carries the unredacted slug regardless.
+      Preserving byte offsets does nothing to stop a plain-text search from firing twice on
+      structurally different parts of the same string.
+
+      **What actually moves F4 forward:** `hacienda-wasm`'s `PipelineResult.entities` is
+      already the overlay shape F4 asks for — spans with category/start/end, independent of
+      any splicing. L6 immediately throws that away by running PII detection *after*
+      `linkEntities` has already spliced, on the spliced string. F4's fix is a reordering +
+      merge, not a new primitive to import: run entity-linking's span collection and PII
+      detection both against the original unlinked `markdown`, producing two independent
+      span lists, resolve overlaps between them once (a PII span inside a would-be entity
+      link should suppress or absorb that link, not run through it twice), and splice the
+      merged result exactly once. That merge/precedence rule is the actual undesigned work
+      F4 names — not present in this repo, in xberg, or in hacienda-core, and out of scope
+      for L7 (investigation only, per this item's own text). Left for whoever picks up F4.
 
 ---
 

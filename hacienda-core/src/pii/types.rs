@@ -13,6 +13,10 @@ pub enum PiiCategory {
     Ssn,
     PassportNumber,
     DriversLicense,
+    /// EU intra-community VAT number: a 2-letter member-state code (`EL` for Greece,
+    /// not `GR`) followed by up to 12 digits. Added for Track C2 — the French client
+    /// base's most common gap between the browser's 9 regexes and the Rust set.
+    EuVat,
     NationalId,
     TaxId,
     CreditCard,

@@ -24,6 +24,12 @@ import initWasm from "@xberg-io/xberg-wasm";
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
 import { extractEntities } from "../lib/ner-bridge";
+import {
+  initPiiEngine,
+  redactPii,
+  scanForPii,
+  type PiiEntity,
+} from "../lib/pii-engine";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -79,24 +85,89 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
   return Array.from(map.values()).sort((a, b) => b.count - a.count);
 }
 
-function linkEntities(markdown: string, entities: Entity[]): string {
-  let result = markdown;
-  const allSpans = entities.flatMap((e) =>
-    e.spans.map((s) => ({ ...s, entity: e })),
-  );
-  allSpans.sort((a, b) => b.start - a.start);
+interface RenderSpan {
+  start: number;
+  end: number;
+  render: (matchedText: string) => string;
+}
 
-  for (const span of allSpans) {
+/**
+ * Entity-link spans and PII-redaction spans, both computed against the same
+ * unmodified `markdown`, merged into a single splice pass (Track F4/L7). PII wins
+ * on overlap: an entity-link span whose range overlaps a redaction span is dropped
+ * rather than spliced, so a redacted span's raw text is never duplicated into a
+ * link's visible text or its `entity:` slug — which is what corrupted output before
+ * (PII detection ran on already-linked markdown, so a match inside link syntax got
+ * rewritten in both places it appeared). Spans are applied right-to-left so each
+ * splice leaves earlier offsets in `markdown` valid for the rest of the pass.
+ *
+ * Only handles the markdown body's splice order. Whether an entity's frontmatter/
+ * glossary/registry row should itself be suppressed when its span was redacted is
+ * a separate decision `processFile` makes before entities ever reach here — see
+ * the "exportableEntities" filter below (Track A2).
+ */
+export function renderAnnotatedMarkdown(
+  markdown: string,
+  entities: Entity[],
+  piiFindings: PiiEntity[],
+): string {
+  const piiSpans: RenderSpan[] = piiFindings.map((f) => ({
+    start: f.start,
+    end: f.end,
+    render: () => f.redact_template,
+  }));
+
+  const overlapsPii = (span: { start: number; end: number }) =>
+    piiSpans.some((p) => span.start < p.end && p.start < span.end);
+
+  const entitySpans: RenderSpan[] = entities
+    .flatMap((e) =>
+      e.spans.map((s) => ({
+        start: s.start,
+        end: s.end,
+        render: (matched: string) => `[${matched}](entity:${e.type}/${e.slug})`,
+      })),
+    )
+    .filter((s) => !overlapsPii(s));
+
+  const spans = [...entitySpans, ...piiSpans].sort((a, b) => b.start - a.start);
+
+  let result = markdown;
+  for (const span of spans) {
     const before = result.slice(0, span.start);
     const matched = result.slice(span.start, span.end);
     const after = result.slice(span.end);
-    const link = `[${matched}](entity:${span.entity.type}/${span.entity.slug})`;
-    result = before + link + after;
+    result = before + span.render(matched) + after;
   }
   return result;
 }
 
-function buildFrontmatter(input: FileInput, entities: Entity[]): string {
+/**
+ * Track A2: an entity whose span the markdown body is about to redact must not
+ * still be named in the frontmatter, the "## Entities" glossary,
+ * entities-registry.json, or the KG export — exporting a redacted document beside
+ * a knowledge graph naming every entity would defeat the point of redacting.
+ * Only filters when output is actually being rewritten; scan-only mode doesn't
+ * touch the markdown, so there's nothing to defeat. Drops the whole entity if
+ * *any* of its mentions overlaps a PII finding, not just the overlapping span —
+ * under-including is the safe direction here.
+ */
+export function filterExportableEntities(
+  entities: Entity[],
+  piiFindings: PiiEntity[],
+  redactPiiInOutput: boolean,
+): Entity[] {
+  if (!redactPiiInOutput) return entities;
+  const overlapsPiiFinding = (span: { start: number; end: number }) =>
+    piiFindings.some((p) => span.start < p.end && p.start < span.end);
+  return entities.filter((e) => !e.spans.some(overlapsPiiFinding));
+}
+
+function buildFrontmatter(
+  input: FileInput,
+  entities: Entity[],
+  piiEntitiesFound: number,
+): string {
   const entityMeta = entities.map((e) => ({
     name: e.name,
     type: e.type.charAt(0).toUpperCase() + e.type.slice(1),
@@ -111,6 +182,7 @@ function buildFrontmatter(input: FileInput, entities: Entity[]): string {
 source: ${input.name}
 type: ${type}
 processed: ${new Date().toISOString()}
+pii_entities_found: ${piiEntitiesFound}
 entities: ${JSON.stringify(entityMeta)}
 ---`;
 }
@@ -127,7 +199,10 @@ function buildGlossary(entities: Entity[]): string {
 }
 
 async function initEngine(): Promise<void> {
-  await initWasm({ module_or_path: fetch(xbergWasmUrl) });
+  await Promise.all([
+    initWasm({ module_or_path: fetch(xbergWasmUrl) }),
+    initPiiEngine(),
+  ]);
 }
 
 async function processFile(
@@ -235,13 +310,39 @@ async function processFile(
 
   postProgress({ file: input.name, stage: "ner", percent: 80 });
 
+  // Track A1/A2, redirected to the Rust/wasm engine per Track L6: `enablePiiDetection`
+  // and `redactPiiInOutput` used to be dead config (nothing read them — see
+  // `lib/ConfigPanel.svelte`'s "PII & Compliance" section). `scanForPii`/`redactPii`
+  // run the same regex engine `cargo test`'s PII suite asserts against, compiled to
+  // wasm32 (`crates/hacienda-wasm`), not a second TypeScript implementation.
+  //
+  // Runs on the original `markdown`, before entities are enriched/registered/linked,
+  // so both the export filter below and `renderAnnotatedMarkdown`'s overlap check
+  // (Track F4/L7) work off the same coordinates.
+  let piiEntitiesFound = 0;
+  let piiFindings: PiiEntity[] = [];
+  if (config.enablePiiDetection) {
+    postProgress({ file: input.name, stage: "pii", percent: 82 });
+    const piiResult = config.redactPiiInOutput
+      ? await redactPii(markdown)
+      : await scanForPii(markdown);
+    piiFindings = piiResult.entities;
+    piiEntitiesFound = piiFindings.length;
+  }
+
+  const exportableEntities = filterExportableEntities(
+    entities,
+    piiFindings,
+    config.redactPiiInOutput,
+  );
+
   // Classify the document once — the fallback below depends only on the
   // document text, so it does not need recomputing for every entity.
   const documentVertical = classifyDocumentVertical(markdown);
 
   // Enrich entities with vertical metadata and register them
   const enrichedEntities: Entity[] = [];
-  for (const entity of entities) {
+  for (const entity of exportableEntities) {
     // Determine vertical based on entity type, falling back to document context
     const verticalMeta = verticalDict.lookup(entity.name.toLowerCase()) ?? {
       canonical: `${documentVertical}_entity`,
@@ -275,11 +376,15 @@ async function processFile(
     );
   }
 
-  postProgress({ file: input.name, stage: "ner", percent: 80 });
-
   const deduped = deduplicateEntities(enrichedEntities);
-  const linkedMarkdown = linkEntities(markdown, deduped);
-  const frontmatter = buildFrontmatter(input, deduped);
+
+  const linkedMarkdown = renderAnnotatedMarkdown(
+    markdown,
+    deduped,
+    config.redactPiiInOutput ? piiFindings : [],
+  );
+
+  const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound);
   const glossary = buildGlossary(deduped);
 
   const finalMarkdown = frontmatter + "\n" + linkedMarkdown + glossary;
@@ -294,6 +399,7 @@ async function processFile(
       source: input.name,
       type: input.type.split("/")[1] || "unknown",
       processed: new Date().toISOString(),
+      piiEntitiesFound,
       entities: deduped.map((e) => ({
         name: e.name,
         type: e.type.charAt(0).toUpperCase() + e.type.slice(1),

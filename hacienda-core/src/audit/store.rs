@@ -140,16 +140,20 @@ pub struct InMemoryAuditStore {
 /// `close` is documented as safe for a signal handler racing a normal exit, which is
 /// exactly that scenario. One lock covering the whole transition removes the window
 /// rather than narrowing it, and it makes lock-ordering deadlocks unrepresentable.
+///
+/// `pub(crate)` (rather than private) so [`super::store_idb::IndexedDbAuditStore`] (Track
+/// L5, wasm32-only) can reuse the exact same in-memory bookkeeping and add a persistence
+/// step around it, instead of maintaining a second copy of this transition logic.
 #[derive(Debug)]
-struct State {
+pub(crate) struct State {
     /// The open segment, or `None` once the store is closed.
-    open: Option<Segment>,
+    pub(crate) open: Option<Segment>,
     /// Sealed segments with their entries, oldest first. The entries are kept because
     /// `verify` has to re-run each sealed segment's internal chain check.
-    sealed: Vec<(SegmentSeal, Vec<AuditEntry>)>,
+    pub(crate) sealed: Vec<(SegmentSeal, Vec<AuditEntry>)>,
     /// The seal produced by `close`, cached so a second `close` returns the same value
     /// instead of sealing a fresh empty segment.
-    closed_seal: Option<SegmentSeal>,
+    pub(crate) closed_seal: Option<SegmentSeal>,
 }
 
 impl InMemoryAuditStore {

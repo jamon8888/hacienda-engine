@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:wasm": "cd ../../crates/hacienda-wasm && wasm-pack build --target web --no-default-features",
+    "predev": "npm run build:wasm",
+    "prebuild": "npm run build:wasm",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
@@ -12,6 +15,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "pretest:unit": "npm run build:wasm",
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "test:ui": "playwright test --ui"
@@ -21,6 +25,7 @@
     "@remotion/whisper-web": "^4.0.500",
     "@xberg-io/xberg-wasm": "^1.0.0-rc.42",
     "compromise": "^14.16.0",
+    "hacienda-wasm": "file:../../crates/hacienda-wasm/pkg",
     "idb": "^8.0.0",
     "jszip": "^3.10.1",
     "tesseract-wasm": "^0.11.0",
