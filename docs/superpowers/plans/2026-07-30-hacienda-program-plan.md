@@ -352,12 +352,55 @@ multilingual and PII-specific.
       failed at 105 on the unresolved `hacienda-wasm` import) — `hacienda_wasm_bg.wasm`
       (12.2 MB) and `xberg_wasm_bg.wasm` (48.1 MB) both bundle cleanly.
 
-- [ ] **B3. Resolve model delivery — 1.23 GB is not shippable.**
+- [x] **B3. Resolve model delivery — 1.23 GB is not shippable.**
       Unquantized safetensors, fetched from huggingface.co on first run. Options: quantized
       weights, a smaller GLiNER2 variant, or self-hosting via the `VITE_MODEL_BASE_URL`
       override that `asset-loader.ts:19` already provides (EU-resident hosting is a selling
       point for these clients, not just a size fix). If quantization forces ONNX, B1 reverses.
       *Check:* record measured first-run download size and time-to-first-document.
+
+      **Measured 2026-07-30.** Sizes via `HEAD` against the resolved CDN URLs (not the
+      redirect stub): `model.safetensors` 1,228,421,964 bytes, `tokenizer.json` 16,020,604
+      bytes, `encoder_config/config.json` 895 bytes — **1,244,443,463 bytes (~1.16 GiB)
+      total**, confirming the plan's "1.23 GB" figure. Raw bandwidth to huggingface.co from
+      this host: ~5.5 MB/s (50 MB range request), projecting ~227s for the transfer alone at
+      that rate — but that number turned out not to be the binding constraint.
+
+      Ran the real onboarding flow end-to-end in headless Chromium (Playwright, freshly
+      installed for this — not previously present in the sandbox) against the actual dev
+      build, not a mock: `xbergWasm` preload completes in ~4s (cached), then
+      `loadNerModel()` (`asset-loader.ts`) fetches and attempts to cache the three files.
+      Two independent runs, two independent failures, neither a network timeout:
+
+      - Run 1: at +598.5s, `db.transaction(...).put(modelData, ...)` rejected with
+        `QuotaExceededError` — surfaced correctly through the existing A4 fallback path
+        (`nerModelDegraded = true`, `assets.nerModel = true`, warning logged), not a crash.
+        Disk itself was not full (30 GB free) — this is IndexedDB's own storage-quota
+        accounting for the origin rejecting a single ~1.2 GB write, plausibly harsher for
+        Playwright's fresh/ephemeral profile than an installed browser's persistent-storage
+        grant, but there is no code path here that requests `navigator.storage.persist()` to
+        get a larger grant regardless of profile type.
+      - Run 2 (immediately after, same build, longer test timeout): the renderer **target
+        crashed outright** before reaching the button-enabled state — consistent with `fetch`
+        buffering the full ~1.2 GB response into a single in-memory `ArrayBuffer`
+        (`fetchAsset()`, `asset-loader.ts:33`) on a host with ~3.7 GB total RAM.
+
+      Both failures are caused by the same design choice: one `fetch().arrayBuffer()` and one
+      `IndexedDB.put()` per file, no chunking/streaming. This means the risk isn't just "slow
+      on a bad connection" as the raw byte count implies — it's an outright crash or a
+      storage-quota rejection on RAM- or quota-constrained clients, independent of bandwidth.
+      Directly strengthens the case that this needs fixing before shipping to real users, not
+      just before shipping to users with slow connections.
+
+      **What this does not resolve:** the choice between quantized weights, a smaller GLiNER2
+      variant, and self-hosting via `VITE_MODEL_BASE_URL` is still open — it is a product/
+      infrastructure decision (self-hosting needs a hosting destination and, per L1's
+      precedent and H1's blocker, this sandbox has no authorized publish target), not
+      something to pick unilaterally here. Whichever option is chosen, `fetchAsset`/
+      `loadNerModel` also need to move off single-shot `arrayBuffer()` and `put()` toward
+      streaming/chunked transfer — that's true regardless of which size-reduction option is
+      picked, and arguably matters more than the size number itself given what actually
+      failed here.
 
 ---
 
