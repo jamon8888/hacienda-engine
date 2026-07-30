@@ -252,11 +252,23 @@ The rule for that window: **do not close a gap by writing TypeScript that Track 
 delete.** A missing detector in the browser is cheap to live with for a few weeks; a second
 TypeScript pseudonymisation engine is not.
 
-- [ ] **C1. Write down the split as temporary.** One short section in the Studio README:
+- [x] **C1. Write down the split as temporary.** One short section in the Studio README:
       today browser = offline, neural, no audit chain; CLI/API = server, regex, real audit
       chain and reversible pseudonyms; **target = one engine, `hacienda-core` on wasm32.**
       Without the last clause, someone will keep trying to wire Studio to `/v1/pii/scan`, or
       will "helpfully" port a Rust detector into TypeScript.
+
+      **Done 2026-07-30.** `apps/hacienda-studio/README.md` didn't exist; created it with a
+      "Relationship to the CLI/API" section. Written to reflect *today's* split, not the
+      pre-Track-L one this item originally described — most of it has already closed: PII
+      detection/redaction is one engine now (both call `hacienda-core` on wasm32), and the
+      audit chain exists in both (differing in durability, not in kind — C3's still open).
+      What's still genuinely split: reversible pseudonymization (Rust-only, F2 not built)
+      and NER (Studio's live pipeline runs `lib/ner-bridge.ts`'s regex/compromise.js bridge,
+      not xberg-wasm's downloaded-but-uncalled GLiNER2 model, and not `hacienda-core`'s own
+      `ner-candle` — which is compiled out of every default build, not just wasm32). Kept
+      the original's warning against wiring Studio to `/v1/pii/scan` or porting a Rust
+      detector into TypeScript.
 
 - [x] **C2. Measure the coverage gap; close it only in the direction that survives.**
       Rust has 20 patterns across 19 categories (`pii/patterns.rs:9-160`) against the browser's
