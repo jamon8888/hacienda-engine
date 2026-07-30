@@ -21,7 +21,6 @@
     "test:ui": "playwright test --ui"
   },
   "dependencies": {
-    "@lmoe/gliner-onnx": "^0.1.0",
     "@remotion/whisper-web": "^4.0.500",
     "@xberg-io/xberg-wasm": "^1.0.0-rc.42",
     "compromise": "^14.16.0",

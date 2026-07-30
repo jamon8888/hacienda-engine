@@ -285,7 +285,7 @@ This is the fix for the product's worst behaviour, not polish: compromise.js is 
 and the documents are French. The downloaded model is `GLiNER2-Guardrails-PII-Multi` —
 multilingual and PII-specific.
 
-- [ ] **B1. Decide the inference backend. Blocking; do this first.**
+- [x] **B1. Decide the inference backend. Blocking; do this first.**
       Two paths exist and neither is used. `xberg-wasm`'s `NerModel` — `createNerBackend()` is
       already written against it and its `detect()` return shape
       (`{category,text,start,end,confidence}`) already matches what the worker's bridge
@@ -294,6 +294,21 @@ multilingual and PII-specific.
       **Recommendation: xberg-wasm; delete the `@lmoe/gliner-onnx` dependency.** It is the one
       the existing code targets, and carrying two unused neural backends is how this state
       arose. Record the decision in this file — the reason to revisit is B3, not preference.
+
+      **Decided 2026-07-30: xberg-wasm, per the recommendation above.** Re-verified both
+      halves of the premise still hold post-merge: `createNerBackend()` (`asset-loader.ts:117`)
+      exists and is unused by `worker/pipeline.ts` (which still calls `extractEntities` from
+      `ner-bridge.ts`, i.e. compromise.js, at both NER call sites); `@lmoe/gliner-onnx` had no
+      references anywhere in `apps/hacienda-studio` outside `package.json`. Removed the
+      dependency (`package.json`, `npm uninstall`) rather than leaving an unused neural
+      backend beside the one B2 will actually wire up. B2 is now unblocked — this decision is
+      exactly what it was waiting on.
+      **Verified:** `svelte-check` — no new errors from this change (16 errors both before and
+      after, all pre-existing/unrelated: `hacienda-wasm` unbuilt, missing `@types/node`).
+      `vitest run` — same pre-existing failures before and after (`pipeline.test.ts` and
+      `pii-engine.test.ts` fail on the unbuilt `hacienda-wasm` pkg; `ner-bridge.test.ts`'s
+      slow test is flaky under parallel load on this host, passes in isolation, confirmed by
+      rerunning both before and after removing the dependency).
 
 - [ ] **B2. Call `createNerBackend()` and route the bridge through it.**
       `worker/pipeline.ts:204-212` constructs `XbergEngine` with `{ner:{ner: extractEntities}}`.
@@ -574,6 +589,16 @@ mmap and needs only numpy.
 - [ ] **H1. Reuse the f16 artifact.** Run the existing script, publish the output, point
       `VITE_MODEL_BASE_URL` (`asset-loader.ts:19`) at it. 1.23 GB → 614 MB for near-zero
       engineering.
+
+      **Blocked 2026-07-30, not done.** The conversion script
+      (`hacienda-private/scripts/models/convert_gliner2_f16.py`) already ran once —
+      output hash/size recorded in `hacienda-private/scripts/models/gliner2-guardrails-pii-f16.sha256`
+      (614,224,538 bytes) — so the "run the existing script" half is not actually the gap.
+      What's missing: (1) this environment has no `numpy` and no network access for a fresh
+      1.2 GB download / 614 MB upload; (2) there is no decided, durable publish destination
+      (S3/CDN/GitHub release/HF repo) with credentials — "publish the output" was never a
+      solved step, just implied by the plan text. Both require a real infra decision and
+      access this session doesn't have; deferred rather than guessed at.
 - [ ] **H2. Decide whether 614 MB is acceptable.** It is a 2× win, not a solution. If not,
       the manifest at `services/mcp-server/models/manifest.json` shows the fallback they
       chose: `onnx-community/gliner_small-v2.1` with int8 variants — a much smaller model at
