@@ -15,6 +15,10 @@
 	let config = $state<AppConfig>({ ...DEFAULT_CONFIG });
 	let showConfig = $state(false);
 	let error = $state<string | null>(null);
+	// `assets.nerModel` stays true even when the neural backend failed to load, because
+	// the app has a legitimate regex-only fallback and onboarding must not get stuck on a
+	// blocked model download. This flag is what actually records the failure.
+	let nerModelDegraded = $state(false);
 	// The drop zone renders before the worker finishes its handshake, and the
 	// handshake is slow — it compiles a 48 MB WASM module. Dropping a file into
 	// that window used to throw on a null worker and silently do nothing.
@@ -59,6 +63,8 @@
 					assets.nerModel = true;
 				} catch (e) {
 					console.warn('[App] NER model download failed, using fallback:', e);
+					nerModelDegraded = true;
+					error = 'Neural PII backend unavailable — falling back to regex-only detection.';
 					assets.nerModel = true;
 				}
 			}
@@ -67,7 +73,8 @@
 			localStorage.setItem('xberg-studio-visited', 'true');
 		} catch (e) {
 			console.error('[App] preloadAssets error:', e);
-			error = 'Failed to load models. Some features may be limited.';
+			nerModelDegraded = true;
+			error = 'Failed to load models — neural PII detection unavailable, falling back to regex-only detection.';
 			assets.xbergWasm = true;
 			assets.nerModel = true;
 			assets.tessdata = true;
@@ -157,7 +164,7 @@
 
 <div class="app">
 	{#if !onboardingComplete}
-		<Onboarding {assets} onComplete={() => { onboardingComplete = true; localStorage.setItem('xberg-studio-visited', 'true'); }} />
+		<Onboarding {assets} {nerModelDegraded} onComplete={() => { onboardingComplete = true; localStorage.setItem('xberg-studio-visited', 'true'); }} />
 	{:else}
 		<header class="header">
 			<h1>Hacienda Studio</h1>

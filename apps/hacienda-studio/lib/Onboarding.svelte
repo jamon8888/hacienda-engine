@@ -3,10 +3,11 @@
 
 	interface Props {
 		assets: OnboardingState['assets'];
+		nerModelDegraded?: boolean;
 		onComplete: () => void;
 	}
 
-	let { assets, onComplete }: Props = $props();
+	let { assets, nerModelDegraded = false, onComplete }: Props = $props();
 
 	function overallPercent(assets: OnboardingState['assets']): number {
 		const values = Object.values(assets);
@@ -19,6 +20,15 @@
 
 	function labelFor(key: string): string {
 		return { xbergWasm: 'xberg WASM Engine', nerModel: 'GLiNER2-Guardrails-PII', tessdata: 'Tesseract OCR Data' }[key] || key;
+	}
+
+	// `assets.nerModel` is true even when the neural backend failed and the app fell back
+	// to regex-only detection — see App.svelte's preloadAssets. `nerModelDegraded` is the
+	// only place that failure is recorded, so the status text must check it explicitly
+	// instead of trusting `ready`.
+	function statusFor(key: string, ready: boolean): string {
+		if (key === 'nerModel' && nerModelDegraded) return '⚠️ Unavailable — using fallback';
+		return ready ? '✓ Cached' : '↓ Downloading...';
 	}
 </script>
 
@@ -42,10 +52,10 @@
 
 			<ul class="asset-list" role="list">
 				{#each Object.entries(assets) as [key, ready]}
-					<li class={ready ? 'ready' : 'loading'}>
+					<li class={key === 'nerModel' && nerModelDegraded ? 'degraded' : ready ? 'ready' : 'loading'}>
 						<span class="asset-icon" aria-hidden="true">{iconFor(key)}</span>
 						<span class="asset-name">{labelFor(key)}</span>
-						<span class="asset-status">{ready ? '✓ Cached' : '↓ Downloading...'}</span>
+						<span class="asset-status">{statusFor(key, ready)}</span>
 					</li>
 				{/each}
 			</ul>
@@ -144,6 +154,14 @@
 
 	.asset-list li.loading {
 		border-left: 3px solid var(--color-warning);
+	}
+
+	.asset-list li.degraded {
+		border-left: 3px solid var(--color-warning);
+	}
+
+	li.degraded .asset-status {
+		color: var(--color-warning);
 	}
 
 	.asset-icon {

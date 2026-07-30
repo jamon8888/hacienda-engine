@@ -249,11 +249,33 @@ Highest value per unit of work. Every toggle here already exists in the UI and l
       (the default), an audio/video file now reaches `engine.extract()` instead of
       `WhisperBridge`, which is untested territory this item didn't ask about.
 
-- [ ] **A4. Stop reporting success on model-load failure.**
+- [x] **A4. Stop reporting success on model-load failure.**
       `App.svelte:60-62` catches the download error and sets `assets.nerModel = true` anyway;
       the outer catch at `:71` does the same. Surface degraded state instead — this is what
       would hide a Track B regression. *Check:* with the model URL blocked, the UI says the
       neural backend is unavailable.
+
+      **Done 2026-07-30.** `assets.nerModel` still ends up `true` on failure — Onboarding's
+      "Get Started" gate (`disabled={!(assets.xbergWasm && assets.nerModel && assets.tessdata)}`)
+      requires it, and regex-only fallback is a legitimate degraded mode, not a hard failure
+      that should trap the user in onboarding forever. Added a separate `nerModelDegraded`
+      flag that both catch blocks set (in addition to `error`, so the failure is named, not
+      just logged to console). `Onboarding.svelte` takes `nerModelDegraded` as a prop and
+      shows "⚠️ Unavailable — using fallback" (amber, distinct `.degraded` list-item style)
+      on the neural-backend row instead of "✓ Cached" when it's set — this is the surface the
+      Check actually asks about, since the post-onboarding `.error-banner` only renders after
+      `onboardingComplete`, i.e. after the user has already clicked past the screen where a
+      blocked model download would happen.
+
+      **Verified:** `svelte-check` clean on both edited files (114 files, 0 errors from this
+      change; the 3 remaining errors are pre-existing, tied to the unbuilt `hacienda-wasm`
+      package). Existing `lib/asset-loader.test.ts`/`ner-bridge.test.ts`/`types.test.ts`
+      (17 tests) unaffected. `vite build` transforms both files cleanly, failing only later on
+      the unrelated, pre-existing unresolved `hacienda-wasm` import (needs a separate
+      `wasm-pack build`, orthogonal to this change). No component-test harness exists in this
+      app (no `@testing-library/svelte`, no prior `.svelte` test anywhere in the codebase) —
+      did not introduce one for a single small UI-state fix; verified by direct code reading
+      against the Check's literal wording instead of a new automated test.
 
 ---
 
