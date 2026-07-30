@@ -101,9 +101,10 @@ interface RenderSpan {
  * rewritten in both places it appeared). Spans are applied right-to-left so each
  * splice leaves earlier offsets in `markdown` valid for the rest of the pass.
  *
- * Track A2's open question — whether `entities`' frontmatter/glossary/registry rows
- * should themselves be suppressed when their source span was redacted — is
- * untouched here; this only fixes the markdown body's splice order.
+ * Only handles the markdown body's splice order. Whether an entity's frontmatter/
+ * glossary/registry row should itself be suppressed when its span was redacted is
+ * a separate decision `processFile` makes before entities ever reach here — see
+ * the "exportableEntities" filter below (Track A2).
  */
 export function renderAnnotatedMarkdown(
   markdown: string,
@@ -139,6 +140,27 @@ export function renderAnnotatedMarkdown(
     result = before + span.render(matched) + after;
   }
   return result;
+}
+
+/**
+ * Track A2: an entity whose span the markdown body is about to redact must not
+ * still be named in the frontmatter, the "## Entities" glossary,
+ * entities-registry.json, or the KG export — exporting a redacted document beside
+ * a knowledge graph naming every entity would defeat the point of redacting.
+ * Only filters when output is actually being rewritten; scan-only mode doesn't
+ * touch the markdown, so there's nothing to defeat. Drops the whole entity if
+ * *any* of its mentions overlaps a PII finding, not just the overlapping span —
+ * under-including is the safe direction here.
+ */
+export function filterExportableEntities(
+  entities: Entity[],
+  piiFindings: PiiEntity[],
+  redactPiiInOutput: boolean,
+): Entity[] {
+  if (!redactPiiInOutput) return entities;
+  const overlapsPiiFinding = (span: { start: number; end: number }) =>
+    piiFindings.some((p) => span.start < p.end && p.start < span.end);
+  return entities.filter((e) => !e.spans.some(overlapsPiiFinding));
 }
 
 function buildFrontmatter(
@@ -288,13 +310,39 @@ async function processFile(
 
   postProgress({ file: input.name, stage: "ner", percent: 80 });
 
+  // Track A1/A2, redirected to the Rust/wasm engine per Track L6: `enablePiiDetection`
+  // and `redactPiiInOutput` used to be dead config (nothing read them — see
+  // `lib/ConfigPanel.svelte`'s "PII & Compliance" section). `scanForPii`/`redactPii`
+  // run the same regex engine `cargo test`'s PII suite asserts against, compiled to
+  // wasm32 (`crates/hacienda-wasm`), not a second TypeScript implementation.
+  //
+  // Runs on the original `markdown`, before entities are enriched/registered/linked,
+  // so both the export filter below and `renderAnnotatedMarkdown`'s overlap check
+  // (Track F4/L7) work off the same coordinates.
+  let piiEntitiesFound = 0;
+  let piiFindings: PiiEntity[] = [];
+  if (config.enablePiiDetection) {
+    postProgress({ file: input.name, stage: "pii", percent: 82 });
+    const piiResult = config.redactPiiInOutput
+      ? await redactPii(markdown)
+      : await scanForPii(markdown);
+    piiFindings = piiResult.entities;
+    piiEntitiesFound = piiFindings.length;
+  }
+
+  const exportableEntities = filterExportableEntities(
+    entities,
+    piiFindings,
+    config.redactPiiInOutput,
+  );
+
   // Classify the document once — the fallback below depends only on the
   // document text, so it does not need recomputing for every entity.
   const documentVertical = classifyDocumentVertical(markdown);
 
   // Enrich entities with vertical metadata and register them
   const enrichedEntities: Entity[] = [];
-  for (const entity of entities) {
+  for (const entity of exportableEntities) {
     // Determine vertical based on entity type, falling back to document context
     const verticalMeta = verticalDict.lookup(entity.name.toLowerCase()) ?? {
       canonical: `${documentVertical}_entity`,
@@ -328,28 +376,7 @@ async function processFile(
     );
   }
 
-  postProgress({ file: input.name, stage: "ner", percent: 80 });
-
   const deduped = deduplicateEntities(enrichedEntities);
-
-  // Track A1/A2, redirected to the Rust/wasm engine per Track L6: `enablePiiDetection`
-  // and `redactPiiInOutput` used to be dead config (nothing read them — see
-  // `lib/ConfigPanel.svelte`'s "PII & Compliance" section). `scanForPii`/`redactPii`
-  // run the same regex engine `cargo test`'s PII suite asserts against, compiled to
-  // wasm32 (`crates/hacienda-wasm`), not a second TypeScript implementation.
-  //
-  // Detection runs on the original `markdown`, *before* entity-link syntax is spliced
-  // in — see `renderAnnotatedMarkdown` above for why (Track F4/L7).
-  let piiEntitiesFound = 0;
-  let piiFindings: PiiEntity[] = [];
-  if (config.enablePiiDetection) {
-    postProgress({ file: input.name, stage: "pii", percent: 82 });
-    const piiResult = config.redactPiiInOutput
-      ? await redactPii(markdown)
-      : await scanForPii(markdown);
-    piiFindings = piiResult.entities;
-    piiEntitiesFound = piiFindings.length;
-  }
 
   const linkedMarkdown = renderAnnotatedMarkdown(
     markdown,

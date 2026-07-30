@@ -181,18 +181,48 @@ Confirmed by reading source, not by trusting the previous plan.
 
 Highest value per unit of work. Every toggle here already exists in the UI and lies to the user.
 
-- [ ] **A1. Call `detectPII` from the worker, gated on `config.enablePiiDetection`.**
+- [x] **A1. Call `detectPII` from the worker, gated on `config.enablePiiDetection`.**
       `worker/pipeline.ts`, after markdown is produced (~line 200, before the NER block).
       *Check:* a document containing `jean.dupont@cabinet-exemple.fr` yields a PII entity in
       the result; with the toggle off, it yields none.
 
-- [ ] **A2. Call `redactPII` when `config.redactPiiInOutput` is set.**
+      **Done via Track L6** — delivered by wiring `enablePiiDetection` to
+      `scanForPii`/`redactPii` (the compiled `hacienda-wasm` engine), not a TypeScript
+      `detectPII`. Verified by the check above via manual Playwright runs in L6/F4/A2.
+
+- [x] **A2. Call `redactPII` when `config.redactPiiInOutput` is set.**
       Must apply to the markdown that reaches the zip, and must run *after* NER so entity
       offsets are computed against unredacted text. Decide and record what happens to the
       entity registry and KG export under redaction — exporting a redacted document beside a
       knowledge graph naming every entity would defeat the feature. *Check:* extend
       `tests/e2e/egress.spec.ts`'s contract fixture — the downloaded markdown must not contain
       the IBAN, and the KG export must not reintroduce it.
+
+      **Done 2026-07-30.** The redact call itself came with L6; this closes the "decide and
+      record" half the plan flagged as still open through F4/C1/L7. Decision: an entity is
+      dropped from the frontmatter, the `## Entities` glossary, `entities-registry.json`,
+      and every KG export format if *any* of its mentions overlaps a PII finding —
+      under-including, not partial redaction of the registry row, is the safe default.
+      `worker/pipeline.ts`: `filterExportableEntities` (new, exported, unit-tested)
+      applies this before entities are ever enriched or handed to `registry.addEntity()`,
+      so the exclusion is upstream of every export surface, not a per-file patch. PII
+      detection was moved earlier in `processFile` (before entity enrichment) so its
+      findings exist before that filter runs — same coordinates `renderAnnotatedMarkdown`
+      already used, no new offset math.
+
+      **Verified for real:** `worker/pipeline.test.ts` gained 4 cases for
+      `filterExportableEntities` (drops on overlap, keeps non-overlapping, drops the whole
+      entity for a partial-mentions overlap, no-op in scan-only mode) — 9/9 in that file,
+      58/58 full suite. New Playwright test in `tests/e2e/egress.spec.ts` (`"PII redaction
+      export contract"`, using the same `CONTRACT` fixture the egress tests already share)
+      asserts the downloaded markdown, `entities-registry.json`, and all three
+      `kg-export/*` files contain no occurrence of the fixture's IBAN — run for real
+      (temporarily pointing `launchOptions.executablePath` at this sandbox's pre-installed
+      Chromium build, then reverted; not a committed change) alongside the two existing
+      egress tests, 3/3 passing. Manually re-ran the full L6/F4 browser reproduction
+      (misclassified Phone/Email entities from IBAN/card-number digit runs) and confirmed
+      zero PII needles in markdown, registry, or any KG export file — only the genuine
+      "Jean Dupont" entity survives.
 
 - [ ] **A3. Widen the upload gate for audio/video.**
       Add `audio/` and `video/` to `SUPPORTED_MIME_PREFIXES` and matching extensions to

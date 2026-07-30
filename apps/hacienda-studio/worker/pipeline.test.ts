@@ -7,10 +7,13 @@ import type { PiiEntity } from "../lib/pii-engine";
 // something to land on under Node/vitest, where `self` doesn't exist. A static
 // `import` would run pipeline.ts's module body before this stub takes effect.
 let renderAnnotatedMarkdown: typeof import("./pipeline").renderAnnotatedMarkdown;
+let filterExportableEntities: typeof import("./pipeline").filterExportableEntities;
 
 beforeAll(async () => {
   (globalThis as { self?: unknown }).self = globalThis;
-  ({ renderAnnotatedMarkdown } = await import("./pipeline"));
+  ({ renderAnnotatedMarkdown, filterExportableEntities } = await import(
+    "./pipeline"
+  ));
 });
 
 function piiEntity(overrides: Partial<PiiEntity>): PiiEntity {
@@ -141,5 +144,75 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     expect(result).toBe(
       "Card number [4111111111111111](entity:phone/4111111111111111) on file.",
     );
+  });
+});
+
+describe("filterExportableEntities (Track A2)", () => {
+  it("drops an entity whose span overlaps a PII finding when output is being redacted", () => {
+    const misclassifiedPhone = entity({
+      name: "4111111111111111",
+      type: "phone",
+      slug: "4111111111111111",
+      spans: [{ start: 12, end: 28 }],
+    });
+    const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
+
+    const result = filterExportableEntities(
+      [misclassifiedPhone],
+      [card],
+      true,
+    );
+
+    expect(result).toEqual([]);
+  });
+
+  it("keeps a non-overlapping entity when output is being redacted", () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 8, end: 19 }],
+    });
+    const card = piiEntity({ start: 30, end: 46, redact_template: "[CARD:****]" });
+
+    const result = filterExportableEntities([jean], [card], true);
+
+    expect(result).toEqual([jean]);
+  });
+
+  it("drops the whole entity if any one of several mentions overlaps, not just that span", () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [
+        { start: 0, end: 11 },
+        { start: 50, end: 61 },
+      ],
+    });
+    // Overlaps only the second mention.
+    const finding = piiEntity({ start: 55, end: 58, redact_template: "[X:*]" });
+
+    const result = filterExportableEntities([jean], [finding], true);
+
+    expect(result).toEqual([]);
+  });
+
+  it("keeps everything untouched in scan-only mode, even with overlapping findings", () => {
+    const misclassifiedPhone = entity({
+      name: "4111111111111111",
+      type: "phone",
+      slug: "4111111111111111",
+      spans: [{ start: 12, end: 28 }],
+    });
+    const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
+
+    const result = filterExportableEntities(
+      [misclassifiedPhone],
+      [card],
+      false,
+    );
+
+    expect(result).toEqual([misclassifiedPhone]);
   });
 });
