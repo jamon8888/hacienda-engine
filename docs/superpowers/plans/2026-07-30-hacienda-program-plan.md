@@ -422,7 +422,7 @@ TypeScript pseudonymisation engine is not.
       `hacienda-wasm` build, not a mock). Both pass 25/25 as of L6's wasm wiring — this
       check couldn't be fully closed until L6 gave the corpus a wasm build to run against.
 
-- [ ] **C3. Studio gets the real audit trail via Track L, not a second implementation.**
+- [x] **C3. Studio gets the real audit trail via Track L, not a second implementation.**
       Previously an open question. It is now answered by the WASM decision: the blake3 chain
       and AES-SIV reversible pseudonyms come to the browser as the same Rust code, with an
       IndexedDB `AuditStore` in place of `FileAuditStore`. **Do not build a TypeScript audit
@@ -430,6 +430,17 @@ TypeScript pseudonymisation engine is not.
       survives the process, an IndexedDB one dies with a cleared browser profile. If Studio
       output must be legally defensible, the chain has to be exported inside the vault
       (Track I2 / G) rather than merely retained locally.
+
+      **Directive honored as of 2026-07-30 — the sub-question is still open, and cannot be
+      closed from here.** No TypeScript audit chain exists anywhere in this codebase; every
+      track since (L5's `IndexedDbAuditStore`, L6-L7, A1-A4, B2, D1-D3) built on the Rust
+      `AuditStore`/`hacienda-wasm` or left the audit chain untouched entirely — nothing
+      reimplemented it. Checking this off records that the directive held, not that the
+      sub-question is answered: whether/how the IndexedDB chain gets exported into a
+      longer-lived vault is explicitly gated on **Track I2** (the vault layout), which the
+      plan's own Sequencing section names as "the keystone decision for the whole repo" —
+      a product/architecture call, not something to default without the person who owns that
+      call weighing in. Left open for that reason, not from lack of investigation.
 
 ---
 
