@@ -24,7 +24,12 @@ import initWasm from "@xberg-io/xberg-wasm";
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
 import { extractEntities } from "../lib/ner-bridge";
-import { initPiiEngine, redactPii, scanForPii } from "../lib/pii-engine";
+import {
+  initPiiEngine,
+  redactPii,
+  scanForPii,
+  type PiiEntity,
+} from "../lib/pii-engine";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -80,19 +85,58 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
   return Array.from(map.values()).sort((a, b) => b.count - a.count);
 }
 
-function linkEntities(markdown: string, entities: Entity[]): string {
-  let result = markdown;
-  const allSpans = entities.flatMap((e) =>
-    e.spans.map((s) => ({ ...s, entity: e })),
-  );
-  allSpans.sort((a, b) => b.start - a.start);
+interface RenderSpan {
+  start: number;
+  end: number;
+  render: (matchedText: string) => string;
+}
 
-  for (const span of allSpans) {
+/**
+ * Entity-link spans and PII-redaction spans, both computed against the same
+ * unmodified `markdown`, merged into a single splice pass (Track F4/L7). PII wins
+ * on overlap: an entity-link span whose range overlaps a redaction span is dropped
+ * rather than spliced, so a redacted span's raw text is never duplicated into a
+ * link's visible text or its `entity:` slug — which is what corrupted output before
+ * (PII detection ran on already-linked markdown, so a match inside link syntax got
+ * rewritten in both places it appeared). Spans are applied right-to-left so each
+ * splice leaves earlier offsets in `markdown` valid for the rest of the pass.
+ *
+ * Track A2's open question — whether `entities`' frontmatter/glossary/registry rows
+ * should themselves be suppressed when their source span was redacted — is
+ * untouched here; this only fixes the markdown body's splice order.
+ */
+export function renderAnnotatedMarkdown(
+  markdown: string,
+  entities: Entity[],
+  piiFindings: PiiEntity[],
+): string {
+  const piiSpans: RenderSpan[] = piiFindings.map((f) => ({
+    start: f.start,
+    end: f.end,
+    render: () => f.redact_template,
+  }));
+
+  const overlapsPii = (span: { start: number; end: number }) =>
+    piiSpans.some((p) => span.start < p.end && p.start < span.end);
+
+  const entitySpans: RenderSpan[] = entities
+    .flatMap((e) =>
+      e.spans.map((s) => ({
+        start: s.start,
+        end: s.end,
+        render: (matched: string) => `[${matched}](entity:${e.type}/${e.slug})`,
+      })),
+    )
+    .filter((s) => !overlapsPii(s));
+
+  const spans = [...entitySpans, ...piiSpans].sort((a, b) => b.start - a.start);
+
+  let result = markdown;
+  for (const span of spans) {
     const before = result.slice(0, span.start);
     const matched = result.slice(span.start, span.end);
     const after = result.slice(span.end);
-    const link = `[${matched}](entity:${span.entity.type}/${span.entity.slug})`;
-    result = before + link + after;
+    result = before + span.render(matched) + after;
   }
   return result;
 }
@@ -287,7 +331,6 @@ async function processFile(
   postProgress({ file: input.name, stage: "ner", percent: 80 });
 
   const deduped = deduplicateEntities(enrichedEntities);
-  let linkedMarkdown = linkEntities(markdown, deduped);
 
   // Track A1/A2, redirected to the Rust/wasm engine per Track L6: `enablePiiDetection`
   // and `redactPiiInOutput` used to be dead config (nothing read them — see
@@ -295,33 +338,24 @@ async function processFile(
   // run the same regex engine `cargo test`'s PII suite asserts against, compiled to
   // wasm32 (`crates/hacienda-wasm`), not a second TypeScript implementation.
   //
-  // Known rough edge, not fixed here: this redacts `linkedMarkdown`, i.e. *after*
-  // `linkEntities` has already turned NER spans into `[text](entity:type/slug)` links.
-  // A PII span that overlaps a link's visible text rewrites inside the link syntax too
-  // (e.g. an IBAN digit run inside both a phone-entity link's text and its `entity:`
-  // target), corrupting the link rather than just masking prose. This is Track F4's
-  // "offset problem": don't hand-roll a fix here.
-  //
-  // Track L7 checked xberg-wasm's `WasmRedactionConfig.preserveOffsets` as a possible
-  // shortcut and ruled it out (see the plan doc's L7 entry) — it's a third, unrelated PII
-  // engine, and it wouldn't have prevented this bug anyway: the corruption isn't an
-  // offset shift, it's a plain-text PII match firing on both the link text and the
-  // `entity:` slug once they're in the same spliced string. The actual fix is
-  // reordering: collect PII spans and entity-link spans separately, both against the
-  // original unlinked `markdown`, merge/resolve overlaps once, then splice a single time
-  // — not two sequential passes each mutating the live string. Left for whoever
-  // implements F4.
+  // Detection runs on the original `markdown`, *before* entity-link syntax is spliced
+  // in — see `renderAnnotatedMarkdown` above for why (Track F4/L7).
   let piiEntitiesFound = 0;
+  let piiFindings: PiiEntity[] = [];
   if (config.enablePiiDetection) {
-    postProgress({ file: input.name, stage: "pii", percent: 85 });
+    postProgress({ file: input.name, stage: "pii", percent: 82 });
     const piiResult = config.redactPiiInOutput
-      ? await redactPii(linkedMarkdown)
-      : await scanForPii(linkedMarkdown);
-    piiEntitiesFound = piiResult.entities.length;
-    if (config.redactPiiInOutput) {
-      linkedMarkdown = piiResult.redacted_text;
-    }
+      ? await redactPii(markdown)
+      : await scanForPii(markdown);
+    piiFindings = piiResult.entities;
+    piiEntitiesFound = piiFindings.length;
   }
+
+  const linkedMarkdown = renderAnnotatedMarkdown(
+    markdown,
+    deduped,
+    config.redactPiiInOutput ? piiFindings : [],
+  );
 
   const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound);
   const glossary = buildGlossary(deduped);

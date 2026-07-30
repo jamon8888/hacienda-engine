@@ -386,7 +386,7 @@ This is the flow the user asked for, and it is where the two apps differ most.
       open the F1 popover.
       *Check:* editing text before a PII span does not misplace that span's highlight.
 
-- [ ] **F4. Solve the offset problem. This is the hard technical core of Tracks A/E/F.**
+- [x] **F4. Solve the offset problem. This is the hard technical core of Tracks A/E/F.**
       Four things mutate the same text and all are offset-sensitive: entity linking
       (`worker/pipeline.ts:82` splices `[text](entity:type/slug)` at byte spans),
       PII redaction (A2), pseudonymization (F2), and now user edits in CodeMirror. Splicing
@@ -395,6 +395,57 @@ This is the flow the user asked for, and it is where the two apps differ most.
       render links/tokens at display or export time rather than splicing into the string.
       Doing A2 and F3 without this will produce corrupted output that tests on short fixtures
       will not catch.
+
+      **Done 2026-07-30, scoped to the two mutators that exist in the pipeline today —
+      entity linking and PII redaction. F2 (pseudonymization) and F3 (CodeMirror editing)
+      aren't built yet; there's nothing for them to merge into until they are. Whoever
+      builds either must extend this pattern, not reintroduce splice-then-mutate.**
+
+      The representation F4 asked for: `renderAnnotatedMarkdown` (`worker/pipeline.ts`)
+      collects entity-link spans and PII-redaction spans as two lists computed against the
+      *same* immutable `markdown` — no splicing happens until both lists exist. PII wins on
+      overlap (`span.start < p.end && p.start < span.end`): an entity-link span that
+      overlaps any redaction span is dropped from the render list rather than spliced, so a
+      redacted span's raw text can never end up duplicated into a link's visible text and
+      its `entity:` slug — which is exactly how L6's corruption happened (PII detection ran
+      on markdown that already had link syntax spliced in, so a matching digit run got
+      rewritten in both places it appeared). The two surviving lists are merged, sorted
+      descending by start, and spliced in one right-to-left pass — same technique the old
+      `linkEntities` used, just fed a merged, pre-filtered span list instead of two
+      sequential passes each mutating the live string.
+
+      `processFile` was reordered to match: PII detection (`scanForPii`/`redactPii`) now
+      runs on the original `markdown`, before `renderAnnotatedMarkdown`, not after a
+      separate `linkEntities` pass. Scan-only mode (`enablePiiDetection` on,
+      `redactPiiInOutput` off) passes an empty finding list into the renderer, so entity
+      links render exactly as before — no redaction findings means no overlaps to resolve.
+
+      **Verified for real:** `worker/pipeline.test.ts` (new — the first unit test for this
+      file; needed a `self` polyfill via dynamic `import()` in `beforeAll`, since the file
+      assigns `self.onmessage` at module scope and Node has no `self`) exercises the exact
+      L6 regression directly — a "phone"-typed entity whose slug is the same digit run a
+      credit-card PII span matches — and asserts the merged output contains neither the raw
+      digits nor a `entity:phone` link, only `[CARD:****]`. Also covers: non-overlapping
+      entity links render unchanged, non-overlapping PII spans redact unchanged, multiple
+      non-overlapping spans of both kinds splice correctly in one pass, and scan-only mode
+      leaves entity links untouched. All 5 pass, plus the full existing suite (54/54),
+      `tsc --noEmit`, `svelte-check` (0 errors), and a production `vite build`, all clean.
+
+      Manually re-ran the L6 browser reproduction (`redactPiiInOutput` on, a document
+      containing an email/IBAN/card-number mixed into text an NER pass misclassifies as
+      phone/organization entities) through the real dev server: output now reads `Contact
+      [Jean Dupont](entity:organization/jean-dupont) at [EMAIL]. ... IBAN [IBAN:****].
+      Card number [CARD:****] on file.` — no raw PII, no `entity:phone/[CARD:****]`-style
+      corruption, confirmed by regex against the downloaded markdown.
+
+      **What's still open, deliberately not touched here:** the frontmatter's `entities`
+      block and the zip's `entities-registry.json`/`kg-export/*` still carry entities'
+      *names* — including ones derived from redacted spans (e.g. an entity literally named
+      `"4111111111111"`) — regardless of what the markdown body shows. That's Track A2's
+      question ("what happens to the entity registry and KG export under redaction —
+      exporting a redacted document beside a knowledge graph naming every entity would
+      defeat the feature"), not F4's; F4 only guarantees the markdown body itself doesn't
+      get corrupted or leak redacted text a second time.
 
 ---
 
