@@ -431,7 +431,32 @@ anything — which is precisely why 31 unchecked boxes coexisted with substantia
       before committing — not a committed change, same as prior sessions' e2e verification).
       65/65 `vitest run` (up from 63; the 2 new `dictionary.test.ts` cases), `svelte-check`
       0 errors, `tsc --noEmit` clean, production `vite build` clean.
-- [ ] **D2. French-language NER fixture** (supports B2).
+- [x] **D2. French-language NER fixture** (supports B2).
+
+      **Done 2026-07-30.** Added a French M&A fixture to `lib/ner-bridge.test.ts` and, while
+      building it, found a real bug: `PHONE_PATTERN` only matched US-style 3-3-4 grouping, so
+      a French number grouped in pairs from a leading 0 (`01 23 45 67 89`) — present in the
+      existing `CONTRACT` fixture since this file's first version — was never matched by any
+      test. Fixed with a second alternative in the pattern (`\b0\d(?:[-.\s]?\d{2}){4}\b`);
+      added a dedicated test for it against the existing fixture too.
+
+      The new fixture asserts two different things on purpose. First, the regex-based
+      categories (date, email, phone) are language-independent and work correctly today —
+      asserted positively. Second, `person`/`organization` — the categories that need
+      `compromise`, which is English-only — are asserted as **currently, honestly broken**:
+      `extractEntities` on `"Maître Jean Dupont a représenté Acme SAS dans l'acquisition de
+      Beta SARL"` misses "Acme SAS" and "Beta SARL" as organizations entirely, and
+      misclassifies the person "Jean Dupont" as an organization instead. This is not a
+      fixture bug to fix here — it is the documented reason Track B exists (swap in
+      xberg-wasm's multilingual `NerModel`). The test doc comment says explicitly: when B2
+      lands, flip these assertions to positive ones against whatever bridge B2 wires in.
+
+      **Verified for real:** confirmed exact current behavior against a live `extractEntities`
+      call (via `vite-node`, not guessed) before writing assertions, so the "known-broken"
+      test describes what the bridge actually does today, not an assumption. `vitest run`
+      68/68 (up from 65 — 3 new: 1 phone-pattern regression on `CONTRACT`, 2 in the new
+      French-fixture describe block), `svelte-check`, `tsc --noEmit`, production `vite build`
+      all clean.
 - [ ] **D3. Audio fixture through the full pipeline** (supports A3; the old plan's Phase 5
       referenced an `audio/mpeg` fixture that was never added).
 
