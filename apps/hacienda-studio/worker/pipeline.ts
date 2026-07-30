@@ -23,7 +23,8 @@ import initWasm from "@xberg-io/xberg-wasm";
 // index.html, and WebAssembly rejects it as "expected magic word 00 61 73 6d,
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
-import { extractEntities } from "../lib/ner-bridge";
+import { extractEntities, type BridgeEntity } from "../lib/ner-bridge";
+import { createNerBackend, loadNerModel } from "../lib/asset-loader";
 import {
   initPiiEngine,
   redactPii,
@@ -41,6 +42,41 @@ import { WhisperBridge } from "../lib/transcription/whisper-bridge";
 import type { TranscriptionResult } from "../lib/transcription/types";
 
 let wasmReady: Promise<void> | null = null;
+
+// Track B1/B2: `createNerBackend()` targets xberg-wasm's neural `NerModel` — multilingual,
+// PII-specific, and already the model the onboarding screen downloads. `null` means the
+// model failed to load (or was never cached), in which case `selectNerBridge` falls back to
+// `extractEntities` (compromise.js, English-only). IndexedDB is worker-accessible, so this
+// load hits the cache `App.svelte`'s preloadAssets already populated — no re-download here.
+type NerRuntime = Awaited<ReturnType<typeof createNerBackend>>;
+let nerRuntime: NerRuntime | null = null;
+
+async function initNerBackend(): Promise<void> {
+  try {
+    const { model, tokenizer, encoderConfig } = await loadNerModel();
+    nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
+    console.log("[Worker] Neural NER backend loaded");
+  } catch (e) {
+    console.warn(
+      "[Worker] Neural NER backend unavailable, using regex/compromise fallback:",
+      e,
+    );
+    nerRuntime = null;
+  }
+}
+
+/**
+ * Takes the runtime explicitly rather than reading `nerRuntime` itself, so the fallback
+ * decision is a pure function of its input and testable without touching worker/module
+ * state or a real WASM model.
+ */
+export function selectNerBridge(
+  runtime: NerRuntime | null,
+): (text: string, categories: string[]) => Promise<BridgeEntity[]> {
+  if (!runtime) return extractEntities;
+  return async (text, categories) =>
+    (await runtime.detect(text, { categories })) as BridgeEntity[];
+}
 
 function postProgress(update: ProgressUpdate): void {
   self.postMessage({ type: "progress", ...update });
@@ -202,6 +238,7 @@ async function initEngine(): Promise<void> {
   await Promise.all([
     initWasm({ module_or_path: fetch(xbergWasmUrl) }),
     initPiiEngine(),
+    initNerBackend(),
   ]);
 }
 
@@ -261,7 +298,7 @@ async function processFile(
 
     const engine = new XbergEngine(
       { bridgeTimeoutMs: 30000 },
-      { ner: { ner: extractEntities } },
+      { ner: { ner: selectNerBridge(nerRuntime) } },
     );
 
     const result = await engine.extract(extractInput, extractConfig);
@@ -279,7 +316,7 @@ async function processFile(
   // Run NER on the markdown (works for both transcription and extraction)
   const nerEngine = new XbergEngine(
     { bridgeTimeoutMs: 30000 },
-    { ner: { ner: extractEntities } },
+    { ner: { ner: selectNerBridge(nerRuntime) } },
   );
 
   const nerResults = await nerEngine.ner(markdown, {

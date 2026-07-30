@@ -310,13 +310,47 @@ multilingual and PII-specific.
       slow test is flaky under parallel load on this host, passes in isolation, confirmed by
       rerunning both before and after removing the dependency).
 
-- [ ] **B2. Call `createNerBackend()` and route the bridge through it.**
+- [x] **B2. Call `createNerBackend()` and route the bridge through it.**
       `worker/pipeline.ts:204-212` constructs `XbergEngine` with `{ner:{ner: extractEntities}}`.
       Load the model bytes in the worker (IndexedDB is worker-accessible, so `loadNerModel()`
       can be called there) and substitute `runtime.detect`. Keep `extractEntities` as the
       fallback when the model is unavailable — that path is what A4 must surface.
       *Check:* a French fixture naming `Maître Jean Dupont` and `Acme SAS` yields a `person`
       and an `organization`. Assert this fails against compromise.js first.
+
+      **Done 2026-07-30.** Added `initNerBackend()` to `worker/pipeline.ts`, run alongside
+      `initWasm`/`initPiiEngine` in `initEngine()`'s `Promise.all`: calls `loadNerModel()`
+      (hits the IndexedDB cache `App.svelte`'s onboarding already populated — no re-download)
+      then `createNerBackend()`; on any failure logs a warning and leaves `nerRuntime = null`.
+      New `selectNerBridge(runtime: NerRuntime | null)` is a pure function — takes the runtime
+      explicitly rather than closing over module state, for testability — returning
+      `extractEntities` when `runtime` is `null`, otherwise an adapter calling
+      `runtime.detect(text, {categories})`. Both `XbergEngine` construction sites
+      (extraction branch and the standalone NER pass) now pass `{ner: {ner:
+      selectNerBridge(nerRuntime)}}` instead of the hardcoded `extractEntities`.
+
+      The *Check*'s "assert this fails against compromise.js first" is
+      `lib/ner-bridge.test.ts`'s new test, empirically confirmed via a manual `node -e` probe
+      before writing it: compromise.js returns `organizations: ["Jean Dupont"]` (misclassified)
+      and `persons: []` for the fixture, missing "Acme SAS" entirely. Two new tests in
+      `worker/pipeline.test.ts` cover `selectNerBridge` itself: the `null`-runtime fallback
+      resolves to `extractEntities` by reference, and a mocked runtime's `detect()` is called
+      with `{categories}` and its results pass through unchanged.
+
+      **Verified:** built `crates/hacienda-wasm`'s missing `pkg/` (`wasm-pack build --target
+      web --no-default-features`, 157m on this host — resource-constrained, not a build
+      defect; produced `hacienda_wasm_bg.wasm` at 19.3 MB raw / 12.2 MB after `wasm-opt`,
+      consistent with L2's `wasm-target` feature set which already includes `ner-candle-wasm`/
+      `excel-wasm`/`layout-tract`, not a PII/redaction-only build). This unblocked real
+      execution of `worker/pipeline.test.ts` and `lib/pii-engine.test.ts`, which had been
+      silently failing to load entirely (unresolved `hacienda-wasm` import) since before this
+      session — full `vitest run`: **66/66 passing**, including the 9 pre-existing
+      `pipeline.test.ts` tests (`renderAnnotatedMarkdown`, `filterExportableEntities`) that
+      this also newly unblocked. `svelte-check`: 13 errors, all pre-existing `@types/node`
+      gaps in Playwright config/specs, none touching `pipeline.ts`/`asset-loader.ts`/
+      `ner-bridge.ts`. `vite build`: succeeds end-to-end, 120 modules transformed (previously
+      failed at 105 on the unresolved `hacienda-wasm` import) — `hacienda_wasm_bg.wasm`
+      (12.2 MB) and `xberg_wasm_bg.wasm` (48.1 MB) both bundle cleanly.
 
 - [ ] **B3. Resolve model delivery — 1.23 GB is not shippable.**
       Unquantized safetensors, fetched from huggingface.co on first run. Options: quantized
