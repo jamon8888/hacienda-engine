@@ -21,6 +21,8 @@ pub mod sink;
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod store_file;
+#[cfg(target_arch = "wasm32")]
+pub mod store_idb;
 
 pub use chain::{AuditChain, GENESIS_HASH};
 pub use entry::{
@@ -36,6 +38,8 @@ pub use sink::{AuditSink, FileSink};
 pub use store::{AuditStore, InMemoryAuditStore};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store_file::{FileAuditStore, SyncPolicy};
+#[cfg(target_arch = "wasm32")]
+pub use store_idb::IndexedDbAuditStore;
 
 use serde::{Deserialize, Serialize};
 

@@ -62,6 +62,19 @@ xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", default
     "auto-rotate-tract",
     "ner-candle-wasm",
 ] }
+# `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"
+# feature is not a workaround for a bug — `AuditStore` (like every trait using bare
+# `#[async_trait]`) returns `Send`-bounded futures by design, so file/database backends
+# can do their I/O off whatever executor thread runs them. `web_sys`/`js_sys` handles
+# (the `Database` connection, transactions, requests) are `!Send` unconditionally, on
+# every wasm32 target, because `wasm-bindgen` does not special-case the single-threaded
+# case. `SendWrapper` is the standard way to satisfy a `Send` bound around JS handles when
+# the target is actually single-threaded (`wasm32-unknown-unknown` without the `atomics`
+# target feature, which is what this crate builds for) — it just moves the "never
+# actually crosses a thread" invariant from the type system to a runtime assertion that
+# can never fire here.
+indexed_db_futures = { version = "0.6", features = ["serde"] }
+send_wrapper = { version = "0.6", features = ["futures"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot`, to drive the auth middleware through a real `Router`. Unit-testing

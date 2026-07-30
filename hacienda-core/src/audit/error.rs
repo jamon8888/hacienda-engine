@@ -68,4 +68,11 @@ pub enum AuditError {
     /// chain would raise a tamper alarm for what is only a lifecycle mistake.
     #[error("the audit store is closed and cannot accept '{operation}'")]
     StoreClosed { operation: &'static str },
+
+    /// A non-file persistence backend failed. `Io` is file-specific (it carries a
+    /// `std::io::Error`); this is the equivalent for backends like
+    /// [`IndexedDbAuditStore`](crate::audit::IndexedDbAuditStore) (Track L5) whose
+    /// underlying errors are JS/DOM exceptions, not `std::io::Error`.
+    #[error("audit backend error: {0}")]
+    Backend(String),
 }

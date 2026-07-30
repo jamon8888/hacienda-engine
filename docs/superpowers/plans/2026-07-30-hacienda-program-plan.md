@@ -749,13 +749,72 @@ after. L1 is a measurement, not a build.
       not(target_arch = "wasm32"))`, so the feature being on changes nothing for this
       target.
 
-- [ ] **L5. IndexedDB `AuditStore` / `ReviewStore` / `JobStore`.**
+- [x] **L5. IndexedDB `AuditStore` / `ReviewStore` / `JobStore`.**
       The trait seams are the reason this track is tractable — implement against them, do not
       reshape them. Carries the C3 sub-question: an IndexedDB chain dies with a cleared browser
       profile, so if Studio output must be legally defensible the chain has to be *exported
       into the vault*, not merely retained.
       *Check:* append two audit entries, reload the page, verify the blake3 chain still
       verifies across the reload.
+
+      **Done 2026-07-30, `AuditStore` only** — `ReviewStore`/`JobStore` deferred (see
+      below). `hacienda-core/src/audit/store_idb.rs` (wasm32-only): `IndexedDbAuditStore`
+      reuses `audit::store::State` (made `pub(crate)`, not reshaped) rather than
+      re-deriving `InMemoryAuditStore`'s transition logic — it *is* that logic plus a
+      durability step. After every mutating call, the current state is serialized to one
+      IndexedDB record; `open()` reads that record back and replays it through
+      `Segment::append`, the same path `FileAuditStore`'s recovery uses for `.jsonl`
+      files, so a tampered snapshot is caught the same way a tampered file would be.
+      `Segment`'s `prev_seal_hash` isn't stored separately — it's always the most recent
+      sealed segment's `seal_hash`, so persisting it too would just be a second place for
+      it to go stale.
+
+      **The `Send` problem, and why `SendWrapper` is the right tool, not a workaround.**
+      `AuditStore` uses plain `#[async_trait]`, so every method returns a `Send`-bounded
+      future by design — a database backend should be able to run its I/O off whatever
+      executor thread drives it. `indexed_db_futures`'s `Database`/`Transaction`/
+      `ObjectStore` wrap `web_sys`/`js_sys` handles, which are `!Send` unconditionally on
+      every wasm32 target (`wasm-bindgen` does not special-case the non-`atomics`,
+      single-threaded case this crate actually builds for). `send_wrapper::SendWrapper`
+      is the ecosystem-standard answer: it satisfies the `Send` bound by moving the "never
+      actually crosses a thread" invariant from the type system to a same-thread runtime
+      assertion that can never fire on `wasm32-unknown-unknown` without `atomics`. Not
+      reshaping `AuditStore` to drop its `Send` bound (`#[async_trait(?Send)]`) was a
+      deliberate choice — that bound is what lets a *native* backend like
+      `FileAuditStore` do real I/O off-thread, and this module has no business narrowing
+      a guarantee other implementations rely on just because it personally doesn't need
+      it.
+
+      **`ReviewStore`/`JobStore` deferred, not silently dropped.** Both live in modules
+      (`review`, `jobs`) still gated out of wasm32 entirely since L1 — nothing in
+      `crates/hacienda-wasm` exposes review or job-tracking functionality yet (Track A/E/F
+      Studio work hasn't reached that point), so an IndexedDB implementation today would
+      have no caller and no way to be exercised by a real check. Add them alongside
+      whichever Studio track first needs one, following the exact pattern here: reuse the
+      existing trait and in-memory state, add a persistence step, don't reshape.
+
+      **C3 is still open.** This module makes the chain durable *across a reload*, not
+      durable in the sense a compliance record needs — an IndexedDB chain dies with a
+      cleared browser profile. Nothing here decides whether/how the chain gets exported
+      into the vault (Track I2); that product question is exactly as open as it was
+      before this step.
+
+      **Check, run for real — "reload the page" modeled as a fresh store instance against
+      the same IndexedDB database name** (no real browser page-navigation available in
+      this harness; Node has no native IndexedDB either, so the run below uses the
+      `fake-indexeddb` polyfill via `NODE_OPTIONS=--require .../fake-indexeddb/auto`).
+      `crates/hacienda-wasm/tests/idb.rs`: session 1 opens a store, appends two entries,
+      confirms `verify()` and `entries().len() == 2`, captures `tip()`, and is dropped
+      *without* calling `close()` — an unclean tab close is exactly the durability case
+      that matters, not just orderly shutdown. Session 2 opens a fresh
+      `IndexedDbAuditStore` against the same database name, confirms both entries and the
+      same `tip()` survived, and — Track L5's actual check — `verify()` still passes,
+      which specifically exercises the replay-through-`Segment::append` rehydration path,
+      not just raw byte persistence. `cargo test --target wasm32-unknown-unknown -p
+      hacienda-wasm --test idb` → `test result: ok. 1 passed`. Native `cargo build
+      --workspace`, `cargo fmt --check --all`, and `cargo clippy` (both native
+      `--workspace --all-targets` and `--target wasm32-unknown-unknown` for
+      `hacienda-core --lib` and `hacienda-wasm --all-targets`) all stay clean.
 
 - [ ] **L6. Delete the TypeScript engine and switch the call sites.**
       `lib/pii-detector.ts` (`detectPII:22`, `redactPII:39`, zero importers) is deleted rather
