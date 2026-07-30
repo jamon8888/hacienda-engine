@@ -433,9 +433,24 @@ async function processFiles(
   const registry = new BatchEntityRegistry();
 
   // Initialize transcription bridge
+  //
+  // Track D3 found this awaited outside every per-file try/catch below and
+  // outside processFiles' own caller (self.onmessage), so a rejection here —
+  // which is the *current, unconditional* outcome: @remotion/whisper-web's
+  // canUseWhisperWeb() requires `window`, which does not exist in a Worker —
+  // was an unhandled rejection that silently hung the entire batch with no
+  // error message, no download, and no user-visible feedback at all. Caught
+  // here instead: each audio file's own transcribeAudio() call retries
+  // load() (it is idempotent — WhisperBridge.load() no-ops once loaded) and
+  // its failure surfaces through the normal per-file catch in the loop
+  // below, exactly like every other per-file failure.
   const whisperBridge = new WhisperBridge();
   if (config.enableTranscription) {
-    await whisperBridge.load(config.transcriptionModel);
+    try {
+      await whisperBridge.load(config.transcriptionModel);
+    } catch (e) {
+      console.warn("[Worker] Whisper model preload failed:", e);
+    }
   }
 
   let docCounter = 0;

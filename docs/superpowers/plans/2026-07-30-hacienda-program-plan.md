@@ -457,8 +457,47 @@ anything — which is precisely why 31 unchecked boxes coexisted with substantia
       68/68 (up from 65 — 3 new: 1 phone-pattern regression on `CONTRACT`, 2 in the new
       French-fixture describe block), `svelte-check`, `tsc --noEmit`, production `vite build`
       all clean.
-- [ ] **D3. Audio fixture through the full pipeline** (supports A3; the old plan's Phase 5
+- [x] **D3. Audio fixture through the full pipeline** (supports A3; the old plan's Phase 5
       referenced an `audio/mpeg` fixture that was never added).
+
+      **Done 2026-07-30 — and found transcription does not work at all, in any
+      environment.** New `tests/e2e/audio.spec.ts` generates a minimal but genuinely valid
+      16-bit PCM WAV (silence) programmatically — no binary fixture checked in — and drives
+      it through the real upload gate and worker.
+
+      **Real bug #1, not fixed here (architecture change, out of scope for a test-writing
+      item):** `@remotion/whisper-web`'s `canUseWhisperWeb()` checks `typeof window ===
+      "undefined"` and refuses to run otherwise. `worker/pipeline.ts` runs inside a Web
+      Worker, which has `self`, not `window`. Every `WhisperBridge.load()`/`transcribeAudio()`
+      call therefore throws synchronously — `Whisper Web is not supported: \`window\` is not
+      defined` — in *every* environment, regardless of network access. This has nothing to do
+      with this sandbox specifically (confirmed separately: `huggingface.co` is blocked by
+      this sandbox's proxy policy too, a coincidental second reason it wouldn't work *here*,
+      but not the actual cause). Fixing it means running whisper-web on the main thread and
+      bridging results into the worker — real architecture work, not attempted here.
+
+      **Real bug #2, fixed here:** `processFiles` awaited `whisperBridge.load()` once,
+      upfront, outside every per-file `try`/`catch` and outside its own caller's
+      (`self.onmessage`) — so bug #1's rejection, which is unconditional, was an *unhandled*
+      promise rejection that silently hung the entire batch: no error banner, no download, no
+      feedback of any kind. `worker/pipeline.ts` now wraps that call in its own `try`/`catch`;
+      each audio file's own `transcribeAudio()` call retries `load()` (idempotent) and its
+      failure surfaces through the normal per-file error path instead, exactly like any other
+      file-processing failure.
+
+      Given both of those, the tests assert what's actually true today rather than an
+      aspirational outcome: the upload gate accepts audio (Track A3), and the two
+      `enableTranscription` states produce two different, specific errors — `"Unsupported
+      format: audio/wav"` from extraction vs. `"Whisper Web is not supported: \`window\` is
+      not defined"` from the transcription attempt — proving the toggle still has a real,
+      provable effect even though neither path currently succeeds. This satisfies D1's
+      `enableTranscription` case, folded in here rather than duplicated in `toggles.spec.ts`.
+
+      **Verified for real**, including the negative case (confirmed via live diagnostic runs,
+      not assumed): all 3 new tests pass, and the full e2e suite (15/15, temporary
+      `launchOptions.executablePath` for this sandbox's Chromium build, reverted before
+      committing) stays green. `vitest run` 68/68 (unaffected — this track added no unit
+      tests), `svelte-check`, `tsc --noEmit`, production `vite build` all clean.
 
 ---
 
