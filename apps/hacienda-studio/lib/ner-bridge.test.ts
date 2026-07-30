@@ -81,6 +81,28 @@ describe("NER bridge", () => {
     const entities = await extractEntities(CONTRACT, []);
     expect(entities).toEqual([]);
   });
+
+  /**
+   * Track B1/B2 baseline: this is the failure the neural backend (xberg-wasm's
+   * `NerModel`) exists to fix. compromise.js is English-only — it does not
+   * recognise "Maître" as a French honorific, so it never resolves "Jean Dupont"
+   * as a person at all, and misclassifies it as an organization instead. It also
+   * misses "Acme SAS" entirely, despite `ACME_SAS_CONTRACT` naming it plainly.
+   * Recorded here so a future change to `extractEntities` that accidentally
+   * "fixes" this is visible — the fix belongs in `worker/pipeline.ts`'s neural
+   * bridge selection (`selectNerBridge`), not in compromise.js's English rules.
+   */
+  it("fails to identify the French fixture correctly (compromise.js baseline)", async () => {
+    const frenchFixture = "Maître Jean Dupont a signé pour Acme SAS.";
+
+    const persons = await extractEntities(frenchFixture, ["person"]);
+    const organizations = await extractEntities(frenchFixture, [
+      "organization",
+    ]);
+
+    expect(persons.map((e) => e.text)).not.toContain("Jean Dupont");
+    expect(organizations.map((e) => e.text)).not.toContain("Acme SAS");
+  });
 });
 
 /**
