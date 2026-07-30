@@ -93,11 +93,27 @@ interface RenderSpan {
 }
 
 /**
+ * Track G2: `entity:` was a custom URI scheme nothing outside Studio
+ * understands — a link like `[Acme SAS](entity:organization/acme-sas)` does
+ * nothing in Claude Desktop or any other markdown viewer. In-document anchors
+ * into the "## Entities" glossary make the exported markdown self-contained
+ * instead. Uses an explicit `<a id="...">` rather than relying on a
+ * renderer's auto-slugified heading anchors: CommonMark/GFM pass raw inline
+ * HTML through verbatim, so the link target is exactly what this app put
+ * there, not dependent on matching some renderer's specific slugification
+ * algorithm (which would also silently break on two entities that happen to
+ * slugify to the same heading text).
+ */
+function entityAnchorId(entity: Pick<Entity, "type" | "slug">): string {
+  return `entity-${entity.type}-${entity.slug}`;
+}
+
+/**
  * Entity-link spans and PII-redaction spans, both computed against the same
  * unmodified `markdown`, merged into a single splice pass (Track F4/L7). PII wins
  * on overlap: an entity-link span whose range overlaps a redaction span is dropped
  * rather than spliced, so a redacted span's raw text is never duplicated into a
- * link's visible text or its `entity:` slug — which is what corrupted output before
+ * link's visible text or its anchor target — which is what corrupted output before
  * (PII detection ran on already-linked markdown, so a match inside link syntax got
  * rewritten in both places it appeared). Spans are applied right-to-left so each
  * splice leaves earlier offsets in `markdown` valid for the rest of the pass.
@@ -126,7 +142,7 @@ export function renderAnnotatedMarkdown(
       e.spans.map((s) => ({
         start: s.start,
         end: s.end,
-        render: (matched: string) => `[${matched}](entity:${e.type}/${e.slug})`,
+        render: (matched: string) => `[${matched}](#${entityAnchorId(e)})`,
       })),
     )
     .filter((s) => !overlapsPii(s));
@@ -188,13 +204,58 @@ entities: ${JSON.stringify(entityMeta)}
 ---`;
 }
 
+/**
+ * Track G3: without this, a Claude Desktop session that opens the zip sees a
+ * pile of markdown files, a JSON registry and a `kg-export/` folder with no
+ * explanation — nothing tells it the registry and KG files exist to answer
+ * cross-document questions the prose alone can't (which entities appear in
+ * multiple files, how they relate), so a session would only ever read the
+ * prose. `fileCount`/`entityCount` are computed by the caller, which already
+ * has `results`/`registry` in scope; this function only formats.
+ */
+function buildBundleReadme(fileCount: number, entityCount: number): string {
+  const documents = fileCount === 1 ? "document" : "documents";
+  const entities = entityCount === 1 ? "entity" : "entities";
+  return `# Hacienda Studio export
+
+This bundle was produced entirely in-browser (Hacienda Studio) — no document
+left the device it was processed on. It contains ${fileCount} processed
+${documents} and ${entityCount} distinct ${entities} across them.
+
+## What's in here
+
+- **\`*.md\`** — one file per source document. Each has YAML frontmatter
+  (source name, type, processing time, PII count) followed by the extracted
+  content with named entities linked into the \`## Entities\` glossary at the
+  bottom of that same file via in-document anchors (\`#entity-type-slug\`).
+- **\`_manifest.json\`** — the file list for this batch, with per-file entity
+  counts.
+- **\`entities-registry.json\`** — every entity across the whole batch, with
+  which document(s) it appears in and inferred relationships between
+  entities. Use this, not just the prose, to answer questions that span more
+  than one document — an entity mentioned in three files only has one row
+  here, not three.
+- **\`kg-export/\`** — the same registry as a knowledge graph, in three
+  formats: \`neo4j.cypher\` (importable into Neo4j), \`networkx.json\`
+  (Python's NetworkX), and \`rdf.ttl\` (RDF/Turtle). Prefer these over
+  re-deriving relationships from the prose.
+
+## Reading this bundle
+
+For cross-document questions (shared entities, relationships between
+documents), start from \`entities-registry.json\` or \`kg-export/\`, not by
+reading every \`.md\` file. For a single document's content, its own \`.md\`
+file is self-contained — frontmatter, prose, and glossary together.
+`;
+}
+
 function buildGlossary(entities: Entity[]): string {
   if (entities.length === 0) return "";
   let md = "\n## Entities\n\n";
   for (const e of entities) {
     const verticalInfo =
       e.vertical && e.vertical !== "shared" ? ` [${e.vertical}]` : "";
-    md += `- **${e.name}** \`${e.type.charAt(0).toUpperCase() + e.type.slice(1)}${verticalInfo}\` — mentioned ${e.count} time${e.count > 1 ? "s" : ""}\n`;
+    md += `- <a id="${entityAnchorId(e)}"></a>**${e.name}** \`${e.type.charAt(0).toUpperCase() + e.type.slice(1)}${verticalInfo}\` — mentioned ${e.count} time${e.count > 1 ? "s" : ""}\n`;
   }
   return md;
 }
@@ -567,6 +628,13 @@ async function processFiles(
     }),
   };
   zip.file("entities-registry.json", JSON.stringify(registryJson, null, 2));
+  zip.file(
+    "README.md",
+    buildBundleReadme(
+      results.length,
+      registryJson.entity_registry.entities.length,
+    ),
+  );
 
   // Add KG exports
   const kgExporter = new KGExporter(registry);

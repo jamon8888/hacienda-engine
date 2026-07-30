@@ -66,7 +66,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     const result = renderAnnotatedMarkdown(markdown, [acme], []);
 
     expect(result).toBe(
-      "[Acme SAS](entity:organization/acme-sas) acquired Beta SARL.",
+      "[Acme SAS](#entity-organization-acme-sas) acquired Beta SARL.",
     );
   });
 
@@ -89,8 +89,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     // "phone") whose name/slug is the same digit run a PII span also matches. The
     // old two-pass pipeline (link first, then regex-redact the linked markdown)
     // matched that digit run twice — once in the link's visible text, once inside
-    // its `entity:` slug — producing
-    // `[[CARD:****]](entity:phone/[CARD:****])`. Detecting PII against the
+    // its anchor target — producing a corrupted link. Detecting PII against the
     // original text and merging spans before a single splice must not do that.
     const markdown = "Card number 4111111111111111 on file.";
     const misclassifiedPhone = entity({
@@ -114,7 +113,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     );
 
     expect(result).toBe("Card number [CARD:****] on file.");
-    expect(result).not.toContain("entity:phone");
+    expect(result).not.toContain("entity-phone");
     expect(result).not.toContain("4111111111111111");
   });
 
@@ -136,7 +135,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     const result = renderAnnotatedMarkdown(markdown, [jean], [iban]);
 
     expect(result).toBe(
-      "Contact [Jean Dupont](entity:person/jean-dupont), IBAN [IBAN:****].",
+      "Contact [Jean Dupont](#entity-person-jean-dupont), IBAN [IBAN:****].",
     );
   });
 
@@ -154,7 +153,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     const result = renderAnnotatedMarkdown(markdown, [misclassifiedPhone], []);
 
     expect(result).toBe(
-      "Card number [4111111111111111](entity:phone/4111111111111111) on file.",
+      "Card number [4111111111111111](#entity-phone-4111111111111111) on file.",
     );
   });
 });

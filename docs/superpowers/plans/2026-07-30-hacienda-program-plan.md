@@ -695,17 +695,54 @@ Studio's zip already contains markdown with linked entities, `_manifest.json`,
 "Copy for Claude Desktop" clipboard button and a mirror push to its MCP server.
 
 - [ ] **G1. Preserve entity linking through pseudonymization.** Already implemented at
-      `worker/pipeline.ts:93` as `[Acme SAS](entity:organization/acme-sas)`, with a
-      `## Entities` glossary (`:118`) and entity metadata in frontmatter (`:99`). Pseudonymizing
-      an entity must not orphan its link or its glossary row.
+      `worker/pipeline.ts` (`renderAnnotatedMarkdown`) as `[Acme SAS](#entity-organization-acme-sas)`
+      (link scheme updated by G2 — see below), with a `## Entities` glossary (`buildGlossary`)
+      and entity metadata in frontmatter (`buildFrontmatter`). Pseudonymizing an entity must
+      not orphan its link or its glossary row.
 
-- [ ] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
+      **Still open — genuinely blocked, not skipped.** Nothing to verify against: F2
+      (reversible pseudonymization) doesn't exist in Studio yet, so there is no
+      pseudonymization code path that could orphan a link or glossary row. Whoever builds F2
+      needs to route it through the same `entityAnchorId()` helper G2 introduced (single
+      source of truth for both the link target and the glossary anchor) rather than
+      reintroducing a second place to keep the two in sync.
+
+- [x] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
       nothing outside Studio understands. Switch to in-document anchors into the `## Entities`
       glossary, or wikilinks, so the exported markdown is self-contained. *Check:* open the
       exported markdown in Claude Desktop and follow a link to its glossary entry.
 
-- [ ] **G3. Ship a README in the zip** describing what the bundle is, so a Claude Desktop
+      **Done 2026-07-30, verified mechanically, not literally in Claude Desktop.** Chose
+      explicit `<a id="entity-${type}-${slug}">` anchors over relying on a renderer's
+      auto-slugified heading text: CommonMark/GFM pass raw inline HTML through verbatim, so
+      the link target (`#entity-${type}-${slug}`) is exactly what this app puts there —
+      independent of whichever specific slugification algorithm a given renderer implements,
+      and immune to two different entities happening to produce the same auto-slugified
+      heading text. A single `entityAnchorId()` helper is the one place that ID is computed,
+      used by both `renderAnnotatedMarkdown` (the link) and `buildGlossary` (the anchor), so
+      the two cannot drift out of sync.
+
+      **What was and wasn't verified:** no access to Claude Desktop from this environment, so
+      the literal Check — open the file there, click a link — could not be run. What *was*
+      verified, via a real browser run (not just unit tests): every `[text](#anchor)` link
+      target in a real generated document has a byte-exact matching `<a id="anchor">` in that
+      same document's glossary, and no `entity:` custom-scheme link remains anywhere in the
+      output. Same-page `#fragment` navigation to a matching `id` attribute is standard
+      HTML/browser behavior, not something Claude Desktop's renderer would need to do
+      anything special to support — but this doesn't substitute for actually opening a real
+      exported file there.
+
+- [x] **G3. Ship a README in the zip** describing what the bundle is, so a Claude Desktop
       session has the context to use the registry and KG files rather than only the prose.
+
+      **Done 2026-07-30.** `buildBundleReadme()` writes `README.md` at the zip root
+      (`worker/pipeline.ts`), computed once from the same `registryJson` the
+      `entities-registry.json` file already builds (not a second `registry.toJSON()` call —
+      that would also have produced a second, slightly different `processed_at` timestamp).
+      Explains what each file/folder is for and steers cross-document questions toward
+      `entities-registry.json`/`kg-export/` instead of re-deriving relationships by reading
+      every `.md` file — the gap this item exists to close. Verified via a real browser run:
+      present in the zip, correct file/entity counts substituted in.
 
 *Note:* hacienda-private also exposes a real Claude Desktop MCP integration
 (`services/mcp-server/release/README.md:12-22` — `xberg-mcp mcp` stdio endpoint plus a
