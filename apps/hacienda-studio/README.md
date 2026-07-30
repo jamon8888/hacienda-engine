@@ -39,14 +39,27 @@ compiled to `wasm32-unknown-unknown`, shared by both. Track L
     it's built in TypeScript against WebCrypto, it must match the Rust token format exactly
     — a document pseudonymized in one must be revealable by the other. Do not invent a
     second format.
-  - **NER differs, and not in the way it looks.** The pipeline's live entity extraction
-    (`worker/pipeline.ts` → `XbergEngine.ner`) is wired to `lib/ner-bridge.ts`'s
-    regex/`compromise.js` bridge, not to `@xberg-io/xberg-wasm`'s neural `NerModel`
-    (GLiNER2) — that model is downloaded into IndexedDB and has a loader
-    (`asset-loader.ts`'s `createNerBackend()`), but nothing calls it. `hacienda-core`'s own
-    neural NER (`ner-candle`) is separately compiled out of every default build, browser or
-    server. Track L didn't touch either; there's no current plan to wire up the unused
-    GLiNER2 loader.
+  - **NER: unified backend, not unified detector.** Track B2 wired `worker/pipeline.ts`'s
+    live entity extraction to `@xberg-io/xberg-wasm`'s neural `NerModel` (GLiNER2,
+    multilingual) via `asset-loader.ts`'s `createNerBackend()`, falling back to
+    `lib/ner-bridge.ts`'s regex/`compromise.js` bridge only when the model failed to load.
+    `hacienda-core`'s own neural NER (`ner-candle`) is still compiled out of every default
+    build, browser or server (Track K) — the CLI/API have no neural NER at all, browser or
+    server-side detection differ in kind, not just in coverage.
+  - **The vault: unified layout, not unified depth.** Both surfaces emit the Track I2 layout
+    (`documents/`, `_manifest.json`, `README.md`), but the CLI's (`hacienda extract --vault`,
+    Track J1) is deliberately thinner — no `entities/`, `GLOSSARY.md`, or `kg-export/`,
+    because the CLI has no general-purpose entity pipeline to populate them honestly (Track
+    J2's explicit decision). The CLI's `pii-registry.json` is the PII-only counterpart to
+    Studio's `entities-registry.json`, not the same schema.
+  - **Concurrency: same knob, different defaults, and that's deliberate (Track J4).** The
+    CLI's `--concurrency` parallelizes documents in flight across `tokio::task::spawn`
+    (default: CPU count). Studio's batch loop (`worker/pipeline.ts`'s `processFiles`) is
+    sequential — decided in Track I1, not an oversight: one loaded WASM NER/PII engine
+    instance is not built for concurrent inference calls, and true parallelism would need
+    multiple Web Workers sharing that model, which is out of scope. A CLI processing 10,000
+    documents overnight and a browser tab processing a folder a lawyer just dropped have
+    different concurrency budgets for a real reason, not a missing flag.
 
 **Do not "helpfully" port a Rust detector into TypeScript, and do not wire Studio to
 `/v1/pii/scan`/`/v1/pii/redact`.** Those routes are real and serve a different deployment

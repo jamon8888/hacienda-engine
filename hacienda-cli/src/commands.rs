@@ -4,7 +4,7 @@ use crate::cli::{ConcurrencyArgs, ExtractArgs, Format, ScanArgs, ServeArgs};
 use crate::config::load_config;
 use anyhow::{Context, Result};
 use hacienda::audit::{export_json, AuditChain};
-use hacienda::{HaciendaConfig, HaciendaFacade};
+use hacienda::{HaciendaConfig, HaciendaFacade, HaciendaResult};
 use hacienda_api::{ApiLimits, ApiState};
 use hacienda_core::auth::AuthState;
 use hacienda_core::jobs::InMemoryJobStore;
@@ -497,7 +497,132 @@ async fn run_extract_inputs(
         write_audit_chain(facade, audit_out).await?;
     }
 
+    if let Some(vault_dir) = &args.vault {
+        write_vault(args, facade, &args.inputs, &all_results, vault_dir).await?;
+        eprintln!("hacienda: wrote vault to {}", vault_dir.display());
+    }
+
     Ok(())
+}
+
+/// Track J1: `hacienda extract --vault <dir>` — the Track I2 layout, deliberately thinner
+/// than Studio's per Track J2's explicit decision (recorded in the program plan): the CLI
+/// has no general-purpose NER entity pipeline (Track K, `ner-candle`, is not in any default
+/// build), so there is no `entities/`, `GLOSSARY.md`, or `kg-export/` — inventing an entity
+/// graph the CLI cannot actually produce would be worse than a README that says so. What the
+/// CLI *does* have that Studio cannot — real audit chains, reversible pseudonyms — carries
+/// through: `pii-registry.json` is the PII-only counterpart to Studio's entity registry, and
+/// the audit chain is mirrored into the vault when `--audit-out` is also given.
+async fn write_vault(
+    args: &ExtractArgs,
+    facade: &HaciendaFacade,
+    inputs: &[String],
+    results: &[HaciendaResult],
+    vault_dir: &Path,
+) -> Result<()> {
+    let documents_dir = vault_dir.join("documents");
+    std::fs::create_dir_all(&documents_dir)
+        .with_context(|| format!("creating {}", documents_dir.display()))?;
+
+    let mut manifest_files = Vec::new();
+    let mut pii_registry = Vec::new();
+
+    for (input, result) in inputs.iter().zip(results.iter()) {
+        let doc = result.extraction.results.first();
+        let content = doc.map(|d| d.content.as_str()).unwrap_or_default();
+        let mime = doc.map(|d| d.mime_type.as_ref()).unwrap_or("unknown");
+
+        let stem = Path::new(input)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document");
+        let doc_name = format!("{stem}.md");
+
+        let pii = result.pii.first();
+        let pii_count = pii.map(|p| p.entities.len()).unwrap_or(0);
+
+        let markdown = format!(
+            "---\nsource: {input}\ntype: {mime}\nprocessed: {processed}\npii_entities_found: {pii_count}\n---\n\n{content}\n",
+            processed = chrono::Utc::now().to_rfc3339(),
+        );
+        std::fs::write(documents_dir.join(&doc_name), markdown)
+            .with_context(|| format!("writing documents/{doc_name}"))?;
+
+        manifest_files.push(serde_json::json!({
+            "name": doc_name,
+            "source": input,
+            "pii_entities_found": pii_count,
+        }));
+        if let Some(pii) = pii {
+            if !pii.entities.is_empty() {
+                pii_registry.push(serde_json::json!({
+                    "document": format!("documents/{doc_name}"),
+                    "entities": pii.entities,
+                }));
+            }
+        }
+    }
+
+    std::fs::write(
+        vault_dir.join("_manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "files": manifest_files,
+            "generated": chrono::Utc::now().to_rfc3339(),
+        }))?,
+    )
+    .context("writing _manifest.json")?;
+
+    std::fs::write(
+        vault_dir.join("pii-registry.json"),
+        serde_json::to_string_pretty(&pii_registry)?,
+    )
+    .context("writing pii-registry.json")?;
+
+    // Track J3: mirror the audit chain into the vault when the caller asked for one — a
+    // vault that silently carries or omits an audit chain is exactly the guessing game the
+    // plan calls out. `--audit-out`'s own standalone write already happened in the caller.
+    let audit_included = if args.audit_out.is_some() {
+        write_audit_chain(facade, &vault_dir.join("audit")).await?;
+        true
+    } else {
+        false
+    };
+
+    std::fs::write(
+        vault_dir.join("README.md"),
+        build_vault_readme(manifest_files.len(), audit_included),
+    )
+    .context("writing README.md")?;
+
+    Ok(())
+}
+
+fn build_vault_readme(file_count: usize, audit_included: bool) -> String {
+    let documents = if file_count == 1 { "document" } else { "documents" };
+    let audit_note = if audit_included {
+        "This vault includes an audit chain at `audit/audit.json` (`--audit-out` was given \
+         alongside `--vault`)."
+    } else {
+        "This vault does not include an audit chain. Pass `--audit-out <dir>` alongside \
+         `--vault` to include one."
+    };
+    format!(
+        "# Hacienda CLI export\n\n\
+         This bundle was produced by `hacienda extract --vault`. It contains {file_count} \
+         processed {documents}.\n\n\
+         **This is a thinner vault than Hacienda Studio's export** (Track J2's explicit \
+         decision): the CLI has no general-purpose named-entity pipeline, so there is no \
+         `entities/` directory, `GLOSSARY.md`, or `kg-export/` here — only what the CLI can \
+         actually detect, PII, not general entities like people or organizations.\n\n\
+         ## What's in here\n\n\
+         - **`documents/`** — one redacted markdown file per input, with YAML frontmatter \
+           (source, type, processing time, PII count).\n\
+         - **`_manifest.json`** — the file list for this run.\n\
+         - **`pii-registry.json`** — every PII detection across the run, grouped by document. \
+           Not the same schema as Studio's `entities-registry.json` — this is PII findings \
+           only, with no cross-document entity resolution.\n\n\
+         {audit_note}\n"
+    )
 }
 
 /// Write this run's audit entries to `dir` as a single pretty-printed JSON array.

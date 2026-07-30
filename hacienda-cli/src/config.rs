@@ -292,6 +292,7 @@ mod tests {
             lora_dir: None,
             format: crate::cli::Format::Text,
             audit_out: None,
+            vault: None,
             no_redact: false,
             i_accept_unredacted_pii: false,
             concurrency: crate::cli::ConcurrencyArgs { concurrency: None },

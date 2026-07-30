@@ -113,6 +113,15 @@ pub struct ExtractArgs {
     #[arg(long, value_name = "PATH")]
     pub audit_out: Option<PathBuf>,
 
+    /// Emit a Track I2 vault to this directory instead of (or alongside) stdout: a
+    /// `documents/` folder of redacted markdown, `_manifest.json`, `pii-registry.json`, and
+    /// `README.md`. Deliberately thinner than Studio's vault (no `entities/`, `GLOSSARY.md`,
+    /// or `kg-export/`) — see Track J2: the CLI has no general-purpose NER entity pipeline,
+    /// so there is no entity graph to emit one honestly. Combine with `--audit-out` to also
+    /// carry the audit chain inside the vault.
+    #[arg(long, value_name = "DIR")]
+    pub vault: Option<PathBuf>,
+
     /// Emit unredacted text. Refused on its own — see `--i-accept-unredacted-pii`.
     #[arg(long)]
     pub no_redact: bool,
