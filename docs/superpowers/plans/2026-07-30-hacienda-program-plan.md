@@ -721,7 +721,7 @@ after. L1 is a measurement, not a build.
       failures (EACCES-simulation tests that don't hold under this sandbox's root user)
       reproduce identically on the pre-L3 commit and are untouched by this change.
 
-- [ ] **L4. Gate out the server- and disk-only modules.**
+- [x] **L4. Gate out the server- and disk-only modules.**
       `axum` appears only in `auth/authz.rs` (4 references) — a server-only concept, so
       `#[cfg]` the module out entirely. `std::fs` appears in `audit/sink.rs:11`,
       `audit/store_file.rs:41`, `audit/segment.rs:76` (reads `/etc/hostname`),
@@ -730,6 +730,24 @@ after. L1 is a measurement, not a build.
       `spawn_blocking` lives only in `audit/store_file.rs:447,587,652`, inside the store being
       gated out; `tokio::sync::Mutex` (`audit/store_file.rs:179`) works on wasm32 as-is.
       *Check:* `cargo build --target wasm32-unknown-unknown -p hacienda-core` succeeds.
+
+      **Already true as of L1/L3 — no new code needed, just the check run for real.**
+      `auth` (axum), `facade` (`/proc/meminfo`), `compliance`, `glossary`, `jobs`, `review`
+      (`review/store_file.rs` included, since the whole `review` module is gated, not just
+      its file-backed store) are all `#[cfg(not(target_arch = "wasm32"))]` in `lib.rs`
+      since L1. `audit`'s `store_file`/`sink`/`export` (the only `std::fs`/`spawn_blocking`
+      users left in `audit` after L3 un-gated `chain`/`segment`/`store`) are gated the same
+      way in `audit/mod.rs`. `pii/config.rs:95`'s `std::fs::read_to_string` is the one
+      `std::fs` call site that *is* compiled on wasm32 — same reasoning as
+      `audit/segment.rs`'s `/etc/hostname` read: it compiles fine (wasm32 `std::fs` exists,
+      it just always errors at runtime, no panic), and nothing in `crates/hacienda-wasm`
+      calls the function that reaches it, so it's inert rather than gated.
+
+      `cargo build --target wasm32-unknown-unknown -p hacienda-core` — **note: no
+      `--no-default-features`, unlike L1/L2/L3's checks** — succeeds: `default = ["jobs"]`
+      doesn't matter here because `jobs`'s `#[cfg]` in `lib.rs` is `all(feature = "jobs",
+      not(target_arch = "wasm32"))`, so the feature being on changes nothing for this
+      target.
 
 - [ ] **L5. IndexedDB `AuditStore` / `ReviewStore` / `JobStore`.**
       The trait seams are the reason this track is tractable — implement against them, do not
