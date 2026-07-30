@@ -611,7 +611,7 @@ This is the flow the user asked for, and it is where the two apps differ most.
       detection. All of this is directly applicable to Studio and is the single most valuable
       thing to port.
 
-- [ ] **F2. Build reversible pseudonymization — it does not exist anywhere in JS yet.**
+- [x] **F2. Build reversible pseudonymization — it does not exist anywhere in JS yet.**
       hacienda-private does **redaction only**: opaque stable tokens `{{C0_PERSON_1}}` with
       no exportable mapping. Reversible pseudonymization exists only in Rust
       (`redaction/pseudonym.rs:520` `reveal()`, AES-SIV, `[CATEGORY:key_id:BASE32]`), and per
@@ -621,6 +621,77 @@ This is the flow the user asked for, and it is where the two apps differ most.
       revealed by the CLI and vice versa. If that is not wanted, say so explicitly here —
       silently choosing a different format is how Track C's divergence happens again.
       *Check:* round-trip a document through Studio pseudonymize → CLI reveal.
+
+      **Done 2026-07-30.** New `lib/pseudonymize.ts` implements AES-256-SIV (RFC 5297) from
+      WebCrypto primitives — there is no native AES-SIV, AES-CMAC, or raw AES-ECB in
+      WebCrypto, so it's built from what WebCrypto does have: native `AES-CTR` with
+      `length: 128` (which is exactly RFC 5297's full-128-bit-counter `Ctr128BE`, not
+      approximated), and `AES-CBC` with a zero IV as a single-block AES-ECB substitute (CBC's
+      first output block depends only on the IV and first plaintext block, so encrypting one
+      16-byte block and keeping only WebCrypto's first 16 output bytes, discarding its
+      automatic PKCS#7 padding block, is exactly one ECB block encryption). AES-CMAC
+      (RFC 4493) and S2V (RFC 5297 §2.4) are built on that primitive.
+
+      Matching the Rust format exactly meant reading the vendored `aes-siv` crate source
+      (`~/.cargo/registry/.../aes-siv-0.7.0/src/siv.rs`) directly rather than the RFC alone,
+      since the RFC leaves some choices — which of the raw vs. IV-masked tag gets stored,
+      the exact key-half ordering — as implementation decisions. Two are easy to get
+      backwards silently: `Siv::new`'s own comment claims "the first half of the key" is the
+      *encryption* key, but the slicing it actually does (`key[M::key_size()..]`) makes it
+      the *second* half — the code was trusted over the comment, checked by making the
+      golden-vector test below pass, not by re-reading the comment more carefully. And the
+      token's stored tag is the **unmasked** S2V output; a separate masked copy (top bit of
+      bytes 8 and 12 zeroed, the SIV paper's collision mitigation) is used only internally as
+      the CTR IV and never appears in the ciphertext.
+
+      The token label is `category_label()`'s Rust output —
+      `{PiiCategory_variant:?}.to_uppercase()`, e.g. `PhoneNumber` → `PHONENUMBER` — not the
+      `snake_case` form `PiiEntity.category` actually carries from the wasm PII engine
+      (`phone_number`). `categoryLabel()` derives the former from the latter generically
+      (strip underscores, uppercase) rather than hand-maintaining a lookup table, since the
+      two are provably the same word sequence under different delimiters for every fixed
+      `PiiCategory` variant — verified against all 32 of them in `pseudonymize.test.ts`, not
+      asserted from the derivation alone.
+
+      **Verified for real, three ways, in `pseudonymize.test.ts` (63 tests):**
+      1. **RFC 4493 known-answer vectors** for the underlying AES-CMAC primitive (four
+         official test cases plus the worked subkey-derivation example) — verified
+         independently via a scratch Rust test using `cmac`/`aes` directly (not `aes-siv`),
+         since this sandbox has no network access to fetch the RFC text to check a
+         from-memory transcription against. Confirms `dbl`/block-chaining/padding are
+         correct independent of anything the Rust side of this repo does.
+      2. **Golden vectors captured from a real `Pseudonymiser::token()`/`.reveal()` run**
+         (scratch test at `hacienda-core/tests/zz_golden_vectors.rs`, not committed — same
+         `wasm-opt`-style temporary-dev-dependency pattern, `aes`/`cmac` added to
+         `hacienda-core`'s dev-dependencies, reverted after) against a fixed key
+         (`"07".repeat(KEY_BYTES)`) across four categories (email, phone, full name, IBAN).
+         `mintToken()` reproduces the exact Rust-minted token string for every case;
+         `revealToken()` recovers the exact normalized text from a Rust-minted token. This is
+         the test a same-language round-trip cannot be: code wrong in the same way on both
+         ends of a round-trip still round-trips.
+      3. **Property/round-trip tests**: determinism, case/whitespace-variant collapse,
+         category-scoped tokens, fail-closed on wrong key and on a tampered ciphertext,
+         `pad`/`unpad`/`base32Encode`/`base32Decode` round-trips, an RFC 4648 base32 vector
+         (`"foobar"` → `MZXW6YTBOI"`).
+
+      `tsc --noEmit`, `svelte-check`, and a production `vite build` all clean — needed one
+      fix along the way: `Uint8Array.prototype.slice()` returns
+      `Uint8Array<ArrayBufferLike>` under this TypeScript version's stricter typed-array
+      generics, which `crypto.subtle.*`'s `BufferSource` rejects (its backing buffer could
+      in principle be a `SharedArrayBuffer`); a small `fresh()` helper re-copies to
+      `Uint8Array<ArrayBuffer>` at each WebCrypto boundary.
+
+      **What's still open, deliberately not touched here:** this module is not wired into
+      `worker/pipeline.ts` or any UI — Track F1 (the reveal/review panel) and F3 (the
+      CodeMirror editor) are the surfaces that would actually call `mintToken`/`revealToken`
+      against a real document, and neither exists yet. There is also no `hacienda reveal`
+      CLI subcommand to literally run for the Check's "CLI reveal" half — `--mode
+      pseudonymize` only *mints* tokens during `extract` today; reversing one is only
+      exposed as `Pseudonymiser::reveal()`, a library function, which is exactly what the
+      golden-vector tests exercise directly rather than through a CLI invocation that
+      doesn't exist. Key management (where a 64-byte key or its id would come from in a
+      browser with no server-side secret store) is also untouched — out of scope for "build
+      the primitive and prove it's compatible," in scope for whoever wires F1/F3 to it.
 
 - [ ] **F3. CodeMirror 6 markdown editor with inline PII decorations.**
       Nothing exists to build on: CodeMirror is not a dependency in any repo, and
@@ -707,12 +778,17 @@ Studio's zip already contains markdown with linked entities, `_manifest.json`,
       and entity metadata in frontmatter (`buildFrontmatter`). Pseudonymizing an entity must
       not orphan its link or its glossary row.
 
-      **Still open — genuinely blocked, not skipped.** Nothing to verify against: F2
-      (reversible pseudonymization) doesn't exist in Studio yet, so there is no
-      pseudonymization code path that could orphan a link or glossary row. Whoever builds F2
-      needs to route it through the same `entityAnchorId()` helper G2 introduced (single
-      source of truth for both the link target and the glossary anchor) rather than
-      reintroducing a second place to keep the two in sync.
+      **Still open — genuinely blocked, not skipped, but the shape of the block changed
+      2026-07-30.** F2 now exists (`lib/pseudonymize.ts`), so the reversible-pseudonymization
+      *primitive* is no longer the blocker. What's still missing is the thing that would
+      actually call it against a document: F2 isn't wired into `worker/pipeline.ts` or any
+      UI, because nothing in Studio's pipeline decides *which* entities to pseudonymize or
+      surfaces that decision to a user — that's F1's reveal/review panel and F3's editor,
+      neither built yet. There is still no pseudonymization code path to route through
+      `relativeEntityLink()`/`entityFileName()` (I2 superseded G2's `entityAnchorId()` — same
+      single-source-of-truth requirement applies to whichever helper exists when this is
+      unblocked). Whoever builds F1/F3 needs to route pseudonymization through that shared
+      helper, not reintroduce a second place to keep a link and its target in sync.
 
 - [x] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
       nothing outside Studio understands. Switch to in-document anchors into the `## Entities`
@@ -890,27 +966,65 @@ entities-registry.json
 kg-export/{neo4j.cypher,networkx.json,rdf.ttl}
 ```
 
-- [ ] **Links must be relative markdown paths**, e.g. `[Acme SAS](../entities/acme-sas.md)`.
+- [x] **Links must be relative markdown paths**, e.g. `[Acme SAS](../entities/acme-sas.md)`.
       This replaces the current `entity:organization/acme-sas` custom scheme
       (`worker/pipeline.ts:93`), which nothing outside Studio can resolve. Relative paths are
       followable by a Claude Desktop agent with filesystem access, and by Obsidian, and by
       anything else that reads a markdown folder.
 
-      **Interim state (G2/G3, merged before I2 was decided):** links currently point to
-      in-document `<a id>` anchors in each file's own `## Entities` glossary section, not to
-      separate per-entity files — a narrower fix for the unresolvable `entity:` scheme that
-      didn't yet assume this layout. **Still open, blocking I1/I3/I4**: replacing that with
-      real `entities/<slug>.md` files and rewriting links to point at them across documents.
-- [ ] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
+      **Done 2026-07-30.** Replaced G2/G3's interim in-document `<a id>` anchors with real
+      `entities/<type>-<slug>.md` files, type-prefixed rather than the plan's literal
+      `entities/acme-sas.md` example — a bare slug collides across types (an `organization`
+      and a `location` can slugify to the same string), the same risk G2's anchor scheme
+      already had to account for. `relativeEntityLink(docPath, entity)` computes the
+      `../`-prefixed path from a document's depth under `documents/` back to `entities/`;
+      `RegistryEntity` gained a `slug` field (`lib/registry.ts`) — the first mention's slug,
+      stable for the batch — since it previously stored everything needed to identify an
+      entity except the one field file-naming needs.
+- [x] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
       than merely readable: the agent can open `entities/acme-sas.md` and find every document
       mentioning it. The data already exists — `BatchEntityRegistry` plus
       `inferRelationships` — it is currently only serialised to `entities-registry.json` and
-      to the KG exports, which an agent will not naturally read. **Still open** — no
-      `entities/` directory is generated yet.
-- [ ] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
+      to the KG exports, which an agent will not naturally read.
+
+      **Done 2026-07-30.** `buildEntityFile()` (`worker/pipeline.ts`) writes one file per
+      registry entity: type, vertical, sector, roles, aliases, mention count, and a backlink
+      to every document that mentions it. Backlinks come from a `docId -> "documents/..."
+      path` map built in `processFiles`'s existing per-file loop (`docPaths`), fed by
+      `RegistryEntity.source_documents` — no new bookkeeping beyond the field the vault
+      layout already needed. Optional fields (sector/roles/aliases) are omitted rather than
+      printed blank when empty.
+- [x] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
       (`worker/pipeline.ts:118`) becomes a local summary; the global glossary is the index.
-      **Still open** — today's `## Entities` sections are per-document only, no global
-      `GLOSSARY.md` is emitted.
+
+      **Done 2026-07-30.** `buildGlossaryIndex()` writes `GLOSSARY.md` at the zip root:
+      entities grouped by type (alphabetical), each linking into `entities/`, with vertical
+      and mention/document counts. The per-document `## Entities` section
+      (`buildGlossary()`) now links into the same `entities/` files instead of in-document
+      anchors, so a reader following a link from either a document or the glossary lands on
+      the same canonical entity file.
+
+      **Verified for real:** `worker/pipeline.test.ts` gained 6 new cases (2
+      `relativeEntityLink` — root-level and nested document depth, 2 `buildEntityFile`, 2
+      `buildGlossaryIndex`) plus updated every existing `renderAnnotatedMarkdown` case for
+      the new link shape — 17/17 in that file, 84/84 full suite, `tsc --noEmit` and
+      `svelte-check` clean, production `vite build` clean. `tests/e2e/pipeline.spec.ts`,
+      `toggles.spec.ts`, `folder-upload.spec.ts` updated for the `documents/` prefix;
+      `egress.spec.ts`'s PII-redaction contract extended to assert no IBAN in any
+      `entities/*.md` file, not just the fixed-name files it already checked (the entity
+      whose only mention overlapped the IBAN was already excluded by A2's
+      `filterExportableEntities`, so this is regression coverage, not a new finding). Ran
+      the full e2e suite for real against this sandbox's Chromium build (temporary
+      `launchOptions.executablePath`, reverted before committing, same pattern as every
+      prior session) — 16/16 passing, including a live-browser check that `documents/`,
+      `entities/*.md`, and `GLOSSARY.md` all appear in a real downloaded zip with correct
+      relative links. Along the way, found and fixed an unrelated environment hazard, not a
+      code defect: an earlier `npm run dev` invocation's `predev` hook had partially
+      regenerated `crates/hacienda-wasm/pkg` (this sandbox has no network access to fetch
+      wasm-opt) and left it without a `package.json`, breaking every worker-dependent e2e
+      test with a resolution error. Fixed by temporarily setting
+      `wasm-opt = false` in `hacienda-wasm/Cargo.toml`, rebuilding, then reverting — the
+      same documented pattern prior sessions used for the same underlying constraint.
 - [x] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
       folder of prose and ignores the registry and graph files entirely. **Done via G3** —
       `README.md` ships at the zip root.
@@ -954,24 +1068,70 @@ The reframe's main new work. Today `hacienda extract` takes `inputs: Vec<String>
 folder. If the vault is the product, the CLI not producing one means the product only exists
 in a browser.
 
-- [ ] **J1. `hacienda extract --vault <dir>`** emitting the Track I2 layout — same
+- [x] **J1. `hacienda extract --vault <dir>`** emitting the Track I2 layout — same
       `documents/`, `entities/`, `GLOSSARY.md`, `kg-export/`. A firm processing 10,000
       documents overnight should get the same artefact a lawyer gets from dropping a folder.
-- [ ] **J2. Port entity linking, glossary and KG export to Rust — or don't, deliberately.**
+
+      **Done 2026-07-30, scoped by J2's decision below.** New `--vault <DIR>` flag on
+      `hacienda extract` (`cli.rs`). `write_vault()` (`commands.rs`) writes `documents/<stem>.md`
+      per input (frontmatter: source, type, processed, PII count; content already redacted
+      per `--mode`, same guarantee `HaciendaResult` already gives stdout output),
+      `_manifest.json`, `pii-registry.json`, and `README.md`. No `entities/`, `GLOSSARY.md`,
+      or `kg-export/` — see J2.
+- [x] **J2. Port entity linking, glossary and KG export to Rust — or don't, deliberately.**
       These exist only in Studio's TypeScript (`worker/pipeline.ts`, `lib/kg-export.ts`,
       `lib/registry.ts`, `lib/verticals/`). Two honest options: reimplement in Rust (a real
       cost, and a third divergence surface), or declare the CLI's vault a thinner artefact —
       markdown plus registry, no cross-document relationship inference. **Decide explicitly.**
       Silently shipping two different things both called "the vault" is the failure mode.
-- [ ] **J3. The CLI has capabilities Studio cannot have** — `--audit-out` writing a real
+
+      **Decided 2026-07-30: thinner artefact, not a Rust port.** The CLI/API have no
+      general-purpose named-entity pipeline at all — `hacienda-core`'s neural NER
+      (`ner-candle`) is compiled out of every default build (Track K, unstarted), and there
+      is no regex-based person/organization detector either, only PII categories. Porting
+      `BatchEntityRegistry`/`inferRelationships`/`kg-export.ts` to Rust would mean inventing
+      an entity graph from nothing, or first building Track K — reversing that decision
+      belongs to Track K's own sequencing (which is itself gated on Track H settling a model
+      artefact), not to this one. `pii-registry.json` replaces `entities-registry.json` as
+      the CLI vault's cross-document artefact — PII findings grouped by document, explicitly
+      documented in the vault's own `README.md` as a different, narrower schema so a
+      consumer does not assume the two vaults are interchangeable.
+- [x] **J3. The CLI has capabilities Studio cannot have** — `--audit-out` writing a real
       blake3 chain, reversible pseudonyms, `--no-redact` gated behind
       `--i-accept-unredacted-pii`. If a vault carries an audit chain when produced by the CLI
       and not by Studio, the bundle format must say so rather than leaving a consumer to
       guess.
-- [ ] **J4. `--concurrency` already exists** (uncommitted, `ConcurrencyArgs` at
+
+      **Found already substantially done, one gap closed 2026-07-30.** `--audit-out`
+      (writing a re-verifying blake3 chain), `--mode pseudonymize` (reversible, AES-SIV), and
+      `--no-redact`/`--i-accept-unredacted-pii` were all already implemented and tested
+      (`hacienda-cli/tests/extract.rs`) before this session — this item's own text describing
+      them as still-open capabilities was stale. What was actually missing, and is what this
+      item's last sentence asks for: when `--vault` and `--audit-out` are both given,
+      `write_vault()` now mirrors the chain into `<vault>/audit/audit.json` (in addition to
+      the standalone `--audit-out` location, unchanged) and `README.md` states plainly
+      whether the vault includes one — no consumer has to guess or discover a second
+      directory.
+- [x] **J4. `--concurrency` already exists** (uncommitted, `ConcurrencyArgs` at
       `cli.rs:157`, wired to `PipelineConfig::concurrency`). Studio's batch loop is sequential
       (`worker/pipeline.ts:331`). Same knob, two behaviours — align the defaults or document
       why they differ.
+
+      **Done 2026-07-30 — documented, not aligned.** `--concurrency` was already committed
+      (this item's "uncommitted" was stale) and already wired. Aligning the defaults would
+      mean either parallelizing Studio's worker (a real architecture change: one loaded WASM
+      NER/PII engine instance is not built for concurrent inference, and true parallelism
+      needs multiple Web Workers sharing that model — explicitly out of scope per Track I1's
+      own decision) or serializing the CLI to match Studio for no reason. Recorded the "why
+      they differ" in `apps/hacienda-studio/README.md`'s "Relationship to the CLI/API"
+      section (Track C1) instead, alongside a correction to that section's now-stale claim
+      that Studio's NER wasn't wired to the neural model (Track B2 did that after C1's README
+      was written) and a new bullet on the vault-depth difference this session's J1/J2 added.
+
+      **Verified for real:** `cargo build -p hacienda-cli` and `cargo test -p hacienda-cli`
+      clean (24/24, including 2 new `--vault` tests: a redacted document + `pii-registry.json`
+      with no leaked PII and no `entities/`/`GLOSSARY.md` present, and the audit-chain mirror
+      into `<vault>/audit/` when both flags are given). `cargo build --workspace` clean.
 
 ---
 
