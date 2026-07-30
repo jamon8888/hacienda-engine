@@ -267,11 +267,15 @@ pub async fn run_scan(
 ) -> Result<()> {
     let config = load_config(config_path, config_json, None, Some(&args))?;
 
-    let pii_config = config.pii.clone().unwrap_or_else(|| {
+    let mut pii_config = config.pii.clone().unwrap_or_else(|| {
         let mut p = PipelineConfig::default();
         p.redaction.mode = RedactionMode::Mask; // doesn't matter for scan
         p
     });
+    // `--concurrency` governs documents in flight through the PII stage
+    // (`PiiPipeline::process`), not the CLI's file list — a single scanned input can
+    // still decompose into several documents (e.g. a multi-page PDF).
+    pii_config.concurrency = parse_concurrency(&args.concurrency);
 
     let facade = Arc::new(HaciendaFacade::new(HaciendaConfig {
         extraction: config.extraction,
@@ -282,7 +286,6 @@ pub async fn run_scan(
         auth: config.auth,
     })?);
 
-    let _concurrency = parse_concurrency(&args.concurrency);
     let mut results = Vec::new();
 
     for input in &args.inputs {
@@ -347,6 +350,8 @@ pub async fn run_extract(
         );
     }
 
+    let concurrency = parse_concurrency(&args.concurrency);
+
     // `--no-redact` skips the PII stage entirely (`pii: None`), not just the redaction
     // step within it — a mode/threshold flag surviving alongside `--no-redact` would
     // silently imply detection still ran. Below, `--audit-out` is refused in that case:
@@ -354,11 +359,16 @@ pub async fn run_extract(
     let pii_config = if args.no_redact {
         None
     } else {
-        Some(config.pii.clone().unwrap_or_else(|| {
+        let mut p = config.pii.clone().unwrap_or_else(|| {
             let mut p = PipelineConfig::default();
             p.redaction.mode = RedactionMode::Mask;
             p
-        }))
+        });
+        // `--concurrency` bounds documents in flight through the PII stage
+        // (`PiiPipeline::process`) within one `facade.process` call — separate from,
+        // and in addition to, the per-file `task::spawn` fan-out below.
+        p.concurrency = concurrency;
+        Some(p)
     };
 
     if let Some(dir) = &args.audit_out {
@@ -385,7 +395,6 @@ pub async fn run_extract(
         auth: config.auth,
     })?);
 
-    let concurrency = parse_concurrency(&args.concurrency);
     let mut all_results = Vec::new();
 
     // Process in batches with concurrency limit
