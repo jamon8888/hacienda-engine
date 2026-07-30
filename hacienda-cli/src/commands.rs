@@ -20,6 +20,31 @@ fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
     args.concurrency.unwrap_or_else(num_cpus::get)
 }
 
+/// Close `facade`'s stores after `result`, regardless of whether `result` is `Ok`.
+///
+/// Phase 1 made `HaciendaFacade::close` recommended rather than required — skipping it
+/// only costs the next process an extra recovery step. A CLI process that always exits
+/// after one command is exactly the case where that recovery step is paid on every run
+/// rather than occasionally, so every path out of `run_scan`/`run_extract` that has a
+/// constructed facade closes it, error paths included.
+///
+/// A prior error from `result` takes priority: it is what the user asked about. A close
+/// failure that follows a prior error is logged rather than returned, so a
+/// close-time-only problem does not shadow the original failure.
+async fn close_after<T>(facade: &HaciendaFacade, result: Result<T>) -> Result<T> {
+    match facade.close().await {
+        Ok(()) => result,
+        Err(close_err) if result.is_ok() => Err(close_err).context("closing the audit store"),
+        Err(close_err) => {
+            tracing::warn!(
+                error = %close_err,
+                "failed to close the audit store while handling a prior error"
+            );
+            result
+        }
+    }
+}
+
 /// Run `hacienda config show`
 pub async fn run_config_show(
     format: Format,
@@ -286,6 +311,11 @@ pub async fn run_scan(
         auth: config.auth,
     })?);
 
+    let result = run_scan_inputs(&args, &facade).await;
+    close_after(&facade, result).await
+}
+
+async fn run_scan_inputs(args: &ScanArgs, facade: &HaciendaFacade) -> Result<()> {
     let mut results = Vec::new();
 
     for input in &args.inputs {
@@ -343,10 +373,15 @@ pub async fn run_extract(
 ) -> Result<()> {
     let config = load_config(config_path, config_json, Some(&args), None)?;
 
-    // Validate --no-redact requires explicit acknowledgement
+    // Validate --no-redact requires explicit acknowledgement (D5): the message must
+    // name both what would be emitted and `scan` as the honest alternative — detection
+    // without a rewrite, and no unredacted text on stdout.
     if args.no_redact && !args.i_accept_unredacted_pii {
         anyhow::bail!(
-            "--no-redact requires --i-accept-unredacted-pii (explicit acknowledgement that raw PII will be output)"
+            "--no-redact requires --i-accept-unredacted-pii: without it, this command \
+             refuses to run rather than emit unredacted document text (containing raw \
+             PII) to stdout. If you only need to know what PII is present, use `hacienda \
+             scan` instead — it detects and reports without emitting document text at all."
         );
     }
 
@@ -395,6 +430,15 @@ pub async fn run_extract(
         auth: config.auth,
     })?);
 
+    let result = run_extract_inputs(&args, concurrency, &facade).await;
+    close_after(&facade, result).await
+}
+
+async fn run_extract_inputs(
+    args: &ExtractArgs,
+    concurrency: usize,
+    facade: &Arc<HaciendaFacade>,
+) -> Result<()> {
     let mut all_results = Vec::new();
 
     // Process in batches with concurrency limit
@@ -403,7 +447,7 @@ pub async fn run_extract(
     for chunk in inputs.chunks(concurrency) {
         let mut handles = Vec::new();
         for input in chunk {
-            let facade = Arc::clone(&facade);
+            let facade = Arc::clone(facade);
             let input = input.clone();
             handles.push(task::spawn(async move { facade.process(input).await }));
         }
@@ -450,7 +494,7 @@ pub async fn run_extract(
     }
 
     if let Some(audit_out) = &args.audit_out {
-        write_audit_chain(&facade, audit_out).await?;
+        write_audit_chain(facade, audit_out).await?;
     }
 
     Ok(())
