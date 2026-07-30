@@ -911,7 +911,7 @@ mod tests {
     use async_trait::async_trait;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     // ── TempDir RAII helper ───────────────────────────────────────────────────
     // Copied from audit/store_file.rs test module. Both modules need isolation;
@@ -2260,5 +2260,177 @@ mod tests {
              ({LIMIT}) — not fewer (the pool would be under-using its budget) and not \
              more (the pool would be ignoring it), across {DOCS} documents"
         );
+    }
+
+    // ── Task 5: the §9 measurement that gates Phase 6 ────────────────────────
+    //
+    // Wraps a `FileAuditStore` to time each `append` call end-to-end (wait + mint +
+    // write + fsync) — D2's number (2). `FileAuditStore::io_order_wait` already
+    // reports number (3) from inside the lock; this decorator adds number (2) at the
+    // call boundary rather than adding another always-on field to the store itself.
+    struct TimingAuditStore {
+        inner: Arc<FileAuditStore>,
+        append_nanos: AtomicU64,
+    }
+
+    impl TimingAuditStore {
+        fn new(inner: Arc<FileAuditStore>) -> Self {
+            Self {
+                inner,
+                append_nanos: AtomicU64::new(0),
+            }
+        }
+
+        fn total_append_time(&self) -> std::time::Duration {
+            std::time::Duration::from_nanos(self.append_nanos.load(Ordering::SeqCst))
+        }
+    }
+
+    #[async_trait]
+    impl AuditStore for TimingAuditStore {
+        async fn append(
+            &self,
+            inputs: Vec<AuditEntryInput>,
+        ) -> Result<Vec<AuditEntry>, AuditError> {
+            let start = std::time::Instant::now();
+            let result = self.inner.append(inputs).await;
+            self.append_nanos
+                .fetch_add(start.elapsed().as_nanos() as u64, Ordering::SeqCst);
+            result
+        }
+
+        async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
+            self.inner.entries().await
+        }
+
+        async fn tip(&self) -> Result<String, AuditError> {
+            self.inner.tip().await
+        }
+
+        async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+            self.inner.seals().await
+        }
+
+        async fn verify(&self) -> Result<(), AuditError> {
+            self.inner.verify().await
+        }
+
+        async fn rotate(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.rotate().await
+        }
+
+        async fn close(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.close().await
+        }
+    }
+
+    /// Deterministic, generated (not checked in as a file): the generator is the
+    /// fixture, and it reproduces byte-for-byte on every run, which is what "same
+    /// corpus for every run" requires. Each document carries one regex-detectable
+    /// email so the PII stage does real detection and redaction work, not a no-op.
+    const CORPUS_DOC_COUNT: usize = 300;
+
+    fn fixed_corpus() -> Vec<String> {
+        (0..CORPUS_DOC_COUNT)
+            .map(|i| {
+                format!(
+                    "Dear team, this is quarterly note number {i}. Contact person{i}@example.com \
+                     for follow-up. This message intentionally repeats standard boilerplate text \
+                     so that every document in the corpus stays close in size to its neighbours. \
+                     Regards, Automated Reporter {i}."
+                )
+            })
+            .collect()
+    }
+
+    /// Reports D2's three numbers — total per-document wall time, time inside
+    /// `append`, and time waiting for `io_order` alone — at `--concurrency` 1, 2, 4,
+    /// and CPU count, against the fixed corpus above. Evaluated against §9: throughput
+    /// must reach 2x at CPU count relative to concurrency 1, and `io_order` wait must
+    /// stay under 20% of per-document wall time, or Phase 6's audit work is unblocked
+    /// immediately per §9.
+    ///
+    /// `#[ignore]`d like `step8_sync_policy_timing` in `audit/store_file.rs`: this
+    /// measures wall-clock on shared CI/dev hardware, so it does not belong in the
+    /// default suite. Run with `cargo test task5_concurrency_and_contention_measurement
+    /// -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore]
+    async fn task5_concurrency_and_contention_measurement() {
+        let corpus = fixed_corpus();
+        let corpus_bytes: usize = corpus.iter().map(|d| d.len()).sum();
+
+        let cpu_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let mut levels: Vec<usize> = vec![1, 2, 4];
+        if !levels.contains(&cpu_count) {
+            levels.push(cpu_count);
+        }
+
+        println!(
+            "\n=== Task 5 measurement: {} documents, {corpus_bytes} bytes, cpu_count={cpu_count} ===",
+            corpus.len(),
+        );
+
+        let mut wall_at_one = None;
+
+        for concurrency in levels {
+            let dir = TempDir::new(&format!("task5-c{concurrency}"));
+            let file_store = Arc::new(
+                FileAuditStore::open_with_policy(
+                    dir.path(),
+                    NodeId::new("bench-node"),
+                    "bench-config",
+                    crate::audit::SyncPolicy::EveryBatch,
+                )
+                .unwrap()
+                .with_contention_tracking(),
+            );
+            let timing_store = Arc::new(TimingAuditStore::new(Arc::clone(&file_store)));
+
+            let mut config = pii_config();
+            config.concurrency = concurrency;
+            let facade = HaciendaFacade::with_stores(
+                HaciendaConfig::default().with_pii(config),
+                Some(Arc::clone(&timing_store) as Arc<dyn AuditStore>),
+                None,
+            )
+            .unwrap();
+
+            let inputs = corpus.iter().map(|t| text_input(t)).collect();
+
+            let wall_start = std::time::Instant::now();
+            facade.process_batch(inputs).await.unwrap();
+            let wall = wall_start.elapsed();
+
+            let append_time = timing_store.total_append_time();
+            let (io_order_wait, _) = file_store.io_order_wait().unwrap();
+            facade.close().await.ok();
+
+            if concurrency == 1 {
+                wall_at_one = Some(wall);
+            }
+            let speedup = wall_at_one
+                .map(|base| base.as_secs_f64() / wall.as_secs_f64())
+                .unwrap_or(1.0);
+            let per_doc_wall = wall / CORPUS_DOC_COUNT as u32;
+            let wait_fraction = io_order_wait.as_secs_f64() / wall.as_secs_f64();
+
+            println!(
+                "concurrency={concurrency:<2} wall={wall:>10?} speedup={speedup:>5.2}x \
+                 per_doc={per_doc_wall:>10?} append_time={append_time:>10?} \
+                 io_order_wait={io_order_wait:>10?} wait_fraction={wait_fraction:.4}"
+            );
+        }
+
+        // RAM headroom: a throughput curve measured under memory pressure measures
+        // the memory, not the code, so it is recorded alongside the numbers above
+        // rather than left implicit.
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            if let Some(line) = meminfo.lines().find(|l| l.starts_with("MemAvailable:")) {
+                println!("RAM headroom at measurement time: {line}");
+            }
+        }
     }
 }

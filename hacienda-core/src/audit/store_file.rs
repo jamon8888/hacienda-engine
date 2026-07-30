@@ -41,8 +41,9 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::audit::entry::{AuditEntry, AuditEntryInput};
 use crate::audit::error::AuditError;
@@ -185,6 +186,40 @@ pub struct FileAuditStore {
     /// operations return an `Io` error immediately. The caller must reopen the store
     /// (which replays from disk) to recover. See struct-level docs for rationale.
     poisoned: AtomicBool,
+    /// `io_order` wait telemetry, opt-in via [`Self::with_contention_tracking`].
+    ///
+    /// `None` by default so that every `append` outside a benchmark costs one
+    /// `Option::is_some` check and nothing else — no `Instant::now()` pair is paid
+    /// per call when contention tracking is switched off. See the phase2 plan's
+    /// Task 5, Design Decision D2.
+    contention: Option<Arc<ContentionMetrics>>,
+}
+
+/// Accumulates how long `append` callers spent waiting to acquire `io_order`,
+/// distinct from the time spent minting and fsyncing once acquired.
+///
+/// Plain atomics rather than a mutex: the whole point is to measure contention
+/// without introducing more of it, and every writer only ever adds.
+#[derive(Debug, Default)]
+struct ContentionMetrics {
+    wait_nanos: AtomicU64,
+    wait_count: AtomicU64,
+}
+
+impl ContentionMetrics {
+    fn record(&self, wait: Duration) {
+        self.wait_nanos
+            .fetch_add(wait.as_nanos() as u64, Ordering::Relaxed);
+        self.wait_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn total(&self) -> Duration {
+        Duration::from_nanos(self.wait_nanos.load(Ordering::Relaxed))
+    }
+
+    fn count(&self) -> u64 {
+        self.wait_count.load(Ordering::Relaxed)
+    }
 }
 
 impl FileAuditStore {
@@ -285,6 +320,7 @@ impl FileAuditStore {
             node_dir,
             sync_policy,
             poisoned: AtomicBool::new(false),
+            contention: None,
         })
     }
 
@@ -297,6 +333,23 @@ impl FileAuditStore {
     pub fn with_sync_policy(mut self, policy: SyncPolicy) -> Self {
         self.sync_policy = policy;
         self
+    }
+
+    /// Builder: opt into recording how long `append` callers spend waiting to acquire
+    /// `io_order`, separate from the time spent minting and writing once acquired.
+    ///
+    /// Off by default: measuring costs a pair of `Instant::now()` calls per `append`,
+    /// which this crate does not pay unless something is actually asking for the
+    /// number. See the phase2 plan's Task 5, Design Decision D2.
+    pub fn with_contention_tracking(mut self) -> Self {
+        self.contention = Some(Arc::new(ContentionMetrics::default()));
+        self
+    }
+
+    /// Total time and count of waits to acquire `io_order`, if contention tracking was
+    /// enabled via [`Self::with_contention_tracking`]. `None` otherwise.
+    pub fn io_order_wait(&self) -> Option<(Duration, u64)> {
+        self.contention.as_ref().map(|c| (c.total(), c.count()))
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, FileState> {
@@ -345,7 +398,14 @@ impl AuditStore for FileAuditStore {
         // minted in is the order they reach the file. Without it, two concurrent callers
         // can mint as (A, B) and write as (B, A), leaving a file this store cannot
         // replay. See "Why there are two locks" on the struct.
+        //
+        // `wait_start` is only ever `Some` when contention tracking is on, so the
+        // `Instant::now()` pair is skipped entirely otherwise.
+        let wait_start = self.contention.is_some().then(Instant::now);
         let _io = self.io_order.lock().await;
+        if let (Some(contention), Some(start)) = (&self.contention, wait_start) {
+            contention.record(start.elapsed());
+        }
 
         // ── Step 1: build the byte buffer and mint entries under the state lock ──
         // The std guard is dropped before the spawn_blocking call. Holding a
@@ -1506,6 +1566,75 @@ mod tests {
             total, 1,
             "only the durably-written entry must be in the chain; \
              the phantom entry must not appear"
+        );
+    }
+
+    // ── Task 5: io_order contention instrumentation ─────────────────────────
+
+    /// At concurrency 1 nobody else is ever holding `io_order`, so the reported wait
+    /// must be near zero. At concurrency 8, every task but whichever one currently
+    /// holds the lock spends real time queued behind an in-flight mint-then-fsync, so
+    /// the reported wait must be materially above zero. A contention metric that reads
+    /// zero under contention is worse than no metric — it will be believed. See phase2
+    /// plan Task 5, Step 3.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn should_report_near_zero_io_order_wait_at_concurrency_one_and_material_wait_at_eight() {
+        const BATCHES_PER_TASK: usize = 20;
+
+        async fn run(dir_tag: &str, concurrency: usize) -> (Duration, u64) {
+            let dir = TempDir::new(dir_tag);
+            let store = Arc::new(
+                FileAuditStore::open_with_policy(
+                    dir.path(),
+                    NodeId::new("contention-node"),
+                    CONFIG,
+                    SyncPolicy::EveryBatch,
+                )
+                .unwrap()
+                .with_contention_tracking(),
+            );
+
+            let mut handles = Vec::with_capacity(concurrency);
+            for t in 0..concurrency {
+                let store = Arc::clone(&store);
+                handles.push(tokio::spawn(async move {
+                    for b in 0..BATCHES_PER_TASK {
+                        let inputs = vec![make_input(&format!("t{t}-b{b}"))];
+                        store.append(inputs).await.expect("append");
+                    }
+                }));
+            }
+            for h in handles {
+                h.await.expect("task must not panic");
+            }
+
+            let (wait, count) = store.io_order_wait().expect("contention tracking enabled");
+            store.close().await.expect("close");
+            (wait, count)
+        }
+
+        let (wait_at_one, count_at_one) = run("contention-c1", 1).await;
+        let (wait_at_eight, count_at_eight) = run("contention-c8", 8).await;
+
+        assert_eq!(count_at_one, BATCHES_PER_TASK as u64);
+        assert_eq!(count_at_eight, (BATCHES_PER_TASK * 8) as u64);
+
+        let avg_wait_at_one = wait_at_one / count_at_one as u32;
+        let avg_wait_at_eight = wait_at_eight / count_at_eight as u32;
+
+        assert!(
+            avg_wait_at_one < Duration::from_millis(1),
+            "expected near-zero io_order wait at concurrency 1, got {avg_wait_at_one:?} average"
+        );
+        assert!(
+            avg_wait_at_eight > Duration::from_micros(100),
+            "expected a materially non-zero io_order wait at concurrency 8, got \
+             {avg_wait_at_eight:?} average"
+        );
+        assert!(
+            avg_wait_at_eight > avg_wait_at_one * 3,
+            "expected io_order wait at concurrency 8 to be materially above concurrency 1's \
+             ({avg_wait_at_eight:?} vs {avg_wait_at_one:?})"
         );
     }
 
