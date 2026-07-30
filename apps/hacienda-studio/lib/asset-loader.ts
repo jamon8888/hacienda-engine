@@ -177,4 +177,6 @@ export const SUPPORTED_MIME_PREFIXES = [
   "application/x-tar",
   "application/gzip",
   "application/x-7z-compressed",
+  "audio/",
+  "video/",
 ];

@@ -224,12 +224,30 @@ Highest value per unit of work. Every toggle here already exists in the UI and l
       zero PII needles in markdown, registry, or any KG export file — only the genuine
       "Jean Dupont" entity survives.
 
-- [ ] **A3. Widen the upload gate for audio/video.**
+- [x] **A3. Widen the upload gate for audio/video.**
       Add `audio/` and `video/` to `SUPPORTED_MIME_PREFIXES` and matching extensions to
       `accept=` (`App.svelte:178`). Note `SUPPORTED_MIME_PREFIXES` and `validateFile` are
       **duplicated verbatim** in `lib/asset-loader.ts:157` and `lib/types.ts:104` — collapse
       to one before editing, or the fix lands in the copy nobody imports. `App.svelte` imports
       the `asset-loader` one. *Check:* an `.mp3` reaches `worker/pipeline.ts:149`.
+
+      **Done 2026-07-30.** Confirmed the duplication was exactly as described and that
+      nothing imports the `lib/types.ts` copy (`App.svelte` imports `validateFile` from
+      `lib/asset-loader.ts` only; grepped the whole app for other importers — none) — deleted
+      it outright rather than leaving dead code as a second place to forget to update next
+      time. Added `"audio/"`/`"video/"` to `asset-loader.ts`'s `SUPPORTED_MIME_PREFIXES`
+      (the live copy) and `.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv` to
+      `App.svelte`'s `accept=`, plus the drop-zone hint text.
+
+      **Verified**: new `validateFile` tests in `lib/asset-loader.test.ts` (audio and video
+      MIME types accepted; empty/oversized/unsupported-type rejections still behave as
+      before) — 5 new cases, 63/63 full suite. `tsc --noEmit`, `svelte-check`, `typos`, and a
+      production `vite build` all clean. Not independently re-verified with a live browser
+      upload — `validateFile` is the exact function `App.svelte` calls before a file ever
+      reaches the worker, so the unit test is a direct check of the gate itself, not a proxy
+      for it. Did not touch what happens *after* the gate: with `enableTranscription` off
+      (the default), an audio/video file now reaches `engine.extract()` instead of
+      `WhisperBridge`, which is untested territory this item didn't ask about.
 
 - [ ] **A4. Stop reporting success on model-load failure.**
       `App.svelte:60-62` catches the download error and sets `assets.nerModel = true` anyway;

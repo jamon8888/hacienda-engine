@@ -175,11 +175,11 @@
 
 		<main class="main">
 			<section class="drop-zone" role="group" aria-label="Upload documents" ondrop={onDrop} ondragover={onDragOver}>
-				<input type="file" id="file-input" multiple disabled={!workerReady} accept=".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html" class="file-input" onchange={(e) => { const files = (e.target as HTMLInputElement).files; if (files) handleFiles(files); }} aria-label="Choose files" />
+				<input type="file" id="file-input" multiple disabled={!workerReady} accept=".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html,.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv" class="file-input" onchange={(e) => { const files = (e.target as HTMLInputElement).files; if (files) handleFiles(files); }} aria-label="Choose files" />
 				<label for="file-input" class="drop-label">
 					<span class="drop-icon" aria-hidden="true">📄</span>
 					<p>{workerReady ? 'Drop files here or click to browse' : 'Starting the local engine…'}</p>
-					<p class="drop-hint">PDF, Office, Email, Images, Subtitles, Code — up to 50MB each</p>
+					<p class="drop-hint">PDF, Office, Email, Images, Audio/Video, Subtitles, Code — up to 50MB each</p>
 				</label>
 			</section>
 
