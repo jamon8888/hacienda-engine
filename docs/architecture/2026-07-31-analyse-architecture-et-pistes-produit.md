@@ -233,7 +233,7 @@ Effort faible, débloque le commercial.
 | **Serveur MCP** | Spécifié depuis 2025 (9 outils, 4 ressources, 3 prompts). C'est le mode d'intégration IA le plus demandé aujourd'hui, et `pii_explain` répond directement à l'AI Act Art. 13. |
 | **Rate limiting, quotas, métriques de facturation** | Prérequis de toute offre SaaS. |
 
-### Vague 3 — « Devenir une plateforme RAG » (3–4 mois — voir §9.10)
+### Vague 3 — « Devenir une plateforme RAG » (voir l'évaluation chiffrée en §9.10)
 
 | Chantier | Détail |
 | --- | --- |
@@ -330,7 +330,7 @@ Ces cinq points conditionnent le reste et relèvent d'un arbitrage produit, pas 
 
 ## 9. Intégrer les briques xberg sans forker — état vérifié
 
-### 9.1 Le fait déterminant : la couche RAG a quitté l'open source
+### 9.1 Le fait déterminant : la couche RAG a cessé d'être publiée
 
 Vérification faite directement contre `xberg-io/xberg` (joignable en git simple depuis cette session, même si l'outillage GitHub ne l'expose pas) :
 
@@ -459,7 +459,84 @@ Mais sa valeur est désormais bien plus qu'archivistique : **c'est la source du 
 
 La distinction à tenir : on en **extrait** du code, une fois, qui devient du code de Hacienda avec sa notice de copyright. On ne le **dépend** jamais — ni `path =`, ni `[patch]`, ni `git =`.
 
-### 9.10 Effet net sur la feuille de route
+### 9.10 Évaluation de la reprise : que prendre, que laisser, à quel coût
+
+Évaluation faite sur le code rc.5 lui-même, pas sur sa documentation.
+
+#### Trois paliers, trois verdicts
+
+| Palier | Contenu | Lignes | Tests | Dépendances nouvelles | Verdict |
+| --- | --- | ---: | ---: | --- | --- |
+| **1 — surface de contrat** | `store` (114), `types` (272), `filter` (371), `query` (238), `registry` (139), `capability` (42), `error` (117) | **1 293** | 20 | **aucune** — `async-trait`, `serde`, `serde_json`, `thiserror`, `tracing` sont déjà au workspace | **Prendre** |
+| **2 — backend mémoire** | `backends/memory.rs` | **526** | 5 | aucune | **Prendre** |
+| **3 — backends SQLite** | `backends/sqlite.rs` (1 523), `backends/graphqlite.rs` (513) | **2 036** | 18 | `rusqlite` + `sqlite-vec` — **dépendances C** | **Différer** |
+
+Le palier 1 est le seul indispensable : c'est lui qui porte le trait sur lequel le décorateur se branche. Le palier 2 vient gratuitement et donne de quoi tester le décorateur sans infrastructure. Le palier 3 introduit une chaîne de compilation C dans un dépôt qui n'en avait pas — à ne payer que si SQLite embarqué est un besoin produit réel, ce qui n'est pas établi.
+
+Note sur `graphqlite` : il est gaté sur la même feature `sqlite` (pas la sienne) et apporte traversée type Cypher, détection de communautés Louvain et PageRank. C'est directement pertinent pour l'angle graphe de connaissances des bundles Studio — mais très en avance sur le besoin actuel. À noter comme option, pas à reprendre maintenant.
+
+#### Frictions vérifiées
+
+| Friction | Sévérité réelle |
+| --- | --- |
+| **Édition 2024 / `rust-version = "1.91"` amont contre édition 2021 ici** | **Faible.** C'est la friction que j'attendais bloquante ; elle ne l'est pas. Aucun `gen`, aucun `unsafe_op_in_unsafe_fn`, et les seuls retours `impl Trait` sont dans `stream.rs` — qu'on ne prend pas. Le code devrait compiler en 2021 ; à confirmer par une compilation réelle, c'est la première chose à faire. |
+| **`thiserror` 2.0.18 amont contre 1.0 ici** | **Faible.** Les dérives utilisées (`#[error(...)]`, `#[error(transparent)]`, `#[from]`) sont identiques dans les deux lignes. Occasion de monter Hacienda en 2.0, ce qui est souhaitable par ailleurs. |
+| **`RagError` est un type d'erreur autonome (117 l.)** | **Moyenne.** À raccorder : soit une variante `HaciendaError::Rag(#[from] RagError)`, soit un ré-hébergement des variantes. C'est le seul vrai travail d'intégration du palier 1. |
+| **`rusqlite` + `sqlite-vec`** | **Moyenne, mais évitable** en différant le palier 3. Revue `deny.toml` nécessaire — l'allowlist accepte MIT, donc pas d'obstacle de principe. |
+| **Aucun répertoire `tests/`** | **Faible.** Les 43 tests sont en modules `#[cfg(test)]` inline : ils viennent avec le code repris, ce qui est le bon comportement. Il n'y a en revanche pas de suite d'intégration au niveau crate. |
+| **Documentation dérivée du manifeste** | **Signal, pas friction.** Le doc de `lib.rs` annonce `ahash` en dépendance ; le manifeste ne le contient pas. Ne pas se fier aux commentaires sans vérifier le code. |
+
+#### Signaux de qualité
+
+Le code est meilleur que ce que sa disparition pourrait laisser croire, et il est écrit dans la même maison de style que `hacienda-core` :
+
+- **chaque méthode du trait documente ses erreurs**, la sûreté vis-à-vis des threads est énoncée, et les choix de conception sont justifiés dans le doc plutôt que laissés implicites ;
+- `filter.rs` impose des **plafonds de complexité durs** — profondeur 8, 64 nœuds, 4 prédicats `text_match`, 1 024 octets de requête — avec la raison écrite : *« so a malicious or accidental filter cannot blow up a backend »*. C'est du durcissement anti-déni de service, pas une IR de confort ;
+- les champs de filtre sont **whitelistés** (`validate_doc_field` / `validate_chunk_field`), donc pas d'injection de champ arbitraire ;
+- la surface est **WASM-safe par construction** : `#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]`. Cela compte directement pour Studio, qui pourrait partager la même IR de requêtes que le serveur.
+
+Deux lignes de commentaire valent une conclusion à elles seules. D'abord dans `store.rs` :
+
+> *« The trait is deliberately **single-tenant**: one instance is one trust domain. Multi-tenancy is layered on top by the caller (e.g. one scoped instance per tenant, or a decorator that sets row-level-security context before delegating). »*
+
+L'amont recommande donc exactement la forme proposée en §9.4 — un décorateur au-dessus d'un trait mono-tenant. Notre couche de rédaction/audit s'inscrit dans le dessin prévu, elle ne le contourne pas.
+
+Ensuite dans `filter.rs` :
+
+> *« Ported (de-tenanted) from the enterprise `vectorstore` crate; Postgres-specific `*_tsv` columns are not part of the neutral surface. »*
+
+Autrement dit, **la surface OSS est elle-même un portage dé-tenanté de la crate Enterprise**. Cela confirme qu'Enterprise embarque bien une implémentation Postgres/pgvector, et surtout que ce que nous reprendrions est *architecturalement aligné* sur ce qu'Enterprise implémente. Si la voie B aboutit plus tard, un adaptateur est plausible plutôt qu'une réécriture.
+
+#### Ce qu'il ne faut pas prendre
+
+`pipeline.rs` et `stream.rs`, et toutes les features `pipeline-*` / `streaming`. Deux raisons : ce sont les seuls fichiers couplés à xberg — donc les seuls dont la compatibilité dépendrait de la version du cœur — et Hacienda possède déjà son orchestration d'ingestion dans la façade, avec sa concurrence bornée, son audit par document et sa file de revue. Reprendre une seconde orchestration créerait deux chemins pour la même chose.
+
+#### `xberg-doc-store` : verdict différent
+
+594 lignes au total, dont `tenant.rs` 59 et `rehydration.rs` 80. À cette taille, la reprise n'apporte presque rien : l'essentiel est le **dessin**, pas le code. Et un `TenantCtx` de Hacienda doit de toute façon s'articuler avec `Caller`, `Capability` et les segments d'audit, qui n'existent pas en amont.
+
+**Recommandation : lire, s'en inspirer, écrire le nôtre.** Les deux propriétés à conserver sont énoncées en §9.5 — contexte passé en paramètre plutôt qu'implicite, et `None` plutôt qu'une erreur pour un objet hors du tenant.
+
+#### Coût
+
+| Lot | Estimation |
+| --- | --- |
+| Paliers 1 + 2 : reprise, portage édition 2021, raccord `RagError`, attribution, `deny.toml`, CI | **2–4 jours** |
+| Palier 3 (SQLite/graphqlite) si retenu | +3–5 jours, dont revue des dépendances C |
+| **Décorateur `HaciendaVectorStore<S>`** — le vrai travail, et il est nôtre | 1–2 semaines |
+| `TenantCtx` écrit ici | 1–2 semaines |
+| Backend pgvector | 2–3 semaines |
+| Endpoints `/v1/index` + `/v1/search` | 1 semaine |
+
+#### Verdict
+
+**Reprendre les paliers 1 et 2 — 1 819 lignes, 25 tests, zéro dépendance nouvelle — est une bonne affaire nette.** Le rapport valeur/risque est inhabituellement favorable : le code est de qualité production, testé, découplé de la version de xberg, sous une licence qui l'autorise sans réserve, et il implémente précisément le contrat sur lequel le différenciateur de Hacienda vient se greffer.
+
+La condition de sortie est simple et vérifiable en une journée : **une compilation propre en édition 2021 avec les tests amont qui passent**. Si cela échoue, la conception reste utilisable comme référence et on retombe sur une écriture guidée — sans avoir rien perdu d'autre qu'une journée.
+
+Différer le palier 3 et écrire nous-mêmes l'équivalent de `xberg-doc-store`.
+
+### 9.11 Effet net sur la feuille de route
 
 | Chantier | Estimation initiale | Révisée |
 | --- | --- | --- |
