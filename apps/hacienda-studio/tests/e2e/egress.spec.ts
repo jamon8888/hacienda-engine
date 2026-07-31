@@ -33,9 +33,7 @@ function recordExternalRequests(page: Page): string[] {
 }
 
 test.describe("network egress", () => {
-  test("contacts no host outside the allowlist while processing a document", async ({
-    page,
-  }) => {
+  test("contacts no host outside the allowlist while processing a document", async ({ page }) => {
     const external = recordExternalRequests(page);
 
     await page.addInitScript(() => {
@@ -44,10 +42,13 @@ test.describe("network egress", () => {
     await page.goto("/");
     // Not `.drop-zone`: it renders while the worker is still compiling the
     // WASM module, and the input is disabled until the handshake lands.
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector("#file-input:not([disabled])");
 
     const download = page.waitForEvent("download");
-    await page.setInputFiles('input[type="file"]', {
+    // Not `input[type="file"]`: Track I1 added a second file input
+    // (`#folder-input`, for folder selection) with the same type, so that
+    // selector now matches two elements.
+    await page.setInputFiles("#file-input", {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(CONTRACT),
@@ -61,11 +62,7 @@ test.describe("network egress", () => {
     await page.goto("/");
 
     const remoteReferences = await page.evaluate(() =>
-      [
-        ...document.querySelectorAll(
-          "link[href], script[src], img[src], iframe[src]",
-        ),
-      ]
+      [...document.querySelectorAll("link[href], script[src], img[src], iframe[src]")]
         .map((element) => element.getAttribute("href") ?? element.getAttribute("src") ?? "")
         .filter((value) => /^https?:\/\//.test(value)),
     );
@@ -81,35 +78,29 @@ test.describe("network egress", () => {
  * the entity-linking pass would otherwise touch (Track F4).
  */
 test.describe("PII redaction export contract", () => {
-  test("redacted output ships no IBAN in the markdown or the entity/KG export", async ({
-    page,
-  }) => {
+  test("redacted output ships no IBAN in the markdown or the entity/KG export", async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem("xberg-studio-visited", "true");
     });
     await page.goto("/");
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector("#file-input:not([disabled])");
 
     await page.click("button.config-toggle");
-    await page.check(
-      'label:has-text("Redact PII in Output") input[type="checkbox"]',
-    );
+    await page.check('label:has-text("Redact PII in Output") input[type="checkbox"]');
     await page.keyboard.press("Escape");
 
     const download = page.waitForEvent("download");
-    await page.setInputFiles('input[type="file"]', {
+    await page.setInputFiles("#file-input", {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(CONTRACT),
     });
 
-    const zip = await JSZip.loadAsync(
-      await readFile(await (await download).path()),
-    );
+    const zip = await JSZip.loadAsync(await readFile(await (await download).path()));
 
     const IBAN = "FR7630006000011234567890189";
     const files = [
-      "protocole.md",
+      "documents/protocole.md",
       "entities-registry.json",
       "kg-export/neo4j.cypher",
       "kg-export/networkx.json",
@@ -117,12 +108,10 @@ test.describe("PII redaction export contract", () => {
     ];
     for (const name of files) {
       const contents = await zip.file(name)!.async("string");
-      expect(contents, `${name} must not contain the redacted IBAN`).not.toContain(
-        IBAN,
-      );
+      expect(contents, `${name} must not contain the redacted IBAN`).not.toContain(IBAN);
     }
 
-    const markdown = await zip.file("protocole.md")!.async("string");
+    const markdown = await zip.file("documents/protocole.md")!.async("string");
     expect(markdown).toContain("[IBAN:****]");
   });
 });

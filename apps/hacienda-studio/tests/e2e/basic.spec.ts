@@ -17,9 +17,7 @@ test.describe("xberg-studio", () => {
     await expect(btn).toBeDisabled();
   });
 
-  test("skips onboarding when visited and shows drop zone", async ({
-    page,
-  }) => {
+  test("skips onboarding when visited and shows drop zone", async ({ page }) => {
     // Pre-set visited flag to skip onboarding
     await page.addInitScript(() => {
       localStorage.setItem("xberg-studio-visited", "true");
@@ -30,7 +28,7 @@ test.describe("xberg-studio", () => {
     await page.waitForSelector(".drop-zone", { timeout: 10000 });
     await expect(page.locator(".onboarding-overlay")).not.toBeVisible();
     // The drop zone announces itself as busy until the worker handshake lands.
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector("#file-input:not([disabled])");
     await expect(page.locator("text=Drop files here")).toBeVisible();
   });
 
@@ -40,9 +38,12 @@ test.describe("xberg-studio", () => {
     });
     await page.goto("/");
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector("#file-input:not([disabled])");
 
-    await page.setInputFiles('input[type="file"]', {
+    // Not `input[type="file"]`: Track I1 added a second file input
+    // (`#folder-input`, for folder selection) with the same type, so that
+    // selector now matches two elements.
+    await page.setInputFiles("#file-input", {
       name: "test.exe",
       mimeType: "application/x-msdownload",
       buffer: Buffer.from("fake"),
@@ -63,8 +64,6 @@ test.describe("xberg-studio", () => {
 
     await page.click('button:has-text("Config")');
     await expect(page.locator("text=NER Categories")).toBeVisible();
-    await expect(
-      page.locator("text=All processing runs locally"),
-    ).toBeVisible();
+    await expect(page.locator("text=All processing runs locally")).toBeVisible();
   });
 });

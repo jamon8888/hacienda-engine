@@ -1,10 +1,4 @@
-import type {
-  FileInput,
-  ProcessedFile,
-  ProgressUpdate,
-  AppConfig,
-  Entity,
-} from "../lib/types";
+import type { FileInput, ProcessedFile, ProgressUpdate, AppConfig, Entity } from "../lib/types";
 
 import {
   XbergEngine,
@@ -25,21 +19,15 @@ import initWasm from "@xberg-io/xberg-wasm";
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
 import { extractEntities, type BridgeEntity } from "../lib/ner-bridge";
 import { createNerBackend, loadNerModel } from "../lib/asset-loader";
-import {
-  initPiiEngine,
-  redactPii,
-  scanForPii,
-  type PiiEntity,
-} from "../lib/pii-engine";
+import { initPiiEngine, redactPii, scanForPii, type PiiEntity } from "../lib/pii-engine";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
-import {
-  loadVerticalTaxonomy,
-  VerticalEntityMetadata,
-} from "../lib/verticals/index";
-import { BatchEntityRegistry } from "../lib/registry";
+import { loadVerticalTaxonomy, VerticalEntityMetadata } from "../lib/verticals/index";
+import { BatchEntityRegistry, type RegistryEntity } from "../lib/registry";
 import { KGExporter } from "../lib/kg-export";
 import { WhisperBridge } from "../lib/transcription/whisper-bridge";
 import type { TranscriptionResult } from "../lib/transcription/types";
+import { slugify } from "../lib/slug";
+import { vaultRelativeLink, buildEntityMarkdown, buildGlossaryMarkdown, buildReadme } from "../lib/vault-export";
 
 let wasmReady: Promise<void> | null = null;
 
@@ -57,10 +45,7 @@ async function initNerBackend(): Promise<void> {
     nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
     console.log("[Worker] Neural NER backend loaded");
   } catch (e) {
-    console.warn(
-      "[Worker] Neural NER backend unavailable, using regex/compromise fallback:",
-      e,
-    );
+    console.warn("[Worker] Neural NER backend unavailable, using regex/compromise fallback:", e);
     nerRuntime = null;
   }
 }
@@ -74,20 +59,11 @@ export function selectNerBridge(
   runtime: NerRuntime | null,
 ): (text: string, categories: string[]) => Promise<BridgeEntity[]> {
   if (!runtime) return extractEntities;
-  return async (text, categories) =>
-    (await runtime.detect(text, { categories })) as BridgeEntity[];
+  return async (text, categories) => (await runtime.detect(text, { categories })) as BridgeEntity[];
 }
 
 function postProgress(update: ProgressUpdate): void {
   self.postMessage({ type: "progress", ...update });
-}
-
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .substring(0, 64);
 }
 
 const MA_TERMS =
@@ -141,11 +117,19 @@ interface RenderSpan {
  * glossary/registry row should itself be suppressed when its span was redacted is
  * a separate decision `processFile` makes before entities ever reach here — see
  * the "exportableEntities" filter below (Track A2).
+ *
+ * Track I2: entity links are relative markdown paths into `entities/<slug>.md`
+ * (`vaultRelativeLink`), not the old `entity:type/slug` custom URI scheme — no
+ * markdown renderer or file browser could follow that scheme, defeating the
+ * point of the exported vault being navigable. `documentOutputPath` is this
+ * document's own vault path (e.g. `"documents/note.md"`), needed to compute the
+ * right number of `../` segments back up to `entities/`.
  */
 export function renderAnnotatedMarkdown(
   markdown: string,
   entities: Entity[],
   piiFindings: PiiEntity[],
+  documentOutputPath: string,
 ): string {
   const piiSpans: RenderSpan[] = piiFindings.map((f) => ({
     start: f.start,
@@ -161,7 +145,7 @@ export function renderAnnotatedMarkdown(
       e.spans.map((s) => ({
         start: s.start,
         end: s.end,
-        render: (matched: string) => `[${matched}](entity:${e.type}/${e.slug})`,
+        render: (matched: string) => `[${matched}](${vaultRelativeLink(documentOutputPath, `entities/${e.slug}.md`)})`,
       })),
     )
     .filter((s) => !overlapsPii(s));
@@ -199,11 +183,7 @@ export function filterExportableEntities(
   return entities.filter((e) => !e.spans.some(overlapsPiiFinding));
 }
 
-function buildFrontmatter(
-  input: FileInput,
-  entities: Entity[],
-  piiEntitiesFound: number,
-): string {
+function buildFrontmatter(input: FileInput, entities: Entity[], piiEntitiesFound: number): string {
   const entityMeta = entities.map((e) => ({
     name: e.name,
     type: e.type.charAt(0).toUpperCase() + e.type.slice(1),
@@ -215,7 +195,7 @@ function buildFrontmatter(
 
   const type = input.type.split("/")[1] || "unknown";
   return `---
-source: ${input.name}
+source: ${input.relativePath}
 type: ${type}
 processed: ${new Date().toISOString()}
 pii_entities_found: ${piiEntitiesFound}
@@ -227,19 +207,14 @@ function buildGlossary(entities: Entity[]): string {
   if (entities.length === 0) return "";
   let md = "\n## Entities\n\n";
   for (const e of entities) {
-    const verticalInfo =
-      e.vertical && e.vertical !== "shared" ? ` [${e.vertical}]` : "";
+    const verticalInfo = e.vertical && e.vertical !== "shared" ? ` [${e.vertical}]` : "";
     md += `- **${e.name}** \`${e.type.charAt(0).toUpperCase() + e.type.slice(1)}${verticalInfo}\` — mentioned ${e.count} time${e.count > 1 ? "s" : ""}\n`;
   }
   return md;
 }
 
 async function initEngine(): Promise<void> {
-  await Promise.all([
-    initWasm({ module_or_path: fetch(xbergWasmUrl) }),
-    initPiiEngine(),
-    initNerBackend(),
-  ]);
+  await Promise.all([initWasm({ module_or_path: fetch(xbergWasmUrl) }), initPiiEngine(), initNerBackend()]);
 }
 
 async function processFile(
@@ -250,7 +225,7 @@ async function processFile(
   docId: string,
   whisperBridge: WhisperBridge,
 ): Promise<ProcessedFile> {
-  postProgress({ file: input.name, stage: "extract", percent: 10 });
+  postProgress({ file: input.relativePath, stage: "extract", percent: 10 });
 
   const isAudio = input.type.startsWith("audio/");
   const isVideo = input.type.startsWith("video/");
@@ -260,28 +235,15 @@ async function processFile(
 
   if ((isAudio || isVideo) && config.enableTranscription) {
     console.log(`[Worker] Transcribing ${input.name}...`);
-    transcriptionResult = await whisperBridge.transcribeAudio(
-      new Uint8Array(input.bytes),
-      input.type,
-      {
-        modelSize: config.transcriptionModel,
-        language:
-          config.transcriptionLanguage === "auto"
-            ? undefined
-            : config.transcriptionLanguage,
-        task: config.translateToEnglish ? "translate" : "transcribe",
-      },
-    );
+    transcriptionResult = await whisperBridge.transcribeAudio(new Uint8Array(input.bytes), input.type, {
+      modelSize: config.transcriptionModel,
+      language: config.transcriptionLanguage === "auto" ? undefined : config.transcriptionLanguage,
+      task: config.translateToEnglish ? "translate" : "transcribe",
+    });
     markdown = transcriptionResult.text;
-    console.log(
-      `[Worker] Transcription complete: ${markdown.substring(0, 100)}...`,
-    );
+    console.log(`[Worker] Transcription complete: ${markdown.substring(0, 100)}...`);
   } else {
-    const extractInput = WasmExtractInput.fromBytes(
-      new Uint8Array(input.bytes),
-      input.type,
-      input.name,
-    );
+    const extractInput = WasmExtractInput.fromBytes(new Uint8Array(input.bytes), input.type, input.name);
 
     const extractConfig = WasmExtractionConfig.default();
     extractConfig.outputFormat = WasmOutputFormat.Markdown;
@@ -296,13 +258,10 @@ async function processFile(
     nerConfig.categories = config.nerCategories;
     extractConfig.ner = nerConfig;
 
-    const engine = new XbergEngine(
-      { bridgeTimeoutMs: 30000 },
-      { ner: { ner: selectNerBridge(nerRuntime) } },
-    );
+    const engine = new XbergEngine({ bridgeTimeoutMs: 30000 }, { ner: { ner: selectNerBridge(nerRuntime) } });
 
     const result = await engine.extract(extractInput, extractConfig);
-    postProgress({ file: input.name, stage: "extract", percent: 50 });
+    postProgress({ file: input.relativePath, stage: "extract", percent: 50 });
 
     if (!result.results[0]?.content) {
       throw new Error("No content extracted");
@@ -311,27 +270,18 @@ async function processFile(
     markdown = result.results[0].content;
   }
 
-  postProgress({ file: input.name, stage: "ner", percent: 60 });
+  postProgress({ file: input.relativePath, stage: "ner", percent: 60 });
 
   // Run NER on the markdown (works for both transcription and extraction)
-  const nerEngine = new XbergEngine(
-    { bridgeTimeoutMs: 30000 },
-    { ner: { ner: selectNerBridge(nerRuntime) } },
-  );
+  const nerEngine = new XbergEngine({ bridgeTimeoutMs: 30000 }, { ner: { ner: selectNerBridge(nerRuntime) } });
 
   const nerResults = await nerEngine.ner(markdown, {
     categories: config.nerCategories,
   });
-  console.log(
-    "[Worker] Engine NER results:",
-    JSON.stringify(nerResults, null, 2),
-  );
+  console.log("[Worker] Engine NER results:", JSON.stringify(nerResults, null, 2));
 
   const xbergEntities = nerResults || [];
-  console.log(
-    "[Worker] Raw entities from extraction:",
-    JSON.stringify(xbergEntities, null, 2),
-  );
+  console.log("[Worker] Raw entities from extraction:", JSON.stringify(xbergEntities, null, 2));
 
   const entities: Entity[] = [];
   for (const e of xbergEntities) {
@@ -345,7 +295,7 @@ async function processFile(
     });
   }
 
-  postProgress({ file: input.name, stage: "ner", percent: 80 });
+  postProgress({ file: input.relativePath, stage: "ner", percent: 80 });
 
   // Track A1/A2, redirected to the Rust/wasm engine per Track L6: `enablePiiDetection`
   // and `redactPiiInOutput` used to be dead config (nothing read them — see
@@ -359,19 +309,13 @@ async function processFile(
   let piiEntitiesFound = 0;
   let piiFindings: PiiEntity[] = [];
   if (config.enablePiiDetection) {
-    postProgress({ file: input.name, stage: "pii", percent: 82 });
-    const piiResult = config.redactPiiInOutput
-      ? await redactPii(markdown)
-      : await scanForPii(markdown);
+    postProgress({ file: input.relativePath, stage: "pii", percent: 82 });
+    const piiResult = config.redactPiiInOutput ? await redactPii(markdown) : await scanForPii(markdown);
     piiFindings = piiResult.entities;
     piiEntitiesFound = piiFindings.length;
   }
 
-  const exportableEntities = filterExportableEntities(
-    entities,
-    piiFindings,
-    config.redactPiiInOutput,
-  );
+  const exportableEntities = filterExportableEntities(entities, piiFindings, config.redactPiiInOutput);
 
   // Classify the document once — the fallback below depends only on the
   // document text, so it does not need recomputing for every entity.
@@ -393,10 +337,12 @@ async function processFile(
       sector: verticalMeta.sector,
       roles: verticalMeta.roles || [],
     };
-    enrichedEntities.push(enrichedEntity);
 
-    // Register entity in batch registry
-    registry.addEntity(
+    // Register entity in batch registry. The registry resolves slug collisions
+    // across every document in the batch (Track I2), so `enrichedEntity.slug`
+    // must become the registry's canonical slug — the one `entities/<slug>.md`
+    // is actually named — not the per-document slug computed at NER time.
+    const registered = registry.addEntity(
       {
         name: enrichedEntity.name,
         type: enrichedEntity.type,
@@ -411,14 +357,24 @@ async function processFile(
       },
       docId,
     );
+    enrichedEntity.slug = registered.slug;
+
+    enrichedEntities.push(enrichedEntity);
   }
 
   const deduped = deduplicateEntities(enrichedEntities);
+
+  // Track I1: outputName preserves the input's directory structure (e.g.
+  // "contracts/2024/nda.pdf" -> "contracts/2024/nda.md") so a folder ingest's
+  // source tree survives into the exported vault, not just the basename.
+  const outputName = input.relativePath.replace(/\.[^.]+$/, ".md");
+  const documentOutputPath = `documents/${outputName}`;
 
   const linkedMarkdown = renderAnnotatedMarkdown(
     markdown,
     deduped,
     config.redactPiiInOutput ? piiFindings : [],
+    documentOutputPath,
   );
 
   const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound);
@@ -426,14 +382,14 @@ async function processFile(
 
   const finalMarkdown = frontmatter + "\n" + linkedMarkdown + glossary;
 
-  postProgress({ file: input.name, stage: "complete", percent: 100 });
+  postProgress({ file: input.relativePath, stage: "complete", percent: 100 });
 
   return {
-    name: input.name.replace(/\.[^.]+$/, ".md"),
+    name: outputName,
     markdown: finalMarkdown,
     entities: deduped,
     frontmatter: {
-      source: input.name,
+      source: input.relativePath,
       type: input.type.split("/")[1] || "unknown",
       processed: new Date().toISOString(),
       piiEntitiesFound,
@@ -449,16 +405,28 @@ async function processFile(
   };
 }
 
-async function processFiles(
-  files: FileInput[],
-  config: AppConfig,
-): Promise<void> {
-  console.log("[Worker] processFiles STARTED for", files.length, "files");
+// Track I1: a folder can contain far more documents than a drag-and-drop of a
+// handful of files, and the 614MB NER model rules out running a second worker
+// with its own copy just to parallelise — so ingest stays a single sequential
+// pass, and this flag is the batch's only cancel mechanism. Checked between
+// files (not mid-file): aborting a file half-processed would need to unwind
+// engine/registry state that has no rollback support, whereas stopping before
+// the next file is a clean boundary.
+let cancelRequested = false;
 
-  // Initialize vertical dictionary and registry
-  const taxonomies = await Promise.all(
-    ["m&a", "financial_services", "shared"].map((v) => loadVerticalTaxonomy(v)),
-  );
+async function processFiles(files: FileInput[], config: AppConfig): Promise<void> {
+  console.log("[Worker] processFiles STARTED for", files.length, "files");
+  cancelRequested = false;
+
+  // Initialize vertical dictionary and registry. Track D1: this used to load all three
+  // taxonomies unconditionally, so `config.enabledVerticals` — the "Verticals" checkbox
+  // group `ConfigPanel.svelte` renders — was dead config exactly like
+  // `enablePiiDetection`/`redactPiiInOutput` were before Track L6 wired them. A vertical
+  // left unchecked here now has no entries in `verticalDict`, so its entities fall back
+  // to the generic `${documentVertical}_entity` bucket (see `processFile`) instead of the
+  // taxonomy's real `sector`/`roles` — an observable output difference, not just an
+  // internal one.
+  const taxonomies = await Promise.all(config.enabledVerticals.map((v) => loadVerticalTaxonomy(v)));
   const verticalDict = new VerticalDictionary(taxonomies);
   const registry = new BatchEntityRegistry();
 
@@ -470,51 +438,59 @@ async function processFiles(
 
   let docCounter = 0;
   const results: ProcessedFile[] = [];
+  // Track I2: maps each docId to its vault path (`documents/<name>.md`) so entity
+  // pages can backlink to the documents that mention them.
+  const docPathByDocId = new Map<string, string>();
 
+  let cancelled = false;
   for (const file of files) {
+    if (cancelRequested) {
+      cancelled = true;
+      break;
+    }
     try {
-      console.log(
-        "[Worker] processing:",
-        file.name,
-        file.type,
-        file.bytes.byteLength,
-      );
+      console.log("[Worker] processing:", file.relativePath, file.type, file.bytes.byteLength);
       const docId = `doc-${String(++docCounter).padStart(3, "0")}`;
-      const processed = await processFile(
-        file,
-        config,
-        verticalDict,
-        registry,
-        docId,
-        whisperBridge,
-      );
+      const processed = await processFile(file, config, verticalDict, registry, docId, whisperBridge);
       // Infer relationships for this document
       registry.inferRelationships(docId);
       results.push(processed);
+      docPathByDocId.set(docId, `documents/${processed.name}`);
       self.postMessage({ type: "file-complete", ...processed });
     } catch (error) {
-      console.error("[Worker] error processing", file.name, error);
+      console.error("[Worker] error processing", file.relativePath, error);
       self.postMessage({
         type: "error",
-        file: file.name,
+        file: file.relativePath,
         message: error instanceof Error ? error.message : "Unknown error",
       });
     }
   }
-  console.log("[Worker] All files processed, creating zip...");
+  console.log(
+    cancelled ? "[Worker] Cancelled, zipping partial results..." : "[Worker] All files processed, creating zip...",
+  );
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
   for (const r of results) {
-    zip.file(r.name, r.markdown);
+    zip.file(`documents/${r.name}`, r.markdown);
   }
   const manifest = {
     files: results.map((r) => ({
-      name: r.name,
+      name: `documents/${r.name}`,
       entityCount: r.entities.length,
     })),
     generated: new Date().toISOString(),
   };
   zip.file("_manifest.json", JSON.stringify(manifest, null, 2));
+  zip.file("README.md", buildReadme(results.length));
+
+  // Track I2: one file per entity, plus an index (GLOSSARY.md) linking into it.
+  const entityList: RegistryEntity[] = registry.getEntities();
+  const entitiesFolder = zip.folder("entities");
+  for (const entity of entityList) {
+    entitiesFolder?.file(`${entity.slug}.md`, buildEntityMarkdown(entity, docPathByDocId));
+  }
+  zip.file("GLOSSARY.md", buildGlossaryMarkdown(entityList));
 
   // Add entities registry to zip
   const registryJson = {
@@ -533,15 +509,12 @@ async function processFiles(
   const kgExporter = new KGExporter(registry);
   const kgFolder = zip.folder("kg-export");
   kgFolder?.file("neo4j.cypher", kgExporter.toCypher());
-  kgFolder?.file(
-    "networkx.json",
-    JSON.stringify(kgExporter.toNetworkX(), null, 2),
-  );
+  kgFolder?.file("networkx.json", JSON.stringify(kgExporter.toNetworkX(), null, 2));
   kgFolder?.file("rdf.ttl", kgExporter.toRDF());
 
   const blob = await zip.generateAsync({ type: "blob" });
   console.log("[Worker] Zip created, sending batch-complete");
-  self.postMessage({ type: "batch-complete", zip: blob });
+  self.postMessage({ type: "batch-complete", zip: blob, cancelled });
 }
 
 self.onmessage = async (event: MessageEvent) => {
@@ -552,6 +525,11 @@ self.onmessage = async (event: MessageEvent) => {
     wasmReady = initEngine();
     await wasmReady;
     self.postMessage({ type: "ready" });
+    return;
+  }
+
+  if (type === "cancel") {
+    cancelRequested = true;
     return;
   }
 

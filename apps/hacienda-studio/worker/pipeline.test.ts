@@ -13,8 +13,7 @@ let selectNerBridge: typeof import("./pipeline").selectNerBridge;
 
 beforeAll(async () => {
   (globalThis as { self?: unknown }).self = globalThis;
-  ({ renderAnnotatedMarkdown, filterExportableEntities, selectNerBridge } =
-    await import("./pipeline"));
+  ({ renderAnnotatedMarkdown, filterExportableEntities, selectNerBridge } = await import("./pipeline"));
 });
 
 function piiEntity(overrides: Partial<PiiEntity>): PiiEntity {
@@ -42,8 +41,8 @@ function entity(overrides: Partial<Entity>): Entity {
   };
 }
 
-describe("renderAnnotatedMarkdown (Track F4)", () => {
-  it("links a non-overlapping entity span normally", () => {
+describe("renderAnnotatedMarkdown (Track F4/I2)", () => {
+  it("links a non-overlapping entity span to its relative entities/ page", () => {
     const markdown = "Acme SAS acquired Beta SARL.";
     const acme = entity({
       name: "Acme SAS",
@@ -52,11 +51,9 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       spans: [{ start: 0, end: 8 }],
     });
 
-    const result = renderAnnotatedMarkdown(markdown, [acme], []);
+    const result = renderAnnotatedMarkdown(markdown, [acme], [], "documents/note.md");
 
-    expect(result).toBe(
-      "[Acme SAS](entity:organization/acme-sas) acquired Beta SARL.",
-    );
+    expect(result).toBe("[Acme SAS](../entities/acme-sas.md) acquired Beta SARL.");
   });
 
   it("redacts a PII span with no overlapping entity link", () => {
@@ -68,7 +65,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       redact_template: "[IBAN:****]",
     });
 
-    const result = renderAnnotatedMarkdown(markdown, [], [iban]);
+    const result = renderAnnotatedMarkdown(markdown, [], [iban], "documents/note.md");
 
     expect(result).toBe("IBAN [IBAN:****].");
   });
@@ -78,8 +75,8 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     // "phone") whose name/slug is the same digit run a PII span also matches. The
     // old two-pass pipeline (link first, then regex-redact the linked markdown)
     // matched that digit run twice — once in the link's visible text, once inside
-    // its `entity:` slug — producing
-    // `[[CARD:****]](entity:phone/[CARD:****])`. Detecting PII against the
+    // its link target — producing
+    // `[[CARD:****]](entities/[CARD:****].md)`. Detecting PII against the
     // original text and merging spans before a single splice must not do that.
     const markdown = "Card number 4111111111111111 on file.";
     const misclassifiedPhone = entity({
@@ -96,14 +93,10 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       redact_template: "[CARD:****]",
     });
 
-    const result = renderAnnotatedMarkdown(
-      markdown,
-      [misclassifiedPhone],
-      [card],
-    );
+    const result = renderAnnotatedMarkdown(markdown, [misclassifiedPhone], [card], "documents/note.md");
 
     expect(result).toBe("Card number [CARD:****] on file.");
-    expect(result).not.toContain("entity:phone");
+    expect(result).not.toContain("entities/");
     expect(result).not.toContain("4111111111111111");
   });
 
@@ -122,11 +115,9 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       redact_template: "[IBAN:****]",
     });
 
-    const result = renderAnnotatedMarkdown(markdown, [jean], [iban]);
+    const result = renderAnnotatedMarkdown(markdown, [jean], [iban], "documents/note.md");
 
-    expect(result).toBe(
-      "Contact [Jean Dupont](entity:person/jean-dupont), IBAN [IBAN:****].",
-    );
+    expect(result).toBe("Contact [Jean Dupont](../entities/jean-dupont.md), IBAN [IBAN:****].");
   });
 
   it("leaves entity links untouched when redaction findings are withheld (scan-only mode)", () => {
@@ -140,11 +131,9 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
 
     // The caller passes `[]` for findings when `redactPiiInOutput` is off — mirrors
     // `processFile`'s `config.redactPiiInOutput ? piiFindings : []`.
-    const result = renderAnnotatedMarkdown(markdown, [misclassifiedPhone], []);
+    const result = renderAnnotatedMarkdown(markdown, [misclassifiedPhone], [], "documents/note.md");
 
-    expect(result).toBe(
-      "Card number [4111111111111111](entity:phone/4111111111111111) on file.",
-    );
+    expect(result).toBe("Card number [4111111111111111](../entities/4111111111111111.md) on file.");
   });
 });
 
@@ -158,11 +147,7 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities(
-      [misclassifiedPhone],
-      [card],
-      true,
-    );
+    const result = filterExportableEntities([misclassifiedPhone], [card], true);
 
     expect(result).toEqual([]);
   });
@@ -208,11 +193,7 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities(
-      [misclassifiedPhone],
-      [card],
-      false,
-    );
+    const result = filterExportableEntities([misclassifiedPhone], [card], false);
 
     expect(result).toEqual([misclassifiedPhone]);
   });
@@ -249,9 +230,7 @@ describe("selectNerBridge (Track B1/B2)", () => {
       },
     ];
     const detect = vi.fn().mockResolvedValue(detected);
-    const mockRuntime = { detect } as unknown as Parameters<
-      typeof selectNerBridge
-    >[0];
+    const mockRuntime = { detect } as unknown as Parameters<typeof selectNerBridge>[0];
 
     const bridge = selectNerBridge(mockRuntime);
     const frenchFixture = "Maître Jean Dupont a signé pour Acme SAS.";

@@ -2,6 +2,15 @@ export interface FileInput {
   name: string;
   bytes: ArrayBuffer;
   type: string;
+  /**
+   * Vault-relative path this file was selected with (Track I1) — `File.name`
+   * for a flat selection, or `File.webkitRelativePath` when selected via a
+   * folder input, e.g. `"contracts/2024/nda.pdf"`. Drives the output path
+   * under `documents/` so a folder's structure survives into the export,
+   * and doubles as the unique key progress tracking keys on, since two
+   * files in different subfolders can share a basename.
+   */
+  relativePath: string;
 }
 
 export interface Entity {
@@ -66,8 +75,7 @@ export interface AppConfig {
   outputFormat: "markdown" | "plain" | "json";
   chunkSize: number;
   enableTranscription: boolean;
-  transcriptionModel:
-    "tiny.en" | "tiny" | "base.en" | "base" | "small.en" | "small";
+  transcriptionModel: "tiny.en" | "tiny" | "base.en" | "base" | "small.en" | "small";
   transcriptionLanguage: string;
   translateToEnglish: boolean;
   enablePiiDetection: boolean;

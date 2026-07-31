@@ -58,3 +58,38 @@ describe("VerticalDictionary", () => {
     expect(dictionary.lookup("fund")?.sector).toBeUndefined();
   });
 });
+
+/**
+ * Track D1: `worker/pipeline.ts` used to build this dictionary from a
+ * hardcoded `["m&a", "financial_services", "shared"]` list, so
+ * `config.enabledVerticals` — the "Enabled Verticals" checkbox group in
+ * `ConfigPanel.svelte` — was dead config; every taxonomy loaded regardless of
+ * what the user unchecked. `processFiles` now builds the dictionary from
+ * `config.enabledVerticals` directly, so these assert the one thing that
+ * makes the toggle load-bearing: excluding a vertical here must make its
+ * terms unresolvable, not merely reorder them.
+ */
+describe("VerticalDictionary built from a subset of enabledVerticals (Track D1)", () => {
+  it("does not resolve m&a terms when only financial_services is enabled", async () => {
+    const taxonomy = await loadVerticalTaxonomy("financial_services");
+    const dictionary = new VerticalDictionary([taxonomy]);
+
+    expect(dictionary.lookup("target_company")).toBeNull();
+    expect(dictionary.lookup("portfolio_company")).toMatchObject({
+      vertical: "financial_services",
+    });
+  });
+
+  it("does not resolve financial_services terms when only m&a is enabled", async () => {
+    const taxonomy = await loadVerticalTaxonomy("m&a");
+    const dictionary = new VerticalDictionary([taxonomy]);
+
+    // `portfolio_company` is listed in both taxonomies (PE-backed M&A deals), so it
+    // is not a valid financial_services-only probe here — use `carried_interest`,
+    // which only m&a's alias list (not its own entityTypes) ever points at.
+    expect(dictionary.lookup("carried_interest")).toBeNull();
+    expect(dictionary.lookup("target_company")).toMatchObject({
+      vertical: "m&a",
+    });
+  });
+});

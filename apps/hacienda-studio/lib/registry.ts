@@ -1,5 +1,8 @@
+import { slugify } from "./slug";
+
 export interface RegistryEntity {
   id: string;
+  slug: string;
   canonical_name: string;
   display_name: string;
   type: string;
@@ -30,6 +33,7 @@ export class BatchEntityRegistry {
   private batchId: string;
   private entityKeyMap: Map<string, string> = new Map();
   private docEntityMap: Map<string, string[]> = new Map();
+  private slugToId: Map<string, string> = new Map();
 
   constructor() {
     this.batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -47,6 +51,7 @@ export class BatchEntityRegistry {
     docId: string,
   ): {
     id: string;
+    slug: string;
     canonical_name: string;
     display_name: string;
     type: string;
@@ -76,8 +81,10 @@ export class BatchEntityRegistry {
     }
 
     const id = `ent-${String(this.entities.size + 1).padStart(3, "0")}`;
+    const slug = this.assignSlug(entity.name, id);
     const registryEntity = {
       id,
+      slug,
       canonical_name: entity.name,
       display_name: entity.name,
       type: entity.type,
@@ -104,6 +111,24 @@ export class BatchEntityRegistry {
     return registryEntity;
   }
 
+  /**
+   * Assigns a filename-safe slug for `entities/<slug>.md` (Track I2), resolving
+   * collisions between distinct entities that slugify to the same base string
+   * (e.g. "Acme SAS" and "Acme, SAS." both -> "acme-sas") by appending `-2`,
+   * `-3`, etc. Each entity id gets exactly one slug, assigned once.
+   */
+  private assignSlug(name: string, id: string): string {
+    const base = slugify(name) || `entity-${id}`;
+    let candidate = base;
+    let suffix = 2;
+    while (this.slugToId.has(candidate) && this.slugToId.get(candidate) !== id) {
+      candidate = `${base}-${suffix}`;
+      suffix++;
+    }
+    this.slugToId.set(candidate, id);
+    return candidate;
+  }
+
   addRelationship(
     sourceId: string,
     targetId: string,
@@ -126,9 +151,7 @@ export class BatchEntityRegistry {
   // Infer relationships based on co-occurrence and entity types
   inferRelationships(docId: string) {
     const entityIds = this.docEntityMap.get(docId) || [];
-    const entities = entityIds
-      .map((id) => this.entities.get(id))
-      .filter(Boolean) as RegistryEntity[];
+    const entities = entityIds.map((id) => this.entities.get(id)).filter(Boolean) as RegistryEntity[];
 
     // Infer relationships based on co-occurrence and entity types
     for (let i = 0; i < entities.length; i++) {
@@ -138,85 +161,29 @@ export class BatchEntityRegistry {
 
         // Person -> Organization: works_for, officer_of
         if (e1.type === "person" && e2.type === "organization") {
-          this.addRelationship(
-            e1.id,
-            e2.id,
-            "works_for",
-            `Co-occurs in document`,
-            0.7,
-            "inferred",
-          );
+          this.addRelationship(e1.id, e2.id, "works_for", `Co-occurs in document`, 0.7, "inferred");
         } else if (e1.type === "organization" && e2.type === "person") {
-          this.addRelationship(
-            e2.id,
-            e1.id,
-            "works_for",
-            `Co-occurs in document`,
-            0.7,
-            "inferred",
-          );
+          this.addRelationship(e2.id, e1.id, "works_for", `Co-occurs in document`, 0.7, "inferred");
         }
 
         // Organization -> Organization: subsidiary_of, parent_of, partner_of
         if (e1.type === "organization" && e2.type === "organization") {
-          this.addRelationship(
-            e1.id,
-            e2.id,
-            "partner_of",
-            `Co-occurs in document`,
-            0.5,
-            "inferred",
-          );
-          this.addRelationship(
-            e2.id,
-            e1.id,
-            "partner_of",
-            `Co-occurs in document`,
-            0.5,
-            "inferred",
-          );
+          this.addRelationship(e1.id, e2.id, "partner_of", `Co-occurs in document`, 0.5, "inferred");
+          this.addRelationship(e2.id, e1.id, "partner_of", `Co-occurs in document`, 0.5, "inferred");
         }
 
         // Person -> Email: contact_email
         if (e1.type === "person" && e2.type === "email") {
-          this.addRelationship(
-            e1.id,
-            e2.id,
-            "contact_email",
-            `Email associated with person`,
-            0.8,
-            "inferred",
-          );
+          this.addRelationship(e1.id, e2.id, "contact_email", `Email associated with person`, 0.8, "inferred");
         } else if (e1.type === "email" && e2.type === "person") {
-          this.addRelationship(
-            e2.id,
-            e1.id,
-            "contact_email",
-            `Email associated with person`,
-            0.8,
-            "inferred",
-          );
+          this.addRelationship(e2.id, e1.id, "contact_email", `Email associated with person`, 0.8, "inferred");
         }
 
         // Organization -> Email: contact_email
         if (e1.type === "organization" && e2.type === "email") {
-          this.addRelationship(
-            e1.id,
-            e2.id,
-            "contact_email",
-            `Contact email for organization`,
-            0.7,
-            "inferred",
-          );
+          this.addRelationship(e1.id, e2.id, "contact_email", `Contact email for organization`, 0.7, "inferred");
         } else if (e1.type === "email" && e2.type === "organization") {
-          this.addRelationship(
-            e2.id,
-            e1.id,
-            "contact_email",
-            `Contact email for organization`,
-            0.7,
-            "inferred",
-          );
+          this.addRelationship(e2.id, e1.id, "contact_email", `Contact email for organization`, 0.7, "inferred");
         }
       }
     }
@@ -226,11 +193,7 @@ export class BatchEntityRegistry {
     return {
       batch_id: this.batchId,
       processed_at: new Date().toISOString(),
-      total_documents: [
-        ...new Set(
-          Array.from(this.entities.values()).flatMap((e) => e.source_documents),
-        ),
-      ].length,
+      total_documents: [...new Set(Array.from(this.entities.values()).flatMap((e) => e.source_documents))].length,
       vertical_taxonomy_version: "1.0.0",
       entity_registry: {
         entities: Array.from(this.entities.values()),
@@ -242,10 +205,7 @@ export class BatchEntityRegistry {
   }
 
   getVerticalSummary() {
-    const summary: Record<
-      string,
-      { entity_count: number; relationship_count: number }
-    > = {};
+    const summary: Record<string, { entity_count: number; relationship_count: number }> = {};
     for (const e of this.entities.values()) {
       if (!summary[e.vertical]) {
         summary[e.vertical] = { entity_count: 0, relationship_count: 0 };

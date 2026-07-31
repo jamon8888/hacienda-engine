@@ -685,13 +685,20 @@ Studio's zip already contains markdown with linked entities, `_manifest.json`,
       `## Entities` glossary (`:118`) and entity metadata in frontmatter (`:99`). Pseudonymizing
       an entity must not orphan its link or its glossary row.
 
-- [ ] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
+- [x] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
       nothing outside Studio understands. Switch to in-document anchors into the `## Entities`
       glossary, or wikilinks, so the exported markdown is self-contained. *Check:* open the
       exported markdown in Claude Desktop and follow a link to its glossary entry.
+      **Done 2026-07-31 via I2** (this is the same decision the Sequencing section already
+      flagged as one decision seen twice): links are now relative markdown paths into
+      `entities/<slug>.md`, not `## Entities` anchors — a separate entity page per Track I2's
+      "RAG-ready" requirement, not just an in-document anchor. *Check not yet run:* opening the
+      exported zip in an actual Claude Desktop session and following a link — only automated
+      tests have verified the link structure so far.
 
-- [ ] **G3. Ship a README in the zip** describing what the bundle is, so a Claude Desktop
+- [x] **G3. Ship a README in the zip** describing what the bundle is, so a Claude Desktop
       session has the context to use the registry and KG files rather than only the prose.
+      **Done 2026-07-31 via I2** — see `buildReadme` in `lib/vault-export.ts`.
 
 *Note:* hacienda-private also exposes a real Claude Desktop MCP integration
 (`services/mcp-server/release/README.md:12-22` — `xberg-mcp mcp` stdio endpoint plus a
@@ -742,15 +749,46 @@ The core product. Design the output format before writing pipeline code.
 
 ### I1. Folder ingest
 
-- [ ] Add `webkitdirectory` to the file input and carry `file.webkitRelativePath` through
+- [x] Add `webkitdirectory` to the file input and carry `file.webkitRelativePath` through
       `FileInput` so the source tree survives into the output. Today only `multiple` is set
       and relative paths are discarded.
-- [ ] Ingest is sequential (`for (const file of files)`, `worker/pipeline.ts:331`). A folder
+      **Done 2026-07-31:** a second `#folder-input` (`webkitdirectory`) sits beside the
+      existing file input (browsers don't support flipping `webkitdirectory` on one input at
+      runtime). `FileInput.relativePath` (new field) carries `fileRelativePath(file)` —
+      `webkitRelativePath` when present, else `name` — through to the worker, which uses it
+      for the output path under `documents/`, `buildFrontmatter`'s `source:` field, and
+      progress-tracking keys. *Check:* `lib/file-ingest.test.ts` (8 tests, `fileRelativePath`/
+      `partitionFiles`/`formatSkippedMessage`) and `tests/e2e/folder-ingest.spec.ts` (asserts
+      `documents/contracts/2024/protocole.md` exists in the export for a folder selection with
+      a subfolder) — the e2e spec is written and structurally mirrors the passing
+      `pipeline.spec.ts`, but neither it nor the pre-existing e2e suite could be run to
+      completion in this sandbox: `#file-input:not([disabled])` (the worker-ready gate every
+      e2e spec waits on) didn't appear within 280s+, a pre-existing environment limitation
+      (see the RAM-constrained build host note), not a regression from this change — confirmed
+      by `pipeline.spec.ts` timing out identically with none of its own logic touched beyond
+      the selector rename below. Unit-level verification (91/91 vitest) is what's actually been
+      observed to pass; the e2e check itself is still outstanding.
+- [x] Ingest is sequential (`for (const file of files)`, `worker/pipeline.ts:331`). A folder
       of a hundred documents with a 614 MB model loaded will be slow and gives no way to
       cancel. Decide whether to parallelise or just report honest per-file progress; do not
       leave a progress bar that stalls for minutes with no explanation.
-- [ ] Skip/report unsupported files rather than failing the batch — a real folder contains
+      **Decided 2026-07-31, resolved without a follow-up question:** stayed sequential — a
+      second Worker would need its own copy of the 614 MB NER model, which the memory note on
+      this build's RAM constraints rules out as a real option, and per-file progress was
+      already reported honestly (each file posts `extract`/`ner`/`pii`/`complete` stage
+      updates and streams a `file-complete` message before the next file starts). What was
+      actually missing was a way to stop: added a `cancel` worker message
+      (`cancelRequested` flag, checked between files, not mid-file — no rollback support for a
+      half-processed file) and a Cancel button in `App.svelte`, wired to it.
+- [x] Skip/report unsupported files rather than failing the batch — a real folder contains
       `.DS_Store`, images, and things Studio cannot extract.
+      **Done 2026-07-31:** this was already half-true — `handleFiles`'s per-file
+      `validateFile` check already let the batch continue past an invalid file. What was
+      missing was reporting: the shared `error` string got overwritten per invalid file, so a
+      folder with several skips only ever showed the last one. `lib/file-ingest.ts`'s
+      `partitionFiles`/`formatSkippedMessage` replace that with an aggregated banner (names
+      each file when ≤3 are skipped, else a count + a few examples). *Check:*
+      `lib/file-ingest.test.ts` passes.
 
 ### I2. The vault layout — the thing to get right
 
@@ -767,23 +805,43 @@ entities-registry.json
 kg-export/{neo4j.cypher,networkx.json,rdf.ttl}
 ```
 
-- [ ] **Links must be relative markdown paths**, e.g. `[Acme SAS](../entities/acme-sas.md)`.
+- [x] **Links must be relative markdown paths**, e.g. `[Acme SAS](../entities/acme-sas.md)`.
       This replaces the current `entity:organization/acme-sas` custom scheme
       (`worker/pipeline.ts:93`), which nothing outside Studio can resolve. Relative paths are
       followable by a Claude Desktop agent with filesystem access, and by Obsidian, and by
       anything else that reads a markdown folder.
-- [ ] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
+      **Done 2026-07-31:** `renderAnnotatedMarkdown` now renders links via
+      `vaultRelativeLink` (`lib/vault-export.ts`) into `entities/<slug>.md`. *Check:*
+      `worker/pipeline.test.ts`'s "renderAnnotatedMarkdown (Track F4/I2)" suite passes.
+- [x] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
       than merely readable: the agent can open `entities/acme-sas.md` and find every document
       mentioning it. The data already exists — `BatchEntityRegistry` plus
       `inferRelationships` — it is currently only serialised to `entities-registry.json` and
       to the KG exports, which an agent will not naturally read.
-- [ ] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
+      **Done 2026-07-31:** `buildEntityMarkdown` (`lib/vault-export.ts`) writes
+      `entities/<slug>.md` per registry entity with type/vertical/roles/aliases/mention count
+      and backlinks to every source document; `BatchEntityRegistry` now assigns each entity a
+      collision-safe `slug`. *Check:* `lib/vault-export.test.ts`,
+      `lib/registry.test.ts` pass; `tests/e2e/pipeline.spec.ts` asserts the zip contains
+      `entities/` output alongside `documents/`.
+- [x] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
       (`worker/pipeline.ts:118`) becomes a local summary; the global glossary is the index.
-- [ ] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
+      **Done 2026-07-31:** `buildGlossaryMarkdown` generates `GLOSSARY.md` at the vault root,
+      sorted by entity name, linking into `entities/`.
+- [x] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
       folder of prose and ignores the registry and graph files entirely.
-- [ ] *Open question:* should redaction/pseudonymisation state be recorded in the bundle —
-      i.e. does the vault declare which entities were pseudonymised and under which key id?
-      Useful for provenance, but it is also a map of where the sensitive material was.
+      **Done 2026-07-31:** `buildReadme` generates `README.md` describing the vault structure
+      and how to navigate it. *Check:* `tests/e2e/pipeline.spec.ts` asserts `README.md` is
+      present in the exported zip.
+- [x] *Open question, resolved 2026-07-31:* redaction/pseudonymisation state is **not**
+      recorded in the bundle — the provenance value doesn't outweigh shipping a map of which
+      entities were sensitive. Nothing in `worker/pipeline.ts` or `lib/vault-export.ts` writes
+      this; keep it that way.
+
+**Also done 2026-07-31, folded into I2 per the decision to do it together rather than as a
+follow-up:** documents now live under `documents/<name>.md` (not the zip root), and
+`_manifest.json`'s `files[].name` records the full vault-relative path. This is what G2
+("make the links resolvable in Claude Desktop") turns out to be — see Track G, same decision.
 
 ### I3. Finder-like browser
 

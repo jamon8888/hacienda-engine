@@ -26,9 +26,7 @@ async function skipOnboarding(page: Page): Promise<void> {
  * against it races the teardown. The exported zip is the durable artifact.
  */
 test.describe("document pipeline", () => {
-  test("processes a text file through to a downloadable export", async ({
-    page,
-  }) => {
+  test("processes a text file through to a downloadable export", async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(String(error)));
     page.on("console", (message) => {
@@ -39,25 +37,33 @@ test.describe("document pipeline", () => {
     await page.goto("/");
     // Not `.drop-zone`: it renders while the worker is still compiling the
     // WASM module, and the input is disabled until the handshake lands.
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector("#file-input:not([disabled])");
 
     const download = page.waitForEvent("download");
-    await page.setInputFiles('input[type="file"]', {
+    // Not `input[type="file"]`: Track I1 added a second file input
+    // (`#folder-input`, for folder selection) with the same type, so that
+    // selector now matches two elements.
+    await page.setInputFiles("#file-input", {
       name: "note.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
 
     const zip = await JSZip.loadAsync(await readFile(await (await download).path()));
+    // Track I2: the export is a navigable vault, not a flat bundle — documents
+    // live under `documents/`, entities get their own page, and README.md/
+    // GLOSSARY.md are the agent's entry points into it.
     expect(Object.keys(zip.files).sort()).toEqual(
       expect.arrayContaining([
         "_manifest.json",
         "entities-registry.json",
-        "note.md",
+        "documents/note.md",
+        "README.md",
+        "GLOSSARY.md",
       ]),
     );
 
-    const markdown = await zip.file("note.md")!.async("string");
+    const markdown = await zip.file("documents/note.md")!.async("string");
     expect(markdown).toContain("source: note.txt");
     expect(markdown).toContain("jean.dupont@cabinet-exemple.fr");
 
