@@ -576,7 +576,7 @@ fn bootstrap_micro_f1_ci(
     let point_pred: Vec<Span> = cases.iter().flat_map(|(_, p)| p.iter().cloned()).collect();
     let point_estimate = score(&point_gold, &point_pred, mode).micro.f1;
 
-    if n == 0 {
+    if n == 0 || resamples == 0 {
         return BootstrapCi {
             point_estimate,
             lower_95: point_estimate,
@@ -662,6 +662,22 @@ mod bootstrap_unit_tests {
         );
         assert_eq!(ci.lower_95, 1.0);
         assert_eq!(ci.upper_95, 1.0);
+        assert_eq!(ci.resamples, 0);
+    }
+
+    /// `resamples: 0` with non-empty cases must not panic: `samples` stays empty, so
+    /// `resamples - 1` would underflow (usize) before an out-of-bounds index without
+    /// the `resamples == 0` guard. It must instead fall back to a point-estimate-only
+    /// interval, same shape as the zero-cases case above.
+    #[test]
+    fn should_return_the_point_estimate_as_the_whole_interval_for_zero_resamples() {
+        let cases = vec![
+            (vec![span(0, 5, "person")], vec![span(0, 5, "person")]),
+            (vec![span(0, 5, "person")], vec![]),
+        ];
+        let ci = bootstrap_micro_f1_ci(&cases, MatchMode::Exact, 0, 42);
+        assert_eq!(ci.lower_95, ci.point_estimate);
+        assert_eq!(ci.upper_95, ci.point_estimate);
         assert_eq!(ci.resamples, 0);
     }
 }

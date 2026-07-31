@@ -158,7 +158,7 @@ impl AuditEntry {
     }
 
     /// The fields of this entry that [`compute_chain_hash`] covers.
-    pub fn chain_hash_fields(&self) -> ChainHashFields<'_> {
+    pub(crate) fn chain_hash_fields(&self) -> ChainHashFields<'_> {
         ChainHashFields {
             id: &self.id,
             category: &self.category,
@@ -179,15 +179,15 @@ impl AuditEntry {
 /// tamper-evidence primitive would be a defect that only shows up as a verification
 /// failure months later.
 ///
-/// `#[non_exhaustive]`: this struct is *designed* to grow — see the rationale above —
-/// so an external crate constructing it with a struct literal is expected to break on
-/// every future field addition regardless. Marking it now costs nothing beyond what
-/// the struct's own documented purpose already implies, and it forces every future
-/// external caller through a constructor this crate controls rather than a literal
-/// that would silently compile with a stale field set.
+/// `pub(crate)`: grepping the whole workspace confirms nothing outside this crate
+/// constructs this type today — the only caller is `AuditEntry::chain_hash_fields`
+/// via `audit::chain`, both in this crate. There is no public constructor, so keeping
+/// this `pub` would only ever be exercised through a struct literal — reintroducing
+/// exactly the positional-argument-style transposition risk the named-field design
+/// above exists to avoid. Narrowing visibility instead of adding a constructor keeps
+/// that guarantee intact without giving external crates a way to build one at all.
 #[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub struct ChainHashFields<'a> {
+pub(crate) struct ChainHashFields<'a> {
     pub id: &'a str,
     pub category: &'a str,
     pub action: &'a RedactionAction,
@@ -197,10 +197,26 @@ pub struct ChainHashFields<'a> {
     pub vertical: Option<&'a str>,
 }
 
+/// Tag byte prepended to the vertical's length-prefixed bytes when present.
+///
+/// `0xff` can never occur in a valid UTF-8 `&str` (it is not a valid byte in any
+/// position of a UTF-8 encoding), so using it as a presence tag — followed by an
+/// explicit little-endian length prefix — makes the framing of the `vertical` field
+/// unambiguous regardless of what the string itself contains. Without this, hashing
+/// `principal` and `vertical` back-to-back with no delimiter meant
+/// `principal="P1", vertical="V1"` and `principal="P1V", vertical="1"` hashed
+/// identically, since blake3's streaming `.update()` is equivalent to hashing the
+/// concatenation of everything fed to it.
+const VERTICAL_PRESENT_TAG: u8 = 0xff;
+
 /// Compute the chain hash linking an entry to its predecessor.
 ///
 /// The timestamp is deliberately excluded so verification is reproducible.
-pub fn compute_chain_hash(prev_chain_hash: &str, seq: u64, fields: ChainHashFields<'_>) -> String {
+pub(crate) fn compute_chain_hash(
+    prev_chain_hash: &str,
+    seq: u64,
+    fields: ChainHashFields<'_>,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(prev_chain_hash.as_bytes());
     hasher.update(&seq.to_le_bytes());
@@ -213,10 +229,18 @@ pub fn compute_chain_hash(prev_chain_hash: &str, seq: u64, fields: ChainHashFiel
     // Absent attribution hashes as the empty string so that chains written before this
     // field existed continue to verify byte-for-byte.
     hasher.update(fields.principal.unwrap_or("").as_bytes());
-    // Same rule, same reason, one field later: absent vertical provenance hashes as the
-    // empty string so chains written before this field existed continue to verify
+    // Same rule, same reason, one field later: absent vertical provenance hashes as no
+    // bytes at all, so chains written before this field existed continue to verify
     // byte-for-byte. Appended *after* principal — never reorder these two hashes.
-    hasher.update(fields.vertical.unwrap_or("").as_bytes());
+    //
+    // Unlike `principal`, a present vertical is framed with a tag byte and an explicit
+    // length prefix (see `VERTICAL_PRESENT_TAG`) so its boundary with the preceding
+    // `principal` bytes — and its own content — can never be shifted undetected.
+    if let Some(vertical) = fields.vertical {
+        hasher.update(&[VERTICAL_PRESENT_TAG]);
+        hasher.update(&(vertical.len() as u64).to_le_bytes());
+        hasher.update(vertical.as_bytes());
+    }
     hasher.finalize().to_hex().to_string()
 }
 
@@ -302,8 +326,16 @@ mod tests {
     }
 
     /// Absent vertical provenance must hash as nothing at all, not as a sentinel
-    /// string, so chains written before the field existed still verify. Same rule as
-    /// `should_hash_an_absent_principal_as_no_bytes`, one field later.
+    /// string, so chains written before the field existed still verify.
+    ///
+    /// Unlike the principal field, this can no longer be demonstrated by comparing
+    /// against `Some("")` — the tagged framing that fixes the boundary-ambiguity bug
+    /// means a *present* empty vertical now hashes differently from an absent one (see
+    /// `should_hash_a_present_empty_vertical_differently_from_an_absent_one`). So this
+    /// test instead confirms the "no bytes at all" property directly, by replicating
+    /// the hasher's byte sequence up to (and including) `principal` and checking that
+    /// `compute_chain_hash` with `vertical: None` produces exactly that hash, with
+    /// nothing appended for `vertical`.
     #[test]
     fn should_hash_an_absent_vertical_as_no_bytes() {
         let fields = ChainHashFields {
@@ -315,13 +347,24 @@ mod tests {
             principal: None,
             vertical: None,
         };
-        let empty_string_vertical = ChainHashFields {
-            vertical: Some(""),
-            ..fields
-        };
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"prev");
+        hasher.update(&0u64.to_le_bytes());
+        hasher.update(fields.id.as_bytes());
+        hasher.update(fields.category.as_bytes());
+        let action_str = serde_json::to_string(fields.action).unwrap_or_default();
+        hasher.update(action_str.as_bytes());
+        hasher.update(fields.span_hash.as_bytes());
+        hasher.update(fields.config_hash.as_bytes());
+        hasher.update(fields.principal.unwrap_or("").as_bytes());
+        // Deliberately nothing appended here for `vertical` — that is the property
+        // under test.
+        let expected_with_no_vertical_bytes = hasher.finalize().to_hex().to_string();
+
         assert_eq!(
             compute_chain_hash("prev", 0, fields),
-            compute_chain_hash("prev", 0, empty_string_vertical)
+            expected_with_no_vertical_bytes
         );
     }
 
@@ -341,6 +384,57 @@ mod tests {
             entry.chain_hash,
             "72eb1d2f14c701e0c58280b2d7fc5132fdc0564a3ed42e7b0c4b84cfdd5a3ee4"
         );
+    }
+
+    /// Since the tagged framing was introduced, `Some("")` is no longer
+    /// indistinguishable from `None` — the tag and zero-length prefix bytes are still
+    /// emitted for `Some("")`, while `None` emits nothing at all.
+    #[test]
+    fn should_hash_a_present_empty_vertical_differently_from_an_absent_one() {
+        let fields = ChainHashFields {
+            id: "id-1",
+            category: "Email",
+            action: &RedactionAction::Mask,
+            span_hash: "abc",
+            config_hash: "cfg",
+            principal: None,
+            vertical: None,
+        };
+        let empty_string_vertical = ChainHashFields {
+            vertical: Some(""),
+            ..fields
+        };
+        assert_ne!(
+            compute_chain_hash("prev", 0, fields),
+            compute_chain_hash("prev", 0, empty_string_vertical)
+        );
+    }
+
+    /// Before the tagged framing was introduced, hashing `principal` and `vertical`
+    /// back-to-back with no delimiter meant these two distinct `(principal, vertical)`
+    /// pairs — whose naive concatenation is identical ("abc" either way) — hashed to
+    /// the same chain hash. The length-prefixed framing must make them differ.
+    #[test]
+    fn should_not_collide_when_principal_and_vertical_bytes_shift_across_the_boundary() {
+        let a = AuditEntry::new(
+            AuditEntryInput {
+                principal: Some("ab".into()),
+                vertical: Some("c".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+        let b = AuditEntry::new(
+            AuditEntryInput {
+                principal: Some("a".into()),
+                vertical: Some("bc".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+        assert_ne!(a.chain_hash, b.chain_hash);
     }
 
     #[test]

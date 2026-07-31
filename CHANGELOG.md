@@ -50,12 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `vertical` column, appended last. The CSV export format is unversioned, so this is a
   silent shape change to any downstream parser that reads it positionally or by
   fixed column count — check any such parser before upgrading.
-  **Compatibility:** `ChainHashFields` is now `#[non_exhaustive]` — its own rustdoc
-  already called adding a field "a deliberate, reviewable act", so this formalises
-  that: external struct-literal construction of `ChainHashFields` (there are no known
-  external constructors of it outside this crate today) now requires going through a
-  crate-provided constructor rather than a bare literal, and will break on every future
-  field addition regardless. `AuditEntry` and `AuditEntryInput` are not marked
+  **Compatibility:** `ChainHashFields` and `compute_chain_hash` are `pub(crate)`, not
+  part of the public API — grepping the workspace confirms nothing outside
+  `hacienda-core` constructs `ChainHashFields` or calls `compute_chain_hash` today, and
+  the only in-crate caller builds it via `AuditEntry::chain_hash_fields()`, never a bare
+  struct literal. `AuditEntry` and `AuditEntryInput` are not marked
   `#[non_exhaustive]` — consistent with the Task 2.5 decision for `PipelineConfig`, the
   new `vertical` field is additive and defaults to `None`/absent via `#[serde(default)]`
   on `AuditEntry`, but external struct-literal construction of `AuditEntryInput` (which

@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Length, in hex characters, of the digest suffix in [`VerticalConfig::provenance_id`].
+const PROVENANCE_DIGEST_LEN: usize = 8;
+
+/// Base NER categories every pipeline already requests, regardless of vertical —
+/// see [`crate::pii::ner::DEFAULT_CATEGORIES`]. A vertical label that
+/// case-insensitively duplicates one of these asks the model for the same concept
+/// twice under two different category representations.
+const BASE_CATEGORY_NAMES: [&str; 5] = ["person", "organization", "location", "email", "phone"];
+
 /// Effective configuration for one [`crate::pii::PiiPipeline`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -90,11 +99,18 @@ impl VerticalConfig {
     /// Validate this vertical's shape.
     ///
     /// Checks, independent of redaction mode and of whether a model is actually
-    /// loaded: `id` is non-empty; `labels` is non-empty; every label is non-empty
-    /// after trimming; no label contains `[`, `:`, or `]` (mirroring
+    /// loaded: `id` is non-empty, has no leading/trailing whitespace, and does not
+    /// contain `@` (reserved as [`Self::provenance_id`]'s separator); `labels` is
+    /// non-empty; every label is non-empty after trimming and has no leading/trailing
+    /// whitespace of its own (an untrimmed label would otherwise pass this check but
+    /// flow untrimmed into detection and `provenance_id`'s hash input); no label
+    /// contains `[`, `:`, or `]` (mirroring
     /// [`crate::redaction::pseudonym::category_label`], since a vertical label that
     /// cannot be pseudonymised is a configuration error regardless of the configured
-    /// redaction mode); and no two labels are equal after case-folding.
+    /// redaction mode); no label case-insensitively duplicates a base NER category
+    /// name (`person`, `organization`, `location`, `email`, `phone` — already
+    /// requested by default, see [`crate::pii::ner::DEFAULT_CATEGORIES`]); and no two
+    /// labels are equal after case-folding.
     ///
     /// # Errors
     ///
@@ -111,6 +127,14 @@ impl VerticalConfig {
         if self.id.trim().is_empty() {
             return fail("id must not be empty".to_string());
         }
+        if self.id.trim() != self.id {
+            return fail("id must not have leading or trailing whitespace".to_string());
+        }
+        if self.id.contains('@') {
+            return fail(
+                "id must not contain '@' (reserved as the provenance id separator)".to_string(),
+            );
+        }
         if self.labels.is_empty() {
             return fail("labels must not be empty".to_string());
         }
@@ -124,6 +148,17 @@ impl VerticalConfig {
             if trimmed.contains('[') || trimmed.contains(':') || trimmed.contains(']') {
                 return fail(format!(
                     "label {trimmed:?} contains a token delimiter ('[', ':' or ']')"
+                ));
+            }
+            if trimmed != label {
+                return fail(format!(
+                    "label {label:?} has leading or trailing whitespace; trim it before configuring"
+                ));
+            }
+            if BASE_CATEGORY_NAMES.contains(&trimmed.to_ascii_lowercase().as_str()) {
+                return fail(format!(
+                    "label {trimmed:?} duplicates a base NER category name ({BASE_CATEGORY_NAMES:?}); \
+                     it is already requested by default and does not need a vertical label"
                 ));
             }
             if !seen.insert(trimmed.to_ascii_lowercase()) {
@@ -155,7 +190,7 @@ impl VerticalConfig {
             hasher.update(b"\0");
         }
         let digest = hasher.finalize().to_hex();
-        format!("{}@{}", self.id, &digest[..8])
+        format!("{}@{}", self.id, &digest[..PROVENANCE_DIGEST_LEN])
     }
 }
 
@@ -320,6 +355,57 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_a_vertical_label_with_leading_or_trailing_whitespace() {
+        let vertical = VerticalConfig {
+            labels: vec![" swift_code ".to_string()],
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_label_that_duplicates_a_base_category_name() {
+        for base in ["person", "Organization", "LOCATION", "email", "Phone"] {
+            let vertical = VerticalConfig {
+                labels: vec![base.to_string()],
+                ..finance_vertical()
+            };
+            let error = vertical.validate().unwrap_err();
+            assert!(
+                matches!(error, PiiError::InvalidVertical { .. }),
+                "label {base:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_a_vertical_id_with_leading_or_trailing_whitespace() {
+        let vertical = VerticalConfig {
+            id: " finance ".to_string(),
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_id_containing_at_sign() {
+        let vertical = VerticalConfig {
+            id: "finance@prod".to_string(),
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
     fn should_reject_duplicate_labels_after_case_folding() {
         let vertical = VerticalConfig {
             labels: vec!["Swift_Code".to_string(), "swift_code".to_string()],
@@ -374,7 +460,11 @@ mod tests {
             "expected a `finance@<digest>` provenance id, got {provenance:?}"
         );
         let digest = provenance.strip_prefix("finance@").unwrap();
-        assert_eq!(digest.len(), 8, "digest must be the first 8 hex chars");
+        assert_eq!(
+            digest.len(),
+            PROVENANCE_DIGEST_LEN,
+            "digest must be the first PROVENANCE_DIGEST_LEN hex chars"
+        );
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

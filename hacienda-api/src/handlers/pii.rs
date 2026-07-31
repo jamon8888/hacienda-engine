@@ -131,7 +131,7 @@ mod tests {
         routes::build_router,
         state::{ApiLimits, ApiState},
     };
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, http::Request, http::StatusCode};
     use hacienda_core::{
         auth::{
             authn::{InMemoryTokenStore, Token},
@@ -143,6 +143,9 @@ mod tests {
     };
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    /// Body-size limit passed to `axum::body::to_bytes` when reading a test response.
+    const MAX_CONFIG_RESPONSE_BYTES: usize = 64 * 1024;
 
     fn app(config: HaciendaConfig) -> axum::Router {
         let mut store = InMemoryTokenStore::new();
@@ -168,8 +171,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), MAX_CONFIG_RESPONSE_BYTES)
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
@@ -179,7 +182,21 @@ mod tests {
     async fn should_report_no_active_vertical_when_none_is_configured() {
         let config = HaciendaConfig::default().with_pii(PipelineConfig::default());
         let body = get_pii_config(&app(config)).await;
-        assert!(body["vertical_id"].is_null());
+        assert!(matches!(body.get("vertical_id"), Some(value) if value.is_null()));
+        assert_eq!(body["vertical_labels"], serde_json::json!([]));
+    }
+
+    /// The untested branch at the top of `pii_config`: `config.pii` is `None` entirely
+    /// (PII disabled), not merely a `PipelineConfig` with no vertical configured.
+    #[tokio::test]
+    async fn should_report_no_vertical_when_pii_is_disabled() {
+        let config = HaciendaConfig::default();
+        assert!(
+            config.pii.is_none(),
+            "fixture must leave pii disabled for this test to be meaningful"
+        );
+        let body = get_pii_config(&app(config)).await;
+        assert!(matches!(body.get("vertical_id"), Some(value) if value.is_null()));
         assert_eq!(body["vertical_labels"], serde_json::json!([]));
     }
 
