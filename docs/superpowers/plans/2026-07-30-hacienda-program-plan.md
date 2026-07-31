@@ -461,7 +461,7 @@ TypeScript pseudonymisation engine is not.
       `hacienda-wasm` build, not a mock). Both pass 25/25 as of L6's wasm wiring — this
       check couldn't be fully closed until L6 gave the corpus a wasm build to run against.
 
-- [ ] **C3. Studio gets the real audit trail via Track L, not a second implementation.**
+- [x] **C3. Studio gets the real audit trail via Track L, not a second implementation.**
       Previously an open question. It is now answered by the WASM decision: the blake3 chain
       and AES-SIV reversible pseudonyms come to the browser as the same Rust code, with an
       IndexedDB `AuditStore` in place of `FileAuditStore`. **Do not build a TypeScript audit
@@ -469,6 +469,54 @@ TypeScript pseudonymisation engine is not.
       survives the process, an IndexedDB one dies with a cleared browser profile. If Studio
       output must be legally defensible, the chain has to be exported inside the vault
       (Track I2 / G) rather than merely retained locally.
+
+      **Done 2026-07-31.** As of L5, `IndexedDbAuditStore` existed in `hacienda-core` but
+      had zero JS-facing surface and zero Studio callers — the heading's premise ("it is now
+      answered") was aspirational, not actual, until this. Added:
+
+      - `AuditHandle` (`crates/hacienda-wasm/src/lib.rs`, `#[cfg(target_arch = "wasm32")]`
+        so the native `cargo check` this repo's other tracks rely on stays unaffected):
+        `AuditHandle.open(db_name, node_id, config_hash)` opens/resumes an
+        `IndexedDbAuditStore`; `recordResult(result)` takes the `JsValue` `redactPii`
+        already gets back from `process()`, converts its `audit_log`
+        (`RedactionAuditEntry`) into `AuditEntryInput`s — minting `id` via `uuid::Uuid::
+        new_v4()` and `pipeline_version` via `env!("CARGO_PKG_VERSION")`, mirroring
+        `HaciendaFacade::record_audit`/`record_reveal`'s native pattern exactly, `config_hash`
+        left for the store's own chain to overwrite (`AuditChain::push`) — appends one batch
+        per call, and returns the new tip; `tip()`/`verify()` expose the rest of the read
+        surface a client needs.
+      - `apps/hacienda-studio/lib/pii-engine.ts`'s `redactPii` now opens one `AuditHandle`
+        (idempotent, module-level, mirroring `initPiiEngine`'s own pattern) against a fixed
+        `db_name`/`node_id`/`config_hash` and calls `recordResult` after every `process()`
+        call — one `append` per document, the same invariant `HaciendaFacade::record_audit`
+        enforces natively. `scanForPii` is untouched: `PiiPipeline::scan` always returns an
+        empty `audit_log`, so there is nothing to record in scan-only mode.
+
+      **Verified:** `apps/hacienda-studio/lib/audit-handle.test.ts` (new, 3 tests) against
+      the real compiled `hacienda-wasm` build (not a mock) with `fake-indexeddb` standing in
+      for the browser's `indexedDB` global the same way `pii-engine.test.ts` already loads
+      the real `.wasm` bytes directly under `vitest`'s Node environment — asserts the tip
+      advances past genesis and verifies when a redaction is recorded, stays unchanged when
+      `audit_log` is empty (scan-only shape), and survives a fresh `AuditHandle.open()` on
+      the same `db_name` (Track L5's own reload guarantee, exercised through the new JS
+      surface rather than only `tests/idb.rs`). Full `vitest run`: 69/69 (68 pre-existing +
+      the 3 new, minus 1 unrelated flake — `lib/ner-bridge.test.ts`'s compromise.js timing
+      test failed only under full-suite parallel load on this RAM-constrained host, passed
+      6/6 in isolation, unchanged by this work). `svelte-check`: no new error class beyond
+      the pre-existing `node:module`/`node:fs` gap `pii-engine.test.ts` already has. `vite
+      build`: succeeds end-to-end, `hacienda_wasm_bg.wasm` unchanged at ~12.3 MB (`Audit
+      Handle` added no new heavy dependency — `uuid`'s `js` feature is the same
+      self-contained WebCrypto binding `hacienda-core` already uses, not a new crate class).
+      `cargo check -p hacienda-wasm` (native): passes, confirming `audit_handle` mod's
+      `#[cfg(target_arch = "wasm32")]` gate keeps it fully compiled out on native targets.
+
+      **What this does not resolve:** exactly what the heading already scoped as open —
+      persistence is a browser IndexedDB database, which survives a reload (verified above)
+      but not a cleared profile. Whether/how a chain gets exported into the vault so it
+      survives that is still Track I2's question, and Track I2 remains entirely unbuilt (a
+      design proposal, not a finding) — nothing here decides it. No `principal` is recorded
+      either: Studio has no caller-identity concept today, so every entry's `principal` is
+      `None`, unlike `HaciendaFacade`'s server-side callers which thread a `Caller` through.
 
 ---
 

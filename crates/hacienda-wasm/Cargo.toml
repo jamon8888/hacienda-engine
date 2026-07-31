@@ -24,6 +24,10 @@ wasm-bindgen-futures = "0.4"
 # selected, such a consumer fails to *compile* for wasm32-unknown-unknown, and that
 # failure is easy to misread as unrelated to randomness.
 getrandom = { version = "0.4", features = ["wasm_js"] }
+# `AuditHandle` (Track C3) mints each `AuditEntryInput.id` itself, mirroring
+# `HaciendaFacade::record_audit`'s `uuid::Uuid::new_v4()` — the `js` feature is the same
+# self-contained WebCrypto binding `hacienda-core` uses, not `getrandom`.
+uuid = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
