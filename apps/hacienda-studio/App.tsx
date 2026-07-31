@@ -4,10 +4,13 @@ import { ConfigPanel } from "./components/ConfigPanel";
 import { ProgressBar } from "./components/ProgressBar";
 import { PiiPanel } from "./components/PiiPanel";
 import { MarkdownEditor } from "./components/MarkdownEditor";
+import { FileBrowser, buildFileRows } from "./components/FileBrowser";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
+import { renderAnnotatedMarkdown } from "./lib/annotate";
 import { DEFAULT_CONFIG } from "./lib/types";
 import type { AppConfig, OnboardingState, ProcessedFile, ProgressUpdate } from "./lib/types";
+import type { PiiEntity } from "./lib/pii-engine";
 
 const UPLOAD_ACCEPT =
   ".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html,.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv";
@@ -19,6 +22,39 @@ function downloadZip(blob: Blob): void {
   a.download = `xberg-output-${Date.now()}.zip`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function downloadText(fileName: string, content: string): void {
+  const blob = new Blob([content], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Track I4: re-splices `result.rawMarkdown` against the (possibly edited) `findings`,
+ * reusing the exact function `worker/pipeline.ts` used to build the original export —
+ * `lib/annotate.ts` exists specifically so this can happen on the main thread without
+ * importing the worker module itself (see that file's header). Frontmatter and the local
+ * "## Entities" glossary are carried over unchanged from the original export rather than
+ * regenerated: `pii_entities_found` and the entity list can go stale relative to add/remove
+ * edits (an added finding won't retroactively drop an entity mention from the glossary, a
+ * removed one won't add a mention back), which is an explicit, documented scope cut — full
+ * frontmatter/registry/KG-export consistency with post-export edits is out of scope for
+ * this increment, the same kind of bounded call already made for I3 below and for Track
+ * J2's "thinner CLI vault" decision.
+ */
+function reExportMarkdown(result: ProcessedFile, findings: PiiEntity[]): string {
+  const docPath = "documents/" + result.name;
+  const linked = renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findings, docPath);
+  const frontmatterMatch = result.markdown.match(/^---\n[\s\S]*?\n---/);
+  const glossaryMatch = result.markdown.match(/\n## Entities\n\n[\s\S]*$/);
+  const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
+  const glossary = glossaryMatch ? glossaryMatch[0] : "";
+  return frontmatter + "\n" + linked + glossary;
 }
 
 export function App() {
@@ -49,6 +85,18 @@ export function App() {
   // slow — it compiles a 48 MB WASM module. Dropping a file into that window used to throw
   // on a null worker and silently do nothing.
   const [workerReady, setWorkerReady] = useState(false);
+  // Track I3: per-file failures, keyed by the same `effectiveFileName` used for `progress`
+  // — the global `error` banner above still fires too (existing UX contract), this is what
+  // lets the Finder-like list show *which* file failed instead of only a banner that
+  // overwrites itself once per failure.
+  const [fileErrors, setFileErrors] = useState<Map<string, string>>(new Map());
+  // Track I4: edits layered on top of a result's original `piiFindings`, keyed by
+  // `ProcessedFile.name` (the output name, unique per batch — unlike the input name, which
+  // a folder upload can repeat across sibling directories). Absent from this map means
+  // "unedited, use `result.piiFindings` as-is"; present (even as an unchanged copy) is what
+  // the Finder list's "edited" badge keys off, via `handleAddFinding`/`handleRemoveFinding`
+  // always writing an entry, never mutating `result.piiFindings` itself.
+  const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
 
   const workerRef = useRef<Worker | null>(null);
   const configRef = useRef(config);
@@ -139,6 +187,7 @@ export function App() {
           break;
         case "error":
           setError(`${data.file}: ${data.message}`);
+          setFileErrors((prev) => new Map(prev).set(data.file, data.message));
           break;
       }
     }
@@ -230,6 +279,60 @@ export function App() {
   function toggleFolderMode(event: React.MouseEvent): void {
     event.preventDefault();
     setFolderMode((v) => !v);
+  }
+
+  function findingsFor(result: ProcessedFile): PiiEntity[] {
+    return editedFindings.get(result.name) ?? result.piiFindings;
+  }
+
+  // Track I4 "Add": a selection in `MarkdownEditor` becomes a manually-flagged finding.
+  // Its `redact_template` is always a plain mask (`[CATEGORY]`), never a pseudonym token —
+  // minting one would need this batch's derived key, which only ever lives inside the
+  // worker (see `worker/pipeline.ts`'s `pseudonymKeyHex`), and re-deriving it here from the
+  // passphrase a second time for a manual add is more machinery than this increment's
+  // scope calls for. Overlapping an existing finding is silently ignored rather than
+  // producing a second, conflicting decoration over the same text.
+  function handleAddFinding(
+    result: ProcessedFile,
+    start: number,
+    end: number,
+    category: string,
+  ): void {
+    if (start >= end) return;
+    setEditedFindings((prev) => {
+      const current = prev.get(result.name) ?? result.piiFindings;
+      if (current.some((f) => start < f.end && f.start < end)) return prev;
+      const next: PiiEntity[] = [
+        ...current,
+        {
+          category,
+          text: "",
+          start,
+          end,
+          confidence: 1,
+          source: "manual",
+          format_preserving: false,
+          redact_template: `[${category.toUpperCase()}]`,
+        },
+      ].sort((a, b) => a.start - b.start);
+      return new Map(prev).set(result.name, next);
+    });
+  }
+
+  // Track I4 "Remove": drops a false-positive finding. Does not restore an entity link
+  // `renderAnnotatedMarkdown` may have suppressed for overlapping that span in the
+  // original export (Track A2's `filterExportableEntities` ran once, at export time,
+  // against the original findings) — re-linking a now-unredacted span is out of scope here.
+  function handleRemoveFinding(result: ProcessedFile, index: number): void {
+    setEditedFindings((prev) => {
+      const current = prev.get(result.name) ?? result.piiFindings;
+      const next = current.filter((_, i) => i !== index);
+      return new Map(prev).set(result.name, next);
+    });
+  }
+
+  function handleExportEdited(result: ProcessedFile): void {
+    downloadText(result.name, reExportMarkdown(result, findingsFor(result)));
   }
 
   // `progress` is keyed by whatever name the worker was sent — the folder-relative path
@@ -361,24 +464,63 @@ export function App() {
           </>
         )}
 
+        {files.length > 0 && (
+          <FileBrowser
+            rows={buildFileRows(
+              files,
+              progress,
+              results,
+              fileErrors,
+              new Set(editedFindings.keys()),
+              new Map(results.map((r) => [r.name, findingsFor(r)] as const)),
+            )}
+          />
+        )}
+
         {results.length > 0 && (
           <section className="mt-8 flex flex-col gap-4 border-t border-border pt-6">
             <h2 className="text-sm font-semibold text-muted-foreground">
               Processed this batch ({results.length})
             </h2>
-            {results.map((result) => (
-              <div key={result.name} className="flex flex-col gap-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="font-medium">{result.name}</span>
-                  <span className="text-muted-foreground">
-                    {result.entities.length}{" "}
-                    {result.entities.length === 1 ? "entity" : "entities"}
-                  </span>
+            {results.map((result) => {
+              const findings = findingsFor(result);
+              const edited = editedFindings.has(result.name);
+              return (
+                <div key={result.name} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium">{result.name}</span>
+                    <div className="flex items-center gap-3 text-muted-foreground">
+                      <span>
+                        {result.entities.length}{" "}
+                        {result.entities.length === 1 ? "entity" : "entities"}
+                      </span>
+                      {edited && (
+                        <button
+                          type="button"
+                          className="export-edited rounded-md bg-muted px-2 py-1 text-xs text-foreground hover:bg-primary hover:text-primary-foreground"
+                          onClick={() => handleExportEdited(result)}
+                        >
+                          Export edited file
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <MarkdownEditor
+                    value={result.rawMarkdown}
+                    findings={findings}
+                    onAddFinding={(start, end, category) =>
+                      handleAddFinding(result, start, end, category)
+                    }
+                  />
+                  {(findings.length > 0 || edited) && (
+                    <PiiPanel
+                      findings={findings}
+                      onRemove={(i) => handleRemoveFinding(result, i)}
+                    />
+                  )}
                 </div>
-                <MarkdownEditor value={result.rawMarkdown} findings={result.piiFindings} />
-                {result.piiFindings.length > 0 && <PiiPanel findings={result.piiFindings} />}
-              </div>
-            ))}
+              );
+            })}
           </section>
         )}
       </main>

@@ -19,6 +19,12 @@
  * A finding is only revealable if its `redact_template` actually parses as a pseudonym
  * token (`revealToken` returns `null` for a plain mask like `"[EMAIL]"`, which is not a bug
  * to report here — it means this document used mask mode, not pseudonymize).
+ *
+ * Track I4: `onRemove`, when given, adds a "Remove" button per finding — for a false
+ * positive the detector flagged that isn't actually PII. Removing a finding here only
+ * drops it from the array `App.tsx` re-splices on export; it does not restore an entity
+ * link that `renderAnnotatedMarkdown` dropped for overlapping this span originally (see
+ * that scope note in `App.tsx`'s re-export handler).
  */
 import { useState } from "react";
 import type { PiiEntity } from "../lib/pii-engine";
@@ -29,7 +35,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Input } from "./ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 
-export function PiiPanel({ findings }: { findings: PiiEntity[] }) {
+export function PiiPanel({
+  findings,
+  onRemove,
+}: {
+  findings: PiiEntity[];
+  onRemove?: (index: number) => void;
+}) {
   return (
     <Card>
       <CardHeader>
@@ -43,7 +55,19 @@ export function PiiPanel({ findings }: { findings: PiiEntity[] }) {
             {findings.map((finding, i) => (
               <li key={i} className="flex items-center justify-between gap-2 text-sm">
                 <RevealableFinding finding={finding} />
-                <Badge variant="destructive">{finding.category}</Badge>
+                <div className="flex items-center gap-2">
+                  <Badge variant="destructive">{finding.category}</Badge>
+                  {onRemove && (
+                    <button
+                      type="button"
+                      className="pii-remove-finding text-xs text-muted-foreground hover:text-destructive"
+                      aria-label={`Remove finding ${i + 1}`}
+                      onClick={() => onRemove(i)}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

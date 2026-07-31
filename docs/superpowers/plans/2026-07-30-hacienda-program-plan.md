@@ -1196,26 +1196,105 @@ kg-export/{neo4j.cypher,networkx.json,rdf.ttl}
 
 ### I3. Finder-like browser
 
-- [ ] `hacienda-private/apps/web/components/ui/file-system.tsx` is a **4,586-line virtualized
+- [x] `hacienda-private/apps/web/components/ui/file-system.tsx` is a **4,586-line virtualized
       grid/list** file browser, with `file-thumbnail.tsx` (154) and
       `document-viewer-sidebar.tsx` (112) alongside. Its interface is a flat
       `FileSystemItem[]` of `{ kind: "folder" | "file", path, key }` (`app/browse/page.tsx`),
       which Studio can build directly from in-memory batch results — the component itself is
       not coupled to their API, only their `/browse` page is.
-- [ ] Show per-file state in the browser: extracted / PII count / edited / error. The Finder
+- [x] Show per-file state in the browser: extracted / PII count / edited / error. The Finder
       view is where the user decides which documents need attention, so it has to carry that.
+
+      **Done 2026-07-30, scoped.** Not a port of `file-system.tsx`: that component is built on
+      `@base-ui/react` + Tailwind v4 (the same incompatible toolkit generation Track F1's UI
+      primitives already had to route around — see `components/ui/README.md`), and its actual
+      job — a persistent, virtualized, tree-structured project browser — isn't this app's use
+      case, which is one flat batch of files per run. Porting it would mean rewriting a file
+      browser's worth of tree/selection/virtualization machinery this app doesn't need to
+      satisfy the plan's literal ask: per-file state, in a list. `components/FileBrowser.tsx`
+      is that scoped equivalent — `buildFileRows()` merges `files`, the `progress` map,
+      `results`, a new per-file `fileErrors` map (worker `"error"` messages were previously
+      only a global banner — Track I3 needed them attributable to a specific row), and I4's
+      edited-findings state into one `FileRow[]`, rendered as a flat list: status icon, name,
+      stage/error text, entity count, PII count, an "edited" badge once I4 has touched a file.
+      `App.tsx` renders it above the existing per-document detail cards. Verified via
+      `tests/e2e/finder-and-editing.spec.ts`'s `FileBrowser` suite against a live browser
+      (temporary Chromium `executablePath`, reverted before commit): a processed file's row
+      shows "Done", a PII count, and no "edited" badge until an edit actually happens.
 
 ### I4. Per-document PII editing
 
 "Add and remove PII" is two operations, and neither is accept/reject on a fixed list:
 
-- [ ] **Remove** — a false positive is unmarked and the original text stands.
-- [ ] **Add** — the user selects text the model missed and marks it as PII with a category.
+- [x] **Remove** — a false positive is unmarked and the original text stands.
+- [x] **Add** — the user selects text the model missed and marks it as PII with a category.
       This is manual annotation, not review of a detection. It is the operation that makes the
       tool trustworthy for a lawyer, and neither app has it today.
-- [ ] Both require **F4's overlay model**: source text immutable, spans as separate data.
+- [x] Both require **F4's overlay model**: source text immutable, spans as separate data.
       Adding a span to spliced text is not implementable; this is why F4 gates the editor.
-- [ ] Edits must survive re-export and be visible in the Finder view.
+- [x] Edits must survive re-export and be visible in the Finder view.
+
+      **Done 2026-07-30.** `renderAnnotatedMarkdown` (the same function `worker/pipeline.ts`
+      used to build the original export) moved out to `lib/annotate.ts` so `App.tsx` — main
+      thread, not a worker — can call it directly without importing `worker/pipeline.ts`
+      itself: that module assigns `self.onmessage = …` at top level, harmless inside a Worker
+      but a silent hijack of `window.onmessage` if imported into the main thread.
+      `worker/pipeline.ts` re-exports both functions unchanged, so nothing that already
+      imported them from `"./pipeline"` (`pipeline.test.ts` included) needed to change.
+
+      **Remove**: `PiiPanel`'s finding rows grow a "✕" button (`onRemove`) that drops the
+      finding from `App.tsx`'s per-document `editedFindings` map (keyed by `ProcessedFile.name`,
+      absent = unedited). **Add**: `MarkdownEditor` grows an optional toolbar — a category
+      `<select>` and "Mark selection as PII" button — reading the selection straight off CM6's
+      own `EditorState.selection`, already in the same `rawMarkdown` coordinates `findings[].
+      start/.end` use, so no offset translation is needed (F4's overlay model, reused rather
+      than reimplemented: source text immutable, the manually-added span is just one more
+      entry in the same array). A manual add gets a plain `[CATEGORY]` mask, not a pseudonym
+      token — minting one needs the batch's derived key, which lives only inside the worker
+      (`pseudonymKeyHex` in `worker/pipeline.ts`), and re-deriving it a second time on the main
+      thread for this is more machinery than this increment's scope calls for; documented, not
+      silently dropped. Overlapping an existing finding is silently ignored.
+
+      **Re-export**: an "Export edited file" button appears once a document has an
+      `editedFindings` entry, calling `reExportMarkdown()` — re-splices `rawMarkdown` against
+      the edited findings via `renderAnnotatedMarkdown`, and carries the *original* export's
+      frontmatter and "## Entities" glossary through unchanged (regex-extracted from
+      `result.markdown`) rather than regenerating them. **Explicit scope cut, matching the
+      session's established pattern for J2's "thinner CLI vault" and I3 above**: full
+      frontmatter/entity-registry/KG-export consistency with post-export edits — retracting an
+      entity's glossary row when an add now redacts its only mention, or restoring one when a
+      remove un-redacts it — is out of scope for this increment. The body text itself is
+      always correct; only the frontmatter's `pii_entities_found` count and the local glossary
+      can go stale relative to edits made after export.
+
+      **A real regression caught, not shipped**: wiring "Mark selection as PII" needed
+      tracking the live CM6 selection via `onUpdate`, which fires on every keystroke.
+      `extensions={[markdown(), piiHighlightExtension(findings)]}` was previously a fresh
+      array every render — harmless when nothing re-rendered `MarkdownEditor` during typing,
+      which nothing did before this track. Once `onUpdate` started calling `setSelection` on
+      every keystroke, that same fresh-array pattern reconfigures `@uiw/react-codemirror`'s
+      extensions on every keystroke too, which rebuilds the decoration `StateField` from
+      scratch (`create()` against the *live, already-edited* document but the *original*
+      finding offsets) instead of continuing F3's `decorations.map(tr.changes)` history — the
+      exact corruption F3's own Check exists to catch. Running the existing
+      `tests/e2e/markdown-editor.spec.ts` suite against this change (not just the new I4
+      tests, which happened not to trigger it) failed exactly that Check:
+      `"an Dupont at jean.dupont@cabin"` instead of the email. Fixed by memoizing `extensions`
+      on `findings` and giving `onUpdate` a permanently stable identity (`useCallback`, empty
+      deps) — `@uiw/react-codemirror` only reconfigures on an actual `findings` change now,
+      which is the documented, narrower scope-cut noted in `MarkdownEditor.tsx`'s header (an
+      edit *interleaved* between two add/remove actions can still lose its live position — a
+      real edge case, deliberately not solved this session; see that file for why).
+
+      **Verified for real**: `tests/e2e/finder-and-editing.spec.ts` (3 tests, real Chromium,
+      temporary `executablePath` reverted before commit) — removing a finding un-redacts its
+      original text in the re-exported file; selecting exact character offsets (computed, not
+      a pixel-based double-click) and marking them as PII redacts that text in the re-export;
+      the Finder row's "edited" badge appears only after an edit. Re-ran the full pre-existing
+      e2e suite (25/25) plus `vitest run` (158/158) and `tsc --noEmit` after the fix — no
+      regressions. Production `vite build` clean (temporary `wasm-opt = false` for the sandbox's
+      blocked binaryen download, reverted before commit, the same documented pattern used
+      throughout this session).
 
 ---
 
