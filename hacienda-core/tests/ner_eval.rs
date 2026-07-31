@@ -557,7 +557,7 @@ struct BootstrapCi {
 /// (not individual spans) with replacement — each resample redraws `cases.len()` cases,
 /// pools their gold/predicted spans, and rescoring. Resampling cases rather than spans
 /// keeps a multi-entity case's spans together, which matches how error is actually
-/// correlated in this data (a single mis-tokenised name produces several wrong spans in
+/// correlated in this data (a single incorrectly tokenised name produces several wrong spans in
 /// the same case, not independently wrong spans scattered across cases).
 ///
 /// With ~40-45 cases per base-language fixture, a per-label F1 rests on the tens of

@@ -1,5 +1,7 @@
 [files]
-extend-exclude = ["superpowers/", ".ai-rulez/", "scripts/", "poly.toml"]
+# fixtures/ner-eval/ is hand-written French/English NER eval prose (hacienda-core/tests/ner_eval.rs);
+# an English spell-checker has nothing useful to say about French sentences.
+extend-exclude = ["superpowers/", ".ai-rulez/", "scripts/", "poly.toml", "fixtures/ner-eval/"]
 
 [default.extend-words]
 hacienda = "hacienda"
@@ -20,5 +22,8 @@ unparseable = "unparseable"
 frist = "frist"
 reveiw = "reveiw"
 cahce = "cahce"
+# hacienda-core/tests/ner_eval.rs doc comment: an example of a typo'd fixture label the
+# schema test is designed to catch, not a typo to fix.
+loaction = "loaction"
 
 [default.extend-identifiers]
