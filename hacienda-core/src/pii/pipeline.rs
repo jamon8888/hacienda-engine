@@ -163,6 +163,19 @@ impl PiiPipeline {
         &self.config
     }
 
+    /// The audit-chain provenance value for this pipeline's configured vertical, if any.
+    ///
+    /// `None` when no `[pii.vertical]` is configured. See
+    /// [`VerticalConfig::provenance_id`] and
+    /// [`AuditEntry::vertical`](crate::audit::AuditEntry::vertical) for what the value
+    /// means and why it is not the bare vertical id.
+    pub(crate) fn vertical_provenance_id(&self) -> Option<String> {
+        self.config
+            .vertical
+            .as_ref()
+            .map(crate::pii::config::VerticalConfig::provenance_id)
+    }
+
     /// True when a NER backend is loaded. A `false` here means regex-only detection.
     pub fn has_model(&self) -> bool {
         self.ner_detector.is_some()
@@ -244,9 +257,8 @@ fn load_detector(config: &PipelineConfig) -> Result<NerDetector, PiiError> {
     if let Some(vertical) = &config.vertical {
         // Extend, not replace: a finance vertical must still find people. See
         // `ner::categories_with_vertical`.
-        detector = detector.with_categories(crate::pii::ner::categories_with_vertical(Some(
-            vertical,
-        )));
+        detector =
+            detector.with_categories(crate::pii::ner::categories_with_vertical(Some(vertical)));
     }
     Ok(detector)
 }

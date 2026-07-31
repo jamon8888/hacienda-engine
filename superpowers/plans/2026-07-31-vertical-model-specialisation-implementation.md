@@ -381,21 +381,87 @@ with different labels detects different things, and the audit record's job is to
 digest makes a silently-edited label set visible. Every step below uses this composed value; `None` when no
 vertical is configured.
 
-- [ ] Add `#[serde(default)] pub vertical: Option<String>` to `AuditEntry` and `pub vertical: Option<String>` to `AuditEntryInput`, documented like `principal`, with a rustdoc note that the value is `id@digest` and why.
-- [ ] Add `VerticalConfig::provenance_id(&self) -> String` producing that value, unit-tested for stability under label reordering and case changes, and for *instability* when a label is added.
-- [ ] Add `pub vertical: Option<&'a str>` to `ChainHashFields`, populate it in `AuditEntry::new` and `chain_hash_fields`, and hash it in `compute_chain_hash` as `fields.vertical.unwrap_or("")` — **appended after `principal`**, so chains written before this field existed hash byte-for-byte identically.
-- [ ] Populate it at both `AuditEntryInput` construction sites in `facade.rs` from the pipeline's configured vertical id.
-- [ ] Add the column to `audit/export.rs`'s CSV header and row. **This is a breaking change to the export format, and the export declares no version** — verified: `export_csv` writes a bare literal header at `export.rs:44-46` with nothing to bump. Append the column last, state the break in `CHANGELOG.md`, and check any downstream parser before merging.
-- [ ] Tests:
+- [x] Add `#[serde(default)] pub vertical: Option<String>` to `AuditEntry` and `pub vertical: Option<String>` to `AuditEntryInput`, documented like `principal`, with a rustdoc note that the value is `id@digest` and why.
+      → confirmed: both added in `hacienda-core/src/audit/entry.rs`, doc comment mirrors `principal`'s
+      structure (what it is, that it's covered by `compute_chain_hash`, that `None` hashes as `""` so old
+      chains still verify) and additionally explains why the value is `id@digest` rather than the bare id.
+- [x] Add `VerticalConfig::provenance_id(&self) -> String` producing that value, unit-tested for stability under label reordering and case changes, and for *instability* when a label is added.
+      → confirmed, in `hacienda-core/src/pii/config.rs`, next to `validate`: lowercases and sorts labels,
+      hashes each with a `\0` separator via `blake3::Hasher`, formats `"{id}@{first 8 hex}"`. Four unit tests:
+      `should_produce_a_stable_provenance_id_regardless_of_label_order`,
+      `..._regardless_of_label_case`, `should_change_the_provenance_id_when_a_label_is_added` (the plan's
+      required name), and `should_prefix_the_provenance_id_with_the_vertical_id` (format sanity: `finance@`
+      prefix, 8 lowercase hex digest chars).
+- [x] Add `pub vertical: Option<&'a str>` to `ChainHashFields`, populate it in `AuditEntry::new` and `chain_hash_fields`, and hash it in `compute_chain_hash` as `fields.vertical.unwrap_or("")` — **appended after `principal`**, so chains written before this field existed hash byte-for-byte identically.
+      → confirmed: field added; populated in both `AuditEntry::new`'s `ChainHashFields` literal and
+      `chain_hash_fields()`; `compute_chain_hash` hashes `fields.vertical.unwrap_or("")` as the very next
+      `hasher.update` call after `fields.principal.unwrap_or("")`, with a comment warning never to reorder the
+      two. Pinned by `should_hash_an_absent_vertical_as_no_bytes` (mirrors the existing principal test) and,
+      decisively, by the literal-backed backward-compatibility test below.
+- [x] Populate it at both `AuditEntryInput` construction sites in `facade.rs` from the pipeline's configured vertical id.
+      → confirmed: added `pub(crate) fn vertical_provenance_id(&self) -> Option<String>` on `PiiPipeline`
+      (`hacienda-core/src/pii/pipeline.rs`, next to the existing `pub fn config(&self) -> &PipelineConfig`
+      accessor — which, contrary to this task's brief text, already existed on `PiiPipeline`; the new method is
+      a thin, testable wrapper around it: `self.config.vertical.as_ref().map(VerticalConfig::provenance_id)`).
+      Both `record_reveal` (~facade.rs:678) and `record_audit` (~facade.rs:735) now compute
+      `self.pii_pipeline.as_ref().and_then(|p| p.vertical_provenance_id())` once per call and clone it into
+      every `AuditEntryInput` in their respective loops.
+- [x] Add the column to `audit/export.rs`'s CSV header and row. **This is a breaking change to the export format, and the export declares no version** — verified: `export_csv` writes a bare literal header at `export.rs:44-46` with nothing to bump. Append the column last, state the break in `CHANGELOG.md`, and check any downstream parser before merging.
+      → confirmed: `vertical` appended as the last CSV column in both the header literal and the row's field
+      slice, with a comment explaining why "appended last" matters for positional parsers. Grepped the whole
+      workspace for CSV consumers of `export_csv`/`audit::export::export`: none exist outside `export.rs`'s own
+      tests, so there is no in-repo downstream parser to update. Breaking change stated in `CHANGELOG.md`.
+- [x] Tests:
       - `should_verify_a_chain_written_before_the_vertical_field_existed` — construct entries with `vertical: None` and assert the chain hash equals a **hard-coded literal captured before the change**. Capture that literal in Task 0. Without it this test proves nothing.
+        → confirmed, in `entry.rs`, using the original `input("id-1")` fixture unmodified (only extended with
+        `vertical: None`) and asserting `entry.chain_hash == "72eb1d2f14c701e0c58280b2d7fc5132fdc0564a3ed42e7b0c4b84cfdd5a3ee4"` — Task 0's exact literal. **Passes.**
       - `should_change_the_chain_hash_when_the_vertical_changes` — same inputs, different vertical id, different hash.
+        → confirmed, in `entry.rs`: three-way comparison (no vertical vs `finance@3f9a1c02` vs
+        `finance@aaaaaaaa`), all pairwise distinct.
       - `should_reject_a_tampered_vertical_id` — rewrite `vertical` on a serialised entry, assert verification fails.
+        → confirmed, but placed in `chain.rs` rather than `entry.rs`, mirroring the existing
+        `should_detect_a_tampered_entry` chain-level test exactly (push an entry with a vertical, mutate
+        `chain.entries[0].vertical` directly, assert `chain.verify()` returns `AuditError::ChainIntegrity` at
+        index 0) — this exercises the real, user-facing verification API rather than manually recomputing a
+        hash, which is a more faithful test of "verification fails."
       - Round-trip an entry with `vertical: Some(..)` through JSON and CSV.
+        → confirmed: `should_round_trip_an_entry_with_a_vertical_through_json` (`entry.rs`) and
+        `should_round_trip_an_entry_with_a_vertical_through_csv` (`export.rs`), plus
+        `should_deserialize_an_entry_with_no_vertical_key_at_all` (`entry.rs`, the `#[serde(default)]`
+        direction) and `should_export_an_absent_vertical_as_an_empty_csv_field` /
+        `should_append_the_vertical_column_last_in_the_csv_header` (`export.rs`).
       - `should_change_the_provenance_id_when_a_label_is_added` — same id, one extra label, different digest.
-- [ ] `ChainHashFields` is `pub` with `pub` fields and no `#[non_exhaustive]`; adding a field breaks external construction. Same decision as Task 2.5, and here the case for `#[non_exhaustive]` is stronger, because this struct is *designed* to grow (its own rustdoc calls adding a field "a deliberate, reviewable act"). Add it, and note the semver impact in CHANGELOG.
-- [ ] Add `AuditEntry.vertical` and the CSV column to `CHANGELOG.md`.
+        → confirmed, in `config.rs` next to `provenance_id`'s other unit tests (see above).
+- [x] `ChainHashFields` is `pub` with `pub` fields and no `#[non_exhaustive]`; adding a field breaks external construction. Same decision as Task 2.5, and here the case for `#[non_exhaustive]` is stronger, because this struct is *designed* to grow (its own rustdoc calls adding a field "a deliberate, reviewable act"). Add it, and note the semver impact in CHANGELOG.
+      → confirmed: `#[non_exhaustive]` added to `ChainHashFields` with a rustdoc paragraph explaining why
+      (contrast with the Task 2.5 `PipelineConfig` decision: nothing outside this crate constructs
+      `ChainHashFields` today — grepped and confirmed — so the attribute costs nothing now and forces every
+      future external caller through a crate-provided constructor). Semver impact noted in `CHANGELOG.md`.
+- [x] Add `AuditEntry.vertical` and the CSV column to `CHANGELOG.md`.
+      → confirmed: one `[Unreleased] / Added` entry covering `AuditEntry.vertical` /
+      `AuditEntryInput.vertical`, `provenance_id`'s format, the hash-order/backward-compatibility guarantee,
+      the CSV breaking change, and the `ChainHashFields` `#[non_exhaustive]` semver note.
 
-**Acceptance:** old-chain verification test passes against the literal captured in Task 0; tamper test fails verification; export round-trips; CHANGELOG updated.
+**Acceptance:** old-chain verification test passes against the literal captured in Task 0 — **confirmed**:
+`should_verify_a_chain_written_before_the_vertical_field_existed` passes, asserting exactly
+`"72eb1d2f14c701e0c58280b2d7fc5132fdc0564a3ed42e7b0c4b84cfdd5a3ee4"`. Tamper test
+(`should_reject_a_tampered_vertical_id`) fails verification as expected (`AuditError::ChainIntegrity` at index
+0). Export round-trips (JSON and CSV, both directions, including the no-vertical-key-at-all and
+absent-vertical-as-empty-CSV-field cases). CHANGELOG updated. `cargo test -p hacienda-core` (default features)
+is 311 passed / 4 failed (the same four pre-existing chmod-under-root `audit::store_file`/`review::store_file`
+failures named in Task 2's acceptance, not new) / 2 ignored in the lib target, with `config_round_trip` 9/9,
+`ner_eval` 14/14 (+1 ignored), and `pii_corpus` 1/1 all clean — 311 is exactly Task 2's 298 plus this task's 13
+new lib-level tests. Identical result under `--features ner-candle`. `cargo clippy -p hacienda-core
+--all-targets --features ner-candle -- -D warnings` is clean. `cargo test -p hacienda-cli -p hacienda-api` is
+20+3+11+8+3+2 = 47/47 passing (facade.rs's two call sites compile and exercise cleanly through both crates).
+Also updated the seven other in-crate `AuditEntryInput` struct-literal fixtures (`chain.rs`, `segment.rs`,
+`sink.rs`, `store.rs`, `store_file.rs`, plus `export.rs`'s own) and the three `hacienda-wasm` construction sites
+(`crates/hacienda-wasm/src/lib.rs`, `tests/wasm.rs`, `tests/idb.rs`) to carry the new field — `AuditEntryInput`
+has no `Default` impl, so every base fixture needed the field added explicitly; call sites using
+`..base_fixture()` struct-update syntax needed no change. The `hacienda-wasm` edits could not be verified by
+`cargo check`/`cargo test` in this sandbox (no `wasm32-unknown-unknown` target installed, and the requested
+verification matrix does not include this crate), but the edits are the same mechanical one-field addition
+made everywhere else, following the file's own existing comment style.
 
 ---
 

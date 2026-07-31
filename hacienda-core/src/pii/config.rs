@@ -135,6 +135,28 @@ impl VerticalConfig {
 
         Ok(())
     }
+
+    /// The value recorded in the audit chain for detections this vertical produced.
+    ///
+    /// `"<id>@<first 8 hex of blake3 over the sorted, case-folded label set>"`, e.g.
+    /// `finance@3f9a1c02`. An id alone would be a false provenance claim: the same id
+    /// with a different label set detects different things, and the audit record's job
+    /// is to say what *was* detectable at the time. Sorting and case-folding the labels
+    /// before hashing makes the digest stable under reordering or a stray case change
+    /// in config, while still changing whenever the actual label *set* changes — see
+    /// [`AuditEntry::vertical`](crate::audit::AuditEntry::vertical).
+    pub fn provenance_id(&self) -> String {
+        let mut labels: Vec<String> = self.labels.iter().map(|l| l.to_ascii_lowercase()).collect();
+        labels.sort();
+        let mut hasher = blake3::Hasher::new();
+        for label in &labels {
+            hasher.update(label.as_bytes());
+            // A separator so ["ab", "c"] and ["a", "bc"] hash differently.
+            hasher.update(b"\0");
+        }
+        let digest = hasher.finalize().to_hex();
+        format!("{}@{}", self.id, &digest[..8])
+    }
 }
 
 /// Which NER model the statistical half of the pipeline runs, if any.
@@ -307,6 +329,53 @@ mod tests {
             vertical.validate(),
             Err(PiiError::InvalidVertical { .. })
         ));
+    }
+
+    #[test]
+    fn should_produce_a_stable_provenance_id_regardless_of_label_order() {
+        let a = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "account_number".to_string()],
+        };
+        let b = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["account_number".to_string(), "swift_code".to_string()],
+        };
+        assert_eq!(a.provenance_id(), b.provenance_id());
+    }
+
+    #[test]
+    fn should_produce_a_stable_provenance_id_regardless_of_label_case() {
+        let a = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["Swift_Code".to_string(), "Account_Number".to_string()],
+        };
+        let b = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "account_number".to_string()],
+        };
+        assert_eq!(a.provenance_id(), b.provenance_id());
+    }
+
+    #[test]
+    fn should_change_the_provenance_id_when_a_label_is_added() {
+        let base = finance_vertical();
+        let mut extended = base.clone();
+        extended.labels.push("routing_number".to_string());
+        assert_ne!(base.provenance_id(), extended.provenance_id());
+    }
+
+    #[test]
+    fn should_prefix_the_provenance_id_with_the_vertical_id() {
+        let vertical = finance_vertical();
+        let provenance = vertical.provenance_id();
+        assert!(
+            provenance.starts_with("finance@"),
+            "expected a `finance@<digest>` provenance id, got {provenance:?}"
+        );
+        let digest = provenance.strip_prefix("finance@").unwrap();
+        assert_eq!(digest.len(), 8, "digest must be the first 8 hex chars");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

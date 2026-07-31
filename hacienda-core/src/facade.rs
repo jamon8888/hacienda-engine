@@ -665,6 +665,10 @@ impl HaciendaFacade {
         }
 
         let principal = caller.principal_id().map(str::to_owned);
+        let vertical = self
+            .pii_pipeline
+            .as_ref()
+            .and_then(|p| p.vertical_provenance_id());
         let inputs: Vec<AuditEntryInput> = entities
             .iter()
             .map(|entity| {
@@ -687,6 +691,7 @@ impl HaciendaFacade {
                     // The store owns config_hash — see `record_audit`.
                     config_hash: String::new(),
                     principal: principal.clone(),
+                    vertical: vertical.clone(),
                 }
             })
             .collect();
@@ -729,6 +734,10 @@ impl HaciendaFacade {
         };
 
         let principal = caller.principal_id().map(str::to_owned);
+        let vertical = self
+            .pii_pipeline
+            .as_ref()
+            .and_then(|p| p.vertical_provenance_id());
         let inputs: Vec<AuditEntryInput> = result
             .audit_log
             .iter()
@@ -746,6 +755,7 @@ impl HaciendaFacade {
                 // the ownership explicit and removes the reason to read it first.
                 config_hash: String::new(),
                 principal: principal.clone(),
+                vertical: vertical.clone(),
             })
             .collect();
 

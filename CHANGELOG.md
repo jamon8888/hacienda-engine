@@ -33,6 +33,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hacienda-cli` and `hacienda-api` now compile `hacienda-core` with the `ner-candle`
   feature, so `--model-dir`/`--lora-dir` (already accepted by the CLI) actually reach a
   Candle-backed `NerDetector` instead of always failing with `ModelUnavailable`.
+- **Vertical provenance in the audit chain.** `AuditEntry.vertical: Option<String>` and
+  `AuditEntryInput.vertical: Option<String>` record which Tier 0 schema vertical (if
+  any) was active when an entity was detected. The recorded value is
+  `"<id>@<first 8 hex of blake3 over the sorted, case-folded label set>"` (e.g.
+  `finance@3f9a1c02`), via the new `VerticalConfig::provenance_id`, not the bare
+  vertical id — an id alone would be a false provenance claim, since the same id with a
+  different label set detects different things. `HaciendaFacade` populates it from the
+  pipeline's configured vertical at both audit-entry construction sites. The field is
+  covered by `compute_chain_hash`, appended immediately after `principal`, so it cannot
+  be rewritten after the fact without breaking verification; `None` hashes as the empty
+  string, so audit chains written before this field existed continue to verify
+  byte-for-byte (`should_verify_a_chain_written_before_the_vertical_field_existed`
+  pins this against the exact pre-change chain-hash literal).
+  **Breaking change:** `audit::export::export_csv`'s header and every row gain a
+  `vertical` column, appended last. The CSV export format is unversioned, so this is a
+  silent shape change to any downstream parser that reads it positionally or by
+  fixed column count — check any such parser before upgrading.
+  **Compatibility:** `ChainHashFields` is now `#[non_exhaustive]` — its own rustdoc
+  already called adding a field "a deliberate, reviewable act", so this formalises
+  that: external struct-literal construction of `ChainHashFields` (there are no known
+  external constructors of it outside this crate today) now requires going through a
+  crate-provided constructor rather than a bare literal, and will break on every future
+  field addition regardless. `AuditEntry` and `AuditEntryInput` are not marked
+  `#[non_exhaustive]` — consistent with the Task 2.5 decision for `PipelineConfig`, the
+  new `vertical` field is additive and defaults to `None`/absent via `#[serde(default)]`
+  on `AuditEntry`, but external struct-literal construction of `AuditEntryInput` (which
+  has no `Default` impl) breaks on upgrade, as it would for any field addition to that
+  struct.
 - **Real pseudonymisation.** `RedactionMode::Pseudonymize` now emits a keyed, deterministic,
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal

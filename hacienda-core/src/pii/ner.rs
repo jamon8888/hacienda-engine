@@ -33,6 +33,11 @@ pub(crate) const DEFAULT_CATEGORIES: &[EntityCategory] = &[
 /// directory: `load_detector`'s `ner-candle` arm is gated on `not(target_arch =
 /// "wasm32")` and needs real weights on disk to run at all, which this workspace's test
 /// sandbox does not have.
+///
+/// `cfg`-gated to match its only callers (`load_detector`'s `ner-candle` arm, and
+/// tests) — without this, a default-feature (`ner-candle` off) non-test build of
+/// `hacienda-core` sees no caller at all and emits a `dead_code` warning.
+#[cfg(any(test, all(feature = "ner-candle", not(target_arch = "wasm32"))))]
 pub(crate) fn categories_with_vertical(
     vertical: Option<&crate::pii::config::VerticalConfig>,
 ) -> Vec<EntityCategory> {
