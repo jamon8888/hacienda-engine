@@ -126,6 +126,14 @@ impl PiiPipeline {
         ner_detector: Option<NerDetector>,
         pseudonymiser: Option<Arc<Pseudonymiser>>,
     ) -> Result<Self, PiiError> {
+        // Validated here, unconditionally, in every build profile — including
+        // regex-only and wasm — rather than inside `load_detector`. `load_detector` is
+        // only reached when `config.model.enabled` is true, so validating there would
+        // silently accept a malformed vertical everywhere else. See `PiiError::InvalidVertical`.
+        if let Some(vertical) = &config.vertical {
+            vertical.validate()?;
+        }
+
         if config.redaction.mode == RedactionMode::Pseudonymize {
             if let Some(detector) = &ner_detector {
                 validate_ner_labels_for_pseudonymize(detector)?;
@@ -230,10 +238,17 @@ fn load_detector(config: &PipelineConfig) -> Result<NerDetector, PiiError> {
     let model_dir = config.model.model_dir.as_deref().ok_or_else(|| {
         PiiError::ModelUnavailable("model.enabled is true but no model_dir is set".into())
     })?;
-    Ok(
+    let mut detector =
         NerDetector::from_candle_local(model_dir, config.model.lora_adapter_dir.as_deref())?
-            .with_threshold(config.model_threshold_default),
-    )
+            .with_threshold(config.model_threshold_default);
+    if let Some(vertical) = &config.vertical {
+        // Extend, not replace: a finance vertical must still find people. See
+        // `ner::categories_with_vertical`.
+        detector = detector.with_categories(crate::pii::ner::categories_with_vertical(Some(
+            vertical,
+        )));
+    }
+    Ok(detector)
 }
 
 #[cfg(not(all(feature = "ner-candle", not(target_arch = "wasm32"))))]
@@ -511,6 +526,162 @@ mod tests {
             .is_ok(),
             "a label with no delimiters must be accepted"
         );
+    }
+
+    // ── Task 2: Tier 0 schema verticals ───────────────────────────────────────
+
+    fn bad_vertical() -> crate::pii::config::VerticalConfig {
+        crate::pii::config::VerticalConfig {
+            id: "finance".into(),
+            labels: vec!["has:colon".into()],
+        }
+    }
+
+    fn valid_vertical() -> crate::pii::config::VerticalConfig {
+        // Deliberately not a label that any built-in regex pattern (SWIFT/BIC, IBAN,
+        // SSN, etc. — see `patterns.rs`) would also claim, so this test isolates the
+        // vertical/model path rather than exercising regex-first merge priority.
+        crate::pii::config::VerticalConfig {
+            id: "finance".into(),
+            labels: vec!["docket_number".into()],
+        }
+    }
+
+    fn env_pseudonymiser() -> Arc<crate::redaction::Pseudonymiser> {
+        use crate::redaction::pseudonym::{EnvKeyResolver, ACTIVE_KEY_VAR, KEY_BYTES};
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            ACTIVE_KEY_VAR => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        Arc::new(crate::redaction::Pseudonymiser::new(&resolver, &[]).unwrap())
+    }
+
+    #[test]
+    fn should_reject_a_vertical_label_containing_a_token_delimiter() {
+        // Validation is not pseudonymise-only: it must fail in every redaction mode.
+        for mode in [RedactionMode::Mask, RedactionMode::Hash] {
+            let config = PipelineConfig {
+                redaction: crate::redaction::RedactionConfig {
+                    mode,
+                    ..Default::default()
+                },
+                vertical: Some(bad_vertical()),
+                ..Default::default()
+            };
+            let result = PiiPipeline::with_detector(config, None);
+            assert!(
+                matches!(result, Err(PiiError::InvalidVertical { .. })),
+                "mode {mode:?} must still reject a delimiter-containing label"
+            );
+        }
+
+        // Also fails under Pseudonymize, with no detector configured at all.
+        let config = PipelineConfig {
+            redaction: crate::redaction::RedactionConfig {
+                mode: RedactionMode::Pseudonymize,
+                ..Default::default()
+            },
+            vertical: Some(bad_vertical()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            PiiPipeline::with_detector(config, None),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_an_invalid_vertical_in_a_regex_only_pipeline() {
+        // model.enabled = false: load_detector is never called. This pins the
+        // validation site to `assemble` — a future refactor that moves validation back
+        // into `load_detector` would make this test pass with `Ok(_)` instead.
+        let config = PipelineConfig {
+            model: crate::pii::config::ModelConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            vertical: Some(bad_vertical()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            PiiPipeline::new(config),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_pseudonymise_a_vertical_detection_into_a_parsable_token() {
+        let pseudonymiser = env_pseudonymiser();
+        let vertical = valid_vertical();
+
+        let text = "DOC-REF-48213";
+        let detector = NerDetector::new(Arc::new(StubBackend(vec![Entity {
+            category: EntityCategory::Custom("docket_number".into()),
+            text: text.into(),
+            start: 0,
+            end: text.len() as u32,
+            confidence: Some(0.9),
+        }])))
+        .with_categories(crate::pii::ner::categories_with_vertical(Some(&vertical)));
+
+        let pipeline_config = PipelineConfig {
+            redaction: crate::redaction::RedactionConfig {
+                mode: RedactionMode::Pseudonymize,
+                ..Default::default()
+            },
+            vertical: Some(vertical),
+            ..Default::default()
+        };
+
+        let pipeline = PiiPipeline::with_detector_and_pseudonymiser(
+            pipeline_config,
+            Some(detector),
+            Some(Arc::clone(&pseudonymiser)),
+        )
+        .unwrap();
+
+        let result = pipeline.process(text).await.unwrap();
+        let start = result.redacted_text.find('[').expect(&result.redacted_text);
+        let end = result.redacted_text.find(']').expect(&result.redacted_text);
+        let token = &result.redacted_text[start..=end];
+
+        assert!(
+            token.starts_with("[DOCKET_NUMBER:"),
+            "token must be labelled with the uppercased vertical label, got {token}"
+        );
+        // `reveal` returns the normalised value (lowercased, NFKC) rather than the
+        // original casing — that lossiness is `normalize`'s documented behaviour, not
+        // something specific to verticals.
+        assert_eq!(pseudonymiser.reveal(token).unwrap(), text.to_lowercase());
+    }
+
+    #[test]
+    fn should_reject_a_pipeline_whose_vertical_label_cannot_be_pseudonymised() {
+        // `config.vertical` is intentionally left `None` here — this test targets the
+        // *pre-existing* `validate_ner_labels_for_pseudonymize`, called with a detector
+        // whose categories were built the same way `load_detector` builds them for a
+        // vertical (`categories_with_vertical`), to confirm it already covers
+        // vertical-origin labels with no new code of its own.
+        let vertical = bad_vertical();
+        let categories = crate::pii::ner::categories_with_vertical(Some(&vertical));
+        let detector = NerDetector::new(Arc::new(StubBackend(vec![]))).with_categories(categories);
+
+        let pseudonymiser = env_pseudonymiser();
+        let pipeline_config = PipelineConfig {
+            redaction: crate::redaction::RedactionConfig {
+                mode: RedactionMode::Pseudonymize,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = PiiPipeline::with_detector_and_pseudonymiser(
+            pipeline_config,
+            Some(detector),
+            Some(pseudonymiser),
+        );
+        assert!(matches!(result, Err(PiiError::InvalidEntityLabel { .. })));
     }
 
     #[test]

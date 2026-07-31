@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tier 0 schema verticals.** `hacienda_core::pii::VerticalConfig` (`id`, `labels`) and
+  `PipelineConfig::vertical: Option<VerticalConfig>` (default `None`). A configured
+  vertical's labels are handed to the NER backend as additional zero-shot
+  `EntityCategory::Custom` categories, *extending* the base five categories rather than
+  replacing them — a finance vertical still finds people. No new weights, no model
+  reload; see `superpowers/specs/2026-07-31-vertical-model-specialisation-design.md`
+  §4.1. `VerticalConfig::validate` rejects an empty id, an empty label set, an empty or
+  `[`/`:`/`]`-containing label, or case-insensitive duplicate labels, and runs
+  unconditionally in `PiiPipeline::assemble` (every build profile, including
+  regex-only and wasm) — not only when a model is actually loaded. `hacienda config
+  show` prints the active vertical's id and labels. `GET /v1/pii/config` now also
+  reports `vertical_id`/`vertical_labels` (deliberately exposed; unlike `model_dir`
+  these are not host-identifying).
+  **Compatibility:** `PipelineConfig` gained a new public field (`vertical`) and is
+  **not** `#[non_exhaustive]` — no type in `hacienda-core` is today, so this follows
+  existing precedent rather than introducing a new one, but it does mean external
+  struct-literal construction of `PipelineConfig` (`PipelineConfig { .. }` without
+  `..Default::default()`) breaks on upgrade, as it would for any field addition to this
+  struct. `Default` is unaffected: `PipelineConfig::default()` and `..Default::default()`
+  keep working, and `vertical` defaults to `None` — a config with no `[pii.vertical]`
+  section behaves exactly as before.
 - `hacienda-cli` and `hacienda-api` now compile `hacienda-core` with the `ner-candle`
   feature, so `--model-dir`/`--lora-dir` (already accepted by the CLI) actually reach a
   Candle-backed `NerDetector` instead of always failing with `ModelUnavailable`.

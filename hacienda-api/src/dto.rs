@@ -212,6 +212,16 @@ pub struct PiiConfigResponse {
     /// than not shipping the endpoint.
     pub model_enabled: bool,
     pub audit_enabled: bool,
+    /// The active Tier 0 vertical's id, or `None` when no vertical is configured.
+    ///
+    /// Deliberately exposed: unlike `model_dir`/`lora_adapter_dir` (filesystem paths,
+    /// host topology) a vertical id and its label set are not secret or
+    /// host-identifying — they describe *what the pipeline is configured to detect*,
+    /// which a caller integrating against `/v1/pii/redact` needs in order to know what
+    /// categories to expect back. See the implementation plan's Task 2.4.
+    pub vertical_id: Option<String>,
+    /// The active vertical's zero-shot labels. Empty when no vertical is configured.
+    pub vertical_labels: Vec<String>,
 }
 
 /// Response from `GET /health`.

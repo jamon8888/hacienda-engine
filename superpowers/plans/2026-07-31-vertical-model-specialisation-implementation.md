@@ -222,7 +222,7 @@ Task 1 is not merely a prerequisite; it can **invalidate Task 2's design**. Run 
 
 ### 2.1 Config
 
-- [ ] Add to `hacienda-core/src/pii/config.rs`:
+- [x] Add to `hacienda-core/src/pii/config.rs`:
       ```rust
       #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
       #[serde(default, deny_unknown_fields)]
@@ -234,8 +234,15 @@ Task 1 is not merely a prerequisite; it can **invalidate Task 2's design**. Run 
       }
       ```
       and `pub vertical: Option<VerticalConfig>` on `PipelineConfig` (default `None`).
-- [ ] Add `pub fn validate(&self) -> Result<(), PiiError>` on `VerticalConfig`: non-empty `id`; non-empty `labels`; every label non-empty after trim; no label containing `[`, `:`, `]` (mirroring `category_label`); no duplicates after case-folding. Return a new `PiiError::InvalidVertical { id, reason }` variant.
-- [ ] Do **not** add a `verticals` array or a selector. One optional vertical, bound at construction.
+      → confirmed: `VerticalConfig` added verbatim (plus rustdoc, including the alias-table footgun note) at
+      `hacienda-core/src/pii/config.rs`; `PipelineConfig::vertical: Option<VerticalConfig>` added, `None` in
+      `PipelineConfig::default()`; re-exported as `hacienda_core::pii::VerticalConfig`.
+- [x] Add `pub fn validate(&self) -> Result<(), PiiError>` on `VerticalConfig`: non-empty `id`; non-empty `labels`; every label non-empty after trim; no label containing `[`, `:`, `]` (mirroring `category_label`); no duplicates after case-folding. Return a new `PiiError::InvalidVertical { id, reason }` variant.
+      → confirmed: implemented exactly as specified; `PiiError::InvalidVertical { id, reason }` added to
+      `hacienda-core/src/pii/mod.rs`; 6 unit tests in `config.rs` cover empty id, empty label set, blank label,
+      each of `[`/`:`/`]`, and case-folded duplicates.
+- [x] Do **not** add a `verticals` array or a selector. One optional vertical, bound at construction.
+      → confirmed: `PipelineConfig` carries a single `Option<VerticalConfig>`, nothing else.
 
 ### 2.2 Threading
 
@@ -246,9 +253,14 @@ Task 1 is not merely a prerequisite; it can **invalidate Task 2's design**. Run 
 **default regex-only configuration** and on every wasm build. Validate in `assemble`, unconditionally, next to
 the existing `validate_ner_labels_for_pseudonymize` call at `pipeline.rs:131`.
 
-- [ ] In `PiiPipeline::assemble`, before building the detector, call `config.vertical.as_ref().map(VerticalConfig::validate).transpose()?`. A bad vertical is a configuration error in every build profile.
-- [ ] `DEFAULT_CATEGORIES` at `ner.rs:14` is a **private** `const` today. Change it to `pub(crate)` as part of this task — the plan's earlier draft assumed it was already visible; it is not.
-- [ ] In the `ner-candle` arm of `load_detector`, extend categories when a vertical is configured:
+- [x] In `PiiPipeline::assemble`, before building the detector, call `config.vertical.as_ref().map(VerticalConfig::validate).transpose()?`. A bad vertical is a configuration error in every build profile.
+      → confirmed: added as the first statement in `assemble`, ahead of the pseudonymize-mode check, using
+      `if let Some(vertical) = &config.vertical { vertical.validate()?; }` (equivalent to the sketch's
+      `.map(...).transpose()?`, chosen for a clearer error site in a stack trace). Pinned by
+      `should_reject_an_invalid_vertical_in_a_regex_only_pipeline` (`model.enabled = false` still rejects).
+- [x] `DEFAULT_CATEGORIES` at `ner.rs:14` is a **private** `const` today. Change it to `pub(crate)` as part of this task — the plan's earlier draft assumed it was already visible; it is not.
+      → confirmed: changed to `pub(crate)`.
+- [x] In the `ner-candle` arm of `load_detector`, extend categories when a vertical is configured:
       ```rust
       let mut detector = NerDetector::from_candle_local(model_dir, config.model.lora_adapter_dir.as_deref())?
           .with_threshold(config.model_threshold_default);
@@ -260,32 +272,102 @@ the existing `validate_ner_labels_for_pseudonymize` call at `pipeline.rs:131`.
       Ok(detector)
       ```
       The base five are **extended, not replaced** — a finance vertical must still find people.
-- [ ] No change to `NerDetector::detect`, `PiiPipeline::detect`, or any call site. That is the design.
+      → confirmed, with one deliberate deviation from the literal sketch: the `DEFAULT_CATEGORIES.to_vec()` +
+      `.extend(...)` logic lives in a new `pub(crate) fn categories_with_vertical` in `ner.rs` rather than
+      inline in `load_detector`, so it is unit-testable (`should_extend_base_categories_with_vertical_labels`,
+      `should_return_the_base_categories_unchanged_when_no_vertical_is_configured`) without a real model
+      directory — `load_detector`'s `ner-candle` arm cannot itself be exercised in this sandbox (needs real
+      GLiNER2 weights on disk; see Task 1.5's status). `load_detector` now calls that shared function; behaviour
+      is unchanged from the sketch.
+- [x] No change to `NerDetector::detect`, `PiiPipeline::detect`, or any call site. That is the design.
+      → confirmed: neither function's body changed.
 
 ### 2.3 Tests
 
-- [ ] `should_extend_base_categories_with_vertical_labels` — build a pipeline with a stub backend and a vertical, assert `configured_categories()` contains all five base variants plus each label as `EntityCategory::Custom`.
-- [ ] `should_reject_a_vertical_label_containing_a_token_delimiter` — assert `PiiError::InvalidVertical`, and assert it fails **regardless of redaction mode** (validation is not pseudonymise-only).
-- [ ] `should_reject_an_invalid_vertical_in_a_regex_only_pipeline` — `model.enabled = false`, bad vertical, still `PiiError::InvalidVertical`. This is the test that pins the validation site; without it a future refactor will quietly move validation back into `load_detector`.
-- [ ] `should_map_a_vertical_label_to_a_custom_pii_category` — stub backend returns `EntityCategory::Custom("swift_code")`, assert the emitted `ModelEntity.category == PiiCategory::Custom("swift_code")`.
-- [ ] `should_map_an_aliased_vertical_label_to_its_taxonomy_category` — label `"iban"` must arrive as `PiiCategory::Iban`, not `Custom("iban")`, because `to_pii_category`'s alias table already claims it. This is a real footgun: a vertical author choosing `iban` gets different downstream behaviour than one choosing `iban_number`. Assert it and document it in the config rustdoc.
-- [ ] `should_pseudonymise_a_vertical_detection_into_a_parsable_token` — end-to-end with a stub backend and `RedactionMode::Pseudonymize`, assert the token is `[SWIFT_CODE:...]` and that `reveal` round-trips it.
-- [ ] `should_reject_a_pipeline_whose_vertical_label_cannot_be_pseudonymised` — confirm the existing `validate_ner_labels_for_pseudonymize` path now covers vertical labels with no new code.
-- [ ] Config round-trip: extend `hacienda-core/tests/config_round_trip.rs` so a TOML file with `[pii.vertical]` survives serialise → deserialise, and so a file **without** it still parses (the `deny_unknown_fields` direction is the risk).
+- [x] `should_extend_base_categories_with_vertical_labels` — build a pipeline with a stub backend and a vertical, assert `configured_categories()` contains all five base variants plus each label as `EntityCategory::Custom`.
+      → confirmed, in `hacienda-core/src/pii/ner.rs`: asserts on `categories_with_vertical`'s output directly
+      (see 2.2's deviation note) rather than reaching into a `PiiPipeline`'s private `ner_detector` field —
+      equivalent coverage, since that function is exactly what `load_detector` now calls.
+- [x] `should_reject_a_vertical_label_containing_a_token_delimiter` — assert `PiiError::InvalidVertical`, and assert it fails **regardless of redaction mode** (validation is not pseudonymise-only).
+      → confirmed, in `pipeline.rs`: loops over `[Mask, Hash]` plus a separate `Pseudonymize` case, all three
+      rejecting with `PiiError::InvalidVertical` and no detector configured at all (so pseudonymize-specific
+      validation cannot be the thing catching it).
+- [x] `should_reject_an_invalid_vertical_in_a_regex_only_pipeline` — `model.enabled = false`, bad vertical, still `PiiError::InvalidVertical`. This is the test that pins the validation site; without it a future refactor will quietly move validation back into `load_detector`.
+      → confirmed, in `pipeline.rs`, using `PiiPipeline::new` (not `with_detector`) so `load_detector` really is
+      skipped end-to-end.
+- [x] `should_map_a_vertical_label_to_a_custom_pii_category` — stub backend returns `EntityCategory::Custom("swift_code")`, assert the emitted `ModelEntity.category == PiiCategory::Custom("swift_code")`.
+      → confirmed, in `ner.rs`.
+- [x] `should_map_an_aliased_vertical_label_to_its_taxonomy_category` — label `"iban"` must arrive as `PiiCategory::Iban`, not `Custom("iban")`, because `to_pii_category`'s alias table already claims it. This is a real footgun: a vertical author choosing `iban` gets different downstream behaviour than one choosing `iban_number`. Assert it and document it in the config rustdoc.
+      → confirmed, in `ner.rs`; the footgun is documented on `VerticalConfig`'s rustdoc in `config.rs` under a
+      "Footgun: the alias-table collision" heading.
+- [x] `should_pseudonymise_a_vertical_detection_into_a_parsable_token` — end-to-end with a stub backend and `RedactionMode::Pseudonymize`, assert the token is `[SWIFT_CODE:...]` and that `reveal` round-trips it.
+      → confirmed, in `pipeline.rs`, **with one change from the plan's example token**: the label used is
+      `docket_number` (text `DOC-REF-48213`), not `swift_code` (text `BOFAUS3N`) — the latter combination was
+      tried first and failed, because `BOFAUS3N` also matches hacienda's own built-in SWIFT/BIC *regex* pattern
+      (`patterns.rs`), and with the default `regex_first: true` merge priority the regex detection pre-empted
+      the model/vertical one, producing a `[SWIFTBIC:...]` token instead — a real merge-priority interaction,
+      not a bug, but the wrong thing for this test to demonstrate. `docket_number`/`DOC-REF-48213` isolates the
+      vertical path from the regex engine. Also note `reveal` returns the *normalised* (lowercased) value, per
+      `normalize`'s existing documented behaviour — asserted as `text.to_lowercase()`, not `text`.
+- [x] `should_reject_a_pipeline_whose_vertical_label_cannot_be_pseudonymised` — confirm the existing `validate_ner_labels_for_pseudonymize` path now covers vertical labels with no new code.
+      → confirmed, in `pipeline.rs`: builds a detector via `categories_with_vertical` (so its categories are
+      shaped exactly as `load_detector` would build them for a vertical) but leaves `config.vertical` itself
+      `None`, so `VerticalConfig::validate` cannot be what catches the bad label — only the pre-existing,
+      unmodified `validate_ner_labels_for_pseudonymize` can, and does (`PiiError::InvalidEntityLabel`).
+- [x] Config round-trip: extend `hacienda-core/tests/config_round_trip.rs` so a TOML file with `[pii.vertical]` survives serialise → deserialise, and so a file **without** it still parses (the `deny_unknown_fields` direction is the risk).
+      → confirmed: `should_round_trip_a_configured_vertical_through_toml` and
+      `should_parse_a_pii_section_with_no_vertical_key_at_all`, both passing.
 
 ### 2.4 Surface exposure
 
-- [ ] **Do not add a `--vertical` flag.** With one `Option<VerticalConfig>` the flag could only confirm or reject the id already in the config file — a flag that cannot change behaviour. Adding it now would contradict this plan's own refusal of the `[[pii.verticals]]` registry as premature. The flag arrives with the registry, or not at all.
-- [ ] Extend `config show` (`hacienda-cli/src/commands.rs:169-181`) to print the active vertical id and label set with provenance, matching the existing `model_dir` lines. This is the whole CLI surface for v1, and it is enough: the operator can see what is active.
-- [ ] **`hacienda-api`:** `dto.rs:199` is an explicit allowlist of `PipelineConfig` fields, not a derived `Serialize`. Decide whether the vertical is exposed over HTTP and act deliberately — leaving it out is defensible, leaving it out *by forgetting the file exists* is not. Add the field to the allowlist and a DTO test either way, or add a comment recording the decision not to.
-- [ ] **wasm — amend the spec, do not build anything.** Verified: `hacienda-core` on wasm32 *does* compile xberg's Candle backend (via `ner-candle-wasm`), but both `NerDetector::from_candle_local` and the real `load_detector` are gated `not(target_arch = "wasm32")`, so `load_detector` on wasm always returns `ModelUnavailable`. hacienda-core cannot run a model in the browser under any feature combination today; Studio reaches `xberg-wasm`'s `NerModel` directly instead (commit `c322cad`). Spec §4.1's "works identically on native and wasm32" is therefore false as plumbing — Tier 0 is native-only until that gate is opened. Correct §4.1 and add it to spec §9 Open Questions. **Do not** widen the cfg as part of this plan: making hacienda-core load a 614 MB model in a browser is spec §6's blocker, not a checkbox here.
+- [x] **Do not add a `--vertical` flag.** With one `Option<VerticalConfig>` the flag could only confirm or reject the id already in the config file — a flag that cannot change behaviour. Adding it now would contradict this plan's own refusal of the `[[pii.verticals]]` registry as premature. The flag arrives with the registry, or not at all.
+      → confirmed: no `--vertical` flag added; `hacienda-cli/src/cli.rs` untouched.
+- [x] Extend `config show` (`hacienda-cli/src/commands.rs:169-181`) to print the active vertical id and label set with provenance, matching the existing `model_dir` lines. This is the whole CLI surface for v1, and it is enough: the operator can see what is active.
+      → confirmed: a `[pii.vertical]` block added right after `[pii.model]` in `print_config_text`, printing
+      `id`/`labels` with `(from: config)` when set and `(not configured — no vertical is active)` otherwise.
+      Manually verified against a `[pii.vertical]` TOML file — see the "Verification" notes below.
+- [x] **`hacienda-api`:** `dto.rs:199` is an explicit allowlist of `PipelineConfig` fields, not a derived `Serialize`. Decide whether the vertical is exposed over HTTP and act deliberately — leaving it out is defensible, leaving it out *by forgetting the file exists* is not. Add the field to the allowlist and a DTO test either way, or add a comment recording the decision not to.
+      → **decision: expose it.** Unlike `model_dir`/`lora_adapter_dir` (filesystem paths, host topology) a
+      vertical's id and labels describe *what the pipeline is configured to detect*, which an API client
+      integrating against `/v1/pii/redact` benefits from knowing, and neither is secret. Added
+      `vertical_id: Option<String>` and `vertical_labels: Vec<String>` to `PiiConfigResponse`
+      (`hacienda-api/src/dto.rs`), populated in `handlers/pii.rs::pii_config`, with two new HTTP-level tests in
+      `handlers/pii.rs` (`should_report_no_active_vertical_when_none_is_configured`,
+      `should_report_the_active_vertical_id_and_labels`) that build a real `axum::Router` via
+      `routes::build_router` and assert on the JSON response — both pass.
+- [x] **wasm — amend the spec, do not build anything.** Verified: `hacienda-core` on wasm32 *does* compile xberg's Candle backend (via `ner-candle-wasm`), but both `NerDetector::from_candle_local` and the real `load_detector` are gated `not(target_arch = "wasm32")`, so `load_detector` on wasm always returns `ModelUnavailable`. hacienda-core cannot run a model in the browser under any feature combination today; Studio reaches `xberg-wasm`'s `NerModel` directly instead (commit `c322cad`). Spec §4.1's "works identically on native and wasm32" is therefore false as plumbing — Tier 0 is native-only until that gate is opened. Correct §4.1 and add it to spec §9 Open Questions. **Do not** widen the cfg as part of this plan: making hacienda-core load a 614 MB model in a browser is spec §6's blocker, not a checkbox here.
+      → confirmed: spec §4.1 already carried the corrective language (verified byte-for-byte present before
+      this task started — likely written alongside this plan document itself). Added a new §9 Open Questions
+      item 6 ("When does Tier 0 actually reach the browser?") cross-referencing §4.1's correction, per this
+      checklist's explicit instruction to add it there too. No `cfg` gate touched; no wasm code touched.
 
 ### 2.5 API compatibility
 
-- [ ] `VerticalConfig` and `PipelineConfig::vertical` are **public API additions**. Add them to `CHANGELOG.md` under `[Unreleased] / Added`, per the repo's api-compatibility rule.
-- [ ] `PipelineConfig` has public fields and no `#[non_exhaustive]` (there is none anywhere in `hacienda-core`). Adding a field breaks any external struct-literal construction. Either mark it `#[non_exhaustive]` now — cheap, and it makes every future field additive — or accept and document the semver consequence. Decide explicitly; do not add the field silently.
+- [x] `VerticalConfig` and `PipelineConfig::vertical` are **public API additions**. Add them to `CHANGELOG.md` under `[Unreleased] / Added`, per the repo's api-compatibility rule.
+      → confirmed: entry added to `CHANGELOG.md`'s `[Unreleased] / Added`, describing the new types, the
+      extend-not-replace behaviour, the unconditional validation site, the CLI/API surface, and the semver
+      decision below.
+- [x] `PipelineConfig` has public fields and no `#[non_exhaustive]` (there is none anywhere in `hacienda-core`). Adding a field breaks any external struct-literal construction. Either mark it `#[non_exhaustive]` now — cheap, and it makes every future field additive — or accept and document the semver consequence. Decide explicitly; do not add the field silently.
+      → **decision: do not mark it `#[non_exhaustive]`.** Kept consistent with the rest of `hacienda-core`,
+      where the attribute is used nowhere today — introducing it on exactly this one struct, in this one PR,
+      would be a bigger and less-reviewed precedent-setting change than the field addition itself, and Task
+      2.5 asks for a decision on *this* field addition, not a crate-wide policy change. The semver consequence
+      (external `PipelineConfig { .. }` struct-literal construction without `..Default::default()` breaks on
+      upgrade) is accepted and documented in the CHANGELOG entry above. `PipelineConfig::default()` and
+      `..Default::default()` usage — the pattern used throughout this codebase's own tests — are unaffected.
 
-**Acceptance:** all new tests pass; `cargo test --workspace` count equals Task 0's baseline plus the new tests, with **zero** pre-existing failures; `clippy -D warnings` clean; `hacienda config show` displays the vertical; CHANGELOG updated.
+**Acceptance:** all new tests pass — confirmed: `cargo test -p hacienda-core` (default features) is 298 passed
+/ 4 failed / 2 ignored in the lib target (the 4 failures are the pre-existing `audit::store_file`/
+`review::store_file` chmod-under-root failures named in this task's brief, not new; every other target —
+`config_round_trip` 9/9, `ner_eval` 14/14 (+1 ignored), `pii_corpus` 1/1 — passes clean), and the same holds
+under `--features ner-candle`. `cargo test -p hacienda-cli` (11+8+3+2 = 24/24) and `cargo test -p hacienda-api`
+(20/20 + 3/3 safety) both pass, including the new CLI-adjacent and DTO tests. `cargo clippy -p hacienda-core
+--all-targets --features ner-candle -- -D warnings` is clean. `hacienda config show` displays the vertical
+(manually verified). CHANGELOG updated. The plan's literal phrase "`cargo test --workspace` count equals Task
+0's baseline plus the new tests, with zero pre-existing failures" is **not achievable as written** — Task 0's
+baseline of 0 failures predates the 4 known chmod-under-root failures, which are a sandbox artifact unrelated to
+this task and were already present (and separately documented as expected) before Task 2 started; "zero
+*new* failures" is what was actually verified and is true.
 
 ---
 

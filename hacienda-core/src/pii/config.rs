@@ -4,6 +4,7 @@ use crate::audit::AuditConfig;
 use crate::pii::PiiError;
 use crate::redaction::{RedactionConfig, RedactionMode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Effective configuration for one [`crate::pii::PiiPipeline`].
@@ -28,6 +29,17 @@ pub struct PipelineConfig {
     /// `HaciendaResult::pii`) and every document is still audited and reviewed exactly
     /// once, regardless of completion order.
     pub concurrency: usize,
+    /// The Tier 0 schema vertical bound to this pipeline, if any.
+    ///
+    /// `None` (the default) is a strict no-op: nothing about detection changes unless
+    /// an operator explicitly writes a `[pii.vertical]` section. See
+    /// `superpowers/specs/2026-07-31-vertical-model-specialisation-design.md` §4.1 and
+    /// [`VerticalConfig`].
+    ///
+    /// There is deliberately no `verticals` array or selector — one optional vertical,
+    /// bound at pipeline construction. A registry is premature abstraction at N=1; see
+    /// the implementation plan's "Explicit Non-Goals".
+    pub vertical: Option<VerticalConfig>,
 }
 
 impl Default for PipelineConfig {
@@ -40,7 +52,88 @@ impl Default for PipelineConfig {
             audit: AuditConfig::default(),
             model: ModelConfig::default(),
             concurrency: 1,
+            vertical: None,
         }
+    }
+}
+
+/// A Tier 0 "schema vertical": a named set of zero-shot labels handed to the NER
+/// backend *in addition to* the base categories (`Person`, `Organization`, `Location`,
+/// `Email`, `Phone`). No weights are loaded and no model is reloaded — a vertical is
+/// arguments to an inference call, nothing more. See
+/// `superpowers/specs/2026-07-31-vertical-model-specialisation-design.md` §4.1.
+///
+/// # Footgun: the alias-table collision
+///
+/// [`crate::pii::ner::to_pii_category`] maps some `Custom` label strings onto existing
+/// [`crate::pii::PiiCategory`] variants *before* they would otherwise become
+/// `PiiCategory::Custom(label)` — for example the label `"iban"` (case-insensitively)
+/// becomes [`crate::pii::PiiCategory::Iban`], not `Custom("iban")`. A vertical author
+/// who picks a label that happens to collide with that alias table gets the aliased
+/// category's downstream behaviour (its pseudonym token name, its place in exports,
+/// its interaction with other detectors) instead of a bespoke `Custom` category. This
+/// is deliberate for the *known* aliases (a vertical calling something `"iban"` should
+/// get real IBAN handling) but is easy to trip over by accident with a near-miss label
+/// (`"iban_number"` does *not* alias and stays `Custom("iban_number")`). Check
+/// `to_pii_category`'s alias table before choosing a label if the distinction matters
+/// to you.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerticalConfig {
+    /// Stable identifier recorded in the audit chain.
+    pub id: String,
+    /// Zero-shot labels handed to the NER backend in addition to the base categories.
+    pub labels: Vec<String>,
+}
+
+impl VerticalConfig {
+    /// Validate this vertical's shape.
+    ///
+    /// Checks, independent of redaction mode and of whether a model is actually
+    /// loaded: `id` is non-empty; `labels` is non-empty; every label is non-empty
+    /// after trimming; no label contains `[`, `:`, or `]` (mirroring
+    /// [`crate::redaction::pseudonym::category_label`], since a vertical label that
+    /// cannot be pseudonymised is a configuration error regardless of the configured
+    /// redaction mode); and no two labels are equal after case-folding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiiError::InvalidVertical`] naming this vertical's `id` and the first
+    /// reason it failed.
+    pub fn validate(&self) -> Result<(), PiiError> {
+        let fail = |reason: String| {
+            Err(PiiError::InvalidVertical {
+                id: self.id.clone(),
+                reason,
+            })
+        };
+
+        if self.id.trim().is_empty() {
+            return fail("id must not be empty".to_string());
+        }
+        if self.labels.is_empty() {
+            return fail("labels must not be empty".to_string());
+        }
+
+        let mut seen = HashSet::new();
+        for label in &self.labels {
+            let trimmed = label.trim();
+            if trimmed.is_empty() {
+                return fail(format!("label {label:?} is empty after trimming"));
+            }
+            if trimmed.contains('[') || trimmed.contains(':') || trimmed.contains(']') {
+                return fail(format!(
+                    "label {trimmed:?} contains a token delimiter ('[', ':' or ']')"
+                ));
+            }
+            if !seen.insert(trimmed.to_ascii_lowercase()) {
+                return fail(format!(
+                    "label {trimmed:?} duplicates another label (case-insensitively)"
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -137,6 +230,83 @@ mod tests {
             config.concurrency, 1,
             "default concurrency must preserve the original sequential behaviour"
         );
+        assert!(
+            config.vertical.is_none(),
+            "no vertical is active until an operator opts in"
+        );
+    }
+
+    fn finance_vertical() -> VerticalConfig {
+        VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "account_number".to_string()],
+        }
+    }
+
+    #[test]
+    fn should_accept_a_well_formed_vertical() {
+        finance_vertical().validate().unwrap();
+    }
+
+    #[test]
+    fn should_reject_a_vertical_with_an_empty_id() {
+        let vertical = VerticalConfig {
+            id: String::new(),
+            ..finance_vertical()
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_with_no_labels() {
+        let vertical = VerticalConfig {
+            labels: Vec::new(),
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_with_a_blank_label() {
+        let vertical = VerticalConfig {
+            labels: vec!["   ".to_string()],
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_label_containing_a_token_delimiter() {
+        for bad in ["swift[code", "swift:code", "swift]code"] {
+            let vertical = VerticalConfig {
+                labels: vec![bad.to_string()],
+                ..finance_vertical()
+            };
+            let error = vertical.validate().unwrap_err();
+            assert!(
+                matches!(error, PiiError::InvalidVertical { .. }),
+                "label {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_duplicate_labels_after_case_folding() {
+        let vertical = VerticalConfig {
+            labels: vec!["Swift_Code".to_string(), "swift_code".to_string()],
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
     }
 
     #[test]

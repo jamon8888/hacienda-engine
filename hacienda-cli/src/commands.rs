@@ -184,6 +184,16 @@ fn print_config_text(config: &HaciendaConfig) {
                 .unwrap_or("default")
         );
         println!();
+
+        println!("  [pii.vertical]");
+        match &pii.vertical {
+            Some(vertical) => {
+                println!("    id = {:?}  (from: config)", vertical.id);
+                println!("    labels = {:?}  (from: config)", vertical.labels);
+            }
+            None => println!("    (not configured — no vertical is active)"),
+        }
+        println!();
     } else {
         println!("[pii]");
         println!("  (disabled - no pii section in config)");
