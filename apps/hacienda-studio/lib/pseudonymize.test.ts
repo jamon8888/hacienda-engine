@@ -6,6 +6,7 @@ import {
   cmac,
   cmacSubkeys,
   dbl,
+  deriveKeyHex,
   hexDecode,
   importCmacTestKey,
   mintToken,
@@ -276,5 +277,38 @@ describe("base32Encode / base32Decode (RFC 4648, no padding)", () => {
 
   it("rejects invalid characters and non-zero padding bits", () => {
     expect(base32Decode("0189!")).toBeNull();
+  });
+});
+
+describe("deriveKeyHex (Track F1)", () => {
+  it("is deterministic: the same passphrase and key id always derive the same key", async () => {
+    const a = await deriveKeyHex("correct horse battery staple", "session");
+    const b = await deriveKeyHex("correct horse battery staple", "session");
+    expect(a).toBe(b);
+    expect(a).toHaveLength(128); // KEY_BYTES * 2 hex chars
+  });
+
+  it("derives a different key for a different passphrase", async () => {
+    const a = await deriveKeyHex("correct horse battery staple", "session");
+    const b = await deriveKeyHex("Correct horse battery staple", "session");
+    expect(a).not.toBe(b);
+  });
+
+  it("derives a different key for a different key id, same passphrase", async () => {
+    const a = await deriveKeyHex("correct horse battery staple", "session");
+    const b = await deriveKeyHex("correct horse battery staple", "rotated-2027");
+    expect(a).not.toBe(b);
+  });
+
+  it("round-trips a real token end to end from a passphrase alone", async () => {
+    const keyHex = await deriveKeyHex("a lawyer's passphrase", "session");
+    const token = await mintToken("email", "alice@example.com", "session", keyHex);
+    const revealed = await revealToken(token, "session", keyHex);
+    expect(revealed).toBe("alice@example.com");
+
+    // Re-deriving from the same passphrase later — a fresh browser tab, not a cached
+    // key — must reveal the same token, or the whole point of a passphrase is lost.
+    const rederivedHex = await deriveKeyHex("a lawyer's passphrase", "session");
+    expect(await revealToken(token, "session", rederivedHex)).toBe("alice@example.com");
   });
 });

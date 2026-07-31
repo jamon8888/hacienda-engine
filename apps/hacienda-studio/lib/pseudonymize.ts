@@ -481,3 +481,46 @@ export async function revealToken(
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------------------
+// Passphrase-derived keys — Track F1's UX layer on top of F2's primitive.
+// ---------------------------------------------------------------------------------------
+
+const PBKDF2_ITERATIONS = 600_000; // OWASP's 2023 minimum for PBKDF2-HMAC-SHA256.
+
+/**
+ * Derive `KEY_BYTES` (64) bytes of key material from a user-memorable passphrase, so a
+ * Studio user isn't asked to paste 128 hex characters to pseudonymize a document. This is
+ * Studio's own convenience layer, deliberately separate from token compatibility: the
+ * *token format* `mintToken`/`revealToken` produce is what has to match the CLI's
+ * `aes-siv`-based `Pseudonymiser` byte-for-byte (verified in `pseudonymize.test.ts`'s
+ * golden vectors), not how either side obtains its 64-byte key. A Studio user and a CLI
+ * operator who want to interoperate still exchange the derived key material itself (e.g.
+ * this function's output) out of band — the CLI has no PBKDF2 step of its own
+ * (`EnvKeyResolver` reads raw hex from an environment variable).
+ *
+ * The salt is derived deterministically from `keyId` alone (`"hacienda-pseudonym:" +
+ * keyId`, not a random per-call salt) — deliberately, not an oversight: the same
+ * passphrase and key id must always derive the same key so a document pseudonymized in
+ * one browser session can be revealed in a later one with nothing else to remember. A
+ * random salt would need to travel with the token or be stored somewhere, which is exactly
+ * the key-management surface a passphrase is meant to avoid.
+ */
+export async function deriveKeyHex(passphrase: string, keyId: string): Promise<string> {
+  const salt = encoder.encode(`hacienda-pseudonym:${keyId}`);
+  const passphraseKey = await crypto.subtle.importKey(
+    "raw",
+    fresh(encoder.encode(passphrase)),
+    { name: "PBKDF2" },
+    false,
+    ["deriveBits"],
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: fresh(salt), iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+    passphraseKey,
+    KEY_BYTES * 8,
+  );
+  return Array.from(new Uint8Array(bits))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}

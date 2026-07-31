@@ -31,6 +31,7 @@ import {
   scanForPii,
   type PiiEntity,
 } from "../lib/pii-engine";
+import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -397,6 +398,9 @@ async function processFile(
   registry: BatchEntityRegistry,
   docId: string,
   whisperBridge: WhisperBridge,
+  /** Derived once per batch in `processFiles`; `null` unless `redactionMode` is
+   * `"pseudonymize"` and a passphrase was given. */
+  pseudonymKeyHex: string | null,
 ): Promise<ProcessedFile> {
   postProgress({ file: input.name, stage: "extract", percent: 10 });
 
@@ -519,6 +523,35 @@ async function processFile(
       : await scanForPii(markdown);
     piiFindings = piiResult.entities;
     piiEntitiesFound = piiFindings.length;
+
+    // Track F1/F2: `redactionMode: "pseudonymize"` replaces each finding's
+    // `redact_template` — the string `renderAnnotatedMarkdown` splices into the body — with
+    // a reversible token instead of the format-preserving mask. `pseudonymKeyHex` is `null`
+    // whenever pseudonymization doesn't apply (mode is "mask", or no passphrase was given),
+    // so this is a no-op in the default configuration. Every finding shares one key: minting
+    // is per-entity, but the key derivation happened once for the whole batch in
+    // `processFiles`, not per file or per finding.
+    //
+    // `f.text` is *not* what gets pseudonymized: `MergedEntity.text` (hacienda-core's
+    // `pii/merge.rs`) is documented "Empty for regex detections, which carry offsets only"
+    // — regex is the only detector active in Studio's default config, so `f.text` is empty
+    // for essentially every real finding. `markdown.slice(f.start, f.end)` recovers the
+    // actual matched text from the same offsets `renderAnnotatedMarkdown` already treats as
+    // JS string indices (Track F4) — consistent with the rest of this pipeline's offset
+    // handling, not a new assumption introduced here.
+    if (config.redactPiiInOutput && pseudonymKeyHex) {
+      piiFindings = await Promise.all(
+        piiFindings.map(async (f) => ({
+          ...f,
+          redact_template: await mintToken(
+            f.category,
+            markdown.slice(f.start, f.end),
+            config.pseudonymKeyId,
+            pseudonymKeyHex,
+          ),
+        })),
+      );
+    }
   }
 
   const exportableEntities = filterExportableEntities(
@@ -587,6 +620,7 @@ async function processFile(
     name: input.name.replace(/\.[^.]+$/, ".md"),
     markdown: finalMarkdown,
     entities: deduped,
+    piiFindings,
     frontmatter: {
       source: input.name,
       type: input.type.split("/")[1] || "unknown",
@@ -645,6 +679,19 @@ async function processFiles(
     }
   }
 
+  // Track F1/F2: derived once for the whole batch — PBKDF2 is deliberately expensive
+  // (600,000 iterations), so this must not run per file or per finding. `null` leaves
+  // every `processFile` call in the existing mask-mode behavior unchanged.
+  let pseudonymKeyHex: string | null = null;
+  if (
+    config.enablePiiDetection &&
+    config.redactPiiInOutput &&
+    config.redactionMode === "pseudonymize" &&
+    config.pseudonymPassphrase
+  ) {
+    pseudonymKeyHex = await deriveKeyHex(config.pseudonymPassphrase, config.pseudonymKeyId);
+  }
+
   let docCounter = 0;
   const results: ProcessedFile[] = [];
   // Track I2's backlinks: `RegistryEntity.source_documents` only holds
@@ -669,6 +716,7 @@ async function processFiles(
         registry,
         docId,
         whisperBridge,
+        pseudonymKeyHex,
       );
       // Infer relationships for this document
       registry.inferRelationships(docId);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Onboarding } from "./components/Onboarding";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { ProgressBar } from "./components/ProgressBar";
+import { PiiPanel } from "./components/PiiPanel";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import { DEFAULT_CONFIG } from "./lib/types";
@@ -360,14 +361,22 @@ export function App() {
         )}
 
         {results.length > 0 && (
-          <footer className="mt-6 flex justify-end border-t border-border pt-6">
-            <button
-              className="rounded-md bg-primary px-6 py-2 font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-60"
-              disabled
-            >
-              Processing...
-            </button>
-          </footer>
+          <section className="mt-8 flex flex-col gap-4 border-t border-border pt-6">
+            <h2 className="text-sm font-semibold text-muted-foreground">
+              Processed this batch ({results.length})
+            </h2>
+            {results.map((result) => (
+              <div key={result.name} className="flex flex-col gap-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">{result.name}</span>
+                  <span className="text-muted-foreground">
+                    {result.entities.length} entit{result.entities.length === 1 ? "y" : "ies"}
+                  </span>
+                </div>
+                {result.piiFindings.length > 0 && <PiiPanel findings={result.piiFindings} />}
+              </div>
+            ))}
+          </section>
         )}
       </main>
 

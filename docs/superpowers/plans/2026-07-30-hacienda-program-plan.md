@@ -658,13 +658,76 @@ generic primitives it carries domain components Studio would otherwise build fro
 
 This is the flow the user asked for, and it is where the two apps differ most.
 
-- [ ] **F1. Adopt the PII reveal UX; do not adopt its data model.**
+- [x] **F1. Adopt the PII reveal UX; do not adopt its data model.**
       `PiiPanel.tsx` is the pattern worth copying: detected spans render as tokens with a
       `Badge` for the kind, clicking opens a `Popover` that asks for a passphrase, and the
       plaintext is shown in a `Dialog` and forgotten on close — never persisted. The vault is
       WebCrypto-sealed client-side. `PiiReviewPanel.tsx` adds accept / correct / reject per
       detection. All of this is directly applicable to Studio and is the single most valuable
       thing to port.
+
+      **Reveal UX done 2026-07-30; accept/correct/reject (the `PiiReviewPanel.tsx` half)
+      still open — see I4, which needs the same F4 overlay model this doesn't touch.**
+      `components/PiiPanel.tsx` adopts the Badge + passphrase-popup + forgotten-on-close
+      pattern against Studio's own `lib/pii-engine.ts` `PiiEntity` and `lib/pseudonymize.ts`
+      (Track F2), not hacienda-private's opaque non-reversible token / "matter passphrase"
+      model. Diverges from the pattern in one way, discovered while wiring it up for real
+      rather than assumed: hacienda-private's `PiiPanel.tsx` nests a `Dialog` inside the
+      `Popover`'s content; doing the same with plain `@radix-ui/react-popover` +
+      `@radix-ui/react-dialog` made the Popover dismiss itself the instant the Dialog
+      opened, making the Dialog unreachable — confirmed live, not theoretical. Base UI
+      (what hacienda-private now actually uses, not plain Radix — its `components/ui/*`
+      files use `@base-ui/react`, contradicting the plan's "Radix primitives" description;
+      see `components/ui/README.md`) may compose the two more gracefully. Fixed by putting
+      the passphrase form and the revealed value both directly in one Popover's content —
+      same UX contract, one overlay instead of two.
+
+      Vendored `components/ui/card.tsx` verbatim (framework-agnostic). Wrote
+      `badge.tsx`/`button.tsx`/`dialog.tsx`/`popover.tsx`/`input.tsx` from the classic
+      `@radix-ui/react-*` + `class-variance-authority` shadcn/ui recipe instead of porting
+      hacienda-private's own (Base UI-based) versions, to avoid adopting a second headless-UI
+      toolkit and a Tailwind v4 migration neither this app nor Track E2 planned for.
+
+      **Wiring `redactionMode: "pseudonymize"` into `worker/pipeline.ts` found a real bug,
+      not a UI issue: `PiiEntity.text` (hacienda-core's `MergedEntity.text`) is documented
+      "Empty for regex detections, which carry offsets only" — regex is the only detector
+      active in Studio's default config, so every finding's `.text` was empty.** The first
+      wiring attempt happily minted a pseudonym token for `""` on every finding — self-
+      consistent (encrypts, decrypts, round-trips) and completely wrong, exactly the kind of
+      bug a same-language round-trip test cannot catch (Track F2's own golden-vector note).
+      Caught only by driving the real UI in a real browser and finding the revealed value
+      was empty, not the diagnostic assertions in isolation. Fixed:
+      `markdown.slice(f.start, f.end)` recovers the actual matched text from the same
+      offsets `renderAnnotatedMarkdown` already treats as JS string indices (Track F4) —
+      consistent with, not a new assumption on top of, this pipeline's existing offset
+      handling.
+
+      New `AppConfig` fields: `redactionMode: "mask" | "pseudonymize"` (default `"mask"`,
+      so nothing changes unless explicitly opted into), `pseudonymPassphrase` (session-only,
+      never persisted), `pseudonymKeyId` (default `"session"`). `ConfigPanel.tsx` exposes
+      them only when `redactPiiInOutput` is on. The passphrase-to-key derivation itself
+      (`deriveKeyHex`, PBKDF2-HMAC-SHA256, 600,000 iterations, deterministic per-`keyId`
+      salt) is new in `lib/pseudonymize.ts` — Studio's own convenience layer on top of F2's
+      primitive, deliberately not part of what has to match the CLI byte-for-byte (only the
+      *token format* does; a Studio user and a CLI operator who want to interoperate
+      exchange the derived 64-byte key itself, out of band — the CLI has no PBKDF2 step,
+      `EnvKeyResolver` reads raw hex).
+
+      `App.tsx` gained a minimal document-view section (the first of Track E3's three still-
+      open screens) listing each processed file with a `PiiPanel` when it has PII findings —
+      `ProcessedFile` gained a `piiFindings: PiiEntity[]` field to carry them from the worker.
+
+      **Verified for real:** `pseudonymize.test.ts` gained `deriveKeyHex` tests (determinism,
+      passphrase/keyId sensitivity, a full passphrase-to-reveal round-trip) — 151/151 full
+      suite, `tsc --noEmit` and production `vite build` clean. New
+      `tests/e2e/pseudonymize.spec.ts` (3 tests) — run for real against this sandbox's
+      Chromium build, temporary `executablePath`, reverted before committing — is what
+      actually found the empty-`.text` bug: mints in the worker, asserts the exported
+      markdown carries `[EMAIL:session:...]` and neither the raw email nor the `[EMAIL]`
+      mask template, then drives the real `PiiPanel` UI to reveal it back to the original
+      value, and a third test proving a wrong passphrase fails closed. Full e2e suite
+      19/19 (16 pre-existing + 3 new), confirming this didn't regress anything Track E's
+      rewrite already covered.
 
 - [x] **F2. Build reversible pseudonymization — it does not exist anywhere in JS yet.**
       hacienda-private does **redaction only**: opaque stable tokens `{{C0_PERSON_1}}` with
@@ -827,23 +890,26 @@ Studio's zip already contains markdown with linked entities, `_manifest.json`,
 (`worker/pipeline.ts:370-397`). hacienda-private has **no zip export at all** — only a
 "Copy for Claude Desktop" clipboard button and a mirror push to its MCP server.
 
-- [ ] **G1. Preserve entity linking through pseudonymization.** Already implemented at
+- [x] **G1. Preserve entity linking through pseudonymization.** Already implemented at
       `worker/pipeline.ts` (`renderAnnotatedMarkdown`) as `[Acme SAS](#entity-organization-acme-sas)`
       (link scheme updated by G2 — see below), with a `## Entities` glossary (`buildGlossary`)
       and entity metadata in frontmatter (`buildFrontmatter`). Pseudonymizing an entity must
       not orphan its link or its glossary row.
 
-      **Still open — genuinely blocked, not skipped, but the shape of the block changed
-      2026-07-30.** F2 now exists (`lib/pseudonymize.ts`), so the reversible-pseudonymization
-      *primitive* is no longer the blocker. What's still missing is the thing that would
-      actually call it against a document: F2 isn't wired into `worker/pipeline.ts` or any
-      UI, because nothing in Studio's pipeline decides *which* entities to pseudonymize or
-      surfaces that decision to a user — that's F1's reveal/review panel and F3's editor,
-      neither built yet. There is still no pseudonymization code path to route through
-      `relativeEntityLink()`/`entityFileName()` (I2 superseded G2's `entityAnchorId()` — same
-      single-source-of-truth requirement applies to whichever helper exists when this is
-      unblocked). Whoever builds F1/F3 needs to route pseudonymization through that shared
-      helper, not reintroduce a second place to keep a link and its target in sync.
+      **Done 2026-07-30, and it needed no G1-specific code once F1 wired pseudonymization
+      into the pipeline.** `filterExportableEntities` (Track A2/F4) already drops any NER
+      entity whose span overlaps a PII finding before it ever reaches the frontmatter,
+      glossary, `entities/` files, or registry — and it does that by comparing
+      `start`/`end` offsets only, never reading `redact_template`'s content. That check is
+      identically correct whether `redact_template` holds a mask (`"[EMAIL]"`) or a
+      pseudonym token — an overlapping entity was never going to get linked in the first
+      place, in either mode, so there was no orphaning mechanism to fix. Verified, not just
+      reasoned: `tests/e2e/pseudonymize.spec.ts`'s new "G1" describe block reuses the
+      misclassified-digit-run fixture `worker/pipeline.test.ts`'s L6 regression test and
+      `egress.spec.ts`'s redaction contract already exercise for mask mode, run for real
+      with `redactionMode: "pseudonymize"` — the raw card number appears nowhere (body,
+      registry, or glossary), no `entities/phone-*.md` link survives, and the body carries
+      a real `[CREDITCARD:session:...]` token. Passed on the first run.
 
 - [x] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
       nothing outside Studio understands. Switch to in-document anchors into the `## Entities`

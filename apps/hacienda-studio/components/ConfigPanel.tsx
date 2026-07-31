@@ -226,6 +226,51 @@ export function ConfigPanel({
             Redact PII in Output
           </label>
         </div>
+        {config.redactPiiInOutput && (
+          <>
+            <div className={fieldLabel + " mt-2"}>
+              <label htmlFor="redaction-mode">Redaction mode</label>
+              <select
+                id="redaction-mode"
+                className={control}
+                value={config.redactionMode}
+                onChange={(e) =>
+                  onChange({
+                    ...config,
+                    redactionMode: e.target.value as AppConfig["redactionMode"],
+                  })
+                }
+              >
+                <option value="mask">Mask (e.g. [EMAIL]) — not reversible</option>
+                <option value="pseudonymize">
+                  Pseudonymize — reversible with your passphrase
+                </option>
+              </select>
+            </div>
+            {config.redactionMode === "pseudonymize" && (
+              <div className={fieldLabel + " mt-2"}>
+                <label htmlFor="pseudonym-passphrase">
+                  Passphrase (never leaves your browser)
+                </label>
+                <input
+                  id="pseudonym-passphrase"
+                  type="password"
+                  className={control}
+                  value={config.pseudonymPassphrase}
+                  onChange={(e) =>
+                    onChange({ ...config, pseudonymPassphrase: e.target.value })
+                  }
+                  placeholder="Used to derive the redaction key — remember it"
+                />
+                {!config.pseudonymPassphrase && (
+                  <p className="text-xs text-amber-600">
+                    Without a passphrase, findings are masked instead — no key to derive.
+                  </p>
+                )}
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       <section className="mb-6">
