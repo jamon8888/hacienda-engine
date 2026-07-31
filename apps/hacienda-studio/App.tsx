@@ -3,6 +3,7 @@ import { Onboarding } from "./components/Onboarding";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { ProgressBar } from "./components/ProgressBar";
 import { PiiPanel } from "./components/PiiPanel";
+import { MarkdownEditor } from "./components/MarkdownEditor";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import { DEFAULT_CONFIG } from "./lib/types";
@@ -370,9 +371,11 @@ export function App() {
                 <div className="flex items-center justify-between text-sm">
                   <span className="font-medium">{result.name}</span>
                   <span className="text-muted-foreground">
-                    {result.entities.length} entit{result.entities.length === 1 ? "y" : "ies"}
+                    {result.entities.length}{" "}
+                    {result.entities.length === 1 ? "entity" : "entities"}
                   </span>
                 </div>
+                <MarkdownEditor value={result.rawMarkdown} findings={result.piiFindings} />
                 {result.piiFindings.length > 0 && <PiiPanel findings={result.piiFindings} />}
               </div>
             ))}

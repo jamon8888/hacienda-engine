@@ -811,12 +811,49 @@ This is the flow the user asked for, and it is where the two apps differ most.
       browser with no server-side secret store) is also untouched — out of scope for "build
       the primitive and prove it's compatible," in scope for whoever wires F1/F3 to it.
 
-- [ ] **F3. CodeMirror 6 markdown editor with inline PII decorations.**
+- [x] **F3. CodeMirror 6 markdown editor with inline PII decorations.**
       Nothing exists to build on: CodeMirror is not a dependency in any repo, and
       hacienda-private's right pane is a read-only `<pre>` of redacted text rendered with
       `react-markdown`. Use CodeMirror decorations to render PII spans as inline pills that
       open the F1 popover.
       *Check:* editing text before a PII span does not misplace that span's highlight.
+
+      **Done 2026-07-30.** `lib/pii-decorations.ts`'s `piiHighlightExtension()` is a CM6
+      `StateField<DecorationSet>` seeded from each `PiiEntity`'s `start`/`end` and mapped
+      through every transaction (`decorations.map(tr.changes)`) — the Check's requirement is
+      CM6's own built-in mechanism, not something this codebase reimplements.
+      `components/MarkdownEditor.tsx` wires it into `@uiw/react-codemirror`
+      (`@codemirror/lang-markdown`), rendered in `App.tsx`'s document-view section next to
+      `PiiPanel`. **Diverges from the plan's literal ask in one way, deliberately**: pills
+      don't open the F1 popover *inside the editor* — CM6 mark decorations are plain DOM
+      spans, and hosting a React `Popover` inside one means a widget decoration carrying a
+      React portal into non-React DOM, real engineering distinct from what this Check tests.
+      The editor shows *where* PII is in the live text; revealing it stays in the adjacent
+      `PiiPanel` list, which already has the real reveal flow (Track F1).
+
+      Required a new `ProcessedFile.rawMarkdown` field, caught before it shipped wrong, not
+      assumed correct: `PiiEntity.start`/`.end` are offsets into the markdown *before*
+      `renderAnnotatedMarkdown` splices in entity links and redaction (Track F4) and before
+      frontmatter is prepended, but `ProcessedFile.markdown` is the *post*-splice final
+      output — pairing `piiFindings` with `markdown` would highlight arbitrary wrong text.
+      `rawMarkdown` carries the pre-splice text `piiFindings`' offsets actually describe.
+
+      **Verified for real:** `lib/pii-decorations.test.ts` (7 tests) exercises the extension
+      directly against real `EditorState`/`StateField` objects (not mocked) — decorates the
+      exact span named, drops out-of-bounds/overlapping findings instead of crashing the
+      `RangeSetBuilder`, and the Check itself: inserting text before a decorated span shifts
+      it by exactly the inserted length while the decoration still bounds the identical
+      original text, edits after a span leave it untouched, and edits inside a span shrink
+      it to what survives (documents CM6's actual mapping behavior at a boundary case,
+      rather than assuming it). New `tests/e2e/markdown-editor.spec.ts` (2 tests) — run for
+      real against this sandbox's Chromium build, temporary `executablePath`, reverted
+      before committing — confirms the pill renders with the right text and category
+      attribute in the live app, and that *typing* before the span in a real editor
+      (not a synthesized transaction) doesn't corrupt the highlighted text either. Full
+      suite: `vitest run` 158/158, `tsc --noEmit` clean, production `vite build` clean
+      (CodeMirror added real bundle weight — flagged Vite's own >500kB chunk-size warning,
+      not treated as a defect given B3/H1's already-dominant 614MB–1.2GB model weight), full
+      e2e 22/22 (20 pre-existing + 2 new), confirming no regression.
 
 - [x] **F4. Solve the offset problem. This is the hard technical core of Tracks A/E/F.**
       Four things mutate the same text and all are offset-sensitive: entity linking

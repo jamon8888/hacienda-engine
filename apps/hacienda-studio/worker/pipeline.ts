@@ -619,6 +619,7 @@ async function processFile(
   return {
     name: input.name.replace(/\.[^.]+$/, ".md"),
     markdown: finalMarkdown,
+    rawMarkdown: markdown,
     entities: deduped,
     piiFindings,
     frontmatter: {

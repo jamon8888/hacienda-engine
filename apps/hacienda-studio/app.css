@@ -183,3 +183,21 @@ textarea:focus {
   white-space: nowrap;
   border: 0;
 }
+
+/* Track F3: CodeMirror PII span decorations (lib/pii-decorations.ts). Plain CSS, not
+ * Tailwind utilities — `.cm-pii-pill` is applied via a CM6 Decoration.mark's `class`, not
+ * a scanned className, so Tailwind's content globs would never generate it. */
+.cm-pii-pill {
+  background: rgba(217, 119, 6, 0.18); /* amber-600 @ 18% */
+  border-bottom: 2px solid rgb(217, 119, 6);
+  border-radius: 2px;
+}
+
+.cm-pii-editor .cm-editor {
+  height: auto;
+  max-height: 40vh;
+}
+
+.cm-pii-editor .cm-scroller {
+  font-family: var(--font-mono);
+}
