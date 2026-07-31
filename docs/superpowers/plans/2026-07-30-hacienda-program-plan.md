@@ -360,7 +360,52 @@ multilingual and PII-specific.
       *Check:* record measured first-run download size and time-to-first-document.
 
       **Superseded by Track H** (see "supersedes B3" at that track's heading) — the f16
-      conversion decision below is this task's actual resolution; not independently tracked.
+      conversion decision there is this task's actual resolution; not independently tracked
+      as a separate decision. The measurement below (landed on `main` independently of that
+      note) is this item's own concrete evidence for why 1.23 GB isn't shippable.
+
+      **Measured 2026-07-30.** Sizes via `HEAD` against the resolved CDN URLs (not the
+      redirect stub): `model.safetensors` 1,228,421,964 bytes, `tokenizer.json` 16,020,604
+      bytes, `encoder_config/config.json` 895 bytes — **1,244,443,463 bytes (~1.16 GiB)
+      total**, confirming the plan's "1.23 GB" figure. Raw bandwidth to huggingface.co from
+      this host: ~5.5 MB/s (50 MB range request), projecting ~227s for the transfer alone at
+      that rate — but that number turned out not to be the binding constraint.
+
+      Ran the real onboarding flow end-to-end in headless Chromium (Playwright, freshly
+      installed for this — not previously present in the sandbox) against the actual dev
+      build, not a mock: `xbergWasm` preload completes in ~4s (cached), then
+      `loadNerModel()` (`asset-loader.ts`) fetches and attempts to cache the three files.
+      Two independent runs, two independent failures, neither a network timeout:
+
+      - Run 1: at +598.5s, `db.transaction(...).put(modelData, ...)` rejected with
+        `QuotaExceededError` — surfaced correctly through the existing A4 fallback path
+        (`nerModelDegraded = true`, `assets.nerModel = true`, warning logged), not a crash.
+        Disk itself was not full (30 GB free) — this is IndexedDB's own storage-quota
+        accounting for the origin rejecting a single ~1.2 GB write, plausibly harsher for
+        Playwright's fresh/ephemeral profile than an installed browser's persistent-storage
+        grant, but there is no code path here that requests `navigator.storage.persist()` to
+        get a larger grant regardless of profile type.
+      - Run 2 (immediately after, same build, longer test timeout): the renderer **target
+        crashed outright** before reaching the button-enabled state — consistent with `fetch`
+        buffering the full ~1.2 GB response into a single in-memory `ArrayBuffer`
+        (`fetchAsset()`, `asset-loader.ts:33`) on a host with ~3.7 GB total RAM.
+
+      Both failures are caused by the same design choice: one `fetch().arrayBuffer()` and one
+      `IndexedDB.put()` per file, no chunking/streaming. This means the risk isn't just "slow
+      on a bad connection" as the raw byte count implies — it's an outright crash or a
+      storage-quota rejection on RAM- or quota-constrained clients, independent of bandwidth.
+      Directly strengthens the case that this needs fixing before shipping to real users, not
+      just before shipping to users with slow connections.
+
+      **What this does not resolve:** the choice between quantized weights, a smaller GLiNER2
+      variant, and self-hosting via `VITE_MODEL_BASE_URL` is still open — it is a product/
+      infrastructure decision (self-hosting needs a hosting destination and, per L1's
+      precedent and H1's blocker, this sandbox has no authorized publish target), not
+      something to pick unilaterally here. Whichever option is chosen, `fetchAsset`/
+      `loadNerModel` also need to move off single-shot `arrayBuffer()` and `put()` toward
+      streaming/chunked transfer — that's true regardless of which size-reduction option is
+      picked, and arguably matters more than the size number itself given what actually
+      failed here.
 
 ---
 
@@ -430,16 +475,59 @@ TypeScript pseudonymisation engine is not.
       output must be legally defensible, the chain has to be exported inside the vault
       (Track I2 / G) rather than merely retained locally.
 
-      **Directive honored as of 2026-07-30 — the sub-question is still open, and cannot be
-      closed from here.** No TypeScript audit chain exists anywhere in this codebase; every
-      track since (L5's `IndexedDbAuditStore`, L6-L7, A1-A4, B2, D1-D3) built on the Rust
-      `AuditStore`/`hacienda-wasm` or left the audit chain untouched entirely — nothing
-      reimplemented it. Checking this off records that the directive held, not that the
-      sub-question is answered: whether/how the IndexedDB chain gets exported into a
-      longer-lived vault is explicitly gated on **Track I2** (the vault layout), which the
-      plan's own Sequencing section names as "the keystone decision for the whole repo" —
-      a product/architecture call, not something to default without the person who owns that
-      call weighing in. Left open for that reason, not from lack of investigation.
+      **Directive honored 2026-07-30 — no TypeScript audit chain was ever built** (every
+      track up to that point either built on the Rust `AuditStore`/`hacienda-wasm` or left
+      the audit chain untouched); the JS-facing surface and Studio wiring that actually
+      closes the sub-question below landed the next day, on `main`, independently of this
+      branch.
+
+      **Done 2026-07-31.** As of L5, `IndexedDbAuditStore` existed in `hacienda-core` but
+      had zero JS-facing surface and zero Studio callers — the heading's premise ("it is now
+      answered") was aspirational, not actual, until this. Added:
+
+      - `AuditHandle` (`crates/hacienda-wasm/src/lib.rs`, `#[cfg(target_arch = "wasm32")]`
+        so the native `cargo check` this repo's other tracks rely on stays unaffected):
+        `AuditHandle.open(db_name, node_id, config_hash)` opens/resumes an
+        `IndexedDbAuditStore`; `recordResult(result)` takes the `JsValue` `redactPii`
+        already gets back from `process()`, converts its `audit_log`
+        (`RedactionAuditEntry`) into `AuditEntryInput`s — minting `id` via `uuid::Uuid::
+        new_v4()` and `pipeline_version` via `env!("CARGO_PKG_VERSION")`, mirroring
+        `HaciendaFacade::record_audit`/`record_reveal`'s native pattern exactly, `config_hash`
+        left for the store's own chain to overwrite (`AuditChain::push`) — appends one batch
+        per call, and returns the new tip; `tip()`/`verify()` expose the rest of the read
+        surface a client needs.
+      - `apps/hacienda-studio/lib/pii-engine.ts`'s `redactPii` now opens one `AuditHandle`
+        (idempotent, module-level, mirroring `initPiiEngine`'s own pattern) against a fixed
+        `db_name`/`node_id`/`config_hash` and calls `recordResult` after every `process()`
+        call — one `append` per document, the same invariant `HaciendaFacade::record_audit`
+        enforces natively. `scanForPii` is untouched: `PiiPipeline::scan` always returns an
+        empty `audit_log`, so there is nothing to record in scan-only mode.
+
+      **Verified:** `apps/hacienda-studio/lib/audit-handle.test.ts` (new, 3 tests) against
+      the real compiled `hacienda-wasm` build (not a mock) with `fake-indexeddb` standing in
+      for the browser's `indexedDB` global the same way `pii-engine.test.ts` already loads
+      the real `.wasm` bytes directly under `vitest`'s Node environment — asserts the tip
+      advances past genesis and verifies when a redaction is recorded, stays unchanged when
+      `audit_log` is empty (scan-only shape), and survives a fresh `AuditHandle.open()` on
+      the same `db_name` (Track L5's own reload guarantee, exercised through the new JS
+      surface rather than only `tests/idb.rs`). Full `vitest run`: 69/69 (68 pre-existing +
+      the 3 new, minus 1 unrelated flake — `lib/ner-bridge.test.ts`'s compromise.js timing
+      test failed only under full-suite parallel load on this RAM-constrained host, passed
+      6/6 in isolation, unchanged by this work). `svelte-check`: no new error class beyond
+      the pre-existing `node:module`/`node:fs` gap `pii-engine.test.ts` already has. `vite
+      build`: succeeds end-to-end, `hacienda_wasm_bg.wasm` unchanged at ~12.3 MB (`Audit
+      Handle` added no new heavy dependency — `uuid`'s `js` feature is the same
+      self-contained WebCrypto binding `hacienda-core` already uses, not a new crate class).
+      `cargo check -p hacienda-wasm` (native): passes, confirming `audit_handle` mod's
+      `#[cfg(target_arch = "wasm32")]` gate keeps it fully compiled out on native targets.
+
+      **What this does not resolve:** exactly what the heading already scoped as open —
+      persistence is a browser IndexedDB database, which survives a reload (verified above)
+      but not a cleared profile. Whether/how a chain gets exported into the vault so it
+      survives that is still Track I2's question, and Track I2 remains entirely unbuilt (a
+      design proposal, not a finding) — nothing here decides it. No `principal` is recorded
+      either: Studio has no caller-identity concept today, so every entry's `principal` is
+      `None`, unlike `HaciendaFacade`'s server-side callers which thread a `Caller` through.
 
 ---
 
