@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
-import { svelte } from "@sveltejs/vite-plugin-svelte";
+import react from "@vitejs/plugin-react";
+import { fileURLToPath, URL } from "node:url";
 
 const CROSS_ORIGIN_ISOLATION = {
   "Cross-Origin-Opener-Policy": "same-origin",
@@ -8,7 +9,14 @@ const CROSS_ORIGIN_ISOLATION = {
 
 export default defineConfig({
   base: "/",
-  plugins: [svelte()],
+  plugins: [react()],
+  // Mirrors tsconfig.json's "@/*" path and hacienda-private's own components.json
+  // alias convention, so ported components need no import-path changes.
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL(".", import.meta.url)),
+    },
+  },
   optimizeDeps: {
     // All three packages resolve their .wasm via new URL(..., import.meta.url).
     // Pre-bundling rewrites that base to .vite/deps/, so the request misses

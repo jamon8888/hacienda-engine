@@ -61,7 +61,7 @@ describe("VerticalDictionary", () => {
   /**
    * Track D1: `worker/pipeline.ts`'s `processFiles` used to load all three
    * taxonomies unconditionally, ignoring `config.enabledVerticals` entirely —
-   * the "Vertical NER" checkboxes in ConfigPanel.svelte did nothing. The fix
+   * the "Vertical NER" checkboxes in ConfigPanel.tsx did nothing. The fix
    * is `config.enabledVerticals.map(loadVerticalTaxonomy)` instead of a
    * hardcoded list; this asserts that restriction actually excludes terms
    * from a disabled vertical, which is the one thing a full pipeline e2e test

@@ -27,7 +27,7 @@ async function visitFresh(page: Page): Promise<void> {
 /**
  * Does not navigate — call `visitFresh` (and toggle any config) first. A
  * second `page.goto` here would reload the page and discard whatever config
- * change the caller just made in the (in-memory, not persisted) Svelte state.
+ * change the caller just made in the (in-memory, not persisted) React state.
  */
 async function uploadAndDownload(
   page: Page,

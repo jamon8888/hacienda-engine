@@ -589,13 +589,68 @@ generic primitives it carries domain components Studio would otherwise build fro
       CodeMirror editor) can now proceed against a concrete component set instead of a
       hypothetical one.
 
-- [ ] **E2. Port the design tokens first, independently of E1.** Tailwind config + CSS
+- [x] **E2. Port the design tokens first, independently of E1.** Tailwind config + CSS
       variables are framework-agnostic and can land before any component work.
+
+      **Done 2026-07-30.** `tailwind.config.ts` and the `--background`/`--primary`/etc.
+      CSS variables in `app.css` are ported verbatim from
+      `hacienda-private/apps/web/{tailwind.config.ts,app/globals.css}`, less that repo's
+      Next.js-specific `content` globs (Studio's own file layout instead). Added
+      `postcss.config.js` and `lib/utils.ts`'s `cn()` (`clsx` + `tailwind-merge`) — the
+      standard shadcn helper every vendored component imports as `@/lib/utils`. Kept
+      distinct custom-property names from the pre-existing hand-rolled `--color-*`/
+      `--radius-*` set already in `app.css`, so nothing collided during the migration.
 
 - [ ] **E3. Screens.** Upload (`file-dropzone`), processing (`progress`), document view
       (`resizable` dual-pane), entity/PII panel (`card` + `badge` + `popover`), export.
       Studio needs no matters/folders/auth — that is hacienda-private's multi-user model and
       must not be imported along with the components.
+
+      **Two of five screens done 2026-07-30 (upload, processing); still open: document
+      view, entity/PII panel, export — tracked under F1 below, since building them is the
+      same work F1's reveal/review panel needs, not a separable step.** The real
+      prerequisite E1/E2 blocked on — a working React+Vite shell to build screens in at
+      all — is now done, which is what made this partial progress possible.
+      `hacienda-private` wasn't attached to this session initially — cloned
+      and registered mid-session (`/workspace/hacienda-private`) once the gap surfaced,
+      since E3/F1/I3 all assume it's available to port from.
+
+      Ported Studio's shell from Svelte to React+Vite, replacing all four `.svelte`
+      components (`App.svelte`, `Onboarding.svelte`, `ConfigPanel.svelte`,
+      `ProgressBar.svelte`, ~904 lines total including `main.ts`/`app.css`) with
+      `App.tsx`/`components/{Onboarding,ConfigPanel,ProgressBar}.tsx`/`main.tsx`,
+      styled with Tailwind utilities against the E2 tokens rather than the old
+      hand-rolled `<style>` blocks. `worker/pipeline.ts` and every `lib/*.ts` module —
+      framework-agnostic per E1's own reasoning — needed zero changes. `vite.config.ts`
+      swapped `@sveltejs/vite-plugin-svelte` for `@vitejs/plugin-react`; `tsconfig.json`'s
+      `jsx` changed from `"preserve"` to `"react-jsx"` and its `"@/*"` path alias now
+      points at the app root (matching hacienda-private's own `components.json`
+      convention) instead of `lib/`, so ported components need no import-path edits.
+      Added the Radix packages E3's remaining screens will need
+      (`dialog`/`popover`/`progress`/`scroll-area`/`select`/`slot`/`tabs`/`tooltip`) plus
+      `class-variance-authority`/`lucide-react` as a foundation, without yet vendoring the
+      `components/ui/*` files themselves — no screen here needs them yet.
+
+      Found and fixed one thing while porting, not a defect in the port itself: every
+      Svelte component's `<style>` block referenced `--spacing`, `--radius`,
+      `--color-surface`, `--color-muted`, and `--color-error` custom properties that were
+      never defined anywhere in the codebase — computed as invalid and silently fell back
+      to each property's initial value the entire time these components existed. Not
+      reproduced; the Tailwind rewrite uses the real E2 tokens instead of carrying a
+      pre-existing invisible bug forward.
+
+      **Verified for real:** `vitest run` 147/147, `tsc --noEmit` clean (script renamed
+      from `svelte-check` to `tsc --noEmit`, now that there's no Svelte to check), and a
+      production `vite build` clean (36 modules transformed, down from 121 — no Svelte
+      compiler pass). Ran the **full existing e2e suite** for real against this sandbox's
+      Chromium build (temporary `launchOptions.executablePath`, reverted before
+      committing) — **16/16 passing on the first run**, unmodified from before the
+      rewrite: onboarding, drop zone (including folder mode and `webkitdirectory`),
+      config panel checkboxes matched by label text, PII toggle effects, redaction,
+      audio upload/transcription-toggle errors, and the egress allowlist all behave
+      identically under React. This is the regression net Track D's tests exist to be —
+      a framework rewrite that changed observable behavior would have failed at least one
+      of them.
 
 ---
 

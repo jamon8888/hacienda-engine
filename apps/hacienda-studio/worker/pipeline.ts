@@ -47,7 +47,7 @@ let wasmReady: Promise<void> | null = null;
 // PII-specific, and already the model the onboarding screen downloads. `null` means the
 // model failed to load (or was never cached), in which case `selectNerBridge` falls back to
 // `extractEntities` (compromise.js, English-only). IndexedDB is worker-accessible, so this
-// load hits the cache `App.svelte`'s preloadAssets already populated — no re-download here.
+// load hits the cache `App.tsx`'s preloadAssets already populated — no re-download here.
 type NerRuntime = Awaited<ReturnType<typeof createNerBackend>>;
 let nerRuntime: NerRuntime | null = null;
 
@@ -503,7 +503,7 @@ async function processFile(
 
   // Track A1/A2, redirected to the Rust/wasm engine per Track L6: `enablePiiDetection`
   // and `redactPiiInOutput` used to be dead config (nothing read them — see
-  // `lib/ConfigPanel.svelte`'s "PII & Compliance" section). `scanForPii`/`redactPii`
+  // `lib/ConfigPanel.tsx`'s "PII & Compliance" section). `scanForPii`/`redactPii`
   // run the same regex engine `cargo test`'s PII suite asserts against, compiled to
   // wasm32 (`crates/hacienda-wasm`), not a second TypeScript implementation.
   //
@@ -614,7 +614,7 @@ async function processFiles(
   //
   // Track D1 found `config.enabledVerticals` was never read here — every
   // taxonomy loaded regardless of what the "Vertical NER" checkboxes in
-  // ConfigPanel.svelte said, another dead toggle in the same family A1-A4
+  // ConfigPanel.tsx said, another dead toggle in the same family A1-A4
   // fixed. An empty selection is not an error case: it means no taxonomy
   // vocabulary is consulted, so every entity falls through to
   // classifyDocumentVertical's document-level fallback below.
