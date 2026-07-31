@@ -14,7 +14,14 @@ const ENGLISH_MONTHS =
   "january|february|march|april|may|june|july|august|september|october|november|december";
 
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
-const PHONE_PATTERN = /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
+/**
+ * Two alternatives: US-style 3-3-4 grouping (`555-123-4567`), and French
+ * numbers, which group in pairs from a leading 0 (`01 23 45 67 89`) rather
+ * than 3-3-4 — the first alternative alone never matched a French fixture's
+ * phone number at all (Track D2).
+ */
+const PHONE_PATTERN =
+  /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|\b0\d(?:[-.\s]?\d{2}){4}\b/g;
 const URL_PATTERN = /https?:\/\/[^\s]+/g;
 /**
  * compromise's date extraction lives in the separate compromise-dates plugin,

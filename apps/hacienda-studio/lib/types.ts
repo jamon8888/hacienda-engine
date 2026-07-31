@@ -1,3 +1,5 @@
+import type { PiiEntity } from "./pii-engine";
+
 export interface FileInput {
   name: string;
   bytes: ArrayBuffer;
@@ -18,7 +20,24 @@ export interface Entity {
 export interface ProcessedFile {
   name: string;
   markdown: string;
+  /**
+   * Track F3: the extracted/transcribed text *before* `renderAnnotatedMarkdown` splices in
+   * entity links and PII redaction, and before frontmatter is prepended. `piiFindings`'
+   * `start`/`end` are offsets into exactly this string, not into `markdown` — every splice
+   * that produces `markdown` shifts what those offsets would point at. The editor (Track
+   * F3) needs this pairing to highlight the right text; `markdown` alone can't provide it.
+   */
+  rawMarkdown: string;
   entities: Entity[];
+  /**
+   * Track F1: the PII findings for this document, so the UI can render a reveal panel
+   * against them. `redact_template` is either the format-preserving mask (`"[EMAIL]"`) or,
+   * under `redactionMode: "pseudonymize"`, the reversible token actually spliced into
+   * `markdown` — same field, so the panel never has to know which mode produced it. Spans
+   * (`start`/`end`) are offsets into `rawMarkdown`, not `markdown` — see above.
+   * Empty when `enablePiiDetection` is off.
+   */
+  piiFindings: PiiEntity[];
   frontmatter: {
     source: string;
     type: string;
@@ -73,6 +92,19 @@ export interface AppConfig {
   enablePiiDetection: boolean;
   redactPiiInOutput: boolean;
   enabledVerticals: ("m&a" | "financial_services" | "shared")[];
+  /**
+   * Track F1/F2: `"mask"` is the existing format-preserving `[EMAIL]`-style redaction.
+   * `"pseudonymize"` replaces each finding with a reversible `lib/pseudonymize.ts` token
+   * instead — only takes effect when `redactPiiInOutput` is also set, and only when
+   * `pseudonymPassphrase` is non-empty (an empty passphrase silently falls back to mask
+   * rather than producing tokens no one can derive the key to reveal).
+   */
+  redactionMode: "mask" | "pseudonymize";
+  /** Session-only. Never persisted, never sent anywhere but this tab's own worker. */
+  pseudonymPassphrase: string;
+  /** Travels with a token (`[CATEGORY:key_id:...]`) so the same passphrase, entered again
+   * later, can be told which id to derive against — matters once key rotation exists. */
+  pseudonymKeyId: string;
 }
 
 export interface OnboardingState {
@@ -95,4 +127,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   enablePiiDetection: true,
   redactPiiInOutput: false,
   enabledVerticals: ["m&a", "financial_services", "shared"],
+  redactionMode: "mask",
+  pseudonymPassphrase: "",
+  pseudonymKeyId: "session",
 };

@@ -57,4 +57,33 @@ describe("VerticalDictionary", () => {
     expect(dictionary.lookup("target_company")?.sector).toBeUndefined();
     expect(dictionary.lookup("fund")?.sector).toBeUndefined();
   });
+
+  /**
+   * Track D1: `worker/pipeline.ts`'s `processFiles` used to load all three
+   * taxonomies unconditionally, ignoring `config.enabledVerticals` entirely —
+   * the "Vertical NER" checkboxes in ConfigPanel.tsx did nothing. The fix
+   * is `config.enabledVerticals.map(loadVerticalTaxonomy)` instead of a
+   * hardcoded list; this asserts that restriction actually excludes terms
+   * from a disabled vertical, which is the one thing a full pipeline e2e test
+   * can't assert reliably (it would depend on the heuristic NER bridge
+   * extracting a taxonomy term as a named entity in the first place).
+   */
+  it("excludes a vertical's terms when its taxonomy isn't in the loaded set", async () => {
+    const taxonomies = await Promise.all(
+      (["financial_services", "shared"] as const).map(loadVerticalTaxonomy),
+    );
+    const dictionary = new VerticalDictionary(taxonomies);
+
+    expect(dictionary.lookup("target_company")).toBeNull();
+    expect(dictionary.lookup("carried_interest")).toMatchObject({
+      vertical: "financial_services",
+    });
+  });
+
+  it("resolves nothing when the enabled-verticals selection is empty", async () => {
+    const dictionary = new VerticalDictionary([]);
+
+    expect(dictionary.lookup("target_company")).toBeNull();
+    expect(dictionary.lookup("carried_interest")).toBeNull();
+  });
 });

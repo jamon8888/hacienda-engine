@@ -168,3 +168,111 @@ fn should_write_an_audit_chain_that_independently_re_verifies() {
         .verify()
         .expect("the reconstructed audit chain failed full verification");
 }
+
+/// Track J1: `--vault <dir>` emits the Track I2 layout — `documents/`, `_manifest.json`,
+/// `pii-registry.json`, `README.md` — and never leaks the raw email into a redacted
+/// document, same contract as stdout output.
+#[test]
+fn should_write_a_vault_with_a_redacted_document_and_pii_registry() {
+    let fixture = fixture();
+    let path = fixture.path().to_str().expect("utf-8 fixture path");
+    let stem = fixture
+        .path()
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("fixture has a utf-8 stem")
+        .to_string();
+    let vault_dir = TempDir::new().expect("create vault directory");
+
+    let (ok, text) = run(&[
+        "extract",
+        "--mode",
+        "mask",
+        "--vault",
+        vault_dir.path().to_str().expect("utf-8 vault dir path"),
+        path,
+    ]);
+    assert!(ok, "`extract --vault` did not exit 0:\n{text}");
+    eprintln!("stderr/stdout was: {text}");
+
+    let doc_path = vault_dir.path().join("documents").join(format!("{stem}.md"));
+    let markdown = std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|e| panic!("vault document was not written at {doc_path:?}: {e}"));
+    assert!(
+        !markdown.contains(KNOWN_EMAIL),
+        "vault document leaked the known email address:\n{markdown}"
+    );
+    assert!(
+        markdown.contains("pii_entities_found: 1"),
+        "vault document frontmatter does not record the PII count:\n{markdown}"
+    );
+
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(vault_dir.path().join("_manifest.json"))
+            .expect("_manifest.json was not written"),
+    )
+    .expect("_manifest.json is not valid JSON");
+    assert_eq!(manifest["files"].as_array().map(Vec::len), Some(1));
+
+    let registry: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(vault_dir.path().join("pii-registry.json"))
+            .expect("pii-registry.json was not written"),
+    )
+    .expect("pii-registry.json is not valid JSON");
+    let registry_text = registry.to_string();
+    assert!(
+        !registry_text.contains(KNOWN_EMAIL),
+        "pii-registry.json leaked the known email address:\n{registry_text}"
+    );
+    assert_eq!(registry.as_array().map(Vec::len), Some(1));
+
+    let readme = std::fs::read_to_string(vault_dir.path().join("README.md"))
+        .expect("README.md was not written");
+    assert!(
+        readme.contains("does not include an audit chain"),
+        "README does not say --audit-out was omitted:\n{readme}"
+    );
+    assert!(
+        !vault_dir.path().join("entities").exists(),
+        "Track J2 decided this vault is thinner than Studio's — no entities/ directory"
+    );
+    assert!(
+        !vault_dir.path().join("GLOSSARY.md").exists(),
+        "Track J2 decided this vault is thinner than Studio's — no GLOSSARY.md"
+    );
+}
+
+/// Track J3: when `--audit-out` and `--vault` are both given, the vault carries its own
+/// copy of the audit chain rather than leaving the consumer to find a second directory.
+#[test]
+fn should_mirror_the_audit_chain_into_the_vault_when_both_flags_are_given() {
+    let fixture = fixture();
+    let path = fixture.path().to_str().expect("utf-8 fixture path");
+    let audit_dir = TempDir::new().expect("create audit-out directory");
+    let vault_dir = TempDir::new().expect("create vault directory");
+
+    let (ok, text) = run(&[
+        "extract",
+        "--mode",
+        "mask",
+        "--audit-out",
+        audit_dir.path().to_str().expect("utf-8 audit dir path"),
+        "--vault",
+        vault_dir.path().to_str().expect("utf-8 vault dir path"),
+        path,
+    ]);
+    assert!(ok, "`extract --audit-out --vault` did not exit 0:\n{text}");
+
+    let mirrored = vault_dir.path().join("audit").join("audit.json");
+    assert!(
+        mirrored.exists(),
+        "audit chain was not mirrored into the vault at {mirrored:?}"
+    );
+
+    let readme = std::fs::read_to_string(vault_dir.path().join("README.md"))
+        .expect("README.md was not written");
+    assert!(
+        readme.contains("includes an audit chain"),
+        "README does not say the vault includes an audit chain:\n{readme}"
+    );
+}

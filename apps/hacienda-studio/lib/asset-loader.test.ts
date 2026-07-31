@@ -78,7 +78,7 @@ describe("fetchAsset", () => {
 /**
  * Track A3: audio/video were rejected outright before an upload ever reached the
  * worker. `SUPPORTED_MIME_PREFIXES`/`validateFile` used to be duplicated verbatim
- * in lib/types.ts (now removed, unimported, dead) — this is the copy `App.svelte`
+ * in lib/types.ts (now removed, unimported, dead) — this is the copy `App.tsx`
  * actually calls.
  */
 describe("validateFile", () => {

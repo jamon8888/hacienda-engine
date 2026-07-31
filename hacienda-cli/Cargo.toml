@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 # Config discovery falls back to the platform config directory when no project-local
 # hacienda.{toml,yaml,json} is found — see hacienda-cli/src/config.rs. Mirrors

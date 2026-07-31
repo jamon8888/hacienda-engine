@@ -359,6 +359,11 @@ multilingual and PII-specific.
       point for these clients, not just a size fix). If quantization forces ONNX, B1 reverses.
       *Check:* record measured first-run download size and time-to-first-document.
 
+      **Superseded by Track H** (see "supersedes B3" at that track's heading) — the f16
+      conversion decision there is this task's actual resolution; not independently tracked
+      as a separate decision. The measurement below (landed on `main` independently of that
+      note) is this item's own concrete evidence for why 1.23 GB isn't shippable.
+
       **Measured 2026-07-30.** Sizes via `HEAD` against the resolved CDN URLs (not the
       redirect stub): `model.safetensors` 1,228,421,964 bytes, `tokenizer.json` 16,020,604
       bytes, `encoder_config/config.json` 895 bytes — **1,244,443,463 bytes (~1.16 GiB)
@@ -470,6 +475,12 @@ TypeScript pseudonymisation engine is not.
       output must be legally defensible, the chain has to be exported inside the vault
       (Track I2 / G) rather than merely retained locally.
 
+      **Directive honored 2026-07-30 — no TypeScript audit chain was ever built** (every
+      track up to that point either built on the Rust `AuditStore`/`hacienda-wasm` or left
+      the audit chain untouched); the JS-facing surface and Studio wiring that actually
+      closes the sub-question below landed the next day, on `main`, independently of this
+      branch.
+
       **Done 2026-07-31.** As of L5, `IndexedDbAuditStore` existed in `hacienda-core` but
       had zero JS-facing surface and zero Studio callers — the heading's premise ("it is now
       answered") was aspirational, not actual, until this. Added:
@@ -526,13 +537,103 @@ Current suite: 3 Playwright specs, 5 vitest files. The e2e pipeline test passes 
 extraction works. Nothing asserts PII, redaction, transcription, or that a toggle does
 anything — which is precisely why 31 unchecked boxes coexisted with substantial working code.
 
-- [ ] **D1. Assert toggles have effect.** For each of `enablePiiDetection`,
+- [x] **D1. Assert toggles have effect.** For each of `enablePiiDetection`,
       `redactPiiInOutput`, `enableTranscription`, `enableVerticalNer`: one test where the
       output differs with the flag on and off. A dead toggle then fails a test instead of
       shipping.
-- [ ] **D2. French-language NER fixture** (supports B2).
-- [ ] **D3. Audio fixture through the full pipeline** (supports A3; the old plan's Phase 5
+
+      **Done 2026-07-30.** Correction first: `enableVerticalNer` does not exist in
+      `AppConfig` — the real config key is `enabledVerticals: ("m&a" | "financial_services" |
+      "shared")[]`, a multi-select, not a boolean. Checking it turned up exactly what D1
+      exists to catch: **it was dead**, in the same family as A1-A4.
+      `processFiles`/`worker/pipeline.ts` loaded all three vertical taxonomies
+      unconditionally (`["m&a", "financial_services", "shared"].map(loadVerticalTaxonomy)`),
+      ignoring `config.enabledVerticals` entirely — the "Vertical NER" checkboxes in
+      `ConfigPanel.svelte` did nothing. Fixed to `config.enabledVerticals.map(...)`.
+
+      New `tests/e2e/toggles.spec.ts` (4 tests, on/off pairs) for `enablePiiDetection` and
+      `redactPiiInOutput` — the two toggles a full pipeline run can assert on
+      deterministically. `enabledVerticals`'s effect is asserted instead in
+      `lib/verticals/dictionary.test.ts` (2 new cases: a restricted taxonomy set excludes
+      that vertical's terms; an empty set resolves nothing) — a full e2e test would depend on
+      the heuristic NER bridge happening to extract a taxonomy term as a named entity, which
+      is not reliable enough to assert against. `enableTranscription`'s effect is folded into
+      **D3** below rather than duplicated here, since D3 already needs an audio fixture and a
+      fresh page per toggle state.
+
+      **Verified for real**: all 4 new e2e tests pass, plus the 2 existing egress/pipeline
+      e2e tests unaffected (12/12 full e2e suite with a temporary
+      `launchOptions.executablePath` pointed at this sandbox's Chromium build, reverted
+      before committing — not a committed change, same as prior sessions' e2e verification).
+      65/65 `vitest run` (up from 63; the 2 new `dictionary.test.ts` cases), `svelte-check`
+      0 errors, `tsc --noEmit` clean, production `vite build` clean.
+- [x] **D2. French-language NER fixture** (supports B2).
+
+      **Done 2026-07-30.** Added a French M&A fixture to `lib/ner-bridge.test.ts` and, while
+      building it, found a real bug: `PHONE_PATTERN` only matched US-style 3-3-4 grouping, so
+      a French number grouped in pairs from a leading 0 (`01 23 45 67 89`) — present in the
+      existing `CONTRACT` fixture since this file's first version — was never matched by any
+      test. Fixed with a second alternative in the pattern (`\b0\d(?:[-.\s]?\d{2}){4}\b`);
+      added a dedicated test for it against the existing fixture too.
+
+      The new fixture asserts two different things on purpose. First, the regex-based
+      categories (date, email, phone) are language-independent and work correctly today —
+      asserted positively. Second, `person`/`organization` — the categories that need
+      `compromise`, which is English-only — are asserted as **currently, honestly broken**:
+      `extractEntities` on `"Maître Jean Dupont a représenté Acme SAS dans l'acquisition de
+      Beta SARL"` misses "Acme SAS" and "Beta SARL" as organizations entirely, and
+      misclassifies the person "Jean Dupont" as an organization instead. This is not a
+      fixture bug to fix here — it is the documented reason Track B exists (swap in
+      xberg-wasm's multilingual `NerModel`). The test doc comment says explicitly: when B2
+      lands, flip these assertions to positive ones against whatever bridge B2 wires in.
+
+      **Verified for real:** confirmed exact current behavior against a live `extractEntities`
+      call (via `vite-node`, not guessed) before writing assertions, so the "known-broken"
+      test describes what the bridge actually does today, not an assumption. `vitest run`
+      68/68 (up from 65 — 3 new: 1 phone-pattern regression on `CONTRACT`, 2 in the new
+      French-fixture describe block), `svelte-check`, `tsc --noEmit`, production `vite build`
+      all clean.
+- [x] **D3. Audio fixture through the full pipeline** (supports A3; the old plan's Phase 5
       referenced an `audio/mpeg` fixture that was never added).
+
+      **Done 2026-07-30 — and found transcription does not work at all, in any
+      environment.** New `tests/e2e/audio.spec.ts` generates a minimal but genuinely valid
+      16-bit PCM WAV (silence) programmatically — no binary fixture checked in — and drives
+      it through the real upload gate and worker.
+
+      **Real bug #1, not fixed here (architecture change, out of scope for a test-writing
+      item):** `@remotion/whisper-web`'s `canUseWhisperWeb()` checks `typeof window ===
+      "undefined"` and refuses to run otherwise. `worker/pipeline.ts` runs inside a Web
+      Worker, which has `self`, not `window`. Every `WhisperBridge.load()`/`transcribeAudio()`
+      call therefore throws synchronously — `Whisper Web is not supported: \`window\` is not
+      defined` — in *every* environment, regardless of network access. This has nothing to do
+      with this sandbox specifically (confirmed separately: `huggingface.co` is blocked by
+      this sandbox's proxy policy too, a coincidental second reason it wouldn't work *here*,
+      but not the actual cause). Fixing it means running whisper-web on the main thread and
+      bridging results into the worker — real architecture work, not attempted here.
+
+      **Real bug #2, fixed here:** `processFiles` awaited `whisperBridge.load()` once,
+      upfront, outside every per-file `try`/`catch` and outside its own caller's
+      (`self.onmessage`) — so bug #1's rejection, which is unconditional, was an *unhandled*
+      promise rejection that silently hung the entire batch: no error banner, no download, no
+      feedback of any kind. `worker/pipeline.ts` now wraps that call in its own `try`/`catch`;
+      each audio file's own `transcribeAudio()` call retries `load()` (idempotent) and its
+      failure surfaces through the normal per-file error path instead, exactly like any other
+      file-processing failure.
+
+      Given both of those, the tests assert what's actually true today rather than an
+      aspirational outcome: the upload gate accepts audio (Track A3), and the two
+      `enableTranscription` states produce two different, specific errors — `"Unsupported
+      format: audio/wav"` from extraction vs. `"Whisper Web is not supported: \`window\` is
+      not defined"` from the transcription attempt — proving the toggle still has a real,
+      provable effect even though neither path currently succeeds. This satisfies D1's
+      `enableTranscription` case, folded in here rather than duplicated in `toggles.spec.ts`.
+
+      **Verified for real**, including the negative case (confirmed via live diagnostic runs,
+      not assumed): all 3 new tests pass, and the full e2e suite (15/15, temporary
+      `launchOptions.executablePath` for this sandbox's Chromium build, reverted before
+      committing) stays green. `vitest run` 68/68 (unaffected — this track added no unit
+      tests), `svelte-check`, `tsc --noEmit`, production `vite build` all clean.
 
 ---
 
@@ -548,7 +649,7 @@ generic primitives it carries domain components Studio would otherwise build fro
 `csv-viewer`, `file-dropzone`, `file-upload`, `file-system`, `bounding-box-citations`,
 `document-splits`, `data-grid`, `schema-builder`.
 
-- [ ] **E1. Decide the framework. Blocking — everything in Track E and F depends on it.**
+- [x] **E1. Decide the framework. Blocking — everything in Track E and F depends on it.**
       shadcn/ui is React-only; Radix has no Svelte build. In Svelte the option is
       shadcn-svelte, a separate port — meaning hacienda-private's screens get *reimplemented*,
       not reused, and the domain components above have no equivalent at all.
@@ -568,13 +669,85 @@ generic primitives it carries domain components Studio would otherwise build fro
       that in Svelte dwarfs the 653 lines of Svelte that would be discarded, and it is only
       one of 40 components.
 
-- [ ] **E2. Port the design tokens first, independently of E1.** Tailwind config + CSS
+      **Decided 2026-07-30: React + shadcn/ui, per the recommendation above** — plain Vite,
+      not Next, to keep the existing Vite worker setup and avoid dragging in routing machinery
+      this app doesn't need. Studio's shell (the 4 `.svelte` components, 653 lines, no
+      Tailwind) gets rebuilt in React and adopts `hacienda-private`'s 40 vendored shadcn/ui
+      components as-is, including `file-system.tsx` unmodified rather than reimplemented.
+      Everything framework-agnostic (`worker/pipeline.ts`, `kg-export.ts`, `ner-bridge.ts`,
+      `verticals/`, `registry.ts`) is unaffected and ports as-is into the new shell. This
+      unblocks E2 (design tokens) and E3 (screens); Track F (PII review UX, pseudonymization,
+      CodeMirror editor) can now proceed against a concrete component set instead of a
+      hypothetical one.
+
+- [x] **E2. Port the design tokens first, independently of E1.** Tailwind config + CSS
       variables are framework-agnostic and can land before any component work.
 
-- [ ] **E3. Screens.** Upload (`file-dropzone`), processing (`progress`), document view
+      **Done 2026-07-30.** `tailwind.config.ts` and the `--background`/`--primary`/etc.
+      CSS variables in `app.css` are ported verbatim from
+      `hacienda-private/apps/web/{tailwind.config.ts,app/globals.css}`, less that repo's
+      Next.js-specific `content` globs (Studio's own file layout instead). Added
+      `postcss.config.js` and `lib/utils.ts`'s `cn()` (`clsx` + `tailwind-merge`) — the
+      standard shadcn helper every vendored component imports as `@/lib/utils`. Kept
+      distinct custom-property names from the pre-existing hand-rolled `--color-*`/
+      `--radius-*` set already in `app.css`, so nothing collided during the migration.
+
+- [x] **E3. Screens.** Upload (`file-dropzone`), processing (`progress`), document view
       (`resizable` dual-pane), entity/PII panel (`card` + `badge` + `popover`), export.
       Studio needs no matters/folders/auth — that is hacienda-private's multi-user model and
       must not be imported along with the components.
+
+      **Two of five screens done 2026-07-30 (upload, processing); the remaining three —
+      document view, entity/PII panel, export — landed across Tracks F1/F3/I3/I4, not as a
+      separable E3 step, since building them was the same work those tracks needed anyway.**
+      The real prerequisite E1/E2 blocked on — a working React+Vite shell to build screens in
+      at all — is now done, which is what made this progress possible: `MarkdownEditor.tsx`
+      (F3) is the document view (a `resizable` dual-pane wasn't adopted — CodeMirror plus the
+      adjacent `PiiPanel` list side by side covers the same need without vendoring that
+      component), `PiiPanel.tsx` (F1/I4) is the entity/PII panel, `FileBrowser.tsx` (I3) is
+      the batch-level list, and the existing zip download (predates this rewrite) is export.
+      All five screens now exist; none of hacienda-private's matters/folders/auth model was
+      imported along with them.
+      `hacienda-private` wasn't attached to this session initially — cloned
+      and registered mid-session (`/workspace/hacienda-private`) once the gap surfaced,
+      since E3/F1/I3 all assume it's available to port from.
+
+      Ported Studio's shell from Svelte to React+Vite, replacing all four `.svelte`
+      components (`App.svelte`, `Onboarding.svelte`, `ConfigPanel.svelte`,
+      `ProgressBar.svelte`, ~904 lines total including `main.ts`/`app.css`) with
+      `App.tsx`/`components/{Onboarding,ConfigPanel,ProgressBar}.tsx`/`main.tsx`,
+      styled with Tailwind utilities against the E2 tokens rather than the old
+      hand-rolled `<style>` blocks. `worker/pipeline.ts` and every `lib/*.ts` module —
+      framework-agnostic per E1's own reasoning — needed zero changes. `vite.config.ts`
+      swapped `@sveltejs/vite-plugin-svelte` for `@vitejs/plugin-react`; `tsconfig.json`'s
+      `jsx` changed from `"preserve"` to `"react-jsx"` and its `"@/*"` path alias now
+      points at the app root (matching hacienda-private's own `components.json`
+      convention) instead of `lib/`, so ported components need no import-path edits.
+      Added the Radix packages E3's remaining screens will need
+      (`dialog`/`popover`/`progress`/`scroll-area`/`select`/`slot`/`tabs`/`tooltip`) plus
+      `class-variance-authority`/`lucide-react` as a foundation, without yet vendoring the
+      `components/ui/*` files themselves — no screen here needs them yet.
+
+      Found and fixed one thing while porting, not a defect in the port itself: every
+      Svelte component's `<style>` block referenced `--spacing`, `--radius`,
+      `--color-surface`, `--color-muted`, and `--color-error` custom properties that were
+      never defined anywhere in the codebase — computed as invalid and silently fell back
+      to each property's initial value the entire time these components existed. Not
+      reproduced; the Tailwind rewrite uses the real E2 tokens instead of carrying a
+      pre-existing invisible bug forward.
+
+      **Verified for real:** `vitest run` 147/147, `tsc --noEmit` clean (script renamed
+      from `svelte-check` to `tsc --noEmit`, now that there's no Svelte to check), and a
+      production `vite build` clean (36 modules transformed, down from 121 — no Svelte
+      compiler pass). Ran the **full existing e2e suite** for real against this sandbox's
+      Chromium build (temporary `launchOptions.executablePath`, reverted before
+      committing) — **16/16 passing on the first run**, unmodified from before the
+      rewrite: onboarding, drop zone (including folder mode and `webkitdirectory`),
+      config panel checkboxes matched by label text, PII toggle effects, redaction,
+      audio upload/transcription-toggle errors, and the egress allowlist all behave
+      identically under React. This is the regression net Track D's tests exist to be —
+      a framework rewrite that changed observable behavior would have failed at least one
+      of them.
 
 ---
 
@@ -582,7 +755,7 @@ generic primitives it carries domain components Studio would otherwise build fro
 
 This is the flow the user asked for, and it is where the two apps differ most.
 
-- [ ] **F1. Adopt the PII reveal UX; do not adopt its data model.**
+- [x] **F1. Adopt the PII reveal UX; do not adopt its data model.**
       `PiiPanel.tsx` is the pattern worth copying: detected spans render as tokens with a
       `Badge` for the kind, clicking opens a `Popover` that asks for a passphrase, and the
       plaintext is shown in a `Dialog` and forgotten on close — never persisted. The vault is
@@ -590,7 +763,73 @@ This is the flow the user asked for, and it is where the two apps differ most.
       detection. All of this is directly applicable to Studio and is the single most valuable
       thing to port.
 
-- [ ] **F2. Build reversible pseudonymization — it does not exist anywhere in JS yet.**
+      **Reveal UX done 2026-07-30; accept/correct/reject (the `PiiReviewPanel.tsx` half)
+      landed under Track I4 (2026-07-30/31) — `PiiPanel`'s per-finding Remove button is the
+      reject half, `MarkdownEditor`'s "Mark selection as PII" is the add/correct half,
+      neither ported from `PiiReviewPanel.tsx` directly (see I4's writeup for why: Studio's
+      own `PiiEntity`/`renderAnnotatedMarkdown` data model, not hacienda-private's).**
+      `components/PiiPanel.tsx` adopts the Badge + passphrase-popup + forgotten-on-close
+      pattern against Studio's own `lib/pii-engine.ts` `PiiEntity` and `lib/pseudonymize.ts`
+      (Track F2), not hacienda-private's opaque non-reversible token / "matter passphrase"
+      model. Diverges from the pattern in one way, discovered while wiring it up for real
+      rather than assumed: hacienda-private's `PiiPanel.tsx` nests a `Dialog` inside the
+      `Popover`'s content; doing the same with plain `@radix-ui/react-popover` +
+      `@radix-ui/react-dialog` made the Popover dismiss itself the instant the Dialog
+      opened, making the Dialog unreachable — confirmed live, not theoretical. Base UI
+      (what hacienda-private now actually uses, not plain Radix — its `components/ui/*`
+      files use `@base-ui/react`, contradicting the plan's "Radix primitives" description;
+      see `components/ui/README.md`) may compose the two more gracefully. Fixed by putting
+      the passphrase form and the revealed value both directly in one Popover's content —
+      same UX contract, one overlay instead of two.
+
+      Vendored `components/ui/card.tsx` verbatim (framework-agnostic). Wrote
+      `badge.tsx`/`button.tsx`/`dialog.tsx`/`popover.tsx`/`input.tsx` from the classic
+      `@radix-ui/react-*` + `class-variance-authority` shadcn/ui recipe instead of porting
+      hacienda-private's own (Base UI-based) versions, to avoid adopting a second headless-UI
+      toolkit and a Tailwind v4 migration neither this app nor Track E2 planned for.
+
+      **Wiring `redactionMode: "pseudonymize"` into `worker/pipeline.ts` found a real bug,
+      not a UI issue: `PiiEntity.text` (hacienda-core's `MergedEntity.text`) is documented
+      "Empty for regex detections, which carry offsets only" — regex is the only detector
+      active in Studio's default config, so every finding's `.text` was empty.** The first
+      wiring attempt happily minted a pseudonym token for `""` on every finding — self-
+      consistent (encrypts, decrypts, round-trips) and completely wrong, exactly the kind of
+      bug a same-language round-trip test cannot catch (Track F2's own golden-vector note).
+      Caught only by driving the real UI in a real browser and finding the revealed value
+      was empty, not the diagnostic assertions in isolation. Fixed:
+      `markdown.slice(f.start, f.end)` recovers the actual matched text from the same
+      offsets `renderAnnotatedMarkdown` already treats as JS string indices (Track F4) —
+      consistent with, not a new assumption on top of, this pipeline's existing offset
+      handling.
+
+      New `AppConfig` fields: `redactionMode: "mask" | "pseudonymize"` (default `"mask"`,
+      so nothing changes unless explicitly opted into), `pseudonymPassphrase` (session-only,
+      never persisted), `pseudonymKeyId` (default `"session"`). `ConfigPanel.tsx` exposes
+      them only when `redactPiiInOutput` is on. The passphrase-to-key derivation itself
+      (`deriveKeyHex`, PBKDF2-HMAC-SHA256, 600,000 iterations, deterministic per-`keyId`
+      salt) is new in `lib/pseudonymize.ts` — Studio's own convenience layer on top of F2's
+      primitive, deliberately not part of what has to match the CLI byte-for-byte (only the
+      *token format* does; a Studio user and a CLI operator who want to interoperate
+      exchange the derived 64-byte key itself, out of band — the CLI has no PBKDF2 step,
+      `EnvKeyResolver` reads raw hex).
+
+      `App.tsx` gained a minimal document-view section (the first of Track E3's three still-
+      open screens) listing each processed file with a `PiiPanel` when it has PII findings —
+      `ProcessedFile` gained a `piiFindings: PiiEntity[]` field to carry them from the worker.
+
+      **Verified for real:** `pseudonymize.test.ts` gained `deriveKeyHex` tests (determinism,
+      passphrase/keyId sensitivity, a full passphrase-to-reveal round-trip) — 151/151 full
+      suite, `tsc --noEmit` and production `vite build` clean. New
+      `tests/e2e/pseudonymize.spec.ts` (3 tests) — run for real against this sandbox's
+      Chromium build, temporary `executablePath`, reverted before committing — is what
+      actually found the empty-`.text` bug: mints in the worker, asserts the exported
+      markdown carries `[EMAIL:session:...]` and neither the raw email nor the `[EMAIL]`
+      mask template, then drives the real `PiiPanel` UI to reveal it back to the original
+      value, and a third test proving a wrong passphrase fails closed. Full e2e suite
+      19/19 (16 pre-existing + 3 new), confirming this didn't regress anything Track E's
+      rewrite already covered.
+
+- [x] **F2. Build reversible pseudonymization — it does not exist anywhere in JS yet.**
       hacienda-private does **redaction only**: opaque stable tokens `{{C0_PERSON_1}}` with
       no exportable mapping. Reversible pseudonymization exists only in Rust
       (`redaction/pseudonym.rs:520` `reveal()`, AES-SIV, `[CATEGORY:key_id:BASE32]`), and per
@@ -601,12 +840,120 @@ This is the flow the user asked for, and it is where the two apps differ most.
       silently choosing a different format is how Track C's divergence happens again.
       *Check:* round-trip a document through Studio pseudonymize → CLI reveal.
 
-- [ ] **F3. CodeMirror 6 markdown editor with inline PII decorations.**
+      **Done 2026-07-30.** New `lib/pseudonymize.ts` implements AES-256-SIV (RFC 5297) from
+      WebCrypto primitives — there is no native AES-SIV, AES-CMAC, or raw AES-ECB in
+      WebCrypto, so it's built from what WebCrypto does have: native `AES-CTR` with
+      `length: 128` (which is exactly RFC 5297's full-128-bit-counter `Ctr128BE`, not
+      approximated), and `AES-CBC` with a zero IV as a single-block AES-ECB substitute (CBC's
+      first output block depends only on the IV and first plaintext block, so encrypting one
+      16-byte block and keeping only WebCrypto's first 16 output bytes, discarding its
+      automatic PKCS#7 padding block, is exactly one ECB block encryption). AES-CMAC
+      (RFC 4493) and S2V (RFC 5297 §2.4) are built on that primitive.
+
+      Matching the Rust format exactly meant reading the vendored `aes-siv` crate source
+      (`~/.cargo/registry/.../aes-siv-0.7.0/src/siv.rs`) directly rather than the RFC alone,
+      since the RFC leaves some choices — which of the raw vs. IV-masked tag gets stored,
+      the exact key-half ordering — as implementation decisions. Two are easy to get
+      backwards silently: `Siv::new`'s own comment claims "the first half of the key" is the
+      *encryption* key, but the slicing it actually does (`key[M::key_size()..]`) makes it
+      the *second* half — the code was trusted over the comment, checked by making the
+      golden-vector test below pass, not by re-reading the comment more carefully. And the
+      token's stored tag is the **unmasked** S2V output; a separate masked copy (top bit of
+      bytes 8 and 12 zeroed, the SIV paper's collision mitigation) is used only internally as
+      the CTR IV and never appears in the ciphertext.
+
+      The token label is `category_label()`'s Rust output —
+      `{PiiCategory_variant:?}.to_uppercase()`, e.g. `PhoneNumber` → `PHONENUMBER` — not the
+      `snake_case` form `PiiEntity.category` actually carries from the wasm PII engine
+      (`phone_number`). `categoryLabel()` derives the former from the latter generically
+      (strip underscores, uppercase) rather than hand-maintaining a lookup table, since the
+      two are provably the same word sequence under different delimiters for every fixed
+      `PiiCategory` variant — verified against all 32 of them in `pseudonymize.test.ts`, not
+      asserted from the derivation alone.
+
+      **Verified for real, three ways, in `pseudonymize.test.ts` (63 tests):**
+      1. **RFC 4493 known-answer vectors** for the underlying AES-CMAC primitive (four
+         official test cases plus the worked subkey-derivation example) — verified
+         independently via a scratch Rust test using `cmac`/`aes` directly (not `aes-siv`),
+         since this sandbox has no network access to fetch the RFC text to check a
+         from-memory transcription against. Confirms `dbl`/block-chaining/padding are
+         correct independent of anything the Rust side of this repo does.
+      2. **Golden vectors captured from a real `Pseudonymiser::token()`/`.reveal()` run**
+         (scratch test at `hacienda-core/tests/zz_golden_vectors.rs`, not committed — same
+         `wasm-opt`-style temporary-dev-dependency pattern, `aes`/`cmac` added to
+         `hacienda-core`'s dev-dependencies, reverted after) against a fixed key
+         (`"07".repeat(KEY_BYTES)`) across four categories (email, phone, full name, IBAN).
+         `mintToken()` reproduces the exact Rust-minted token string for every case;
+         `revealToken()` recovers the exact normalized text from a Rust-minted token. This is
+         the test a same-language round-trip cannot be: code wrong in the same way on both
+         ends of a round-trip still round-trips.
+      3. **Property/round-trip tests**: determinism, case/whitespace-variant collapse,
+         category-scoped tokens, fail-closed on wrong key and on a tampered ciphertext,
+         `pad`/`unpad`/`base32Encode`/`base32Decode` round-trips, an RFC 4648 base32 vector
+         (`"foobar"` → `MZXW6YTBOI"`).
+
+      `tsc --noEmit`, `svelte-check`, and a production `vite build` all clean — needed one
+      fix along the way: `Uint8Array.prototype.slice()` returns
+      `Uint8Array<ArrayBufferLike>` under this TypeScript version's stricter typed-array
+      generics, which `crypto.subtle.*`'s `BufferSource` rejects (its backing buffer could
+      in principle be a `SharedArrayBuffer`); a small `fresh()` helper re-copies to
+      `Uint8Array<ArrayBuffer>` at each WebCrypto boundary.
+
+      **What's still open, deliberately not touched here:** this module is not wired into
+      `worker/pipeline.ts` or any UI — Track F1 (the reveal/review panel) and F3 (the
+      CodeMirror editor) are the surfaces that would actually call `mintToken`/`revealToken`
+      against a real document, and neither exists yet. There is also no `hacienda reveal`
+      CLI subcommand to literally run for the Check's "CLI reveal" half — `--mode
+      pseudonymize` only *mints* tokens during `extract` today; reversing one is only
+      exposed as `Pseudonymiser::reveal()`, a library function, which is exactly what the
+      golden-vector tests exercise directly rather than through a CLI invocation that
+      doesn't exist. Key management (where a 64-byte key or its id would come from in a
+      browser with no server-side secret store) is also untouched — out of scope for "build
+      the primitive and prove it's compatible," in scope for whoever wires F1/F3 to it.
+
+- [x] **F3. CodeMirror 6 markdown editor with inline PII decorations.**
       Nothing exists to build on: CodeMirror is not a dependency in any repo, and
       hacienda-private's right pane is a read-only `<pre>` of redacted text rendered with
       `react-markdown`. Use CodeMirror decorations to render PII spans as inline pills that
       open the F1 popover.
       *Check:* editing text before a PII span does not misplace that span's highlight.
+
+      **Done 2026-07-30.** `lib/pii-decorations.ts`'s `piiHighlightExtension()` is a CM6
+      `StateField<DecorationSet>` seeded from each `PiiEntity`'s `start`/`end` and mapped
+      through every transaction (`decorations.map(tr.changes)`) — the Check's requirement is
+      CM6's own built-in mechanism, not something this codebase reimplements.
+      `components/MarkdownEditor.tsx` wires it into `@uiw/react-codemirror`
+      (`@codemirror/lang-markdown`), rendered in `App.tsx`'s document-view section next to
+      `PiiPanel`. **Diverges from the plan's literal ask in one way, deliberately**: pills
+      don't open the F1 popover *inside the editor* — CM6 mark decorations are plain DOM
+      spans, and hosting a React `Popover` inside one means a widget decoration carrying a
+      React portal into non-React DOM, real engineering distinct from what this Check tests.
+      The editor shows *where* PII is in the live text; revealing it stays in the adjacent
+      `PiiPanel` list, which already has the real reveal flow (Track F1).
+
+      Required a new `ProcessedFile.rawMarkdown` field, caught before it shipped wrong, not
+      assumed correct: `PiiEntity.start`/`.end` are offsets into the markdown *before*
+      `renderAnnotatedMarkdown` splices in entity links and redaction (Track F4) and before
+      frontmatter is prepended, but `ProcessedFile.markdown` is the *post*-splice final
+      output — pairing `piiFindings` with `markdown` would highlight arbitrary wrong text.
+      `rawMarkdown` carries the pre-splice text `piiFindings`' offsets actually describe.
+
+      **Verified for real:** `lib/pii-decorations.test.ts` (7 tests) exercises the extension
+      directly against real `EditorState`/`StateField` objects (not mocked) — decorates the
+      exact span named, drops out-of-bounds/overlapping findings instead of crashing the
+      `RangeSetBuilder`, and the Check itself: inserting text before a decorated span shifts
+      it by exactly the inserted length while the decoration still bounds the identical
+      original text, edits after a span leave it untouched, and edits inside a span shrink
+      it to what survives (documents CM6's actual mapping behavior at a boundary case,
+      rather than assuming it). New `tests/e2e/markdown-editor.spec.ts` (2 tests) — run for
+      real against this sandbox's Chromium build, temporary `executablePath`, reverted
+      before committing — confirms the pill renders with the right text and category
+      attribute in the live app, and that *typing* before the span in a real editor
+      (not a synthesized transaction) doesn't corrupt the highlighted text either. Full
+      suite: `vitest run` 158/158, `tsc --noEmit` clean, production `vite build` clean
+      (CodeMirror added real bundle weight — flagged Vite's own >500kB chunk-size warning,
+      not treated as a defect given B3/H1's already-dominant 614MB–1.2GB model weight), full
+      e2e 22/22 (20 pre-existing + 2 new), confirming no regression.
 
 - [x] **F4. Solve the offset problem. This is the hard technical core of Tracks A/E/F.**
       Four things mutate the same text and all are offset-sensitive: entity linking
@@ -680,18 +1027,63 @@ Studio's zip already contains markdown with linked entities, `_manifest.json`,
 (`worker/pipeline.ts:370-397`). hacienda-private has **no zip export at all** — only a
 "Copy for Claude Desktop" clipboard button and a mirror push to its MCP server.
 
-- [ ] **G1. Preserve entity linking through pseudonymization.** Already implemented at
-      `worker/pipeline.ts:93` as `[Acme SAS](entity:organization/acme-sas)`, with a
-      `## Entities` glossary (`:118`) and entity metadata in frontmatter (`:99`). Pseudonymizing
-      an entity must not orphan its link or its glossary row.
+- [x] **G1. Preserve entity linking through pseudonymization.** Already implemented at
+      `worker/pipeline.ts` (`renderAnnotatedMarkdown`) as `[Acme SAS](#entity-organization-acme-sas)`
+      (link scheme updated by G2 — see below), with a `## Entities` glossary (`buildGlossary`)
+      and entity metadata in frontmatter (`buildFrontmatter`). Pseudonymizing an entity must
+      not orphan its link or its glossary row.
 
-- [ ] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
+      **Done 2026-07-30, and it needed no G1-specific code once F1 wired pseudonymization
+      into the pipeline.** `filterExportableEntities` (Track A2/F4) already drops any NER
+      entity whose span overlaps a PII finding before it ever reaches the frontmatter,
+      glossary, `entities/` files, or registry — and it does that by comparing
+      `start`/`end` offsets only, never reading `redact_template`'s content. That check is
+      identically correct whether `redact_template` holds a mask (`"[EMAIL]"`) or a
+      pseudonym token — an overlapping entity was never going to get linked in the first
+      place, in either mode, so there was no orphaning mechanism to fix. Verified, not just
+      reasoned: `tests/e2e/pseudonymize.spec.ts`'s new "G1" describe block reuses the
+      misclassified-digit-run fixture `worker/pipeline.test.ts`'s L6 regression test and
+      `egress.spec.ts`'s redaction contract already exercise for mask mode, run for real
+      with `redactionMode: "pseudonymize"` — the raw card number appears nowhere (body,
+      registry, or glossary), no `entities/phone-*.md` link survives, and the body carries
+      a real `[CREDITCARD:session:...]` token. Passed on the first run.
+
+- [x] **G2. Make the links resolvable in Claude Desktop.** `entity:` is a custom URI scheme
       nothing outside Studio understands. Switch to in-document anchors into the `## Entities`
       glossary, or wikilinks, so the exported markdown is self-contained. *Check:* open the
       exported markdown in Claude Desktop and follow a link to its glossary entry.
 
-- [ ] **G3. Ship a README in the zip** describing what the bundle is, so a Claude Desktop
+      **Done 2026-07-30, verified mechanically, not literally in Claude Desktop.** Chose
+      explicit `<a id="entity-${type}-${slug}">` anchors over relying on a renderer's
+      auto-slugified heading text: CommonMark/GFM pass raw inline HTML through verbatim, so
+      the link target (`#entity-${type}-${slug}`) is exactly what this app puts there —
+      independent of whichever specific slugification algorithm a given renderer implements,
+      and immune to two different entities happening to produce the same auto-slugified
+      heading text. A single `entityAnchorId()` helper is the one place that ID is computed,
+      used by both `renderAnnotatedMarkdown` (the link) and `buildGlossary` (the anchor), so
+      the two cannot drift out of sync.
+
+      **What was and wasn't verified:** no access to Claude Desktop from this environment, so
+      the literal Check — open the file there, click a link — could not be run. What *was*
+      verified, via a real browser run (not just unit tests): every `[text](#anchor)` link
+      target in a real generated document has a byte-exact matching `<a id="anchor">` in that
+      same document's glossary, and no `entity:` custom-scheme link remains anywhere in the
+      output. Same-page `#fragment` navigation to a matching `id` attribute is standard
+      HTML/browser behavior, not something Claude Desktop's renderer would need to do
+      anything special to support — but this doesn't substitute for actually opening a real
+      exported file there.
+
+- [x] **G3. Ship a README in the zip** describing what the bundle is, so a Claude Desktop
       session has the context to use the registry and KG files rather than only the prose.
+
+      **Done 2026-07-30.** `buildBundleReadme()` writes `README.md` at the zip root
+      (`worker/pipeline.ts`), computed once from the same `registryJson` the
+      `entities-registry.json` file already builds (not a second `registry.toJSON()` call —
+      that would also have produced a second, slightly different `processed_at` timestamp).
+      Explains what each file/folder is for and steers cross-document questions toward
+      `entities-registry.json`/`kg-export/` instead of re-deriving relationships by reading
+      every `.md` file — the gap this item exists to close. Verified via a real browser run:
+      present in the zip, correct file/entity counts substituted in.
 
 *Note:* hacienda-private also exposes a real Claude Desktop MCP integration
 (`services/mcp-server/release/README.md:12-22` — `xberg-mcp mcp` stdio endpoint plus a
@@ -724,15 +1116,57 @@ mmap and needs only numpy.
       (S3/CDN/GitHub release/HF repo) with credentials — "publish the output" was never a
       solved step, just implied by the plan text. Both require a real infra decision and
       access this session doesn't have; deferred rather than guessed at.
+
+      **Publish destination decided 2026-07-30: a new HuggingFace repo**, under the owner's
+      own HF account/org, over self-hosting or standing up S3/CDN. Rationale: `huggingface.co`
+      is already the sole external host in Studio's egress allowlist
+      (`tests/e2e/egress.spec.ts:16`) — publishing there needs no allowlist change and adds no
+      new domain for the secret-professionnel egress constraint to reason about, unlike
+      self-hosting (new bandwidth/cost commitment on Studio's own deployment) or cloud
+      storage + CDN (new infra, new credentials, new allowlisted domain). Once uploaded,
+      `VITE_MODEL_BASE_URL` points at
+      `https://huggingface.co/<owner>/<new-repo>/resolve/main` in place of today's
+      `fastino/GLiNER2-Guardrails-PII-Multi`.
+
+      **Still blocked on execution, not just decision**: uploading requires an HF account
+      with write access, `numpy` (absent here), and network egress to huggingface.co for the
+      upload — none available in this sandbox. The destination is settled; running the
+      script and performing the actual upload is a task for someone with those three things,
+      not further planning.
+
+      **Re-verified 2026-07-31: one of the three blockers has narrowed, the binding one has
+      not.** `numpy` is no longer absent from this environment — `pip install numpy` succeeds
+      (PyPI is reachable through this session's proxy even though general HTTPS is not), so a
+      future session in *this* sandbox could run the conversion script itself without that
+      gap. What's still blocking: `curl https://huggingface.co` fails at the proxy layer
+      (`CONNECT tunnel failed, response 403`) — the same class of failure as
+      `github.com/WebAssembly/binaryen/releases` (still 403, still needing the documented
+      temporary `wasm-opt = false` workaround for every `vite build` this session ran). The
+      conversion script itself takes a **local** source-checkpoint path, not a URL
+      (`convert_gliner2_f16.py`'s `source: Path` argument) — `hacienda-private`'s repo (freshly
+      re-cloned this session at `/workspace/hacienda-private`) ships the *script*, not the
+      1.2 GB F32 checkpoint itself, so downloading it still needs huggingface.co access this
+      sandbox doesn't have, and uploading the 614 MB result needs the same access plus write
+      credentials, neither available. Net: unchanged conclusion (blocked on network/
+      credentials this session cannot obtain), with the specific `numpy` sub-blocker now
+      closed for whichever future session actually has huggingface.co egress.
 - [ ] **H2. Decide whether 614 MB is acceptable.** It is a 2× win, not a solution. If not,
       the manifest at `services/mcp-server/models/manifest.json` shows the fallback they
       chose: `onnx-community/gliner_small-v2.1` with int8 variants — a much smaller model at
       some accuracy cost. Evaluate against French legal fixtures before switching, since
       multilingual quality is the whole point (Track B).
+
+      **Re-verified 2026-07-31, still unstarted.** Genuinely a judgment call for whoever owns
+      the accuracy/size tradeoff, not something blocked on tooling or network access —
+      correctly left open, not silently stalled.
 - [ ] **H3. Note their runtime differs.** hacienda-private loads GLiNER2 in a dedicated Web
       Worker via `packages/wasm-pipeline/src/gliner2-worker.ts` with a `@xenova/transformers`
       tokenizer, whereas Studio's `createNerBackend()` targets xberg-wasm's `NerModel`. Both
       consume the same safetensors. B1 should account for this third option.
+
+      **Re-verified 2026-07-31, still unstarted.** `services/mcp-server` isn't in this repo
+      (it's `hacienda-private`'s), so nothing here needed touching — a documentation/decision
+      task for whoever next revisits B1's runtime choice, not code.
 
 ---
 
@@ -740,22 +1174,70 @@ mmap and needs only numpy.
 
 The core product. Design the output format before writing pipeline code.
 
-### I1. Folder ingest
+### I1. Folder ingest — DONE 2026-07-30
 
-- [ ] Add `webkitdirectory` to the file input and carry `file.webkitRelativePath` through
+- [x] Add `webkitdirectory` to the file input and carry `file.webkitRelativePath` through
       `FileInput` so the source tree survives into the output. Today only `multiple` is set
       and relative paths are discarded.
-- [ ] Ingest is sequential (`for (const file of files)`, `worker/pipeline.ts:331`). A folder
+
+      **Done.** Rather than a second `<input type="file">` (every e2e test's
+      `input[type="file"]` selector assumes exactly one element exists), `App.svelte` toggles
+      `webkitdirectory` on the *same* `#file-input` via a `folderMode` flag, flipped by an
+      "or choose a folder" button next to the existing label. `lib/file-filter.ts`'s new
+      `effectiveFileName()` prefers `webkitRelativePath` over `.name` — used everywhere a
+      filename crosses a boundary: the `FileInput.name` sent to the worker, the
+      `progress`/`ProgressBar` Map key (previously keyed by bare `file.name`, which would have
+      silently never matched a folder-uploaded file's progress messages — caught before it
+      shipped, not after), and the batch-completion counter. `worker/pipeline.ts` needed no
+      change: `r.name` already becomes the zip entry path via `zip.file(r.name, ...)`, and
+      JSZip treats `/` in that path as folder nesting, so a relative path in `input.name`
+      produces a nested zip entry for free. **Not done**: drag-and-drop folder traversal —
+      `onDrop` still reads `dataTransfer.files` flat, so a dragged folder is not (yet) walked
+      recursively; only the explicit folder-picker button carries `webkitRelativePath`.
+- [x] Ingest is sequential (`for (const file of files)`, `worker/pipeline.ts:331`). A folder
       of a hundred documents with a 614 MB model loaded will be slow and gives no way to
       cancel. Decide whether to parallelise or just report honest per-file progress; do not
       leave a progress bar that stalls for minutes with no explanation.
-- [ ] Skip/report unsupported files rather than failing the batch — a real folder contains
+
+      **Decided: honest per-file progress, not parallelisation.** The single loaded WASM
+      NER/PII engine instance is not built for concurrent inference calls, and true
+      parallelism would need multiple Workers — out of scope here. The per-file progress
+      cards already update through real stages as `processFile` runs (not new); what was
+      missing for a large folder was any sense of overall progress. Added a
+      `{completed} / {total} processed` summary line, shown whenever more than one file is
+      queued, computed from the same `progress` Map. Cancellation remains unimplemented.
+- [x] Skip/report unsupported files rather than failing the batch — a real folder contains
       `.DS_Store`, images, and things Studio cannot extract.
 
-### I2. The vault layout — the thing to get right
+      **Done.** `isJunkFile()` (`lib/file-filter.ts`) silently drops OS noise (dotfiles,
+      `Thumbs.db`, `desktop.ini`) before validation — a real folder's `.DS_Store` was never a
+      file the user meant to include, so it isn't reported as skipped, just excluded.
+      Genuinely unsupported files (wrong type/too large) already didn't fail the batch
+      (`validateFile` filtered them client-side before this change) but only surfaced as a
+      per-file error banner that overwrote itself on every subsequent file — useless for a
+      folder with several. Now: exactly one rejected file (the existing, tested single-file
+      case) keeps its precise message; more than one is reported as a count
+      ("Skipped 2 unsupported and 1 system files.").
 
-Proposed zip structure. This is a design proposal, not a finding; disagree with it before it
-gets built:
+      **Verified for real**: `lib/file-filter.test.ts` (7 cases: relative-path preference,
+      junk-file detection including nested-path basenames). New
+      `tests/e2e/folder-upload.spec.ts` builds an actual temp directory (`sub/note.txt`,
+      `.DS_Store`, `mystery.xyz`), uploads it through the folder picker using Playwright's
+      directory-path `setInputFiles` (which populates `webkitRelativePath` the same way a
+      real browser directory picker does — not simulated), and asserts all three claims
+      against the real downloaded zip: the nested path survives (`.../sub/note.md`), the
+      junk and unsupported files are absent, and the skip-notice text names both counts. Run
+      for real (temporary sandbox-only `wasm-opt = false` and Chromium `executablePath`,
+      both reverted before commit, same pattern as every other verification in this PR) —
+      5/5 across `basic.spec.ts` + the new spec, and the full existing e2e suite
+      (`toggles`, `egress`, `pipeline`, `audio` — 11 more tests) re-run clean to confirm no
+      regression from re-keying the progress Map. `vitest run` 77/77, `svelte-check` 0
+      errors, `tsc --noEmit` clean, production `vite build` clean, `typos` clean.
+
+### I2. The vault layout — the thing to get right — DECIDED 2026-07-30
+
+Proposed zip structure. **Accepted as proposed**, per the person who owns this call — this is
+now the contract all three surfaces (Studio, CLI, API) must emit, not a finding to revisit:
 
 ```text
 README.md                    ← what this bundle is, how an agent should use it
@@ -767,46 +1249,177 @@ entities-registry.json
 kg-export/{neo4j.cypher,networkx.json,rdf.ttl}
 ```
 
-- [ ] **Links must be relative markdown paths**, e.g. `[Acme SAS](../entities/acme-sas.md)`.
+- [x] **Links must be relative markdown paths**, e.g. `[Acme SAS](../entities/acme-sas.md)`.
       This replaces the current `entity:organization/acme-sas` custom scheme
       (`worker/pipeline.ts:93`), which nothing outside Studio can resolve. Relative paths are
       followable by a Claude Desktop agent with filesystem access, and by Obsidian, and by
       anything else that reads a markdown folder.
-- [ ] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
+
+      **Done 2026-07-30.** Replaced G2/G3's interim in-document `<a id>` anchors with real
+      `entities/<type>-<slug>.md` files, type-prefixed rather than the plan's literal
+      `entities/acme-sas.md` example — a bare slug collides across types (an `organization`
+      and a `location` can slugify to the same string), the same risk G2's anchor scheme
+      already had to account for. `relativeEntityLink(docPath, entity)` computes the
+      `../`-prefixed path from a document's depth under `documents/` back to `entities/`;
+      `RegistryEntity` gained a `slug` field (`lib/registry.ts`) — the first mention's slug,
+      stable for the batch — since it previously stored everything needed to identify an
+      entity except the one field file-naming needs.
+- [x] **One file per entity, with backlinks.** This is what makes the bundle RAG-ready rather
       than merely readable: the agent can open `entities/acme-sas.md` and find every document
       mentioning it. The data already exists — `BatchEntityRegistry` plus
       `inferRelationships` — it is currently only serialised to `entities-registry.json` and
       to the KG exports, which an agent will not naturally read.
-- [ ] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
+
+      **Done 2026-07-30.** `buildEntityFile()` (`worker/pipeline.ts`) writes one file per
+      registry entity: type, vertical, sector, roles, aliases, mention count, and a backlink
+      to every document that mentions it. Backlinks come from a `docId -> "documents/..."
+      path` map built in `processFiles`'s existing per-file loop (`docPaths`), fed by
+      `RegistryEntity.source_documents` — no new bookkeeping beyond the field the vault
+      layout already needed. Optional fields (sector/roles/aliases) are omitted rather than
+      printed blank when empty.
+- [x] **`GLOSSARY.md` is the entry point.** The existing per-document `## Entities` section
       (`worker/pipeline.ts:118`) becomes a local summary; the global glossary is the index.
-- [ ] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
-      folder of prose and ignores the registry and graph files entirely.
-- [ ] *Open question:* should redaction/pseudonymisation state be recorded in the bundle —
-      i.e. does the vault declare which entities were pseudonymised and under which key id?
-      Useful for provenance, but it is also a map of where the sensitive material was.
+
+      **Done 2026-07-30.** `buildGlossaryIndex()` writes `GLOSSARY.md` at the zip root:
+      entities grouped by type (alphabetical), each linking into `entities/`, with vertical
+      and mention/document counts. The per-document `## Entities` section
+      (`buildGlossary()`) now links into the same `entities/` files instead of in-document
+      anchors, so a reader following a link from either a document or the glossary lands on
+      the same canonical entity file.
+
+      **Verified for real:** `worker/pipeline.test.ts` gained 6 new cases (2
+      `relativeEntityLink` — root-level and nested document depth, 2 `buildEntityFile`, 2
+      `buildGlossaryIndex`) plus updated every existing `renderAnnotatedMarkdown` case for
+      the new link shape — 17/17 in that file, 84/84 full suite, `tsc --noEmit` and
+      `svelte-check` clean, production `vite build` clean. `tests/e2e/pipeline.spec.ts`,
+      `toggles.spec.ts`, `folder-upload.spec.ts` updated for the `documents/` prefix;
+      `egress.spec.ts`'s PII-redaction contract extended to assert no IBAN in any
+      `entities/*.md` file, not just the fixed-name files it already checked (the entity
+      whose only mention overlapped the IBAN was already excluded by A2's
+      `filterExportableEntities`, so this is regression coverage, not a new finding). Ran
+      the full e2e suite for real against this sandbox's Chromium build (temporary
+      `launchOptions.executablePath`, reverted before committing, same pattern as every
+      prior session) — 16/16 passing, including a live-browser check that `documents/`,
+      `entities/*.md`, and `GLOSSARY.md` all appear in a real downloaded zip with correct
+      relative links. Along the way, found and fixed an unrelated environment hazard, not a
+      code defect: an earlier `npm run dev` invocation's `predev` hook had partially
+      regenerated `crates/hacienda-wasm/pkg` (this sandbox has no network access to fetch
+      wasm-opt) and left it without a `package.json`, breaking every worker-dependent e2e
+      test with a resolution error. Fixed by temporarily setting
+      `wasm-opt = false` in `hacienda-wasm/Cargo.toml`, rebuilding, then reverting — the
+      same documented pattern prior sessions used for the same underlying constraint.
+- [x] **`README.md` tells the agent what it has.** Without it a Claude Desktop session sees a
+      folder of prose and ignores the registry and graph files entirely. **Done via G3** —
+      `README.md` ships at the zip root.
+- [x] *Open question, resolved 2026-07-30:* should redaction/pseudonymisation state be
+      recorded in the bundle — i.e. does the vault declare which entities were pseudonymised
+      and under which key id? **Decided: no.** The vault stays silent on redaction/
+      pseudonymisation state; it must not become a map of where the sensitive material was,
+      even without the plaintext itself. Provenance, if ever needed, is a separate concern for
+      the audit chain (Track I2/G's audit-export question, still open per C3), not the vault
+      contract.
 
 ### I3. Finder-like browser
 
-- [ ] `hacienda-private/apps/web/components/ui/file-system.tsx` is a **4,586-line virtualized
+- [x] `hacienda-private/apps/web/components/ui/file-system.tsx` is a **4,586-line virtualized
       grid/list** file browser, with `file-thumbnail.tsx` (154) and
       `document-viewer-sidebar.tsx` (112) alongside. Its interface is a flat
       `FileSystemItem[]` of `{ kind: "folder" | "file", path, key }` (`app/browse/page.tsx`),
       which Studio can build directly from in-memory batch results — the component itself is
       not coupled to their API, only their `/browse` page is.
-- [ ] Show per-file state in the browser: extracted / PII count / edited / error. The Finder
+- [x] Show per-file state in the browser: extracted / PII count / edited / error. The Finder
       view is where the user decides which documents need attention, so it has to carry that.
+
+      **Done 2026-07-30, scoped.** Not a port of `file-system.tsx`: that component is built on
+      `@base-ui/react` + Tailwind v4 (the same incompatible toolkit generation Track F1's UI
+      primitives already had to route around — see `components/ui/README.md`), and its actual
+      job — a persistent, virtualized, tree-structured project browser — isn't this app's use
+      case, which is one flat batch of files per run. Porting it would mean rewriting a file
+      browser's worth of tree/selection/virtualization machinery this app doesn't need to
+      satisfy the plan's literal ask: per-file state, in a list. `components/FileBrowser.tsx`
+      is that scoped equivalent — `buildFileRows()` merges `files`, the `progress` map,
+      `results`, a new per-file `fileErrors` map (worker `"error"` messages were previously
+      only a global banner — Track I3 needed them attributable to a specific row), and I4's
+      edited-findings state into one `FileRow[]`, rendered as a flat list: status icon, name,
+      stage/error text, entity count, PII count, an "edited" badge once I4 has touched a file.
+      `App.tsx` renders it above the existing per-document detail cards. Verified via
+      `tests/e2e/finder-and-editing.spec.ts`'s `FileBrowser` suite against a live browser
+      (temporary Chromium `executablePath`, reverted before commit): a processed file's row
+      shows "Done", a PII count, and no "edited" badge until an edit actually happens.
 
 ### I4. Per-document PII editing
 
 "Add and remove PII" is two operations, and neither is accept/reject on a fixed list:
 
-- [ ] **Remove** — a false positive is unmarked and the original text stands.
-- [ ] **Add** — the user selects text the model missed and marks it as PII with a category.
+- [x] **Remove** — a false positive is unmarked and the original text stands.
+- [x] **Add** — the user selects text the model missed and marks it as PII with a category.
       This is manual annotation, not review of a detection. It is the operation that makes the
       tool trustworthy for a lawyer, and neither app has it today.
-- [ ] Both require **F4's overlay model**: source text immutable, spans as separate data.
+- [x] Both require **F4's overlay model**: source text immutable, spans as separate data.
       Adding a span to spliced text is not implementable; this is why F4 gates the editor.
-- [ ] Edits must survive re-export and be visible in the Finder view.
+- [x] Edits must survive re-export and be visible in the Finder view.
+
+      **Done 2026-07-30.** `renderAnnotatedMarkdown` (the same function `worker/pipeline.ts`
+      used to build the original export) moved out to `lib/annotate.ts` so `App.tsx` — main
+      thread, not a worker — can call it directly without importing `worker/pipeline.ts`
+      itself: that module assigns `self.onmessage = …` at top level, harmless inside a Worker
+      but a silent hijack of `window.onmessage` if imported into the main thread.
+      `worker/pipeline.ts` re-exports both functions unchanged, so nothing that already
+      imported them from `"./pipeline"` (`pipeline.test.ts` included) needed to change.
+
+      **Remove**: `PiiPanel`'s finding rows grow a "✕" button (`onRemove`) that drops the
+      finding from `App.tsx`'s per-document `editedFindings` map (keyed by `ProcessedFile.name`,
+      absent = unedited). **Add**: `MarkdownEditor` grows an optional toolbar — a category
+      `<select>` and "Mark selection as PII" button — reading the selection straight off CM6's
+      own `EditorState.selection`, already in the same `rawMarkdown` coordinates `findings[].
+      start/.end` use, so no offset translation is needed (F4's overlay model, reused rather
+      than reimplemented: source text immutable, the manually-added span is just one more
+      entry in the same array). A manual add gets a plain `[CATEGORY]` mask, not a pseudonym
+      token — minting one needs the batch's derived key, which lives only inside the worker
+      (`pseudonymKeyHex` in `worker/pipeline.ts`), and re-deriving it a second time on the main
+      thread for this is more machinery than this increment's scope calls for; documented, not
+      silently dropped. Overlapping an existing finding is silently ignored.
+
+      **Re-export**: an "Export edited file" button appears once a document has an
+      `editedFindings` entry, calling `reExportMarkdown()` — re-splices `rawMarkdown` against
+      the edited findings via `renderAnnotatedMarkdown`, and carries the *original* export's
+      frontmatter and "## Entities" glossary through unchanged (regex-extracted from
+      `result.markdown`) rather than regenerating them. **Explicit scope cut, matching the
+      session's established pattern for J2's "thinner CLI vault" and I3 above**: full
+      frontmatter/entity-registry/KG-export consistency with post-export edits — retracting an
+      entity's glossary row when an add now redacts its only mention, or restoring one when a
+      remove un-redacts it — is out of scope for this increment. The body text itself is
+      always correct; only the frontmatter's `pii_entities_found` count and the local glossary
+      can go stale relative to edits made after export.
+
+      **A real regression caught, not shipped**: wiring "Mark selection as PII" needed
+      tracking the live CM6 selection via `onUpdate`, which fires on every keystroke.
+      `extensions={[markdown(), piiHighlightExtension(findings)]}` was previously a fresh
+      array every render — harmless when nothing re-rendered `MarkdownEditor` during typing,
+      which nothing did before this track. Once `onUpdate` started calling `setSelection` on
+      every keystroke, that same fresh-array pattern reconfigures `@uiw/react-codemirror`'s
+      extensions on every keystroke too, which rebuilds the decoration `StateField` from
+      scratch (`create()` against the *live, already-edited* document but the *original*
+      finding offsets) instead of continuing F3's `decorations.map(tr.changes)` history — the
+      exact corruption F3's own Check exists to catch. Running the existing
+      `tests/e2e/markdown-editor.spec.ts` suite against this change (not just the new I4
+      tests, which happened not to trigger it) failed exactly that Check:
+      `"an Dupont at jean.dupont@cabin"` instead of the email. Fixed by memoizing `extensions`
+      on `findings` and giving `onUpdate` a permanently stable identity (`useCallback`, empty
+      deps) — `@uiw/react-codemirror` only reconfigures on an actual `findings` change now,
+      which is the documented, narrower scope-cut noted in `MarkdownEditor.tsx`'s header (an
+      edit *interleaved* between two add/remove actions can still lose its live position — a
+      real edge case, deliberately not solved this session; see that file for why).
+
+      **Verified for real**: `tests/e2e/finder-and-editing.spec.ts` (3 tests, real Chromium,
+      temporary `executablePath` reverted before commit) — removing a finding un-redacts its
+      original text in the re-exported file; selecting exact character offsets (computed, not
+      a pixel-based double-click) and marking them as PII redacts that text in the re-export;
+      the Finder row's "edited" badge appears only after an edit. Re-ran the full pre-existing
+      e2e suite (25/25) plus `vitest run` (158/158) and `tsc --noEmit` after the fix — no
+      regressions. Production `vite build` clean (temporary `wasm-opt = false` for the sandbox's
+      blocked binaryen download, reverted before commit, the same documented pattern used
+      throughout this session).
 
 ---
 
@@ -817,24 +1430,70 @@ The reframe's main new work. Today `hacienda extract` takes `inputs: Vec<String>
 folder. If the vault is the product, the CLI not producing one means the product only exists
 in a browser.
 
-- [ ] **J1. `hacienda extract --vault <dir>`** emitting the Track I2 layout — same
+- [x] **J1. `hacienda extract --vault <dir>`** emitting the Track I2 layout — same
       `documents/`, `entities/`, `GLOSSARY.md`, `kg-export/`. A firm processing 10,000
       documents overnight should get the same artefact a lawyer gets from dropping a folder.
-- [ ] **J2. Port entity linking, glossary and KG export to Rust — or don't, deliberately.**
+
+      **Done 2026-07-30, scoped by J2's decision below.** New `--vault <DIR>` flag on
+      `hacienda extract` (`cli.rs`). `write_vault()` (`commands.rs`) writes `documents/<stem>.md`
+      per input (frontmatter: source, type, processed, PII count; content already redacted
+      per `--mode`, same guarantee `HaciendaResult` already gives stdout output),
+      `_manifest.json`, `pii-registry.json`, and `README.md`. No `entities/`, `GLOSSARY.md`,
+      or `kg-export/` — see J2.
+- [x] **J2. Port entity linking, glossary and KG export to Rust — or don't, deliberately.**
       These exist only in Studio's TypeScript (`worker/pipeline.ts`, `lib/kg-export.ts`,
       `lib/registry.ts`, `lib/verticals/`). Two honest options: reimplement in Rust (a real
       cost, and a third divergence surface), or declare the CLI's vault a thinner artefact —
       markdown plus registry, no cross-document relationship inference. **Decide explicitly.**
       Silently shipping two different things both called "the vault" is the failure mode.
-- [ ] **J3. The CLI has capabilities Studio cannot have** — `--audit-out` writing a real
+
+      **Decided 2026-07-30: thinner artefact, not a Rust port.** The CLI/API have no
+      general-purpose named-entity pipeline at all — `hacienda-core`'s neural NER
+      (`ner-candle`) is compiled out of every default build (Track K, unstarted), and there
+      is no regex-based person/organization detector either, only PII categories. Porting
+      `BatchEntityRegistry`/`inferRelationships`/`kg-export.ts` to Rust would mean inventing
+      an entity graph from nothing, or first building Track K — reversing that decision
+      belongs to Track K's own sequencing (which is itself gated on Track H settling a model
+      artefact), not to this one. `pii-registry.json` replaces `entities-registry.json` as
+      the CLI vault's cross-document artefact — PII findings grouped by document, explicitly
+      documented in the vault's own `README.md` as a different, narrower schema so a
+      consumer does not assume the two vaults are interchangeable.
+- [x] **J3. The CLI has capabilities Studio cannot have** — `--audit-out` writing a real
       blake3 chain, reversible pseudonyms, `--no-redact` gated behind
       `--i-accept-unredacted-pii`. If a vault carries an audit chain when produced by the CLI
       and not by Studio, the bundle format must say so rather than leaving a consumer to
       guess.
-- [ ] **J4. `--concurrency` already exists** (uncommitted, `ConcurrencyArgs` at
+
+      **Found already substantially done, one gap closed 2026-07-30.** `--audit-out`
+      (writing a re-verifying blake3 chain), `--mode pseudonymize` (reversible, AES-SIV), and
+      `--no-redact`/`--i-accept-unredacted-pii` were all already implemented and tested
+      (`hacienda-cli/tests/extract.rs`) before this session — this item's own text describing
+      them as still-open capabilities was stale. What was actually missing, and is what this
+      item's last sentence asks for: when `--vault` and `--audit-out` are both given,
+      `write_vault()` now mirrors the chain into `<vault>/audit/audit.json` (in addition to
+      the standalone `--audit-out` location, unchanged) and `README.md` states plainly
+      whether the vault includes one — no consumer has to guess or discover a second
+      directory.
+- [x] **J4. `--concurrency` already exists** (uncommitted, `ConcurrencyArgs` at
       `cli.rs:157`, wired to `PipelineConfig::concurrency`). Studio's batch loop is sequential
       (`worker/pipeline.ts:331`). Same knob, two behaviours — align the defaults or document
       why they differ.
+
+      **Done 2026-07-30 — documented, not aligned.** `--concurrency` was already committed
+      (this item's "uncommitted" was stale) and already wired. Aligning the defaults would
+      mean either parallelizing Studio's worker (a real architecture change: one loaded WASM
+      NER/PII engine instance is not built for concurrent inference, and true parallelism
+      needs multiple Web Workers sharing that model — explicitly out of scope per Track I1's
+      own decision) or serializing the CLI to match Studio for no reason. Recorded the "why
+      they differ" in `apps/hacienda-studio/README.md`'s "Relationship to the CLI/API"
+      section (Track C1) instead, alongside a correction to that section's now-stale claim
+      that Studio's NER wasn't wired to the neural model (Track B2 did that after C1's README
+      was written) and a new bullet on the vault-depth difference this session's J1/J2 added.
+
+      **Verified for real:** `cargo build -p hacienda-cli` and `cargo test -p hacienda-cli`
+      clean (24/24, including 2 new `--vault` tests: a redacted document + `pii-registry.json`
+      with no leaked PII and no `entities/`/`GLOSSARY.md` present, and the audit-chain mirror
+      into `<vault>/audit/` when both flags are given). `cargo build --workspace` clean.
 
 ---
 
@@ -850,6 +1509,11 @@ surfaces, since Studio has a neural model and the CLI/API do not.
       (`cli.rs:103`, `:107`) with nothing behind them.
 - [ ] Sequence this **after** Track H settles which model artefact ships. Both surfaces should
       use the same f16 checkpoint rather than each picking one.
+
+      **Re-verified 2026-07-31, still correctly gated.** Track H (H1) is still blocked on
+      huggingface.co network access this sandbox doesn't have (see H1's 2026-07-31 note) — the
+      artefact Track K would consume doesn't exist yet, so Track K remaining unstarted is the
+      correct sequencing outcome, not a stall.
 
 ---
 

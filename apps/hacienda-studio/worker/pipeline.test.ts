@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeAll } from "vitest";
 import type { Entity } from "../lib/types";
 import type { PiiEntity } from "../lib/pii-engine";
 import type { BridgeEntity } from "../lib/ner-bridge";
+import type { RegistryEntity } from "../lib/registry";
 
 // `pipeline.ts` assigns `self.onmessage` at module scope (it's a worker entry
 // point). Stub `self` before importing it dynamically so that assignment has
@@ -10,12 +11,40 @@ import type { BridgeEntity } from "../lib/ner-bridge";
 let renderAnnotatedMarkdown: typeof import("./pipeline").renderAnnotatedMarkdown;
 let filterExportableEntities: typeof import("./pipeline").filterExportableEntities;
 let selectNerBridge: typeof import("./pipeline").selectNerBridge;
+let relativeEntityLink: typeof import("./pipeline").relativeEntityLink;
+let buildEntityFile: typeof import("./pipeline").buildEntityFile;
+let buildGlossaryIndex: typeof import("./pipeline").buildGlossaryIndex;
 
 beforeAll(async () => {
   (globalThis as { self?: unknown }).self = globalThis;
-  ({ renderAnnotatedMarkdown, filterExportableEntities, selectNerBridge } =
-    await import("./pipeline"));
+  ({
+    renderAnnotatedMarkdown,
+    filterExportableEntities,
+    selectNerBridge,
+    relativeEntityLink,
+    buildEntityFile,
+    buildGlossaryIndex,
+  } = await import("./pipeline"));
 });
+
+function registryEntity(overrides: Partial<RegistryEntity>): RegistryEntity {
+  return {
+    id: "ent-001",
+    canonical_name: "",
+    display_name: "",
+    type: "organization",
+    slug: "",
+    vertical: "shared",
+    roles: [],
+    aliases: [],
+    source_documents: [],
+    mention_count: 1,
+    vertical_metadata: {},
+    first_seen: "2026-07-30T00:00:00.000Z",
+    last_seen: "2026-07-30T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 function piiEntity(overrides: Partial<PiiEntity>): PiiEntity {
   return {
@@ -52,10 +81,15 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       spans: [{ start: 0, end: 8 }],
     });
 
-    const result = renderAnnotatedMarkdown(markdown, [acme], []);
+    const result = renderAnnotatedMarkdown(
+      markdown,
+      [acme],
+      [],
+      "documents/note.md",
+    );
 
     expect(result).toBe(
-      "[Acme SAS](entity:organization/acme-sas) acquired Beta SARL.",
+      "[Acme SAS](../entities/organization-acme-sas.md) acquired Beta SARL.",
     );
   });
 
@@ -68,7 +102,12 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       redact_template: "[IBAN:****]",
     });
 
-    const result = renderAnnotatedMarkdown(markdown, [], [iban]);
+    const result = renderAnnotatedMarkdown(
+      markdown,
+      [],
+      [iban],
+      "documents/note.md",
+    );
 
     expect(result).toBe("IBAN [IBAN:****].");
   });
@@ -78,8 +117,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
     // "phone") whose name/slug is the same digit run a PII span also matches. The
     // old two-pass pipeline (link first, then regex-redact the linked markdown)
     // matched that digit run twice — once in the link's visible text, once inside
-    // its `entity:` slug — producing
-    // `[[CARD:****]](entity:phone/[CARD:****])`. Detecting PII against the
+    // its anchor target — producing a corrupted link. Detecting PII against the
     // original text and merging spans before a single splice must not do that.
     const markdown = "Card number 4111111111111111 on file.";
     const misclassifiedPhone = entity({
@@ -100,10 +138,11 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       markdown,
       [misclassifiedPhone],
       [card],
+      "documents/note.md",
     );
 
     expect(result).toBe("Card number [CARD:****] on file.");
-    expect(result).not.toContain("entity:phone");
+    expect(result).not.toContain("entities/phone");
     expect(result).not.toContain("4111111111111111");
   });
 
@@ -122,10 +161,15 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
       redact_template: "[IBAN:****]",
     });
 
-    const result = renderAnnotatedMarkdown(markdown, [jean], [iban]);
+    const result = renderAnnotatedMarkdown(
+      markdown,
+      [jean],
+      [iban],
+      "documents/note.md",
+    );
 
     expect(result).toBe(
-      "Contact [Jean Dupont](entity:person/jean-dupont), IBAN [IBAN:****].",
+      "Contact [Jean Dupont](../entities/person-jean-dupont.md), IBAN [IBAN:****].",
     );
   });
 
@@ -140,10 +184,15 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
 
     // The caller passes `[]` for findings when `redactPiiInOutput` is off — mirrors
     // `processFile`'s `config.redactPiiInOutput ? piiFindings : []`.
-    const result = renderAnnotatedMarkdown(markdown, [misclassifiedPhone], []);
+    const result = renderAnnotatedMarkdown(
+      markdown,
+      [misclassifiedPhone],
+      [],
+      "documents/note.md",
+    );
 
     expect(result).toBe(
-      "Card number [4111111111111111](entity:phone/4111111111111111) on file.",
+      "Card number [4111111111111111](../entities/phone-4111111111111111.md) on file.",
     );
   });
 });
@@ -215,6 +264,97 @@ describe("filterExportableEntities (Track A2)", () => {
     );
 
     expect(result).toEqual([misclassifiedPhone]);
+  });
+});
+
+describe("relativeEntityLink (Track I2)", () => {
+  const acme = { type: "organization", slug: "acme-sas" };
+
+  it("one level up for a document at the documents/ root", () => {
+    expect(relativeEntityLink("documents/note.md", acme)).toBe(
+      "../entities/organization-acme-sas.md",
+    );
+  });
+
+  it("adds one more '../' per nested source directory", () => {
+    expect(relativeEntityLink("documents/sub/note.md", acme)).toBe(
+      "../../entities/organization-acme-sas.md",
+    );
+    expect(relativeEntityLink("documents/a/b/note.md", acme)).toBe(
+      "../../../entities/organization-acme-sas.md",
+    );
+  });
+});
+
+describe("buildEntityFile (Track I2)", () => {
+  it("renders type/vertical/roles/mentions and a backlink per document", () => {
+    const entity = registryEntity({
+      display_name: "Acme SAS",
+      type: "organization",
+      vertical: "m&a",
+      roles: ["acquirer"],
+      mention_count: 2,
+      source_documents: ["doc-001", "doc-002"],
+    });
+
+    const md = buildEntityFile(entity, [
+      "documents/contract.md",
+      "documents/sub/note.md",
+    ]);
+
+    expect(md).toContain("# Acme SAS");
+    expect(md).toContain("**Type:** Organization");
+    expect(md).toContain("**Vertical:** m&a");
+    expect(md).toContain("**Roles:** acquirer");
+    expect(md).toContain("**Mentions:** 2 across 2 documents");
+    expect(md).toContain("[contract.md](../documents/contract.md)");
+    expect(md).toContain("[sub/note.md](../documents/sub/note.md)");
+  });
+
+  it("omits optional fields that are empty rather than printing them blank", () => {
+    const entity = registryEntity({ display_name: "Jean Dupont", type: "person" });
+    const md = buildEntityFile(entity, []);
+    expect(md).not.toContain("**Sector:**");
+    expect(md).not.toContain("**Roles:**");
+    expect(md).not.toContain("**Aliases:**");
+  });
+});
+
+describe("buildGlossaryIndex (Track I2)", () => {
+  it("groups entities by type, alphabetically, with a link into entities/", () => {
+    const md = buildGlossaryIndex([
+      registryEntity({
+        display_name: "Beta SARL",
+        type: "organization",
+        vertical: "m&a",
+        mention_count: 1,
+        source_documents: ["doc-001"],
+        slug: "beta-sarl",
+      }),
+      registryEntity({
+        display_name: "Jean Dupont",
+        type: "person",
+        mention_count: 3,
+        source_documents: ["doc-001", "doc-002"],
+        slug: "jean-dupont",
+      }),
+    ]);
+
+    expect(md).toContain("# Glossary");
+    // "Organization" sorts before "Person" alphabetically.
+    expect(md.indexOf("## Organization")).toBeLessThan(md.indexOf("## Person"));
+    expect(md).toContain(
+      "[Beta SARL](entities/organization-beta-sarl.md) — m&a, mentioned 1 time across 1 document",
+    );
+    expect(md).toContain(
+      "[Jean Dupont](entities/person-jean-dupont.md), mentioned 3 times across 2 documents",
+    );
+  });
+
+  it("says so plainly when the batch found no entities", () => {
+    expect(buildGlossaryIndex([])).toBe(
+      "# Glossary\n\nNo entities were detected in this batch.\n",
+    );
   });
 });
 

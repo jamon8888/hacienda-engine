@@ -7,21 +7,21 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["vite/client"],
+    "types": ["vite/client", "node"],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["lib/*"]
+      "@/*": ["./*"]
     }
   },
   "include": [
     "*.ts",
-    "*.svelte",
+    "*.tsx",
     "app.d.ts",
     "lib/**/*",
     "worker/**/*",

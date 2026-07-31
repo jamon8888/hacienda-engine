@@ -1,3 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Track E2: shadcn/ui's default (slate) design tokens, ported verbatim from
+ * hacienda-private/apps/web/app/globals.css — the source Track E1 decided to adopt.
+ * Distinct custom-property names from the `--color-*`/`--radius-*` set below, so both
+ * can coexist during the Svelte-to-React migration without collision. */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+}
+
 *,
 *::before,
 *::after {
@@ -145,4 +182,22 @@ textarea:focus {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* Track F3: CodeMirror PII span decorations (lib/pii-decorations.ts). Plain CSS, not
+ * Tailwind utilities — `.cm-pii-pill` is applied via a CM6 Decoration.mark's `class`, not
+ * a scanned className, so Tailwind's content globs would never generate it. */
+.cm-pii-pill {
+  background: rgba(217, 119, 6, 0.18); /* amber-600 @ 18% */
+  border-bottom: 2px solid rgb(217, 119, 6);
+  border-radius: 2px;
+}
+
+.cm-pii-editor .cm-editor {
+  height: auto;
+  max-height: 40vh;
+}
+
+.cm-pii-editor .cm-scroller {
+  font-family: var(--font-mono);
 }
