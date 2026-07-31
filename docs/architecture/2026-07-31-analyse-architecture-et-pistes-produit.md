@@ -22,10 +22,10 @@ Ce qui manque pour la promesse « les entreprises construisent leurs solutions I
 
 | Brique attendue | État réel |
 | --- | --- |
-| RAG côté serveur (chunking, embeddings, reranking) | **Absent** — les features xberg correspondantes sont explicitement désactivées dans `Cargo.toml` |
+| RAG côté serveur (chunking, embeddings, reranking) | **Non branché** — les features xberg sont désactivées dans `Cargo.toml`, et la crate amont `xberg-rag` (trait `VectorStore`, pipeline, backends) n'est pas déclarée du tout. Voir §9 : c'est de l'intégration, pas de la conception |
 | SDK 14 langages | **Annoncés ✅ dans le README, aucun généré** — `alef.toml` pointe vers 4 fichiers sources inexistants et un dossier `packages/` absent |
 | Serveur MCP | **Absent** — spécifié (9 outils, 4 ressources, 3 prompts) mais aucun code |
-| Multi-tenancy | **Partielle** — isolation par `owner` au niveau des jobs seulement ; pas de tenant de premier ordre |
+| Multi-tenancy | **Partielle** — isolation par `owner` au niveau des jobs seulement ; le `TenantCtx` d'`xberg-doc-store` existe en amont mais n'est pas importé |
 | Persistance | **Fichier uniquement** — aucun backend Postgres/S3, ce qui plafonne le déploiement à un nœud |
 | Observabilité | **Docker-compose Prometheus/Grafana/Alertmanager présent, zéro instrumentation dans le code** — aucun `/metrics`, aucun OTel |
 | API REST | **7 routes** (`/v1/documents`, `/v1/documents/async`, `/v1/jobs/{id}`, `/v1/pii/*`) — pas d'audit, pas de review, pas de compliance exposés |
@@ -61,6 +61,8 @@ Hacienda consomme **trois choses seulement** de xberg : `extract_batch`, `text::
 C'est une **excellente décision d'hygiène de build** — et c'est **exactement le mur** contre lequel la promesse RAG bute. Le chunking et les embeddings sont dans xberg (4 stratégies, 4 presets, FastEmbed — cf. `.ai-rulez/skills/chunking-embeddings/`), mais Hacienda les a débranchés. Le seul endroit où le chunking tourne réellement, c'est **le navigateur**, via `WasmChunkingConfig` dans `apps/hacienda-studio/worker/pipeline.ts`.
 
 Autrement dit : **Studio est RAG-ready, le serveur ne l'est pas.** L'asymétrie est inversée par rapport à ce qu'attend un acheteur entreprise.
+
+Surtout — et c'est le point que la §10 développe — **Hacienda ne consomme qu'une seule crate d'un dépôt qui en publie une vingtaine.** Le dépôt xberg embarque `xberg-rag` (contrat de store vectoriel, pipeline d'ingestion, streaming), `xberg-doc-store` (tenants, rehydratation chiffrée), un serveur MCP, et 14 packages SDK déjà générés. Le `Cargo.toml` de Hacienda n'en déclare aucun.
 
 ### 2.3 Ce que la façade fait réellement
 
@@ -125,13 +127,13 @@ C'est du **GraphRAG léger**, et c'est précisément ce qu'un client entreprise 
 
 Le problème : cette valeur n'est disponible que si l'utilisateur ouvre un navigateur et glisse ses fichiers. **Il n'y a aucun chemin API pour l'obtenir.** Le CLI a une version délibérément amoindrie (`--vault`, sans `entities/`, sans `GLOSSARY.md`, sans KG — le commentaire est honnête : « le CLI n'a pas de pipeline NER d'entités généraliste, donc il n'y a pas de graphe à émettre honnêtement »).
 
-Et il manque le dernier maillon dans tous les cas : **pas de vecteurs, pas de store vectoriel, pas d'endpoint de recherche.** Le pipeline s'arrête à « corpus structuré et rédigé », jamais à « corpus interrogeable ».
+Et il manque le dernier maillon dans tous les cas : **pas de vecteurs, pas de store vectoriel, pas d'endpoint de recherche** — *dans ce dépôt*. Le contrat, lui, existe en amont : `xberg-rag` expose un trait `VectorStore`, une IR de filtres/requêtes, un registre global et trois backends (mémoire, SQLite+sqlite-vec, graphqlite). Ce n'est donc pas une brique à concevoir mais une brique à brancher — voir §10.
 
 ### 3.4 Multi-tenancy et persistance — le plafond de scalabilité
 
 L'isolation existante est réelle mais minimale : `Job.owner` porte l'identifiant de principal, et `hacienda-api/src/handlers/jobs.rs` retourne 404 (pas 403) quand un principal demande le job d'un autre — bonne défense IDOR (OWASP A01), avec des tests `two_tenant_app`.
 
-Mais il n'y a **pas de tenant de premier ordre** :
+Mais il n'y a **pas de tenant de premier ordre** — dans ce dépôt. `xberg-doc-store` en amont définit déjà `TenantId`, `ActorId` et `TenantCtx`, et son trait `RehydrationStore` est explicitement *tenant-scoped* (« not visible to `ctx.tenant` » renvoie `None`). Le type à adopter existe donc ; il n'est simplement pas importé ici. Conséquences actuelles :
 
 - une clé de pseudonymisation est globale au process (`HACIENDA_PSEUDONYM_ACTIVE_KEY`) — deux clients partagent le même espace de tokens, donc **la même valeur chez deux clients produit le même token** : fuite d'information inter-tenant par corrélation ;
 - une chaîne d'audit par nœud, pas par tenant — l'export pour un client contient les entrées de tous ;
@@ -164,11 +166,13 @@ Les fondations qui doivent rester intactes :
 
 Les trois changements structurels à faire, par ordre de blocage :
 
-### 4.1 Introduire `TenantId` comme dimension de premier ordre
+### 4.1 Adopter le `TenantCtx` de xberg comme dimension de premier ordre
 
 C'est le changement le plus intrusif et **il doit être fait tôt** — le rétro-ajouter après des données en production signifie migrer chaînes d'audit et espaces de tokens, ce qui est douloureux par construction.
 
-Portée : `Caller` porte un `TenantId` ; les traits de store prennent un `TenantId` en paramètre de scope ; le `KeyResolver` résout par tenant (chaque tenant a son propre espace de tokens de pseudonymisation) ; les segments d'audit sont nommés par `(tenant, node)`.
+**Ne pas définir un `TenantId` maison.** `xberg-doc-store` en publie déjà un (`TenantId`, `ActorId`, `TenantCtx`), et tout ce que Hacienda voudra composer en aval — `RehydrationStore`, les stores vectoriels Pro/Enterprise — est typé contre lui. Un type parallèle imposerait une conversion à chaque frontière et divergerait au premier changement amont.
+
+Portée : `Caller` porte un `TenantCtx` ; les traits de store de `hacienda-core` le prennent en paramètre de scope, comme le fait déjà `RehydrationStore` ; le `KeyResolver` résout par tenant (chaque tenant a son propre espace de tokens de pseudonymisation) ; les segments d'audit sont nommés par `(tenant, node)`.
 
 Le `NodeId` des segments (`audit/segment.rs:43`) est déjà décrit comme servant « les déploiements multi-tenant » — l'intention est là, l'implémentation ne l'est pas.
 
@@ -229,12 +233,13 @@ Effort faible, débloque le commercial.
 | **Serveur MCP** | Spécifié depuis 2025 (9 outils, 4 ressources, 3 prompts). C'est le mode d'intégration IA le plus demandé aujourd'hui, et `pii_explain` répond directement à l'AI Act Art. 13. |
 | **Rate limiting, quotas, métriques de facturation** | Prérequis de toute offre SaaS. |
 
-### Vague 3 — « Devenir une plateforme RAG » (3–4 mois)
+### Vague 3 — « Devenir une plateforme RAG » (3–4 mois, sans doute moins — voir §9.10)
 
 | Chantier | Détail |
 | --- | --- |
-| **Réactiver chunking + embeddings** | Features xberg `chunking`/`embeddings`, derrière un feature flag pour ne pas imposer ONNX aux consommateurs qui ne l'utilisent pas. Le compromis de build documenté dans `Cargo.toml` reste valable — il faut juste le rendre optionnel plutôt qu'absent. |
-| **`POST /v1/index` + `POST /v1/search`** | Store vectoriel derrière un trait `VectorStore` (pgvector d'abord, Qdrant/Weaviate ensuite). |
+| **Déclarer `xberg-rag`** | Feature `vector-store` seule pour commencer : elle apporte le trait, l'IR de requêtes et le registre sans tirer ONNX. `pipeline-embeddings` seulement quand un appelant existe. |
+| **Décorateur `HaciendaVectorStore<S>`** | Rédaction avant vectorisation, audit à la récupération, générique sur n'importe quel backend. C'est là que vit le différenciateur — voir §9.4. |
+| **`POST /v1/index` + `POST /v1/search`** | Au-dessus du décorateur. Backend : le SQLite fourni en amont d'abord, pgvector ensuite (peut-être déjà dans Enterprise). |
 | **Porter le bundle Studio côté serveur** | Registre d'entités, glossaire, export KG — ce qui existe en TS dans `worker/pipeline.ts` remonté en Rust et exposé en API. C'est le vrai différenciateur : **du RAG dont chaque chunk est rédigé, traçable et réversible par un porteur de clé.** |
 | **Verticales serveur** | Les taxonomies M&A et services financiers sont en YAML dans Studio. Les remonter en ressource serveur, versionnée, extensible par le client. |
 
@@ -303,6 +308,8 @@ C'est le partage classique open-core, et il tombe naturellement sur les lignes d
 | `InMemoryJobStore` en production | Moyenne | Backend Postgres (vague 2) |
 | Aucune instrumentation malgré une stack de monitoring déclarée | Moyenne | `/metrics` + OTel (vague 1) |
 | Écart Studio (riche) / serveur (pauvre) | Moyenne | Porter le pipeline de bundle côté serveur (vague 3) |
+| Le fork `jamon8888/xberg` (rc.5) entre dans le graphe de dépendances à la place du v1.0.2 épinglé | Moyenne | Le tenir hors de tout `path =` / `[patch]` — voir §9.8 |
+| Deux schémas cryptographiques concurrents (token SIV vs carte GCM) adoptés sans arbitrage | Moyenne | Décision explicite avant de coder l'intégration — voir §9.5 |
 | Clés de pseudonymisation en variables d'environnement | Moyenne | Intégration KMS/Vault (vague 2) |
 
 ---
@@ -319,7 +326,148 @@ Ces cinq points conditionnent le reste et relèvent d'un arbitrage produit, pas 
 
 ---
 
-## 9. Ce qu'il faut faire en premier
+## 9. Intégrer les briques xberg existantes sans forker
+
+> **Provenance de cette section.** Elle s'appuie sur une lecture de `jamon8888/xberg`, un fork public figé à **1.0.0-rc.5**, alors que ce dépôt épingle `xberg-io/xberg` **v1.0.2**. Les dépôts `xberg-io/*` ne sont pas atteignables depuis la session où cette analyse a été produite. Les **formes** décrites ci-dessous (traits, registres, découpage en crates, features) sont stables entre rc.5 et 1.0.2 selon toute vraisemblance ; les **signatures exactes** sont à revérifier contre le tag épinglé. Le dépôt « xberg Enterprise » n'a pas pu être inspecté du tout — voir §9.6.
+
+### 9.1 Le modèle d'intégration est déjà défini en amont
+
+La documentation de `crates/xberg-rag/src/lib.rs` est explicite :
+
+> *« This crate is the **engine contract** that the commercial products build on: Xberg Pro and Xberg Enterprise each implement `VectorStore` externally (single-node embedded store, tenant-scoped pgvector, …) while this crate stays single-tenant and free of any product/tenant policy. »*
+
+Autrement dit : **xberg a déjà prévu que des produits commerciaux s'y greffent sans le modifier.** Pro et Enterprise sont deux implémentations externes du même contrat. La bonne posture pour Hacienda est d'être **la troisième**, pas un fork.
+
+Cela règle la question de principe. Reste la mécanique.
+
+### 9.2 Consommer par crate et par feature, jamais par fork
+
+Le dépôt xberg est un workspace qui publie une vingtaine de crates. Aujourd'hui `Cargo.toml` n'en déclare qu'une (`xberg`). Les autres se déclarent **depuis le même dépôt et le même tag**, sans rien copier :
+
+```toml
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", features = ["redaction", "ner", "tokio-runtime"] }
+
+xberg-rag = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", features = [
+    "vector-store",          # trait + IR + registre, WASM-safe, dépendances minimales
+    "pipeline",              # orchestration ingestion/récupération
+    "pipeline-embeddings",   # tire ORT — à activer seulement quand un appelant existe
+] }
+
+xberg-doc-store = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2" }
+```
+
+Le découpage en features de `xberg-rag` est fin **et conçu pour ça** : `vector-store` seul ne dépend que de `serde`/`async-trait`/`thiserror`. On peut donc adopter le *contrat* sans réintroduire ONNX Runtime — exactement la préoccupation qui avait motivé de tout couper. Le compromis documenté dans le `Cargo.toml` actuel reste valable ; il devient simplement **granulaire** au lieu d'être binaire.
+
+**Le tag doit rester identique sur les trois crates.** Elles partagent un `version.workspace = true` ; les mélanger produit des incompatibilités de types là où `xberg-rag` référence `xberg::text::redaction`.
+
+### 9.3 Étendre par les registres, pas par la source
+
+`xberg-rag` expose un registre global, du même modèle que les registres de plugins de xberg :
+
+```rust
+register_vector_store(store: Arc<dyn VectorStore>) -> RagResult<()>
+get_vector_store(name: &str) -> RagResult<Arc<dyn VectorStore>>
+```
+
+Toute addition de Hacienda — un store adossé à Postgres/pgvector, un store dont chaque écriture est chaînée dans l'audit — s'enregistre ici. Aucune ligne de xberg n'est touchée. C'est le principe **« Zero Core Changes »** que la spec de 2025 posait déjà, et il est aujourd'hui outillé en amont.
+
+### 9.4 La bonne forme pour nos additions : le décorateur
+
+L'apport de Hacienda par-dessus le RAG de xberg n'est pas un backend de plus. C'est une **politique** : chaque chunk rédigé avant d'être vectorisé, chaque récupération auditée, chaque token réversible par un porteur de clé. Cela se code comme un décorateur générique sur le trait, pas comme un backend concurrent :
+
+```text
+HaciendaVectorStore<S: VectorStore>
+  ├── upsert_document → rédige/pseudonymise le chunk, PUIS délègue à S
+  ├── retrieve        → délègue à S, PUIS écrit une entrée d'audit par span révélé
+  └── tout le reste   → délégation transparente
+```
+
+Propriétés de cette forme :
+
+- elle marche avec **n'importe quel** backend — mémoire, SQLite, pgvector d'Enterprise, un store client — puisqu'elle est générique sur `S` ;
+- elle est strictement additive : rien à patcher en amont, rien à maintenir en divergence ;
+- elle place la garantie **dans le core**, cohérent avec la discipline déjà appliquée (`facade.rs:561`, la suppression du texte de span faite en core « parce qu'un des appelants oubliera »).
+
+C'est aussi ce qui rend le produit défendable : un client peut choisir son store vectoriel *sans* pouvoir contourner la rédaction ni l'audit.
+
+### 9.5 Le vrai point de conception : deux schémas cryptographiques à réconcilier
+
+C'est la seule décision réellement difficile de l'intégration, et il faut la traiter explicitement plutôt que la découvrir à l'exécution.
+
+| | xberg `RehydrationStore` | Hacienda `Pseudonymiser` |
+| --- | --- | --- |
+| Primitive | AES-256-GCM, blob `XPII\x01` | AES-256-SIV (RFC 5297) |
+| Unité | une **carte** chiffrée par document | un **token** par valeur |
+| Réversibilité | en masse, nécessite le blob | par valeur, sans carte |
+| Déterminisme | non | **oui** — même valeur, même token |
+| Portée | tenant-scoped par construction | globale au process aujourd'hui |
+
+Ils ne font pas la même chose et **aucun ne remplace l'autre** :
+
+- le déterminisme de Hacienda est ce qui permet de suivre un même sujet à travers un corpus — c'est ce qui fait fonctionner le liage d'entités inter-documents, et donc les bundles KG de Studio. Une carte par document ne donne pas cette propriété ;
+- la carte de xberg permet une réhydratation en masse et une expiration par tenant, que le token seul ne donne pas.
+
+**Recommandation : les composer, pas choisir.** Garder `Pseudonymiser` comme frappe de tokens (c'est le différenciateur), et implémenter `RehydrationStore` comme backend de persistance quand un client demande la réhydratation en masse. Le trait ne voit jamais de clé — il ne stocke que du chiffré — donc l'implémenter n'expose pas le matériel cryptographique de Hacienda.
+
+À vérifier contre v1.0.2 avant de coder : la crate est-elle réellement `pipeline-redaction`-compatible avec un NER injecté de l'extérieur, ou impose-t-elle celui de xberg ? De cela dépend si notre pipeline PII peut alimenter le leur ou s'il faut rédiger en amont de l'ingestion.
+
+### 9.6 SDK : reprendre la configuration, pas les packages
+
+xberg publie 14 packages SDK générés (`packages/{python,go,java,csharp,…}`) via alef 0.30.0. Hacienda a un `alef.toml` en 0.44.0 qui **pointe vers quatre fichiers sources inexistants**, ce qui est la vraie raison pour laquelle aucun binding n'est généré ici.
+
+La bonne manœuvre n'est pas de copier `packages/` depuis xberg — ce serait un fork déguisé, à resynchroniser à chaque release amont. C'est de **reprendre la forme de configuration qui marche en amont** et de la pointer vers les fichiers réels de Hacienda. Comme la crate `hacienda` réexporte `xberg`, un utilisateur du SDK Python de Hacienda obtient les deux surfaces dans un seul package.
+
+Un point d'attention : `xberg-rag` précise « **Rust-only — deliberately not exposed through the language bindings** ». Le RAG amont ne passe donc pas par alef. Si Hacienda veut du RAG dans ses SDK, c'est une **addition propre à Hacienda** — et un différenciateur réel, pas une redite de l'amont.
+
+### 9.7 Développement conjoint et remontée amont
+
+Le mécanisme est déjà écrit dans le `Cargo.toml` actuel et il est correct — il suffit de s'y tenir :
+
+```toml
+# Pour développer xberg et hacienda ensemble, surcharger localement sans éditer ce fichier :
+#   [patch."https://github.com/xberg-io/xberg"] dans .cargo/config.toml
+```
+
+`[patch]` dans `.cargo/config.toml`, jamais un `path =` commité — c'est exactement la leçon que le commentaire existant tire du checkout voisin dont les modifications non commitées rendaient la sortie de Hacienda imprévisible.
+
+La ligne de partage à tenir pour décider où va un changement :
+
+> **xberg = la capacité. Hacienda = le contrôle.**
+
+Un nouveau format, une amélioration OCR, une optimisation NER, un backend vectoriel générique → remontée amont. La chaîne d'audit, le modèle de capacités, les artefacts de conformité, la politique de rédaction → restent dans `hacienda-core`. Ce partage évite le fork *et* évite de diluer le différenciateur dans une brique open source.
+
+### 9.8 Le fork `jamon8888/xberg` est un piège à éviter
+
+Il est à **1.0.0-rc.5** quand ce dépôt épingle **v1.0.2**. Quiconque le branche en `path =` ou en `[patch]` construit contre du code plus ancien que celui que CI compile, sans qu'aucun message d'erreur ne le signale. C'est précisément le scénario que le commentaire du `Cargo.toml` décrit pour le checkout voisin.
+
+Recommandation : le traiter en lecture seule (référence d'architecture) ou le supprimer, et ne jamais l'introduire dans le graphe de dépendances.
+
+### 9.9 Ce qu'il faut vérifier sur l'amont réel
+
+Cette session n'a pas pu atteindre `xberg-io/*`. Quatre questions à trancher avec le dépôt en main, dans cet ordre :
+
+1. **`xberg-rag` et `xberg-doc-store` existent-ils au tag v1.0.2 sous cette forme ?** Le fork est en rc.5 ; le découpage a pu bouger.
+2. **Que contient exactement « xberg Enterprise » ?** S'il apporte le pgvector tenant-scoped et les SDK entreprise, une grande partie de la vague 2 devient de l'intégration plutôt que du développement. Sa **licence** et son **mode de distribution** (crate privée ? dépôt git privé ? artefact ?) déterminent s'il peut être une dépendance de Hacienda et ce qu'il faut provisionner en CI.
+3. **Le serveur MCP amont couvre-t-il nos besoins ?** Il est en TypeScript (`mcp-server/`). Si oui, exposer les outils PII/audit de Hacienda peut se faire en l'étendant plutôt qu'en écrivant un serveur MCP Rust de zéro.
+4. **Quelle gouvernance sur xberg ?** Qui décide des releases, sous quel engagement. C'est la question que posera le premier acheteur entreprise sérieux, et elle conditionne le choix « fournisseur amont » contre « internalisation » de la §8.
+
+### 9.10 Effet sur la feuille de route
+
+Si l'amont est bien tel que décrit, la §5 se raccourcit nettement :
+
+| Chantier | Estimation initiale | Révisée |
+| --- | --- | --- |
+| `TenantId` de premier ordre | à concevoir | **adopter `TenantCtx`** — types fournis |
+| Store vectoriel + recherche | à concevoir | **implémenter un trait fourni** + décorateur |
+| Backends de persistance | à écrire intégralement | SQLite fourni ; Postgres peut-être dans Enterprise |
+| SDK | à construire | **corriger `alef.toml`** ; la config amont est le modèle |
+| Serveur MCP | à écrire | à évaluer — un serveur amont existe |
+
+La vague 3 (« devenir une plateforme RAG ») passe de 3–4 mois de construction à un travail d'**intégration et de politique** : brancher les crates, écrire le décorateur, réconcilier les deux schémas cryptographiques. C'est le changement le plus important de cette analyse, et il déplace l'effort du « construire » vers le « décider ».
+
+---
+
+## 10. Ce qu'il faut faire en premier
 
 Si une seule chose doit être faite cette semaine : **aligner le README sur la réalité et exposer par API le métier déjà écrit** (audit, review, compliance). Le premier point protège la crédibilité ; le second transforme ~4 000 lignes de code testé et invisible en surface produit vendable, pour quelques centaines de lignes de handlers.
 
