@@ -42,10 +42,14 @@ reviews:
     # you want drafts covered too.
     drafts: false
 
-    # Re-reviewing on every push is the main quota drain on the Free plan. With this
-    # off, a PR is reviewed once; push more commits and re-trigger deliberately with
-    # "@coderabbitai review".
-    auto_incremental_review: false
+    # Re-reviewing on every push burns Free-plan quota fastest, but leaving this off
+    # turned out worse in practice: the manual fallback ("@coderabbitai review") is
+    # itself routed through CodeRabbit's Chat feature, which the Free plan blocks
+    # outright ("upgrade the PR author to CodeRabbit Pro to use the Chat feature").
+    # With auto_incremental_review off and Chat gated, there was no working way to
+    # get a re-review on this plan short of clicking the retry checkbox by hand on
+    # every single push. Paying the quota cost buys back actual automatic reviews.
+    auto_incremental_review: true
 
   # Free tier caps how much a single review will look at, so keep generated, vendored
   # and build output out of the way. Everything not excluded here is still reviewed.
