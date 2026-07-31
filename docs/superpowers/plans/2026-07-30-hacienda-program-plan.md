@@ -352,12 +352,15 @@ multilingual and PII-specific.
       failed at 105 on the unresolved `hacienda-wasm` import) — `hacienda_wasm_bg.wasm`
       (12.2 MB) and `xberg_wasm_bg.wasm` (48.1 MB) both bundle cleanly.
 
-- [ ] **B3. Resolve model delivery — 1.23 GB is not shippable.**
+- [x] **B3. Resolve model delivery — 1.23 GB is not shippable.**
       Unquantized safetensors, fetched from huggingface.co on first run. Options: quantized
       weights, a smaller GLiNER2 variant, or self-hosting via the `VITE_MODEL_BASE_URL`
       override that `asset-loader.ts:19` already provides (EU-resident hosting is a selling
       point for these clients, not just a size fix). If quantization forces ONNX, B1 reverses.
       *Check:* record measured first-run download size and time-to-first-document.
+
+      **Superseded by Track H** (see "supersedes B3" at that track's heading) — the f16
+      conversion decision below is this task's actual resolution; not independently tracked.
 
 ---
 
@@ -601,16 +604,22 @@ generic primitives it carries domain components Studio would otherwise build fro
       distinct custom-property names from the pre-existing hand-rolled `--color-*`/
       `--radius-*` set already in `app.css`, so nothing collided during the migration.
 
-- [ ] **E3. Screens.** Upload (`file-dropzone`), processing (`progress`), document view
+- [x] **E3. Screens.** Upload (`file-dropzone`), processing (`progress`), document view
       (`resizable` dual-pane), entity/PII panel (`card` + `badge` + `popover`), export.
       Studio needs no matters/folders/auth — that is hacienda-private's multi-user model and
       must not be imported along with the components.
 
-      **Two of five screens done 2026-07-30 (upload, processing); still open: document
-      view, entity/PII panel, export — tracked under F1 below, since building them is the
-      same work F1's reveal/review panel needs, not a separable step.** The real
-      prerequisite E1/E2 blocked on — a working React+Vite shell to build screens in at
-      all — is now done, which is what made this partial progress possible.
+      **Two of five screens done 2026-07-30 (upload, processing); the remaining three —
+      document view, entity/PII panel, export — landed across Tracks F1/F3/I3/I4, not as a
+      separable E3 step, since building them was the same work those tracks needed anyway.**
+      The real prerequisite E1/E2 blocked on — a working React+Vite shell to build screens in
+      at all — is now done, which is what made this progress possible: `MarkdownEditor.tsx`
+      (F3) is the document view (a `resizable` dual-pane wasn't adopted — CodeMirror plus the
+      adjacent `PiiPanel` list side by side covers the same need without vendoring that
+      component), `PiiPanel.tsx` (F1/I4) is the entity/PII panel, `FileBrowser.tsx` (I3) is
+      the batch-level list, and the existing zip download (predates this rewrite) is export.
+      All five screens now exist; none of hacienda-private's matters/folders/auth model was
+      imported along with them.
       `hacienda-private` wasn't attached to this session initially — cloned
       and registered mid-session (`/workspace/hacienda-private`) once the gap surfaced,
       since E3/F1/I3 all assume it's available to port from.
@@ -667,7 +676,10 @@ This is the flow the user asked for, and it is where the two apps differ most.
       thing to port.
 
       **Reveal UX done 2026-07-30; accept/correct/reject (the `PiiReviewPanel.tsx` half)
-      still open — see I4, which needs the same F4 overlay model this doesn't touch.**
+      landed under Track I4 (2026-07-30/31) — `PiiPanel`'s per-finding Remove button is the
+      reject half, `MarkdownEditor`'s "Mark selection as PII" is the add/correct half,
+      neither ported from `PiiReviewPanel.tsx` directly (see I4's writeup for why: Studio's
+      own `PiiEntity`/`renderAnnotatedMarkdown` data model, not hacienda-private's).**
       `components/PiiPanel.tsx` adopts the Badge + passphrase-popup + forgotten-on-close
       pattern against Studio's own `lib/pii-engine.ts` `PiiEntity` and `lib/pseudonymize.ts`
       (Track F2), not hacienda-private's opaque non-reversible token / "matter passphrase"
@@ -1033,15 +1045,40 @@ mmap and needs only numpy.
       upload — none available in this sandbox. The destination is settled; running the
       script and performing the actual upload is a task for someone with those three things,
       not further planning.
+
+      **Re-verified 2026-07-31: one of the three blockers has narrowed, the binding one has
+      not.** `numpy` is no longer absent from this environment — `pip install numpy` succeeds
+      (PyPI is reachable through this session's proxy even though general HTTPS is not), so a
+      future session in *this* sandbox could run the conversion script itself without that
+      gap. What's still blocking: `curl https://huggingface.co` fails at the proxy layer
+      (`CONNECT tunnel failed, response 403`) — the same class of failure as
+      `github.com/WebAssembly/binaryen/releases` (still 403, still needing the documented
+      temporary `wasm-opt = false` workaround for every `vite build` this session ran). The
+      conversion script itself takes a **local** source-checkpoint path, not a URL
+      (`convert_gliner2_f16.py`'s `source: Path` argument) — `hacienda-private`'s repo (freshly
+      re-cloned this session at `/workspace/hacienda-private`) ships the *script*, not the
+      1.2 GB F32 checkpoint itself, so downloading it still needs huggingface.co access this
+      sandbox doesn't have, and uploading the 614 MB result needs the same access plus write
+      credentials, neither available. Net: unchanged conclusion (blocked on network/
+      credentials this session cannot obtain), with the specific `numpy` sub-blocker now
+      closed for whichever future session actually has huggingface.co egress.
 - [ ] **H2. Decide whether 614 MB is acceptable.** It is a 2× win, not a solution. If not,
       the manifest at `services/mcp-server/models/manifest.json` shows the fallback they
       chose: `onnx-community/gliner_small-v2.1` with int8 variants — a much smaller model at
       some accuracy cost. Evaluate against French legal fixtures before switching, since
       multilingual quality is the whole point (Track B).
+
+      **Re-verified 2026-07-31, still unstarted.** Genuinely a judgment call for whoever owns
+      the accuracy/size tradeoff, not something blocked on tooling or network access —
+      correctly left open, not silently stalled.
 - [ ] **H3. Note their runtime differs.** hacienda-private loads GLiNER2 in a dedicated Web
       Worker via `packages/wasm-pipeline/src/gliner2-worker.ts` with a `@xenova/transformers`
       tokenizer, whereas Studio's `createNerBackend()` targets xberg-wasm's `NerModel`. Both
       consume the same safetensors. B1 should account for this third option.
+
+      **Re-verified 2026-07-31, still unstarted.** `services/mcp-server` isn't in this repo
+      (it's `hacienda-private`'s), so nothing here needed touching — a documentation/decision
+      task for whoever next revisits B1's runtime choice, not code.
 
 ---
 
@@ -1384,6 +1421,11 @@ surfaces, since Studio has a neural model and the CLI/API do not.
       (`cli.rs:103`, `:107`) with nothing behind them.
 - [ ] Sequence this **after** Track H settles which model artefact ships. Both surfaces should
       use the same f16 checkpoint rather than each picking one.
+
+      **Re-verified 2026-07-31, still correctly gated.** Track H (H1) is still blocked on
+      huggingface.co network access this sandbox doesn't have (see H1's 2026-07-31 note) — the
+      artefact Track K would consume doesn't exist yet, so Track K remaining unstarted is the
+      correct sequencing outcome, not a stall.
 
 ---
 
