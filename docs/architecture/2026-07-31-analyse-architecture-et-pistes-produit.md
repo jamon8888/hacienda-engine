@@ -22,7 +22,7 @@ Ce qui manque pour la promesse « les entreprises construisent leurs solutions I
 
 | Brique attendue | État réel |
 | --- | --- |
-| RAG côté serveur | **Partiel.** Chunking et embeddings existent dans `xberg` au tag épinglé, simplement désactivés ici. Mais la couche de stockage vectoriel (trait, IR de requêtes, backends) **a été retirée de l'open source amont avant la GA** — voir §9.1. Elle est à construire, pas à brancher |
+| RAG côté serveur | **Partiel.** Chunking et embeddings existent dans `xberg` au tag épinglé, simplement désactivés ici. La couche de stockage vectoriel a **cessé d'être publiée en amont avant la GA**, mais reste disponible sous MIT dans sa dernière version — à reprendre comme code de Hacienda plutôt qu'à réécrire (§9.1, §9.3) |
 | SDK 14 langages | **Annoncés ✅ dans le README, aucun généré** — `alef.toml` pointe vers 4 fichiers sources inexistants et un dossier `packages/` absent |
 | Serveur MCP | **Absent** — spécifié (9 outils, 4 ressources, 3 prompts) mais aucun code |
 | Multi-tenancy | **Partielle** — isolation par `owner` au niveau des jobs seulement ; pas de tenant de premier ordre, et rien à reprendre en amont (§9.5) |
@@ -238,7 +238,7 @@ Effort faible, débloque le commercial.
 | Chantier | Détail |
 | --- | --- |
 | **Activer chunking + embeddings** | Features `xberg/chunking` et `xberg/embeddings`, présentes au tag épinglé, derrière un flag optionnel pour ne pas imposer ONNX aux consommateurs qui ne s'en servent pas. |
-| **Posséder le trait `VectorStore`** | À définir dans `hacienda-core` — la couche amont a quitté l'open source (§9.3, voie C). Une dizaine de méthodes plus l'IR de requêtes minimale dont le décorateur a besoin. |
+| **Posséder le trait `VectorStore`** | Reprendre la surface de contrat et les backends MIT de la rc.5 dans `hacienda-core`, avec attribution — ~3 900 lignes sans couplage à la version de xberg (§9.3). |
 | **Décorateur `HaciendaVectorStore<S>`** | Rédaction avant vectorisation, audit à la récupération, générique sur n'importe quel backend. C'est là que vit le différenciateur — voir §9.4. |
 | **`POST /v1/index` + `POST /v1/search`** | Au-dessus du décorateur, sur un backend Postgres/pgvector à écrire. |
 | **Porter le bundle Studio côté serveur** | Registre d'entités, glossaire, export KG — ce qui existe en TS dans `worker/pipeline.ts` remonté en Rust et exposé en API. C'est le vrai différenciateur : **du RAG dont chaque chunk est rédigé, traçable et réversible par un porteur de clé.** |
@@ -309,8 +309,9 @@ C'est le partage classique open-core, et il tombe naturellement sur les lignes d
 | `InMemoryJobStore` en production | Moyenne | Backend Postgres (vague 2) |
 | Aucune instrumentation malgré une stack de monitoring déclarée | Moyenne | `/metrics` + OTel (vague 1) |
 | Écart Studio (riche) / serveur (pauvre) | Moyenne | Porter le pipeline de bundle côté serveur (vague 3) |
-| **L'amont retire des crates de l'open source entre deux versions** — c'est déjà arrivé à `xberg-rag` et `xberg-doc-store` avant la GA | **Élevée** | Précédent établi : `cargo vendor` devient une assurance de continuité produit, pas seulement de CI (§9.7) |
-| Le fork `jamon8888/xberg` (rc.5) entre dans le graphe de dépendances à la place du v1.0.2 épinglé | Moyenne | Le tenir hors de tout `path =` / `[patch]` ; valeur de référence de conception uniquement (§9.9) |
+| **Une brique amont cesse d'être publiée d'une version à l'autre** — arrivé à `xberg-rag` et `xberg-doc-store` avant la GA. Risque de disponibilité, non juridique : MIT protège définitivement le publié | **Élevée** | Précédent établi : `cargo vendor` garantit que la version dont dépend le produit reste accessible (§9.7) |
+| Le fork `jamon8888/xberg` (rc.5) entre dans le graphe de dépendances à la place du v1.0.2 épinglé | Moyenne | On en **extrait** du code une fois, avec attribution ; on ne le **dépend** jamais (§9.9) |
+| Reprise de code MIT sans conserver la notice de copyright de Kreuzberg, Inc. | Moyenne | Notice dans chaque fichier repris + `THIRD_PARTY_LICENSES.md` ; `deny.toml` outille déjà la vérification (§9.3) |
 | Clés de pseudonymisation en variables d'environnement | Moyenne | Intégration KMS/Vault (vague 2) |
 
 ---
@@ -341,9 +342,11 @@ Vérification faite directement contre `xberg-io/xberg` (joignable en git simple
 
 Les membres du workspace amont aujourd'hui sont 14 crates — `xberg`, `xberg-cli`, `xberg-ffi`, les backends OCR, les crates de binding — plus les packages Dart/Swift et le harnais de benchmark. Aucune trace de `xberg-rag`, `xberg-rag-node`, `xberg-doc-store` ni `xberg-gliner-candle`. La seule occurrence de « rag » restante est `crates/xberg/src/chunking/rag.rs` : des aides au découpage pour RAG, pas la couche de stockage vectoriel.
 
-**Ces crates ont été retirées de l'open source entre la rc.5 et la GA 1.0.0.** Ce n'est pas une conjecture : la documentation de `xberg-rag` à la rc.5 annonçait déjà la destination — *« the engine contract that the commercial products build on: Xberg Pro and Xberg Enterprise each implement `VectorStore` externally »*. Le contrat est parti avec les produits qui l'implémentent.
+**Ces crates ont cessé d'être publiées entre la rc.5 et la GA 1.0.0.** Ce n'est pas une conjecture : la documentation de `xberg-rag` à la rc.5 annonçait déjà la destination — *« the engine contract that the commercial products build on: Xberg Pro and Xberg Enterprise each implement `VectorStore` externally »*. Le contrat est parti avec les produits qui l'implémentent.
 
-Kreuzberg, Inc. (l'éditeur, licence MIT) applique donc exactement la stratégie open-core recommandée en §6.4 : extraction, OCR et NER restent ouverts ; **la couche RAG et la multi-tenance sont devenues le produit payant**. C'est le fait le plus important de cette analyse pour la stratégie de Hacienda, et il est développé en §9.7.
+**Précision importante : il ne s'agit pas d'un changement de licence.** `xberg` est MIT (Kreuzberg, Inc.) à la rc.5 comme à la 1.0.6 d'aujourd'hui, et le dépôt public reste généreux. Ce qui a changé, c'est ce qui est *publié* : les versions déjà diffusées de `xberg-rag` et `xberg-doc-store` restent MIT pour toujours, mais il n'y en aura pas de nouvelles côté open source. La distinction compte, et la §9.3 en tire la conséquence.
+
+Kreuzberg, Inc. applique donc exactement la stratégie open-core recommandée en §6.4 : extraction, OCR et NER restent ouverts ; **la couche RAG et la multi-tenance sont devenues le produit payant**. C'est le fait le plus important de cette analyse pour la stratégie de Hacienda, et il est développé en §9.7.
 
 ### 9.2 Ce qui reste réellement consommable au tag épinglé
 
@@ -358,19 +361,36 @@ Conséquence directe : **le premier pas RAG reste possible et bon marché.** Act
 
 ### 9.3 Trois voies pour la couche vectorielle, et une recommandation
 
-**Voie A — reprendre la snapshot rc.5 du fork.** Juridiquement possible : la rc.5 est MIT, et MIT est irrévocable pour cette version. Techniquement, c'est un piège. Les features de `xberg-rag` sont couplées au cœur (`pipeline = ["xberg/chunking"]`, `pipeline-redaction = ["xberg/redaction-rehydrate", "xberg/ner"]`) et compilaient contre une rc.5 ; les brancher sur un cœur 1.0.2 ou 1.0.6 met en jeu des API qui ont eu quatre versions pour bouger. Surtout, c'est **un fork de fait** : aucun amont, aucune mise à jour, une divergence permanente à porter. C'est précisément ce qu'il s'agit d'éviter.
+D'abord, écarter une confusion : **la licence n'est pas le problème.** `xberg` est MIT (Kreuzberg, Inc.) à la rc.5 comme à la 1.0.6, et `xberg-rag` héritait de cette licence par `license.workspace = true`. MIT est irrévocable pour toute version publiée : le code de la rc.5 est utilisable, modifiable, redistribuable et commercialisable, définitivement. Ce qui a cessé, c'est la **publication amont** de ces crates — pas les droits sur ce qui a déjà été publié.
 
-**Voie B — licencier Xberg Pro ou Enterprise.** C'est le chemin que l'éditeur a conçu. Il apporte vraisemblablement le pgvector tenant-scoped et `TenantCtx`. Il est **impossible à évaluer aujourd'hui** : le dépôt est privé, ses conditions, sa licence et son mode de distribution sont inconnus. C'est la question n°1 à poser à Kreuzberg (§9.8).
+La bonne question n'est donc pas « avons-nous le droit ? » (oui) mais « que coûte la reprise, et de quoi héritons-nous ? ».
 
-**Voie C — posséder le contrat dans `hacienda-core`.** Définir nous-mêmes un trait `VectorStore` (une dizaine de méthodes) et le typage de requêtes minimal dont le décorateur a besoin. La rc.5 étant MIT, sa **conception** peut servir de référence, avec attribution, sans dépendre de code retiré de l'amont.
+**Voie A — reprendre la snapshot rc.5.** Le point décisif est le **découplage** : la surface de contrat de `xberg-rag` ne référence pas xberg du tout.
 
-**Recommandation : C d'abord, B en parallèle sur le plan commercial.** Trois raisons :
+```text
+store.rs · types.rs · filter.rs · query.rs · registry.rs · capability.rs   → 0 import xberg
+backends/{memory,sqlite,graphqlite}.rs                                     → 0 import xberg
+error.rs                                                                   → 1 seule référence,
+                                                                             sous #[cfg(feature = "pipeline"/"streaming")]
+```
 
-1. le différenciateur de Hacienda est le décorateur — rédaction avant vectorisation, audit à la récupération — et il a besoin d'*un* trait, pas de *ce* trait ;
-2. posséder le contrat rend Hacienda indépendante d'une couche que son fournisseur amont a explicitement placée derrière un péage ;
-3. un trait maison peut s'adapter par la suite à n'importe quel backend, y compris celui d'Enterprise si la voie B aboutit, par un simple adaptateur.
+Dépendances non optionnelles : `async-trait`, `serde`, `serde_json`, `thiserror`, `tracing`. Rien d'autre.
 
-La voie A ne devrait servir que de documentation de conception, jamais de dépendance.
+Autrement dit, **~3 900 lignes de code MIT compilent indépendamment de la version de xberg** : le trait (114 l.), l'IR de types (272 l.), de filtres (371 l.) et de requêtes (238 l.), le registre (139 l.), et trois backends fonctionnels — mémoire (526 l.), SQLite + sqlite-vec (1 523 l.), graphqlite (513 l.). Le couplage au cœur que je redoutais n'existe que dans les features `pipeline` et `streaming`, dont Hacienda n'a pas besoin : l'orchestration d'ingestion, elle l'a déjà dans sa façade.
+
+**Voie B — licencier Xberg Pro ou Enterprise.** Le chemin conçu par l'éditeur. Il apporte vraisemblablement le pgvector tenant-scoped. **Impossible à évaluer aujourd'hui** : dépôt privé, conditions et mode de distribution inconnus. Question n°1 à poser à Kreuzberg (§9.8).
+
+**Voie C — réécrire le contrat de zéro dans `hacienda-core`.**
+
+**Recommandation : A et C fusionnent, et c'est la meilleure option.** Vendorer la surface de contrat et les backends rc.5 **dans `hacienda-core`, comme code de Hacienda**, pas comme dépendance. Ce n'est pas un fork — un fork suppose un amont à suivre, et il n'y en a plus ; c'est une **reprise de code MIT devenue nôtre**, exactement ce que la licence autorise et prévoit.
+
+Cela donne à la voie C son résultat (nous possédons la couche, indépendante d'un péage amont) sans en payer le coût (~3 900 lignes déjà écrites et testées, dont un backend SQLite non trivial). Les objections que je formulais contre la voie A — « aucun amont, aucune mise à jour, divergence permanente » — ne tiennent pas ici : ne pas avoir d'amont **est** le but recherché.
+
+Trois obligations qui vont avec :
+
+1. **Attribution.** MIT impose de conserver la notice de copyright de Kreuzberg, Inc. dans les fichiers repris, et de la faire apparaître dans `THIRD_PARTY_LICENSES.md`. Le `deny.toml` du dépôt outille déjà la vérification de licences.
+2. **Ne reprendre que ce qui est découplé.** La surface de contrat et les backends, oui. `pipeline.rs` et `stream.rs`, non — ils compilaient contre une rc.5 et Hacienda a sa propre orchestration.
+3. **Documenter la provenance.** Un en-tête de module indiquant l'origine (xberg-rag rc.5, MIT) et la raison de la reprise, pour qu'un futur mainteneur ne cherche pas un amont inexistant.
 
 ### 9.4 La forme de nos additions reste la même : le décorateur
 
@@ -415,8 +435,8 @@ Note tirée de la rc.5 : `xberg-rag` était marqué *« Rust-only — deliberate
 Hacienda est aujourd'hui positionnée **en aval d'un fournisseur qui monétise exactement la couche dont elle a besoin**. Ce n'est pas fatal, mais cela doit être décidé plutôt que subi :
 
 - la ligne de partage à tenir reste **xberg = la capacité, Hacienda = le contrôle** — un nouveau format, une amélioration OCR, une optimisation NER se remontent en amont ; la chaîne d'audit, le modèle de capacités, les artefacts de conformité et la politique de rédaction restent ici ;
-- mais **la couche vectorielle n'est plus « une capacité amont »** : c'est un produit concurrent en puissance. La posséder (voie C) est autant une décision commerciale que technique ;
-- le risque « dépendance à un dépôt tiers » de la §7 monte d'un cran : l'amont a déjà démontré, une fois, qu'il retire des crates de l'open source entre deux versions. Rien n'interdit que cela se reproduise sur une brique que Hacienda consomme réellement. Le `cargo vendor` recommandé en vague 1 n'est donc plus seulement une assurance de disponibilité CI — c'est une assurance de **continuité produit**.
+- mais **la couche vectorielle n'est plus « une capacité amont »** : c'est un produit concurrent en puissance. La posséder est autant une décision commerciale que technique ;
+- le risque « dépendance à un dépôt tiers » de la §7 se précise. Il ne s'agit pas d'un risque juridique — MIT protège définitivement ce qui a été publié — mais d'un risque de **disponibilité future** : l'amont a montré, une fois, qu'une brique peut cesser d'être publiée d'une version à l'autre. Rien n'interdit que cela se reproduise sur un composant que Hacienda consomme réellement. Le `cargo vendor` recommandé en vague 1 cesse donc d'être une simple assurance de CI : c'est ce qui garantit que la version dont dépend le produit reste disponible quoi qu'il arrive en amont.
 
 ### 9.8 Ce qu'il reste à vérifier, et comment
 
@@ -435,21 +455,23 @@ Les questions à trancher une fois dedans, par ordre d'impact :
 
 Il est à **1.0.0-rc.5 (2026-07-17)** quand ce dépôt épingle **v1.0.2 (2026-07-29)** et que l'amont est à **1.0.6**. Le brancher en `path =` ou en `[patch]` compilerait contre du code antérieur à ce que la CI construit, sans aucun message d'erreur — exactement le scénario que le commentaire du `Cargo.toml` décrit pour le checkout voisin.
 
-Sa seule valeur est archivistique : il conserve `xberg-rag` et `xberg-doc-store` sous MIT, ce qui en fait une **référence de conception légitime** pour la voie C. À ce titre il mérite d'être gardé et documenté comme tel, pas supprimé — mais il ne doit jamais entrer dans le graphe de dépendances.
+Mais sa valeur est désormais bien plus qu'archivistique : **c'est la source du code que la §9.3 recommande de reprendre.** Il conserve `xberg-rag` et `xberg-doc-store` sous MIT, dans la seule version où ils aient jamais été publiés. À ce titre il doit être **conservé et documenté comme tel** — c'est un actif, pas un résidu.
+
+La distinction à tenir : on en **extrait** du code, une fois, qui devient du code de Hacienda avec sa notice de copyright. On ne le **dépend** jamais — ni `path =`, ni `[patch]`, ni `git =`.
 
 ### 9.10 Effet net sur la feuille de route
 
 | Chantier | Estimation initiale | Révisée |
 | --- | --- | --- |
 | Chunking + embeddings | à réactiver | **inchangé** — bien présent au tag épinglé, en features optionnelles |
-| Trait `VectorStore` + IR de requêtes | à concevoir | **à concevoir ici** (voie C), conception de référence disponible sous MIT |
-| Backends vectoriels | fournis en amont | **à écrire** — plus aucun backend amont ; commencer par un adossé à Postgres/pgvector |
+| Trait `VectorStore` + IR de requêtes | à concevoir | **~1 300 lignes MIT à reprendre**, sans couplage à la version de xberg |
+| Backends vectoriels | fournis en amont | **~2 600 lignes MIT à reprendre** (mémoire, SQLite+sqlite-vec, graphqlite) ; pgvector reste à écrire |
 | `TenantCtx` | fourni en amont | **à écrire ici**, sur le modèle rc.5 |
 | Réversibilité | deux schémas à concilier | **un seul** — notre `Pseudonymiser` ; contrainte disparue |
 | SDK | à construire | **corriger `alef.toml`** ; la config amont reste le modèle |
-| Serveur MCP | un serveur amont existe | à revérifier — il était présent à la rc.5, sa présence au tag épinglé reste à confirmer |
+| Serveur MCP | un serveur amont existe | à revérifier — présent à la rc.5, sa présence au tag épinglé reste à confirmer |
 
-La vague 3 ne se raccourcit donc **pas** comme je l'avais écrit une heure plus tôt : elle reste un vrai chantier de construction. Ce qui change, c'est qu'elle produit un actif possédé par Hacienda plutôt qu'une intégration louée à un fournisseur — ce qui, compte tenu de la §9.7, est probablement préférable.
+La vague 3 se raccourcit donc, mais pas pour la raison que j'avais avancée d'abord. Ce n'est pas de l'intégration d'une dépendance amont : c'est une **reprise ponctuelle de code MIT qui devient le nôtre**. Le résultat est meilleur que l'intégration — Hacienda possède la couche au lieu de la louer à un fournisseur qui la monétise par ailleurs — pour un coût qui reste très inférieur à une écriture de zéro. Reste à écrire, pour de bon : le décorateur, `TenantCtx`, un backend pgvector, et les endpoints.
 
 ---
 
