@@ -209,6 +209,13 @@ Task 1 is not merely a prerequisite; it can **invalidate Task 2's design**. Run 
 - [ ] If base-category F1 drops beyond the interval from 1.2, **label interference is real** and "extend the base set" (Task 2.2) is the wrong design — verticals would have to run as a second detection pass and merge, which is a materially larger change. Stop and re-scope rather than shipping the extension.
 - [ ] Record the two tables side by side here regardless of outcome.
 
+**Status: not run — cannot be run from this environment.** No agent session working this plan so far (Task 0 through this point) has had a local GLiNER2 model directory available; every ignored-runner invocation has taken the "skip, print a message" branch. This gate is therefore **not empirically satisfied**. Task 2 below was implemented anyway, at explicit user direction to continue the plan end-to-end, on the following basis:
+
+- Task 2's code *is* exactly the design the plan specifies (extend `DEFAULT_CATEGORIES`, do not replace it) — nothing about proceeding without the gate changes what gets built, only whether it has been shown safe to enable.
+- The risk this gate protects against is **runtime behaviour** (does adding vertical labels degrade base-category recall in the deployed model), not a compile-time or type-level property. Shipping the code with the gate outstanding is safe *precisely because* nothing downstream defaults it to on — see Task 2.1's `vertical: Option<VerticalConfig>` defaulting to `None`, and Task 2.4's decision not to add a `--vertical` CLI flag. An operator must opt in by writing `[pii.vertical]` into a config file.
+- The unresolved risk is now **operational, not architectural**: do not enable a `[pii.vertical]` config in any environment that has real traffic until this comparison has actually been run against the target model and recorded here. That is a deployment gate, not a code-review gate, and it is documented as such in this file, in `README.md`, and in the PR description so it cannot be missed by reading only one of the three.
+- If this comparison is later run and shows material interference, Task 2's "extend, don't replace" design is wrong and needs the second-detection-pass re-scope the original text above describes — that would be a breaking change to `VerticalConfig`'s semantics, not a patch. Flagging it here so the next person who *can* run the harness knows what a failing result implies.
+
 ---
 
 ## Task 2 — Tier 0 schema verticals (spec §8 step 2)
