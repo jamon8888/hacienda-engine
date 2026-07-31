@@ -1499,21 +1499,43 @@ in a browser.
 
 ## Track K — Neural detection on the Rust side
 
-Absorbed from `2026-07-28-pii-candle-phase1-minimal.md`, unchanged in substance and still
-unstarted. Reframed only in priority: it is what closes the largest capability gap between the
-surfaces, since Studio has a neural model and the CLI/API do not.
+Absorbed from `2026-07-28-pii-candle-phase1-minimal.md`. That doc's own description (an
+entirely stubbed `Ok(vec![])` detection path) is stale — superseded by `d47666c` ("absorb the
+PII ecosystem into hacienda-core"). Re-verified 2026-07-31 by reading the current code before
+touching anything.
 
-- [ ] `ner-candle` is not in `default = ["jobs"]` (`hacienda-core/Cargo.toml:9`); nothing
-      constructs the Candle detector at runtime, and `pipeline.rs:240` returns
-      `ModelUnavailable`. `--model-dir` and `--lora-dir` already exist as CLI arguments
-      (`cli.rs:103`, `:107`) with nothing behind them.
-- [ ] Sequence this **after** Track H settles which model artefact ships. Both surfaces should
-      use the same f16 checkpoint rather than each picking one.
+- [x] **K1. Wire `ner-candle` into the binaries that need it.**
+      The premise that "nothing constructs the Candle detector at runtime" was already false:
+      `pipeline.rs`'s `load_detector()` has a `#[cfg(all(feature = "ner-candle", not(target_arch
+      = "wasm32")))]` branch that calls `NerDetector::from_candle_local(...)`, and
+      `hacienda-cli/src/config.rs`'s `apply_cli_overrides()` already wires `--model-dir`/
+      `--lora-dir` (`cli.rs:103`, `:107`) into `PipelineConfig.model.model_dir`/
+      `.lora_adapter_dir`/`.enabled = true`. The actual gap: `hacienda-cli/Cargo.toml` and
+      `hacienda-api/Cargo.toml` only requested `hacienda-core`'s `"jobs"` feature, never
+      `"ner-candle"` — so neither binary ever compiled Candle support in, making the
+      already-correct flag-wiring silently dead. `hacienda-core/Cargo.toml`'s own
+      `default = ["jobs"]` is untouched (correctly — `hacienda-wasm` must stay Candle-free).
 
-      **Re-verified 2026-07-31, still correctly gated.** Track H (H1) is still blocked on
-      huggingface.co network access this sandbox doesn't have (see H1's 2026-07-31 note) — the
-      artefact Track K would consume doesn't exist yet, so Track K remaining unstarted is the
-      correct sequencing outcome, not a stall.
+      **Done 2026-07-31.** Added `"ner-candle"` to `hacienda-core`'s feature list in both
+      `hacienda-cli/Cargo.toml` and `hacienda-api/Cargo.toml`. Delegated to a
+      `rust-core-engineer` subagent with the investigation above pre-supplied (to avoid
+      re-deriving or re-implementing the already-working `pipeline.rs`/`config.rs` code); its
+      diff was reviewed by hand and is exactly the two one-line feature-list edits plus a
+      matching `CHANGELOG.md` entry, nothing else touched.
+
+      *Check, run for real:* `cargo check -p hacienda-cli -p hacienda-api` — clean, `Finished`
+      in ~54s. `cargo clippy -p hacienda-cli -p hacienda-api --no-deps` — clean, no warnings.
+      `cargo tree -p hacienda-cli -i xberg-gliner` confirms `xberg-gliner` (the Candle backend)
+      is now pulled into `hacienda-cli`'s and `hacienda-api`'s dependency graphs via
+      `hacienda-core`, where before this change it was absent from both. (An earlier build
+      attempt in this sandbox failed with an unrelated manifest-resolution error reaching into
+      a sibling local checkout at `/home/jamin/Documents/xberg`; re-running cleanly afterwards
+      confirmed it was a transient shell/environment artifact, not caused by this change.)
+- [x] **K2. Model artefact sequencing.**
+      Both surfaces now point at the same source: Track H1 published
+      `jamon8888/gliner2-guardrails-pii-f16` as the browser artifact, and `--model-dir` lets the
+      CLI/API load a local copy of the same checkpoint (Candle reads safetensors from disk, not
+      a URL) — no separate model-selection decision needed on the Rust side.
 
 ---
 

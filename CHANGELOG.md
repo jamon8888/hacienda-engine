@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hacienda-cli` and `hacienda-api` now compile `hacienda-core` with the `ner-candle`
+  feature, so `--model-dir`/`--lora-dir` (already accepted by the CLI) actually reach a
+  Candle-backed `NerDetector` instead of always failing with `ModelUnavailable`.
 - **Real pseudonymisation.** `RedactionMode::Pseudonymize` now emits a keyed, deterministic,
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal
