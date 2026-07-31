@@ -66,7 +66,7 @@ Autrement dit : **Studio est RAG-ready, le serveur ne l'est pas.** L'asymétrie 
 
 `HaciendaFacade::process_batch_with_auth` (hacienda-core/src/facade.rs:440) est le cœur :
 
-```
+```text
 extract (xberg) → detect_concurrently (JoinSet borné) → pour chaque document :
     observe_glossary  → record_audit (1 append/doc) → submit_for_review → remplace content par redacted_text
 ```
@@ -182,7 +182,7 @@ Le travail est cadré : les traits sont déjà async, retournent `Result`, et le
 
 Aujourd'hui `hacienda-cli serve` lance un binaire unique qui fait tout. La cible :
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │  PLAN DE CONTRÔLE  (stateless, scale horizontal)                │
 │  API REST · MCP · Auth/tenants · Jobs · Quotas · Webhooks       │

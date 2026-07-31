@@ -1,5 +1,16 @@
 [files]
-extend-exclude = ["superpowers/", ".ai-rulez/", "scripts/", "poly.toml"]
+extend-exclude = [
+  "superpowers/",
+  ".ai-rulez/",
+  "scripts/",
+  "poly.toml",
+  # French-language prose. `typos` is an English dictionary, so it reads "moteur" as
+  # "motor", "ressources" as "resources", "amont" as "amount" — 91 corrections that would
+  # each make the text wrong. Excluded by file rather than by directory so English
+  # documents added under docs/architecture/ are still checked. Same reason `superpowers/`
+  # is excluded above: it holds the French design specs.
+  "docs/architecture/2026-07-31-analyse-architecture-et-pistes-produit.md",
+]
 
 [default.extend-words]
 hacienda = "hacienda"
