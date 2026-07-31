@@ -9,7 +9,7 @@ license.workspace = true
 async-trait = { workspace = true }
 axum = { workspace = true }
 data-encoding = { workspace = true }
-hacienda-core = { path = "../hacienda-core", features = ["jobs"] }
+hacienda-core = { path = "../hacienda-core", features = ["jobs", "ner-candle"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

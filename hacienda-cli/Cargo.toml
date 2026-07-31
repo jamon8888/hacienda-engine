@@ -26,7 +26,7 @@ hacienda-api = { path = "../hacienda-api" }
 # `jobs` is required by `serve`, which constructs the API's job store. hacienda-api
 # enables it too; naming it here means this crate does not rely on feature unification
 # with a sibling in order to compile.
-hacienda-core = { path = "../hacienda-core", features = ["jobs"] }
+hacienda-core = { path = "../hacienda-core", features = ["jobs", "ner-candle"] }
 num_cpus = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
