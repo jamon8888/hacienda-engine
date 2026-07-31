@@ -1,0 +1,220 @@
+{
+  "cases": [
+    {
+      "id": "fin-001",
+      "lang": "fr",
+      "text": "Merci de virer les fonds sur l'IBAN FR76 3000 6000 0112 3456 7890 189.",
+      "entities": [
+        {
+          "start": 36,
+          "end": 69,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-002",
+      "lang": "fr",
+      "text": "Le code SWIFT de notre banque est BNPAFRPPXXX.",
+      "entities": [
+        {
+          "start": 34,
+          "end": 45,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-003",
+      "lang": "fr",
+      "text": "Votre numéro de compte est le 00023456789.",
+      "entities": [
+        {
+          "start": 31,
+          "end": 42,
+          "label": "account_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-004",
+      "lang": "en",
+      "text": "Please wire the funds to IBAN GB29 NWBK 6016 1331 9268 19.",
+      "entities": [
+        {
+          "start": 30,
+          "end": 57,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-005",
+      "lang": "en",
+      "text": "Our bank's SWIFT code is DEUTDEFF500.",
+      "entities": [
+        {
+          "start": 25,
+          "end": 36,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-006",
+      "lang": "en",
+      "text": "Your account number is 987654321.",
+      "entities": [
+        {
+          "start": 23,
+          "end": 32,
+          "label": "account_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-007",
+      "lang": "fr",
+      "text": "L'IBAN du bénéficiaire est FR14 2004 1010 0505 0001 3M02 606.",
+      "entities": [
+        {
+          "start": 29,
+          "end": 62,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-008",
+      "lang": "fr",
+      "text": "Veuillez confirmer le code SWIFT SOGEFRPP avant le virement.",
+      "entities": [
+        {
+          "start": 33,
+          "end": 41,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-009",
+      "lang": "fr",
+      "text": "Le compte mentionné sur le relevé porte le numéro 11223344556.",
+      "entities": [
+        {
+          "start": 53,
+          "end": 64,
+          "label": "account_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-010",
+      "lang": "en",
+      "text": "Kindly transfer to account number 5566778899 at your earliest convenience.",
+      "entities": [
+        {
+          "start": 34,
+          "end": 44,
+          "label": "account_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-011",
+      "lang": "en",
+      "text": "The recipient's IBAN is DE89 3704 0044 0532 0130 00.",
+      "entities": [
+        {
+          "start": 24,
+          "end": 51,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-012",
+      "lang": "en",
+      "text": "Confirm the SWIFT/BIC HSBCGB2LXXX before initiating the transfer.",
+      "entities": [
+        {
+          "start": 22,
+          "end": 33,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-013",
+      "lang": "fr",
+      "text": "Merci d'indiquer votre IBAN complet: FR76 1234 5678 9101 1121 3141 592 avant vendredi.",
+      "entities": [
+        {
+          "start": 37,
+          "end": 70,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-014",
+      "lang": "fr",
+      "text": "Le numéro de compte à créditer est 0099887766 selon le RIB joint.",
+      "entities": [
+        {
+          "start": 38,
+          "end": 48,
+          "label": "account_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-015",
+      "lang": "en",
+      "text": "Please use SWIFT code CHASUS33 for the incoming payment.",
+      "entities": [
+        {
+          "start": 22,
+          "end": 30,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-016",
+      "lang": "fr",
+      "text": "L'IBAN espagnol fourni est ES91 2100 0418 4502 0005 1332.",
+      "entities": [
+        {
+          "start": 27,
+          "end": 56,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-017",
+      "lang": "en",
+      "text": "Reference the account number 334455667 in your remittance advice.",
+      "entities": [
+        {
+          "start": 29,
+          "end": 38,
+          "label": "account_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-018",
+      "lang": "fr",
+      "text": "Le code SWIFT à utiliser pour ce virement international est BARCGB22.",
+      "entities": [
+        {
+          "start": 61,
+          "end": 69,
+          "label": "swift_code"
+        }
+      ]
+    }
+  ]
+}
