@@ -165,10 +165,55 @@ Deux constats supplémentaires, non bloquants mais structurants :
 - [ ] **Étape 2.3** — L'enveloppe porte **entrées et sceaux ensemble** (décision D-P2-5),
       désormais obligatoire et non plus souhaitable : sans les sceaux, une histoire
       multi-segments n'a aucune continuité vérifiable.
-- [ ] **Étape 2.4** — **JSON et JSONL sont les formats vérifiables. CSV ne l'est pas** tant que
-      `export_csv` omet `principal` (constat 4). Deux options, à trancher et à écrire :
-      soit ajouter la colonne `principal`, soit documenter le CSV comme format de commodité
-      non vérifiable. **Ne pas laisser le défaut silencieux.**
+### Décision D-P2-6 — séparer l'enveloppe de preuve de l'extraction tabulaire
+
+**Le cadrage « faut-il ajouter la colonne `principal` au CSV ? » était faux.** La vérification
+d'une entrée exige `compute_chain_hash(prev_chain_hash, seq, {id, category, action, span_hash,
+config_hash, principal})` (`entry.rs:176-190`). Il manque donc au CSV **deux choses, pas une** :
+
+1. **`principal`**, une entrée du hachage, absente des colonnes (`export.rs:46-50`) ;
+2. **les frontières de segments.** Le CSV est une liste plate. Chaque segment redémarre à
+   `GENESIS_HASH` avec `seq` remis à 0 (`segment.rs:167`), et rien dans le fichier ne dit où.
+   Un vérificateur ne peut donc ni connaître `seq`, ni savoir où `prev` se réinitialise.
+
+**Conséquence : ajouter `principal` ne rendrait pas le CSV vérifiable.** Une liste plate d'entrées
+est structurellement incapable de porter une histoire multi-segments vérifiable, quelles que
+soient ses colonnes.
+
+Le défaut réel est la **confusion de deux artefacts** qui n'ont ni le même usage ni le même
+lecteur :
+
+| | Enveloppe de preuve | Extraction tabulaire |
+| --- | --- | --- |
+| Lecteur | Régulateur, auditeur externe | Analyste, tableur, SIEM |
+| Exigence | Vérifiable hors ligne | Lisible, greppable, importable |
+| Format | JSON / JSONL, **groupé par segment**, sceaux inclus | CSV plat |
+| Porte `seq` et `prev` recouvrables | oui, par le groupement | non, et ce n'est pas son rôle |
+
+**Décision, en trois points :**
+
+- [ ] **Étape 2.4a** — **L'enveloppe de preuve est JSON/JSONL, groupée par segment, sceaux
+      inclus.** Le groupement n'est pas cosmétique : c'est lui qui rend `seq` et la
+      réinitialisation de `prev` recouvrables, donc la vérification possible. Code neuf, aucune
+      rupture.
+- [ ] **Étape 2.4b** — **Ajouter `principal` au CSV** — non pour le rendre vérifiable, il ne
+      peut pas l'être, mais parce que **retirer silencieusement l'attribution d'un extrait
+      d'audit est un défaut en soi** : « qui a révélé cette valeur » est précisément la question
+      à laquelle l'extrait sert à répondre, et le champ est couvert par `chain_hash`
+      (`entry.rs:79-87`) donc réputé fiable.
+
+      *Sur la rupture :* le CSV est sorti en 0.1.0 le 2026-07-28, il y a quatre jours ; il n'a
+      **aucun appelant dans le dépôt** (seulement le ré-export `mod.rs:35`) ; et en 0.x SemVer
+      autorise la rupture sur montée mineure. Corriger maintenant coûte ~zéro et le coût croît
+      avec chaque consommateur. Entrée `CHANGELOG.md` sous `### Changed`, avec la raison.
+- [ ] **Étape 2.4c** — **L'API doit rendre la distinction impossible à manquer.** Un appelant
+      qui demande `?format=csv` reçoit une réponse indiquant explicitement qu'il ne s'agit pas
+      d'une enveloppe vérifiable. Laisser un utilisateur remettre un CSV à un régulateur en le
+      croyant probant est le mode d'échec que toute cette spec existe pour fermer.
+
+**Ce qui est délibérément écarté :** ajouter `segment_id` et `seq` en colonnes pour rendre le CSV
+vérifiable. Cela transformerait une table en demi-enveloppe, mal taillée pour les deux usages —
+illisible en tableur, et toujours sans les sceaux nécessaires à la chaîne inter-segments.
 - [ ] **Étape 2.5** — Test : exporter après deux rotations, puis vérifier la chaîne **hors du
       serveur** à partir du seul export, sceaux compris.
 
