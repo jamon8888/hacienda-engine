@@ -51,6 +51,30 @@ comment elle les respecte, et sa suite de tests doit en contenir au moins un tes
 
 ---
 
+## 2 bis. État de rédaction des specs filles
+
+Huit specs sont rédigées : celles des vagues 0 et 1, c'est-à-dire l'horizon réellement
+actionnable. Les autres restent définies par ce document — portée, interfaces, critères de
+sortie — et seront rédigées quand leurs entrées existeront.
+
+| Spec | Fichier | État |
+| --- | --- | --- |
+| S1 | `2026-08-01-S1-tenancy-and-projects.md` | **Rédigée** |
+| S4 | `2026-08-01-S4-api-contract-and-clients.md` | **Rédigée** |
+| P1 | `2026-08-01-P1-redaction-enforcement-point.md` | **Rédigée** |
+| P2 | `2026-08-01-P2-audit-exposure-and-verification.md` | **Rédigée** |
+| P3 | `2026-08-01-P3-pseudonymisation-as-a-service.md` | **Rédigée** |
+| P4 | `2026-08-01-P4-human-review-api.md` | **Rédigée** |
+| P5 | `2026-08-01-P5-compliance-artefacts-api.md` | **Rédigée** |
+| E0 | `2026-08-01-E0-redacting-document-loader.md` | **Rédigée** |
+| S2, S3 | — | À rédiger : dépendent du choix de backend (Postgres, KMS) |
+| V1–V4 | — | À rédiger **après fusion de PR #42/#43**, dont elles prolongent les mesures |
+| E1–E5 | — | À rédiger une fois P1 livré et éprouvé par E0 |
+
+Rédiger maintenant les specs V ou E reviendrait à écrire contre des interfaces qui n'existent
+pas encore et des mesures qui ne sont pas faites — c'est exactement ce que le §2 de la spec
+#42 reproche aux documents de planification antérieurs.
+
 ## 3. Carte du programme
 
 ```text
