@@ -19,6 +19,26 @@ Aucune dépendance nouvelle.
 
 **Programme :** `2026-08-01-hacienda-platform-parity-program.md` §5.2, vague 0.
 
+**Ligne de base (2026-08-01, `cargo test -p hacienda-core -p hacienda-api`) :**
+**284 passés, 4 échecs préexistants, 2 ignorés.**
+
+Les quatre échecs sont une limitation d'environnement, **pas un défaut du code et pas notre
+fait** :
+
+```text
+audit::store_file::tests::should_poison_store_after_a_failed_append_write
+audit::store_file::tests::should_not_include_phantom_entries_in_chain_after_a_failed_append_and_reopen
+review::store_file::tests::should_poison_store_and_not_expose_phantom_state_after_a_failed_decide_write
+review::store_file::tests::should_not_show_phantom_decision_after_a_failed_write_and_restart
+```
+
+Ils simulent un échec d'écriture par `fs::set_permissions(0o444)` (`store_file.rs:1485`), et
+cet environnement tourne en **uid 0** : root outrepasse les contrôles de permission, l'écriture
+réussit, le test échoue. La CI tourne en non-root et ils y passent.
+
+**Consigne aux agents : ne pas chercher à les réparer, ne pas les compter comme régression.**
+Le critère est « 284 passés inchangés, aucun nouvel échec ».
+
 ---
 
 ## Vérité terrain — vérifié contre le code, 2026-08-01
@@ -49,45 +69,108 @@ Aucune dépendance nouvelle.
 2. **Pas d'export depuis un store.** `export(&AuditChain, _)` ne s'applique pas à un
    `Arc<dyn AuditStore>`.
 
-**Hypothèses non vérifiées, à confirmer en tâche 1 :**
+## Résultat de l'investigation 1.1 — conception révisée
 
-- que `FileAuditStore` puisse relire ses segments scellés sans réouvrir les fichiers un par un ;
-- que la volumétrie d'une chaîne de production tienne le streaming sans pagination côté store.
+L'étape 1.1 a été exécutée le 2026-08-01. Quatre constats ont été **re-vérifiés
+indépendamment** et invalident trois points du plan initial. Chacun est corrigé ci-dessous.
+
+| Constat | Preuve | Effet |
+| --- | --- | --- |
+| **`read_jsonl` est une lecture *mutante*** : `discard_unterminated_tail` fait `set_len` + `sync_all` | `store_file.rs:820-823` | Un `history()` qui lirait le fichier du segment **ouvert** pendant un `append` concurrent peut observer un enregistrement à moitié écrit et **le tronquer**. Le segment ouvert doit être servi depuis `state.open` en mémoire, jamais depuis le disque — c'est déjà ce que fait `verify()` (`store_file.rs:520-541`) |
+| **Le module `export` n'existe pas sur wasm32** | `mod.rs:16-17`, `mod.rs:32-33` | Une méthode de trait prenant `ExportFormat` **ne compile pas** là où vit `IndexedDbAuditStore`. Tranche l'étape 2.1 : fonction libre, cfg-gatée |
+| **Chaque segment redémarre à `GENESIS_HASH`** et `AuditChain::append` rejette toute entrée n'étendant pas la tête courante | `segment.rs:167` (`AuditChain::new`), `chain.rs:56-64` | On **ne peut pas** reconstruire une `AuditChain` unique à partir d'une histoire multi-segments. Un export passant par `AuditChain` échouerait à la première rotation |
+| **`export_csv` omet `principal`**, alors que `chain_hash` le couvre | `export.rs:46-50`, `entry.rs:79-87` | Un export CSV **ne se vérifie pas hors ligne**. L'enveloppe vérifiable doit être JSON/JSONL |
+
+Deux constats supplémentaires, non bloquants mais structurants :
+
+- **Les trois backends conservent les segments scellés** — `FileAuditStore` sur disque
+  (`store_file.rs:90-91`), `InMemoryAuditStore` et `IndexedDbAuditStore` en mémoire avec leurs
+  entrées (`store.rs:153`, `store_idb.rs:54-59`). L'échappatoire « le backend IndexedDB peut
+  refuser » du plan initial est **inutile** : supprimée.
+- **Il n'existe pas d'ordre total inter-nœuds.** Un `FileAuditStore` ne voit que son propre
+  `node_dir` (`store_file.rs:258`, et la note `116-122`). `history()` rend donc *l'histoire de
+  ce nœud*, pas celle du déploiement. **Obligation de documentation**, sinon l'API dit « les
+  entrées d'audit » en pensant « celles de ce nœud » — exactement le mode d'échec que ce plan
+  reproche à `entries()`.
 
 ---
 
 ## Tâche 1 — Lecture de l'histoire complète
 
-- [ ] **Étape 1.1** — Lire `audit/store_file.rs` et établir si les segments scellés sont
-      relisibles depuis le store. Écrire la réponse dans ce plan avant d'écrire du code.
-- [ ] **Étape 1.2** — Ajouter au trait `AuditStore` :
+- [x] **Étape 1.1** — Investigation faite. Voir la section ci-dessus.
+- [ ] **Étape 1.2** — Ajouter les types de curseur dans `hacienda-core/src/audit/` :
 
       ```rust
-      /// Entries across sealed segments and the open one, oldest first.
-      async fn history(&self, after: Option<&str>, limit: usize)
-          -> Result<Vec<AuditEntry>, AuditError>;
+      /// Position immuable dans la chaîne : l'entrée à `index` dans le segment `segment_id`.
+      /// `index` est la position que `AuditChain::verify` utilise comme numéro de séquence
+      /// (`chain.rs:81-83`) — une valeur que la chaîne engage déjà, pas un décalage fortuit.
+      pub struct AuditCursor { pub segment_id: String, pub index: u64 }
+      // + FromStr / Display sur une forme opaque "{segment_id}:{index}"
+
+      pub struct AuditPage { pub entries: Vec<AuditEntry>, pub next: Option<AuditCursor> }
       ```
 
-      `after` est l'identifiant d'entrée servant de curseur — jamais un offset (décision
-      D-P2-4 de la spec).
-- [ ] **Étape 1.3** — Implémenter pour `InMemoryAuditStore`, `FileAuditStore`,
-      `IndexedDbAuditStore`. Le backend IndexedDB peut renvoyer `AuditError` « non supporté »
-      s'il ne conserve pas les segments scellés : mieux vaut refuser que rendre partiel.
-- [ ] **Étape 1.4** — Test : écrire assez d'entrées pour forcer deux rotations, puis vérifier
-      que `history` les rend **toutes**, dans l'ordre, à travers les segments scellés.
-- [ ] **Étape 1.5** — Test : appeler `history` pendant qu'un `append` concurrent tourne ;
-      aucune entrée ne doit être sautée ni dupliquée entre deux pages.
+- [ ] **Étape 1.3** — Ajouter au trait `AuditStore` :
+
+      ```rust
+      /// Entrées des segments scellés puis du segment ouvert, plus anciennes d'abord,
+      /// **pour ce nœud**. `after` est un curseur opaque rendu par cette méthode —
+      /// jamais un décalage, jamais un identifiant d'entrée.
+      async fn history(&self, after: Option<&AuditCursor>, limit: usize)
+          -> Result<AuditPage, AuditError>;
+      ```
+
+      **Pourquoi pas `Option<&str>` sur un identifiant d'entrée** : `AuditEntry` ne porte ni
+      `segment_id` ni numéro de séquence (`entry.rs:68-90`), il n'existe aucun index sur
+      disque, et l'identifiant est un uuid v4 donc non triable. Le retrouver imposerait un
+      balayage complet de l'histoire **à chaque page**. `(segment_id, index)` se résout en une
+      ouverture de fichier via `jsonl_path` (`store_file.rs:673-675`) contre le `Vec<SegmentSeal>`
+      déjà ordonné en mémoire (`store_file.rs:92`).
+
+      Le trait doit rester **objet-safe** — propriété épinglée par
+      `should_construct_arc_dyn_audit_store` (`store.rs:497-502`).
+
+- [ ] **Étape 1.4** — Implémenter pour les trois backends. Pour `FileAuditStore` :
+      **segments scellés depuis le disque, segment ouvert depuis `state.open`** — jamais
+      `read_jsonl` sur le fichier vivant (constat 1).
+- [ ] **Étape 1.5** — Ne **pas** prendre `io_order` en lecture : cela bloquerait tous les
+      `append` pendant une lecture disque O(n), et un verrou ne peut de toute façon pas couvrir
+      deux requêtes HTTP. La correction de la pagination vient de l'immuabilité du curseur, pas
+      d'un verrou.
+- [ ] **Étape 1.6** — Test : forcer deux rotations, vérifier que `history` rend **toutes** les
+      entrées, dans l'ordre, à travers les segments scellés.
+- [ ] **Étape 1.7** — Test : paginer pendant qu'un `append` concurrent tourne ; aucune entrée
+      sautée ni dupliquée. Les entrées ajoutées après la frappe du curseur apparaissent
+      simplement sur une page ultérieure — croissance, pas dérive.
+- [ ] **Étape 1.8** — Test : après `close()`, `history` rend le segment final depuis le disque.
+      `entries()` rend vide dans cet état (`store_file.rs:488-492`) ; `history` **ne doit pas**
+      hériter de ce comportement.
+- [ ] **Étape 1.9** — Un curseur inconnu rend une erreur explicite, jamais un redémarrage
+      silencieux depuis le début — qui dupliquerait.
 
 ## Tâche 2 — Export depuis un store
 
-- [ ] **Étape 2.1** — Ajouter `async fn export(&self, format: ExportFormat) -> Result<Vec<u8>, AuditError>`
-      au trait, ou une fonction libre prenant `&dyn AuditStore`. **Décider laquelle et
-      écrire pourquoi** : une méthode de trait oblige chaque backend à l'implémenter ; une
-      fonction libre s'appuie sur `history` et n'a qu'une implémentation.
-- [ ] **Étape 2.2** — L'export **enveloppe entrées et sceaux ensemble** (décision D-P2-5) : un
-      export d'entrées seules ne se vérifie pas hors ligne.
-- [ ] **Étape 2.3** — Test : exporter, vérifier la chaîne **hors du serveur** à partir du seul
-      export, sceaux compris.
+- [ ] **Étape 2.1** — **Fonction libre, cfg-gatée**, décidée par le constat 2 :
+
+      ```rust
+      #[cfg(not(target_arch = "wasm32"))]
+      pub async fn export_store(store: &dyn AuditStore, format: ExportFormat)
+          -> Result<Vec<u8>, AuditError>;
+      ```
+
+      Pas une méthode de trait : `ExportFormat` n'existe pas sur wasm32, où vit
+      `IndexedDbAuditStore`.
+- [ ] **Étape 2.2** — **Ne pas router par `AuditChain`** (constat 3). Construire l'enveloppe
+      directement depuis `history()` et `seals()`.
+- [ ] **Étape 2.3** — L'enveloppe porte **entrées et sceaux ensemble** (décision D-P2-5),
+      désormais obligatoire et non plus souhaitable : sans les sceaux, une histoire
+      multi-segments n'a aucune continuité vérifiable.
+- [ ] **Étape 2.4** — **JSON et JSONL sont les formats vérifiables. CSV ne l'est pas** tant que
+      `export_csv` omet `principal` (constat 4). Deux options, à trancher et à écrire :
+      soit ajouter la colonne `principal`, soit documenter le CSV comme format de commodité
+      non vérifiable. **Ne pas laisser le défaut silencieux.**
+- [ ] **Étape 2.5** — Test : exporter après deux rotations, puis vérifier la chaîne **hors du
+      serveur** à partir du seul export, sceaux compris.
 
 ## Tâche 3 — Les cinq routes
 
@@ -131,6 +214,10 @@ Aucune dépendance nouvelle.
 - [ ] **Étape 5.2** — Documenter dans le README de l'API **ce que la chaîne prouve** et en quoi
       elle diffère d'un journal d'activité. C'est l'argument commercial (spec §2), et il doit
       être lisible par un acheteur, pas seulement par un développeur.
+- [ ] **Étape 5.4** — Documenter que `history` rend **l'histoire de ce nœud**, pas celle du
+      déploiement : il n'existe pas d'ordre total inter-nœuds (`store_file.rs:116-122`). Dire
+      « les entrées d'audit » en pensant « celles de ce nœud » est le mode d'échec que la tâche 1
+      existe pour fermer ; le reproduire à l'échelle du déploiement serait la même faute.
 - [ ] **Étape 5.3** — Entrée `CHANGELOG.md` sous `[Unreleased] / Added`.
 
 ---
