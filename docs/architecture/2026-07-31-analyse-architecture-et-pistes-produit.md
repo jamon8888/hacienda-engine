@@ -701,9 +701,10 @@ La vague 3 se raccourcit donc, mais pas pour la raison que j'avais avancée d'ab
 
 > **Suite donnée.** Le découpage en specs exécutant la parité Enterprise complète, la couche
 > de preuve et les LoRA métiers est dans
-> `superpowers/specs/2026-08-01-hacienda-platform-parity-program.md` — quinze specs en quatre
-> pistes, avec ordre de livraison et décisions à trancher. Il retient la parité totale, donc
-> à l'inverse de la recommandation §9.12.4, qui y est explicitement notée comme réserve levée.
+> `superpowers/specs/2026-08-01-hacienda-platform-parity-program.md` — dix-neuf specs en quatre
+> pistes, avec invariants de programme, ordre de livraison et recommandations sur les cinq
+> décisions ouvertes. Il exécute la parité, donc à l'inverse de la recommandation §9.12.4, qui
+> y est notée comme réserve levée — sa décision D5 y revient et recommande une parité sélective.
 
 Si une seule chose doit être faite cette semaine : **aligner le README sur la réalité et exposer par API le métier déjà écrit** (audit, review, compliance). Le premier point protège la crédibilité ; le second transforme ~4 000 lignes de code testé et invisible en surface produit vendable, pour quelques centaines de lignes de handlers.
 

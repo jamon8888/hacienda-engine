@@ -23,7 +23,7 @@ sur la couche de preuve, seul terrain où hacienda est aujourd'hui seule. La dé
 est la parité complète. Ce document l'exécute intégralement. Deux conséquences à assumer
 explicitement plutôt qu'à découvrir :
 
-- le programme devient large — quatre pistes, quinze specs — là où la couche de preuve
+- le programme devient large — quatre pistes, dix-neuf specs — là où la couche de preuve
   seule en demandait cinq ;
 - hacienda se place en concurrence frontale d'un fournisseur dont elle consomme le moteur.
   La piste **F** (§7) traite cette tension comme un objet de conception, pas comme un
@@ -67,8 +67,8 @@ comment elle les respecte, et sa suite de tests doit en contenir au moins un tes
                              │ enveloppe TOUT contenu
 ┌────────────────────────────┴─────────────────────────────────────────┐
 │  PISTE E — Parité Enterprise                                          │
-│  E1 extraction+presets · E2 documents/versions/diff · E3 uploads      │
-│  E4 RAG · E5 métrage d'usage                                          │
+│  E0 document loader (valide le garde) · E1 extraction+presets (min.)  │
+│  E2 documents/versions/diff · E3 uploads · E4 RAG · E5 métrage (min.) │
 └────────────────────────────┬─────────────────────────────────────────┘
                              │ repose sur
 ┌────────────────────────────┴─────────────────────────────────────────┐
@@ -246,13 +246,31 @@ aucun équivalent chez Enterprise (`gdpr` : zéro occurrence dans leur spec).
 Chaque spec de cette piste **doit** déclarer par quel garde P1 elle passe. Une spec E qui
 n'énonce pas son point d'application est incomplète.
 
-### E1 — Extraction et presets
+### E0 — *Document loader* rédacteur (LangChain, LlamaIndex)
+
+**Ajoutée par la décision D1.** Livrée en vague 1, bien avant le reste de la piste.
+
+**Portée.** Un chargeur publié sur PyPI et npm qui appelle l'API hacienda, rend des documents
+et des chunks **déjà rédigés**, et attache à chaque lot l'identifiant de chaîne d'audit qui
+l'atteste. Le client garde son moteur vectoriel.
+
+**Rôle dans le programme.** C'est la **validation préalable du garde P1 contre un store tiers**
+— la partie la plus difficile de E4, éprouvée sur de vrais corpus avant d'engager E4.
+
+**Dépendances.** P1, P2 seulement. Ni S2, ni S3, ni E4.
+
+**Critères de sortie.** Un corpus de contrôle ingéré via le chargeur dans un pgvector client
+n'est récupérable en clair par aucune requête de similarité ; l'entrée d'audit correspondante
+est vérifiable via P2.
+
+### E1 — Extraction et presets *(portée minimale — D5)*
 
 **Parité visée.** `POST /v1/extract`, `GET /v1/presets`, `/{id}`, `/{id}/sample/{name}`,
 et l'équivalent Pro `/v1/saved-presets` (CRUD).
 
-**Portée.** Aligner le contrat de `/v1/documents` sur `/v1/extract` ; presets nommés,
-versionnés, partagés au niveau projet ; échantillons de sortie.
+**Portée retenue.** Aligner le contrat de `/v1/documents` sur `/v1/extract`. Les presets
+nommés, versionnés et partagés au niveau projet sont **hors portée** par D5 : commodité pure,
+qu'aucun appel d'offres n'examine.
 
 **Garde P1.** Le contenu extrait est rédigé avant retour et avant toute mise en cache.
 
@@ -304,7 +322,7 @@ par `retrieve` ; le décorateur fonctionne indifféremment sur mémoire et pgvec
 rédige et audite tient une grande part de la promesse « RAG conforme » sans moteur vectoriel
 (analyse §9.11.2). À trancher avant d'engager E4 en entier.
 
-### E5 — Métrage d'usage
+### E5 — Métrage d'usage *(portée minimale — D5)*
 
 **Parité visée.** `GET /v1/usage`.
 
@@ -387,12 +405,12 @@ L'ordre des dépendances (S → E → P → V) n'est pas l'ordre de valeur. Séq
 | Vague | Contenu | Justification |
 | --- | --- | --- |
 | **0 — semaines 1-3** | **P2**, **P5**, **P4** | Exposent du métier déjà écrit et testé. Quelques centaines de lignes de handlers pour la surface la plus différenciante du produit. Aucune dépendance. |
-| **1 — semaines 2-8** | **S1**, puis **S4** | S1 est le seul chantier réellement bloquant : le rétro-ajouter après production impose une migration des chaînes d'audit. S4 rend le produit consommable. |
-| **2 — semaines 6-14** | **S2**, **S3**, **P1**, **P3** | La persistance partagée et le point d'application doivent précéder tout nouveau store. P3 dépend de l'espace de clés par tenant de S1. |
-| **3 — semaines 10-18** | **V3**, **V1**, **V2**, **V4** | V3 d'abord : sans réponse à l'empreinte mémoire, le routage n'a rien à router. |
-| **4 — semaines 14-30** | **E1**, **E2**, **E3**, **E4**, **E5** | La parité en dernier, une fois que le garde P1 existe pour l'envelopper. E4 seulement après l'arbitrage « document loader d'abord » de sa fiche. |
+| **1 — semaines 2-8** | **S1**, puis **S4**, puis **P1** + **E0** | S1 est le seul chantier réellement bloquant : le rétro-ajouter après production impose une migration des chaînes d'audit. S4 rend le produit consommable. E0 met le garde P1 à l'épreuve d'un store tiers (D1). |
+| **2 — semaines 6-14** | **S2**, **S3**, **P3** | La persistance partagée doit précéder tout nouveau store. P3 dépend de l'espace de clés par tenant de S1. |
+| **3 — semaines 10-18** | **V3**, **V1**, **V2**, **V4** | V3 d'abord : sans réponse à l'empreinte mémoire, le routage n'a rien à router. Tier 0 (D2) rend V3 livrable sans aucun poids. |
+| **4 — semaines 14-26** | **E2**, **E3**, **E4**, puis **E1** et **E5** au minimum | La parité en dernier, une fois le garde P1 éprouvé par E0. Portée réduite par D5 : quatre à six semaines récupérées. |
 
-**Chemin critique :** S1 → P1 → E4. Tout le reste peut avancer en parallèle.
+**Chemin critique :** S1 → P1 → E0 → E4. Tout le reste peut avancer en parallèle.
 
 **Point de contrôle après la vague 0.** Les trois specs P exposées suffisent à qualifier un
 prospect en secteur régulé. Si elles ne suscitent pas d'intérêt commercial, la parité
@@ -405,7 +423,7 @@ Enterprise des vagues 4 est à rediscuter avant d'engager quinze semaines.
 | Exclusion | Raison |
 | --- | --- |
 | Serveur MCP | Chantier distinct : la moitié extraction est une feature `xberg/mcp` à activer (analyse §9.11.1), les outils PII/conformité se greffent dessus. À spécifier à part. |
-| Intégrations de frameworks RAG | Voie parallèle et moins chère que E4 (analyse §9.11.2), à spécifier séparément. |
+| ~~Intégrations de frameworks RAG~~ | **Rapatriées dans le programme** par la décision D1, comme spec **E0** en vague 1. |
 | Entraînement d'adaptateurs | PR #35 le couvre, en Python, hors de ce workspace. |
 | Studio | Consomme V1 et P3 ; son évolution propre est hors programme. |
 | SSO/SAML, console d'administration, facturation | Nécessaires à une offre SaaS, hors du périmètre demandé. |
@@ -414,15 +432,123 @@ Enterprise des vagues 4 est à rediscuter avant d'engager quinze semaines.
 
 ## 10. Décisions à trancher avant rédaction des specs filles
 
-1. **E4 complet ou *document loader* d'abord ?** L'alternative est nettement moins chère et
-   couvre une grande part du besoin. Recommandation : loader d'abord, E4 sur demande client
-   avérée.
-2. **V3 : Tier 0 zéro-shot, ou poids d'emblée ?** #42 recommande Tier 0. Cela décale, voire
-   annule, une partie de #35.
-3. **E2 : diff sur tokens pseudonymisés — validé ?** C'est la seule résolution compatible avec
-   I1, et c'est un avantage sur Enterprise. À confirmer comme parti pris.
-4. **E3 : quarantaine des uploads présignés — acceptable en performance ?** Elle impose un
-   aller-retour de traitement avant lisibilité.
-5. **Parité totale ou parité sélective ?** E1, E2, E5 sont peu différenciants. Les livrer
-   affaiblit la concentration sans créer d'avantage. À arbitrer après le point de contrôle de
-   la vague 0.
+Cinq questions conditionnent le contenu des specs filles. Chacune reçoit ci-dessous une
+recommandation ferme et la contrainte qui la porte.
+
+### D1 — E4 complet, ou *document loader* d'abord ?
+
+**Recommandation : les deux, dans cet ordre — loader en vague 1, E4 en vague 4 comme prévu.**
+Ce n'est pas un compromis : ce sont deux besoins différents.
+
+Le loader répond à « je garde mon LangChain et mon pgvector, je veux que ce qui y entre soit
+rédigé et tracé ». E4 répond à « je veux que hacienda *soit* mon moteur ». Sous mandat de
+parité, E4 reste requis ; la question n'est que son rang.
+
+L'argument décisif est technique, pas commercial : **le loader valide le contrat de P1
+— rédiger avant persistance — contre un store tiers, ce qui est la partie la plus difficile de
+E4.** Le faire d'abord fait hériter E4 d'un garde déjà éprouvé, sur de vrais corpus clients,
+avant d'y engager six à dix semaines. L'ordre inverse fait découvrir les défauts du garde dans
+le composant le plus coûteux.
+
+**Conséquence pour les specs filles.** Ajouter une spec **E0 — *document loader* rédacteur
+(LangChain, LlamaIndex)**, en vague 1, dépendant de P1 et P2 seulement. E4 la référence comme
+validation préalable de son garde.
+
+### D2 — V3 : Tier 0 zéro-shot, ou poids d'emblée ?
+
+**Recommandation : Tier 0, sans réserve. Et faire de l'entraînement une conséquence de la
+mesure, jamais une hypothèse.**
+
+Trois faits de #42 §2 l'imposent, et ils sont mesurés :
+
+- **zéro adaptateur entraîné existe aujourd'hui.** Tier 0 est la seule voie qui puisse livrer
+  une verticale maintenant ;
+- une verticale zéro-shot ne porte **aucun poids**, donc le blocage mémoire de V3 — deux
+  verticales marginales, trois qui ne tiennent pas sous 4 Go — **disparaît** pour les premières
+  verticales, au lieu d'être contourné ;
+- `detect_with_custom(text, categories, custom_labels)` est **déjà payé et inutilisé**.
+
+Le raisonnement de fond : entraîner des poids avant d'avoir mesuré l'insuffisance du zéro-shot
+revient à investir sans hypothèse falsifiable. Le harnais d'évaluation de PR #43 existe
+précisément pour produire cette mesure.
+
+**Barrière à inscrire dans la spec V3.** Un LoRA n'est entraîné que pour une verticale dont le
+F1 mesuré en Tier 0 tombe **sous le seuil produit sur le jeu d'évaluation**, et le ticket
+d'entraînement cite ce chiffre.
+
+**Effet sur PR #35.** La *conception* du pipeline reste valable et doit être conservée — c'est
+la capacité, et elle est réutilisable pour toute verticale. Ce qui est différé, ce sont les
+**exécutions d'entraînement**. Un pipeline conçu ne coûte rien à garder ; un entraînement
+spéculatif sur une verticale que le zéro-shot couvrait déjà est une perte sèche.
+
+### D3 — E2 : diff sur tokens pseudonymisés — validé ?
+
+**Recommandation : validé, comme parti pris de conception — avec deux conditions que la spec
+E2 doit porter explicitement.**
+
+C'est la seule résolution compatible avec I1, et c'est un avantage net sur Enterprise, qui ne
+dispose d'aucun jeton déterministe et ne peut donc pas produire ce diff.
+
+**Condition 1 — la rotation de clés.** Le déterminisme vaut *à clé constante*. Si une rotation
+survient entre v1 et v2, la même valeur porte deux jetons différents et le diff signalerait un
+changement fictif. L'identifiant de clé voyageant dans le jeton (P3), la résolution est
+disponible : **le diff résout via l'ensemble des clés retirées**, ou refuse explicitement de
+comparer deux versions dont les clés ne sont pas rapprochables. Refuser est acceptable ;
+afficher un faux changement ne l'est pas.
+
+**Condition 2 — la fidélité dépend du mode de rédaction.** En `Pseudonymize` et en `Hash`, le
+déterminisme rend le diff exact. En `Mask`, l'identité est perdue et le diff dégrade à « quelque
+chose a changé ici ». **Cette dégradation doit être annoncée dans la réponse**, pas subie
+silencieusement — c'est la même règle que le repli d'adaptateur de V2.
+
+### D4 — E3 : quarantaine des uploads présignés — acceptable en performance ?
+
+**Recommandation : adopter. La préoccupation de performance est largement mal placée ; le vrai
+coût est ailleurs.**
+
+Un upload présigné existe pour éviter de faire transiter un gros fichier **à travers le serveur
+d'API**. La quarantaine ne réintroduit pas ce transit : le fichier va toujours directement au
+stockage objet. Ce qui est ajouté, c'est que la *lisibilité* attend le traitement — or le
+traitement d'un document est déjà asynchrone, et un appelant ne peut de toute façon pas lire un
+résultat avant qu'il existe. Il n'y a donc pas de latence nouvelle sur le chemin qui compte.
+
+Le coût réel est le **cycle de vie du stockage** : pendant une fenêtre, l'original en clair et
+la sortie rédigée coexistent. C'est une exposition, pas une lenteur.
+
+**Exigence dure à inscrire dans E3, qui traite les deux à la fois.** Destruction de l'original
+en clair après traitement, avec TTL sur les objets jamais confirmés. C'est de toute façon exigé
+par la minimisation du RGPD Art. 5 : ce n'est pas un surcoût du choix de conception, c'est du
+travail dû.
+
+### D5 — Parité totale ou parité sélective ?
+
+**Recommandation : parité sélective — E2, E3, E4 complets ; E1 et E5 au minimum utile.**
+
+Cette question revient sur l'arbitrage rendu, et c'est délibéré : la §1 l'a notée comme
+re-arbitrable après la vague 0, et la recommandation demandée porte dessus. La décision reste
+au commanditaire.
+
+Le critère qui rend l'arbitrage tranchable : **la parité est un outil de traitement d'objection
+commerciale, pas un objectif produit.** Ce qui doit exister, c'est ce qu'un prospect comparera
+ligne à ligne dans un appel d'offres.
+
+| Spec | Verdict | Motif |
+| --- | --- | --- |
+| **E4** RAG | **Complet** | C'est là que la couche de preuve crée une valeur unique — des vecteurs rédigés. Comparé systématiquement. |
+| **E2** versions/diff | **Complet** | Devient différenciant grâce au diff sur jetons (D3), pas malgré lui. |
+| **E3** uploads | **Complet** | Plomberie, mais indispensable au-delà de quelques Mo, et peu coûteuse. |
+| **E1** extraction/presets | **Minimal** | Aligner le contrat de `/v1/documents` sur `/v1/extract`. Les presets nommés et versionnés sont de la commodité pure : aucun appel d'offres ne s'y arrête. |
+| **E5** métrage | **Minimal** | Compteurs dérivés de l'audit et quotas, rien de plus. Le besoin est commercial (facturation), pas concurrentiel. |
+
+**Gain estimé : quatre à six semaines, sans perte de position concurrentielle** — le temps
+récupéré va à la piste P, seul terrain où hacienda est aujourd'hui seule.
+
+### Récapitulatif
+
+| # | Décision | Recommandation | Effet sur les specs filles |
+| --- | --- | --- | --- |
+| D1 | E4 ou loader | **Les deux** — loader vague 1, E4 vague 4 | **Ajouter E0**, prérequis de validation de E4 |
+| D2 | Tier 0 ou poids | **Tier 0**, entraînement piloté par la mesure | V3 porte la barrière ; #35 conserve sa conception, diffère ses runs |
+| D3 | Diff sur jetons | **Validé** | E2 porte la résolution de rotation et la dégradation annoncée |
+| D4 | Quarantaine | **Adoptée** | E3 porte la destruction de l'original et le TTL |
+| D5 | Parité | **Sélective** | E1 et E5 réduits au minimum utile |
