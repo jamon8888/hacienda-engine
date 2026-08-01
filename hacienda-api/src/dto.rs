@@ -194,6 +194,24 @@ impl From<hacienda_core::jobs::Job> for JobResponse {
     }
 }
 
+/// Request body for `POST /v1/pii/reveal`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevealTokenRequest {
+    /// A pseudonym token previously returned by a redaction operation.
+    /// Format: `[CATEGORY:key_id:base32_ciphertext]`
+    pub token: String,
+}
+
+/// Response from `POST /v1/pii/reveal`.
+#[derive(Debug, Serialize)]
+pub struct RevealTokenResponse {
+    /// The normalised plaintext value behind the token.
+    pub plaintext: String,
+    /// Current audit chain tip. `null` when auditing is disabled.
+    pub audit_chain_tip: Option<String>,
+}
+
 /// Response from `GET /v1/pii/config`.
 ///
 /// An explicit allowlist of fields rather than a derived `Serialize` on `PipelineConfig`.

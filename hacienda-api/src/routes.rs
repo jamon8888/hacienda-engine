@@ -100,6 +100,11 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         make_router: || post(pii::redact_text),
     },
     RouteSpec {
+        path: "/v1/pii/reveal",
+        access: Access::Capability(Capability::PiiReveal),
+        make_router: || post(pii::reveal_token),
+    },
+    RouteSpec {
         path: "/v1/pii/config",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(pii::pii_config),
@@ -150,6 +155,8 @@ pub(crate) mod tests {
     use hacienda_core::{
         auth::{authn::DevTokenResolver, AuthState},
         jobs::InMemoryJobStore,
+        pii::PipelineConfig,
+        redaction::{EnvKeyResolver, RedactionConfig, RedactionMode},
         HaciendaConfig, HaciendaFacade,
     };
     use std::sync::Arc;
@@ -177,6 +184,30 @@ pub(crate) mod tests {
         let facade = Arc::new(HaciendaFacade::new(HaciendaConfig::default()).unwrap());
         let jobs = InMemoryJobStore::new().into_arc();
         ApiState::new(facade, jobs, auth, limits)
+    }
+
+    /// Creates a test state with PII enabled in pseudonymize mode and a key resolver.
+    fn state_with_pii() -> ApiState {
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(64)),
+            _ => None,
+        });
+
+        let pii_config = PipelineConfig {
+            redaction: RedactionConfig {
+                mode: RedactionMode::Pseudonymize,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = HaciendaConfig::default().with_pii(pii_config);
+        let facade = Arc::new(HaciendaFacade::with_key_resolver(config, &resolver, &[]).unwrap());
+
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let jobs = InMemoryJobStore::new().into_arc();
+        ApiState::new(facade, jobs, auth, ApiLimits::default())
     }
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
@@ -412,6 +443,124 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_ne!(response.status().as_u16(), 413);
+    }
+
+    /// Reveal route requires `pii:reveal` capability, not just `documents:process`.
+    ///
+    /// Mirrors `guarded_handler_observes_the_caller_not_trusted` but for the reveal
+    /// endpoint: a token with only `documents:process` must get 403.
+    #[tokio::test]
+    async fn reveal_route_requires_pii_reveal_not_just_documents_process() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pii/reveal")
+                    .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"token":"[EMAIL:k1:AAAA]"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            403,
+            "reveal without pii:reveal must be 403; got {}",
+            response.status()
+        );
+    }
+
+    /// Reveal route returns plaintext for a valid token with correct capabilities.
+    #[tokio::test]
+    async fn reveal_route_returns_plaintext_for_a_valid_token() {
+        let app = build_router(state_with_pii());
+
+        // First, redact something to get a valid token
+        let redact_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pii/redact")
+                    .header(
+                        "authorization",
+                        "Bearer hcd_documents:process,pii:reveal_testsuffix",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"mail bob@example.com"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(redact_response.status().as_u16(), 200);
+
+        let redact_body = axum::body::to_bytes(redact_response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let redact_json: serde_json::Value = serde_json::from_slice(&redact_body).unwrap();
+        let redacted_text = redact_json["redacted_text"].as_str().unwrap();
+
+        // Extract the token from the redacted text
+        let token_start = redacted_text.find('[').unwrap();
+        let token_end = redacted_text.find(']').unwrap() + 1;
+        let token = &redacted_text[token_start..token_end];
+
+        // Now reveal it
+        let reveal_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pii/reveal")
+                    .header(
+                        "authorization",
+                        "Bearer hcd_documents:process,pii:reveal_testsuffix",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reveal_response.status().as_u16(), 200);
+
+        let reveal_body = axum::body::to_bytes(reveal_response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let reveal_json: serde_json::Value = serde_json::from_slice(&reveal_body).unwrap();
+        assert_eq!(
+            reveal_json["plaintext"].as_str().unwrap(),
+            "bob@example.com"
+        );
+    }
+
+    /// Reveal route returns 400 for a malformed token.
+    #[tokio::test]
+    async fn reveal_route_returns_400_for_a_malformed_token() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pii/reveal")
+                    .header(
+                        "authorization",
+                        "Bearer hcd_documents:process,pii:reveal_testsuffix",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"token":"not-a-token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
     }
 
     /// The route table's path set must be internally consistent (no duplicate paths).

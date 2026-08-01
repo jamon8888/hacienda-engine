@@ -1,4 +1,5 @@
-//! Handlers for `POST /v1/pii/scan`, `POST /v1/pii/redact`, and `GET /v1/pii/config`.
+//! Handlers for `POST /v1/pii/scan`, `POST /v1/pii/redact`, `GET /v1/pii/config`,
+//! and `POST /v1/pii/reveal`.
 
 use axum::{extract::State, http::request::Parts, Json};
 use hacienda_core::SpanText;
@@ -6,8 +7,8 @@ use std::time::Instant;
 
 use crate::{
     dto::{
-        EntityDto, PiiConfigResponse, RedactTextRequest, RedactTextResponse, ScanTextRequest,
-        ScanTextResponse,
+        EntityDto, PiiConfigResponse, RedactTextRequest, RedactTextResponse, RevealTokenRequest,
+        RevealTokenResponse, ScanTextRequest, ScanTextResponse,
     },
     error::ApiError,
     extract::Json as SafeJson,
@@ -113,4 +114,34 @@ pub async fn pii_config(State(state): State<ApiState>) -> Json<PiiConfigResponse
             })
         }
     }
+}
+
+/// `POST /v1/pii/reveal`
+///
+/// Requires `documents:process` AND `pii:reveal`. The second requirement is
+/// enforced by `facade.reveal_token_with_auth` itself, which also writes the
+/// attributed `Reveal` audit entry. We delegate to the facade and map
+/// `HaciendaError::Authz` to 403.
+pub async fn reveal_token(
+    State(state): State<ApiState>,
+    parts: Parts,
+    SafeJson(body): SafeJson<RevealTokenRequest>,
+) -> Result<Json<RevealTokenResponse>, ApiError> {
+    let _start = Instant::now();
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let result = state
+        .facade
+        .reveal_token_with_auth(caller, &body.token)
+        .await
+        .map_err(ApiError::from)?;
+
+    let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
+
+    Ok(Json(RevealTokenResponse {
+        plaintext: result,
+        audit_chain_tip,
+    }))
 }

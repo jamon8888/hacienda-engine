@@ -23,6 +23,12 @@ pub struct HaciendaFacade {
     /// `Arc`-wrapped so [`Self::detect_concurrently`] can hand each spawned task its own
     /// cheap clone without cloning the pipeline itself (`PiiPipeline` is not `Clone`).
     pii_pipeline: Option<Arc<PiiPipeline>>,
+    /// The pseudonymiser instance used for minting and revealing tokens.
+    ///
+    /// Separate from `pii_pipeline` because token reveal is a standalone operation that
+    /// does not require running the full detection pipeline. Cloned from the same
+    /// `Arc<Pseudonymiser>` passed to the pipeline to maintain a single instance per key set.
+    pseudonymiser: Option<Arc<Pseudonymiser>>,
     compliance: Option<ComplianceGenerator>,
     /// The persistence backend for the tamper-evident audit log.
     ///
@@ -252,6 +258,7 @@ impl HaciendaFacade {
                 .filter(|g| g.enabled)
                 .map(|g| Mutex::new(EntityGlossary::new(g))),
             pii_pipeline,
+            pseudonymiser,
             audit_store,
             config,
         })
@@ -634,6 +641,74 @@ impl HaciendaFacade {
             metrics: result.metrics,
             audit_entries,
         })
+    }
+
+    /// Reverse a pseudonym token to its normalised plaintext, enforcing `Capability::PiiReveal`.
+    ///
+    /// Writes one `Reveal` audit entry keyed by `blake3(plaintext)` — the same digest scheme
+    /// `record_reveal` already uses for scan-time reveals, so an auditor can join this call to
+    /// the redaction that minted the token by span_hash, exactly as for the scan path.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::Authz`] without `PiiReveal`. [`HaciendaError::PiiDisabled`] if no
+    /// pseudonymiser is configured (redaction mode is not `pseudonymize`, or PII is off).
+    /// A malformed or unreadable token surfaces as [`HaciendaError::Pii`] wrapping
+    /// [`PseudonymError::MalformedToken`] / `UnreadableToken` / `KeyNotFound` — never panics,
+    /// per `redaction-safety`'s ban on disclosing internal detail: the three token-specific
+    /// variants are distinguishable to an operator but the HTTP layer maps all three to one
+    /// 400, not three status codes, so a client cannot use error-shape to probe key material.
+    pub async fn reveal_token_with_auth(
+        &self,
+        caller: Caller<'_>,
+        token: &str,
+    ) -> Result<String, HaciendaError> {
+        caller.require(Capability::PiiReveal)?;
+        let pseudonymiser = self
+            .pseudonymiser
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+        let plaintext = pseudonymiser.reveal(token)?;
+        self.record_token_reveal(&plaintext, caller).await?;
+        Ok(plaintext)
+    }
+
+    /// Record a token reveal audit entry for a single plaintext value.
+    ///
+    /// Mirrors `record_reveal` but operates on a bare token reveal where no entity
+    /// metadata (category, offsets, confidence, source) is available — the token
+    /// carries only the ciphertext and key id. The category is recorded as
+    /// `"pseudonym"` to distinguish these entries from scan-time reveals.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Audit`] if the store rejects the entry.
+    async fn record_token_reveal(
+        &self,
+        plaintext: &str,
+        caller: Caller<'_>,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        let Some(store) = &self.audit_store else {
+            return Ok(Vec::new());
+        };
+
+        let principal = caller.principal_id().map(str::to_owned);
+        let span_hash = blake3::hash(plaintext.as_bytes()).to_hex().to_string();
+
+        let input = AuditEntryInput {
+            id: uuid::Uuid::new_v4().to_string(),
+            category: "pseudonym".to_string(),
+            action: RedactionAction::Reveal,
+            span_hash,
+            span_length: plaintext.len() as u32,
+            confidence: None,
+            source: crate::audit::EntitySource::Regex,
+            pipeline_version: PIPELINE_VERSION.to_string(),
+            config_hash: String::new(),
+            principal,
+        };
+
+        Ok(store.append(vec![input]).await?)
     }
 
     /// Append one `Reveal` entry per span whose plaintext was handed to `caller`.
@@ -1762,6 +1837,7 @@ mod tests {
             audit_store,
             review_queue: None,
             glossary: None,
+            pseudonymiser: None,
         }
     }
 
@@ -2019,6 +2095,116 @@ mod tests {
         );
     }
 
+    // ── Task 1: reveal_token_with_auth (Phase 8) ──────────────────────────────
+
+    #[tokio::test]
+    async fn should_reveal_a_previously_minted_pseudonym_token() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let result = facade
+            .process(text_input("mail bob@example.com"))
+            .await
+            .unwrap();
+
+        let content = &result.extraction.results[0].content;
+        let token = token_in(content);
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let revealed = facade.reveal_token_with_auth(caller, token).await.unwrap();
+
+        assert_eq!(revealed, "bob@example.com");
+    }
+
+    #[tokio::test]
+    async fn should_reject_reveal_without_pii_reveal_capability() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let result = facade
+            .process(text_input("mail bob@example.com"))
+            .await
+            .unwrap();
+
+        let content = &result.extraction.results[0].content;
+        let token = token_in(content);
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.reveal_token_with_auth(caller, token).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_malformed_token() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.reveal_token_with_auth(caller, "not-a-token").await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Pseudonym(_)));
+    }
+
+    #[tokio::test]
+    async fn should_record_an_audit_entry_for_a_token_reveal() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let result = facade
+            .process(text_input("mail bob@example.com"))
+            .await
+            .unwrap();
+
+        let content = &result.extraction.results[0].content;
+        let token = token_in(content);
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let revealed = facade.reveal_token_with_auth(caller, token).await.unwrap();
+
+        assert_eq!(revealed, "bob@example.com");
+
+        let entries = facade.audit_entries().await.unwrap();
+        let reveal_entry = entries
+            .iter()
+            .find(|e| e.action == crate::audit::RedactionAction::Reveal)
+            .expect("reveal entry must exist");
+
+        assert_eq!(reveal_entry.category, "pseudonym");
+        assert_eq!(
+            reveal_entry.span_hash,
+            blake3::hash("bob@example.com".as_bytes())
+                .to_hex()
+                .to_string()
+        );
+        assert_eq!(reveal_entry.principal.as_deref(), Some("test-principal"));
+    }
+
+    #[tokio::test]
+    async fn should_reject_reveal_when_pii_is_disabled() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default()).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .reveal_token_with_auth(caller, "[EMAIL:k1:AAAA]")
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::PiiDisabled));
+    }
+
     // ── Concurrency spike (Task 4, Step 1 — closes #30) ─────────────────────────
     //
     // Throwaway proof-of-compile, not part of `process_batch_with_auth`. Every
@@ -2125,6 +2311,7 @@ mod tests {
             audit_store,
             review_queue: None,
             glossary: None,
+            pseudonymiser: None,
         }
     }
 

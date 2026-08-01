@@ -9,7 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Real pseudonymisation.** `RedactionMode::Pseudonymize` now emits a keyed, deterministic,
+- **`POST /v1/pii/reveal` endpoint (Phase 8).** Reverses a pseudonym token
+  (`[CATEGORY:key_id:base32_ciphertext]`) back to its normalised plaintext.
+  Requires `pii:reveal` capability. Writes a `Reveal` audit entry keyed by
+  `blake3(plaintext)` so an auditor can join this call to the original redaction
+  that minted the token by `span_hash`. Returns 400 for any malformed,
+  unreadable, or unknown-key token — all token errors collapse to one status code
+  to prevent probing key material.
+- `HaciendaFacade::reveal_token_with_auth(caller, token)` — core method
+  enforcing `Capability::PiiReveal`, delegating to `Pseudonymiser::reveal`, and
+  recording the token reveal in the audit chain. `HaciendaFacade` now holds a
+  cloned `Arc<Pseudonymiser>` so the de-pseudonymisation path is available
+  outside a live pipeline run.
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal
   values yield equal tokens across processes and runs, so a reader can follow one
