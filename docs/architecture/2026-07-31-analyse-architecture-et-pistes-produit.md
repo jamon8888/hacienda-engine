@@ -23,7 +23,7 @@ Ce qui manque pour la promesse « les entreprises construisent leurs solutions I
 | Brique attendue | État réel |
 | --- | --- |
 | RAG côté serveur | **Partiel.** Chunking et embeddings existent dans `xberg` au tag épinglé, simplement désactivés ici. La couche de stockage vectoriel a **cessé d'être publiée en amont avant la GA**, mais reste disponible sous MIT dans sa dernière version — à reprendre comme code de Hacienda plutôt qu'à réécrire (§9.1, §9.3) |
-| SDK 14 langages | **Annoncés ✅ dans le README, aucun généré** — `alef.toml` pointe vers 4 fichiers sources inexistants et un dossier `packages/` absent |
+| SDK 14 langages | **Annoncés ✅ dans le README, aucun généré** — `alef.toml` pointe vers 4 fichiers sources inexistants et un dossier `packages/` absent. Et c'est peut-être le mauvais chantier : le produit est un serveur d'API, donc des clients HTTP générés depuis OpenAPI coûtent bien moins cher (§9.12.1) |
 | Serveur MCP | **Absent ici**, mais à moitié gratuit : `xberg` embarque un serveur MCP derrière la feature `mcp` (§9.11.1). Restent à écrire les outils PII/conformité, qui sont le différenciateur |
 | Intégrations RAG (LangChain, LlamaIndex…) | **Absentes** — alors que l'amont en publie huit, versionnées en verrou avec le cœur. C'est la voie RAG la moins chère (§9.11.2) |
 | Multi-tenancy | **Partielle** — isolation par `owner` au niveau des jobs seulement ; pas de tenant de premier ordre, et rien à reprendre en amont (§9.5) |
@@ -221,7 +221,7 @@ Effort faible, débloque le commercial.
 | **Aligner le README** | Passer les 13 bindings non générés en 🚧, ou les générer. Corriger `alef.toml` (4 sources fantômes). Non négociable. |
 | **Exposer le métier existant** | `/v1/audit/{entries,verify,export}`, `/v1/review/*`, `/v1/compliance/report`. Le code est écrit et testé, il manque les handlers. |
 | **Observabilité réelle** | `/metrics` Prometheus + spans OTel sur `extract`/`ner`/`merge`/`redact`/`audit`. La stack docker-compose existe déjà et ne scrape rien. |
-| **Générer 3 SDK** | Python, Node, Go via alef. Trois vrais valent mieux que quatorze annoncés. La config amont, qui produit 11 packages, sert de modèle vérifié (§9.11.3). |
+| **Générer 3 clients HTTP** | Étoffer `/openapi.json` (la couture existe déjà, dérivée de `ROUTE_TABLE` et protégée par un test), puis générer Python/TypeScript/Go par codegen. Bien moins cher que réparer alef pour 14 cibles natives, et aligné sur ce qu'est le produit — un serveur d'API (§9.12.1). |
 | **Activer `xberg/mcp`** | Le serveur MCP d'extraction est une feature, pas un chantier (§9.11.1). Y greffer ensuite `pii_scan`, `pii_redact`, `pii_explain`. Déplacé de la vague 2. |
 | **Un *document loader* LangChain** | La voie RAG la moins chère : rédaction + audit dans le chargeur, le client garde son moteur (§9.11.2). |
 | **Vendorer xberg** | Miroir interne ou `cargo vendor`, pour ne plus dépendre de la disponibilité d'un dépôt tiers en CI. |
@@ -256,6 +256,8 @@ Effort faible, débloque le commercial.
 Le marché du RAG d'entreprise est saturé. Le marché du **RAG conforme** ne l'est pas.
 
 La phrase à porter : **« Vos documents deviennent interrogeables par une IA sans qu'aucune donnée personnelle ne quitte votre périmètre — et vous pouvez le prouver. »**
+
+> **Révision après lecture des specs Enterprise (§9.12.3).** La moitié « interrogeable » n'est plus différenciante : Xberg Enterprise vend déjà extraction, RAG et rédaction de base. Le poids doit porter sur **« et vous pouvez le prouver »** — pseudonymisation réversible, chaîne d'audit vérifiable, artefacts réglementaires, revue humaine, zéro-egress. C'est un périmètre plus étroit, mais c'est celui où Hacienda est seule.
 
 Chaque mot est adossé à du code existant :
 
@@ -308,6 +310,7 @@ C'est le partage classique open-core, et il tombe naturellement sur les lignes d
 | --- | --- | --- |
 | README annonçant 14 SDK inexistants | **Élevée** — crédibilité, et exposition juridique si contractualisé | Corriger cette semaine |
 | Dépendance à un dépôt xberg tiers non vendoré | Élevée | Vendorer/mirrorer ; clarifier gouvernance et licence |
+| **Le fournisseur amont est aussi un concurrent** — Xberg Enterprise vend extraction, RAG, rédaction, audit d'activité et métrage (§9.12.2) | **Élevée** | Ne pas concurrencer sur la commodité ; concentrer le produit sur la couche de preuve, absente chez eux (§9.12.3) |
 | Espace de tokens de pseudonymisation partagé entre tenants | Élevée | `TenantId` dans le `KeyResolver` avant toute mise en production multi-client |
 | `InMemoryJobStore` en production | Moyenne | Backend Postgres (vague 2) |
 | Aucune instrumentation malgré une stack de monitoring déclarée | Moyenne | `/metrics` + OTel (vague 1) |
@@ -607,7 +610,77 @@ Cela confirme l'intuition de la §6.5 — « MCP est un canal de distribution, p
 
 Cela ne change rien à la §9.1 : la couche de stockage vectoriel a bien cessé d'être publiée. Cela change en revanche son *urgence*. Les intégrations de frameworks apportent la valeur RAG plus vite et à moindre risque ; posséder un store vectoriel devient une décision de deuxième temps, motivée par une demande client réelle plutôt que par la nécessité de combler un trou.
 
-### 9.12 Effet net sur la feuille de route
+### 9.12 `xberg-io/sdks` : deux modèles de SDK, et l'API Enterprise à découvert
+
+La §9.11.3 comptait les 11 packages de `xberg-io/xberg` et concluait que la configuration alef amont était le modèle à suivre. C'était incomplet : **il existe un second dépôt, `xberg-io/sdks`, qui suit un modèle entièrement différent** — et il révèle au passage ce que la §9.8 disait inaccessible.
+
+#### 9.12.1 Deux dépôts, deux natures de SDK
+
+| | `xberg-io/xberg` → `packages/` | `xberg-io/sdks` |
+| --- | --- | --- |
+| Nature | **Bindings natifs** vers la bibliothèque Rust (FFI, JNI, WASM…) | **Clients HTTP** vers l'API du produit commercial |
+| Langages | 11 (csharp, dart, elixir, go, java, kotlin-android, php, python, ruby, swift, zig) | 4 (python, typescript, go, dart) |
+| Génération | alef, depuis les sources Rust | **openapi-python-client / openapi-typescript / oapi-codegen, depuis OpenAPI 3.1** |
+| Versionnage | en verrou avec le cœur | **indépendant** (0.3.1) |
+| Cible | l'utilisateur qui embarque la bibliothèque | l'utilisateur qui appelle un déploiement Enterprise ou Pro |
+| Licence | MIT | MIT |
+
+Le README de `sdks` l'énonce sans ambiguïté : *« Official client SDKs for the extraction API served by Xberg Enterprise and Xberg Pro. One package per language, one dual-target client… Generated from the upstream OpenAPI 3.1 specifications. »*
+
+**Conséquence directe pour Hacienda, et elle est importante.** Le README de ce dépôt promet 14 bindings natifs, et l'`alef.toml` cassé est présenté partout comme le chantier SDK. Mais le produit réel de Hacienda est **un serveur d'API** : `hacienda-cli serve`, une table de routes, `/openapi.json`. Ce que ses clients consommeront, c'est HTTP — pas une bibliothèque Rust liée en statique.
+
+Or `hacienda-api/src/handlers/openapi.rs` construit déjà un document OpenAPI 3.1 **dérivé de `ROUTE_TABLE`**, avec un test (`openapi_path_set_equals_route_table`) qui interdit la dérive. Le document est aujourd'hui squelettique — les chemins n'ont ni opérations, ni schémas de corps, ni réponses typées — mais **la couture est posée et la garantie anti-dérive existe déjà**.
+
+Étoffer ce document, puis générer trois clients HTTP par codegen, est **considérablement moins coûteux que de réparer alef pour 14 cibles natives**, et sert mieux le produit tel qu'il est. Cela ne condamne pas les bindings natifs : ils gardent leur sens pour Studio (WASM) et pour un embarqueur qui veut du zéro-egress en process. Mais ce sont deux offres distinctes, et **le §5 vague 1 les confondait**.
+
+#### 9.12.2 Ce que les specs révèlent de Xberg Enterprise
+
+Les deux specs OpenAPI sont **dans ce dépôt public** : `spec/api/openapi.yaml` (Enterprise, 24 endpoints, `https://api.xberg.io`) et `spec/pro/openapi.yaml` (Pro, 20 endpoints). La §9.8 posait quatre questions en attendant un accès au dépôt privé ; la surface fonctionnelle, elle, est désormais lisible.
+
+**Xberg Enterprise expose :**
+
+- `POST /v1/extract`, `GET /v1/jobs`, `/v1/presets`, `/v1/uploads/presign` + `/confirm` ;
+- **toute la couche RAG** — `/v1/rag/collections` (CRUD), `/documents`, `/retrieve`, `/reindex`, `/migrate-embeddings` ;
+- **de la rédaction PII** — `PiiCategory` (email, phone, ssn, credit_card…), `RedactionFinding`, `RedactionReport`, et `RedactionStrategy` = `mask | hash | token_replace | drop` ;
+- `GET /v1/audit`, `GET /v1/usage` (facturation à l'usage), versionnement et `diff` de documents ;
+- authentification `bearer_auth`, cloisonnement par *project* (`/v1/projects/{id}/rag-config` côté Pro).
+
+**Il faut en tirer la conclusion franche : Xberg Enterprise n'est pas seulement un fournisseur amont, c'est un produit concurrent sur une grande partie du périmètre visé par ce document.** Extraction, RAG, jobs, rédaction de base, journal d'audit, métrage d'usage : tout cela existe, est vendu, et est déjà documenté.
+
+#### 9.12.3 Ce qu'Enterprise ne fait pas — et c'est précisément le différenciateur
+
+La lecture des specs est aussi rassurante que dérangeante. Quatre absences, vérifiées par recherche dans les 317 Ko de la spec Enterprise :
+
+| Capacité | Enterprise | Hacienda |
+| --- | --- | --- |
+| **Pseudonymisation réversible** | **Absente** — zéro occurrence de `pseudonym`. `token_replace` émet un `replacement_token`, mais aucun endpoint de révélation ni de réhydratation | AES-256-SIV déterministe, réversible par porteur de clé, rotation additive |
+| **Audit infalsifiable au niveau du contenu** | **Non** — `AuditEntry` est `{id, actor, action, resource_type, metadata, created_at}` : un journal d'activité (`"job.submit"`, `"api_key.revoke"`). Aucune chaîne de hachage, aucun endpoint de vérification | Chaîne blake3 segmentée, une entrée par span rédigé, `span_hash` joignant rédaction et révélation, `verify()` |
+| **Artefacts de conformité** | **Absents** — zéro occurrence de `gdpr` ; DPIA, Model Card, DORA, AI Act introuvables | DPIA, Model Card, DORA, AI Act, checklists générés |
+| **Zéro-egress** | **Non** — API hébergée sur `api.xberg.io` | Studio traite dans le navigateur ; le moteur tourne sur site |
+| **File de revue humaine** | Absente de la spec | Queue durable, event-sourcée (AI Act Art. 14) |
+
+Autrement dit : **Enterprise couvre la commodité, pas la preuve.** Il rédige, mais sans réversibilité ni chaîne d'audit vérifiable ; il journalise l'activité, mais ne prouve rien sur le contenu ; il ne produit aucun artefact réglementaire.
+
+#### 9.12.4 Ce que cela impose au positionnement
+
+Le §6.1 proposait « vos documents deviennent interrogeables par une IA sans qu'aucune donnée personnelle ne quitte votre périmètre — et vous pouvez le prouver ». Les specs Enterprise **valident la seconde moitié de la phrase et invalident la première comme différenciateur** : rendre des documents interrogeables est désormais une commodité vendue par l'amont.
+
+Trois conséquences, par ordre d'importance :
+
+1. **Ne pas concurrencer sur l'extraction ni sur la plomberie RAG.** C'est le terrain d'Enterprise, il est mieux outillé, et Hacienda le consomme déjà. La §9.11.2 reste la bonne voie : s'intégrer aux frameworks, ne pas construire un moteur.
+2. **Concentrer le discours sur la couche de preuve** — pseudonymisation réversible, chaîne d'audit vérifiable, artefacts réglementaires, revue humaine, zéro-egress. C'est un périmètre plus étroit que « document intelligence », mais c'est le seul où Hacienda est aujourd'hui seule, et il s'adresse à un acheteur (DPO, direction des risques) qui n'est pas celui d'Enterprise.
+3. **Traiter Enterprise comme un partenaire possible autant qu'un concurrent.** Un client qui a déjà Enterprise et à qui il manque la preuve réglementaire est un prospect naturel — le décorateur de la §9.4 se pose au-dessus de *n'importe quel* backend, y compris le sien. C'est aussi ce qui rend la voie B de la §9.3 moins attirante : licencier le moteur d'un acteur dont on veut occuper la couche supérieure mérite réflexion.
+
+#### 9.12.5 Ce que cette section change
+
+| Constat antérieur | Correction |
+| --- | --- |
+| §5 vague 1 : « générer 3 SDK via alef » | **Deux offres distinctes.** Clients HTTP par codegen OpenAPI d'abord — moins cher et aligné sur le produit ; bindings natifs ensuite, pour Studio et l'embarquement |
+| §9.8 : « il faut accéder au dépôt privé pour évaluer Enterprise » | **Partiellement résolu** — la surface fonctionnelle est publique via `spec/api/openapi.yaml`. Restent ouvertes les questions de licence, de distribution et de gouvernance |
+| §9.7 : « l'amont monétise la couche dont vous avez besoin » | **Plus net que cela** : l'amont vend un produit concurrent sur extraction + RAG + rédaction + audit d'activité + métrage |
+| §6.1 : positionnement « interrogeable + prouvable » | **La moitié « interrogeable » n'est plus différenciante.** Le discours doit porter sur la preuve |
+
+### 9.13 Effet net sur la feuille de route
 
 | Chantier | Estimation initiale | Révisée |
 | --- | --- | --- |
