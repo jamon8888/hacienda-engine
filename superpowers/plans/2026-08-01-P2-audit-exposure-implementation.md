@@ -150,7 +150,7 @@ Deux constats supplémentaires, non bloquants mais structurants :
 
 ## Tâche 2 — Export depuis un store
 
-- [ ] **Étape 2.1** — **Fonction libre, cfg-gatée**, décidée par le constat 2 :
+- [x] **Étape 2.1** — **Fonction libre, cfg-gatée**, décidée par le constat 2 :
 
       ```rust
       #[cfg(not(target_arch = "wasm32"))]
@@ -160,9 +160,9 @@ Deux constats supplémentaires, non bloquants mais structurants :
 
       Pas une méthode de trait : `ExportFormat` n'existe pas sur wasm32, où vit
       `IndexedDbAuditStore`.
-- [ ] **Étape 2.2** — **Ne pas router par `AuditChain`** (constat 3). Construire l'enveloppe
+- [x] **Étape 2.2** — **Ne pas router par `AuditChain`** (constat 3). Construire l'enveloppe
       directement depuis `history()` et `seals()`.
-- [ ] **Étape 2.3** — L'enveloppe porte **entrées et sceaux ensemble** (décision D-P2-5),
+- [x] **Étape 2.3** — L'enveloppe porte **entrées et sceaux ensemble** (décision D-P2-5),
       désormais obligatoire et non plus souhaitable : sans les sceaux, une histoire
       multi-segments n'a aucune continuité vérifiable.
 ### Décision D-P2-6 — séparer l'enveloppe de preuve de l'extraction tabulaire
@@ -192,11 +192,11 @@ lecteur :
 
 **Décision, en trois points :**
 
-- [ ] **Étape 2.4a** — **L'enveloppe de preuve est JSON/JSONL, groupée par segment, sceaux
+- [x] **Étape 2.4a** — **L'enveloppe de preuve est JSON/JSONL, groupée par segment, sceaux
       inclus.** Le groupement n'est pas cosmétique : c'est lui qui rend `seq` et la
       réinitialisation de `prev` recouvrables, donc la vérification possible. Code neuf, aucune
       rupture.
-- [ ] **Étape 2.4b** — **Ajouter `principal` au CSV** — non pour le rendre vérifiable, il ne
+- [x] **Étape 2.4b** — **Ajouter `principal` au CSV** — non pour le rendre vérifiable, il ne
       peut pas l'être, mais parce que **retirer silencieusement l'attribution d'un extrait
       d'audit est un défaut en soi** : « qui a révélé cette valeur » est précisément la question
       à laquelle l'extrait sert à répondre, et le champ est couvert par `chain_hash`
@@ -206,7 +206,7 @@ lecteur :
       **aucun appelant dans le dépôt** (seulement le ré-export `mod.rs:35`) ; et en 0.x SemVer
       autorise la rupture sur montée mineure. Corriger maintenant coûte ~zéro et le coût croît
       avec chaque consommateur. Entrée `CHANGELOG.md` sous `### Changed`, avec la raison.
-- [ ] **Étape 2.4c** — **L'API doit rendre la distinction impossible à manquer.** Un appelant
+- [x] **Étape 2.4c** — **L'API doit rendre la distinction impossible à manquer.** Un appelant
       qui demande `?format=csv` reçoit une réponse indiquant explicitement qu'il ne s'agit pas
       d'une enveloppe vérifiable. Laisser un utilisateur remettre un CSV à un régulateur en le
       croyant probant est le mode d'échec que toute cette spec existe pour fermer.
@@ -214,7 +214,7 @@ lecteur :
 **Ce qui est délibérément écarté :** ajouter `segment_id` et `seq` en colonnes pour rendre le CSV
 vérifiable. Cela transformerait une table en demi-enveloppe, mal taillée pour les deux usages —
 illisible en tableur, et toujours sans les sceaux nécessaires à la chaîne inter-segments.
-- [ ] **Étape 2.5** — Test : exporter après deux rotations, puis vérifier la chaîne **hors du
+- [x] **Étape 2.5** — Test : exporter après deux rotations, puis vérifier la chaîne **hors du
       serveur** à partir du seul export, sceaux compris.
 
 ## Contrat hérité de la tâche 1 — à respecter en tâche 3
@@ -239,9 +239,9 @@ contrat HTTP.
 
 ## Tâche 3 — Les cinq routes
 
-- [ ] **Étape 3.1** — Créer `hacienda-api/src/handlers/audit.rs`, en suivant le patron de
+- [x] **Étape 3.1** — Créer `hacienda-api/src/handlers/audit.rs`, en suivant le patron de
       `handlers/pii.rs`.
-- [ ] **Étape 3.2** — Ajouter à `ROUTE_TABLE` :
+- [x] **Étape 3.2** — Ajouter à `ROUTE_TABLE` :
 
       | Chemin | Accès |
       | --- | --- |
@@ -251,26 +251,45 @@ contrat HTTP.
       | `/v1/audit/export` | `Capability(AuditExport)` |
       | `/v1/audit/tip` | `Capability(DocumentsProcess)` |
 
-- [ ] **Étape 3.3** — DTO dans `dto.rs` : `AuditEntryDto`, `SegmentSealDto`, `VerifyResponse`,
+- [x] **Étape 3.3** — DTO dans `dto.rs` : `AuditEntryDto`, `SegmentSealDto`, `VerifyResponse`,
       `AuditPage { entries, next_cursor }`.
-- [ ] **Étape 3.4** — `verify` rend 200 avec le résultat, y compris en cas de rupture : une
+- [x] **Étape 3.4** — `verify` rend 200 avec le résultat, y compris en cas de rupture : une
       chaîne rompue est une **réponse**, pas une erreur serveur. Le corps nomme l'entrée ou le
       sceau fautif (décision D-P2-2).
-- [ ] **Étape 3.5** — Vérifier que `every_guarded_route_reflected_in_auth_state` passe toujours
+- [x] **Étape 3.5** — Vérifier que `every_guarded_route_reflected_in_auth_state` passe toujours
       — il balaie la table, donc les nouvelles routes y entrent automatiquement.
 
 ## Tâche 4 — Le test qui compte
 
-- [ ] **Étape 4.1** — `no_endpoint_returns_corpus_plaintext` : traiter un corpus témoin aux
+- [x] **Étape 4.1** — `no_endpoint_returns_corpus_plaintext` : traiter un corpus témoin aux
       valeurs distinctives, puis interroger **chacune** des cinq routes et asserter qu'aucune
       réponse ne contient une de ces valeurs. Balayer la table plutôt que lister les routes à
       la main, pour qu'une route ajoutée plus tard soit couverte d'office.
-- [ ] **Étape 4.2** — `verify_names_the_broken_entry` : altérer une entrée sur disque, appeler
+- [x] **Étape 4.2** — `verify_names_the_broken_entry` : altérer une entrée sur disque, appeler
       `/v1/audit/verify`, asserter un 200 nommant l'entrée — pas un 500 opaque.
-- [ ] **Étape 4.3** — `tip_is_reachable_with_documents_process_alone` : jeton
+- [x] **Étape 4.3** — `tip_is_reachable_with_documents_process_alone` : jeton
       `hcd_documents:process_*`, `/v1/audit/tip` ne rend ni 401 ni 403.
-- [ ] **Étape 4.4** — `export_requires_audit_export_not_audit_read` : un jeton portant
+- [x] **Étape 4.4** — `export_requires_audit_export_not_audit_read` : un jeton portant
       `audit:read` seul reçoit 403 sur `/v1/audit/export`.
+
+## Limite connue, à reprendre hors de P2
+
+**`verify` ne peut pas nommer le *segment* d'une entrée rompue, seulement son index dans ce
+segment.** L'étape 3.4 affirmait « `AuditError` le porte déjà » : c'est vrai à moitié.
+`AuditError::ChainIntegrity` porte `{index, expected, actual}`, et `FileAuditStore::verify`
+boucle sur les sceaux sans propager le segment. `VerifyFailure.segment_id` est donc `null` pour
+les ruptures de chaîne d'entrées — il est renseigné pour les trois ruptures au niveau des sceaux,
+qui le portent.
+
+**Pourquoi c'est acceptable en l'état :** la réponse identifie l'enregistrement par
+`entry_index` **et** `actual_hash`, le hachage de chaîne propre à l'entrée, qui est unique sur
+toute l'histoire. Un auditeur cherche ce hachage dans l'enveloppe de preuve — laquelle est
+groupée par segment (tâche 2) — et le segment devient évident. Le chemin de travail est donc
+complet, sans détour.
+
+**Pourquoi ce n'est pas corrigé ici :** propager le contexte de segment jusqu'à `verify` touche
+le cœur des tâches 1 et 2, déjà fusionnées. À reprendre dans un lot dédié, pas en fin de P2.
+La limite est documentée sur le type plutôt que masquée.
 
 ## Tâche 5 — Documentation
 

@@ -1,6 +1,9 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
-use crate::audit::{AuditEntry, AuditEntryInput, AuditStore, InMemoryAuditStore, RedactionAction};
+use crate::audit::{
+    export_store, AuditCursor, AuditEntry, AuditEntryInput, AuditPage, AuditStore, ExportFormat,
+    InMemoryAuditStore, RedactionAction, SegmentSeal,
+};
 use crate::auth::{Caller, Capability};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
@@ -300,6 +303,103 @@ impl HaciendaFacade {
             Some(store) => Ok(store.entries().await?),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// One page of **this node's** audit history, across sealed segments and the open one.
+    ///
+    /// `None` means no audit store is configured — not "no entries". The two are different
+    /// answers and an auditor must be able to tell them apart, which is why this returns
+    /// `Option<AuditPage>` rather than an empty page: an empty page reads as "nothing was
+    /// ever recorded here", and reporting that about a server which simply never had a
+    /// chain is the failure mode the whole audit surface exists to close.
+    ///
+    /// # Scope
+    ///
+    /// This node's history. Segments are per-writer and there is no total order between
+    /// writers, so nothing here can speak for a deployment. See [`AuditStore::history`].
+    ///
+    /// Requires `audit:read`.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::Authz`] without the capability, and [`HaciendaError::Audit`] with
+    /// [`AuditError::UnresolvableCursor`] when `after` names no position in this history —
+    /// never a silent restart from the beginning, which would re-serve entries the caller
+    /// already holds.
+    ///
+    /// [`AuditError::UnresolvableCursor`]: crate::audit::AuditError::UnresolvableCursor
+    pub async fn audit_history_with_auth(
+        &self,
+        caller: Caller<'_>,
+        after: Option<&AuditCursor>,
+        limit: usize,
+    ) -> Result<Option<AuditPage>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        match &self.audit_store {
+            Some(store) => Ok(Some(store.history(after, limit).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every segment seal this node's store can see, oldest first.
+    ///
+    /// `None` when no audit store is configured — same distinction as
+    /// [`audit_history_with_auth`](Self::audit_history_with_auth).
+    ///
+    /// Requires `audit:read`.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::Authz`] without the capability; [`HaciendaError::Audit`] if the
+    /// seals cannot be read.
+    pub async fn audit_seals_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<Vec<SegmentSeal>>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        match &self.audit_store {
+            Some(store) => Ok(Some(store.seals().await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Serialise this node's whole audit history in `format`.
+    ///
+    /// `None` when no audit store is configured. Requires `audit:export`, which is a
+    /// **distinct** capability from `audit:read`: reading the chain on the server and
+    /// carrying a copy of it out of the building are different acts with different blast
+    /// radii, and the capability model separates them for that reason.
+    ///
+    /// [`ExportFormat::Json`] and [`ExportFormat::JsonLines`] produce an evidence envelope
+    /// that verifies offline; [`ExportFormat::Csv`] produces a tabular extract that does
+    /// **not** and cannot. A caller that surfaces this choice to a user must surface that
+    /// difference with it.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::Authz`] without the capability; [`HaciendaError::Audit`] if the
+    /// history cannot be read or serialised.
+    pub async fn audit_export_with_auth(
+        &self,
+        caller: Caller<'_>,
+        format: ExportFormat,
+    ) -> Result<Option<Vec<u8>>, HaciendaError> {
+        caller.require(Capability::AuditExport)?;
+        match &self.audit_store {
+            Some(store) => Ok(Some(export_store(store.as_ref(), format).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether this facade holds an audit store at all.
+    ///
+    /// Deliberately not capability-guarded, and deliberately not folded into
+    /// [`verify_audit_with_auth`](Self::verify_audit_with_auth): that method answers `Ok`
+    /// for a facade with no store, which is honest as "nothing failed" but useless as
+    /// "the chain is intact". A caller that must not report a verified chain where there
+    /// is no chain asks this first.
+    pub fn audit_enabled(&self) -> bool {
+        self.audit_store.is_some()
     }
 
     /// The current head of the audit hash chain, or `None` when auditing is disabled.

@@ -23,7 +23,7 @@ use hacienda_core::{
 };
 
 use crate::{
-    handlers::{documents, info, jobs, openapi, pii},
+    handlers::{audit, documents, info, jobs, openapi, pii},
     state::ApiState,
 };
 
@@ -47,8 +47,8 @@ pub struct RouteSpec {
 
 /// The single source of truth for the entire API surface.
 ///
-/// Every Phase 4 route appears here exactly once. Audit and review endpoints are
-/// Phase 5 and must not be added to this table until then.
+/// Every route appears here exactly once. Review endpoints are not yet exposed and must
+/// not be added to this table until they are specified.
 ///
 /// Column order: path, access, handler factory.
 pub static ROUTE_TABLE: &[RouteSpec] = &[
@@ -103,6 +103,39 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/pii/config",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(pii::pii_config),
+    },
+    // ── audit:read endpoints ──────────────────────────────────────────────────
+    RouteSpec {
+        path: "/v1/audit/entries",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit::audit_entries),
+    },
+    RouteSpec {
+        path: "/v1/audit/verify",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit::audit_verify),
+    },
+    RouteSpec {
+        path: "/v1/audit/seals",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit::audit_seals),
+    },
+    // ── audit:export ──────────────────────────────────────────────────────────
+    // A distinct capability from `audit:read`: reading the chain on the server and
+    // carrying a copy of it out of the building are different acts.
+    RouteSpec {
+        path: "/v1/audit/export",
+        access: Access::Capability(Capability::AuditExport),
+        make_router: || get(audit::audit_export),
+    },
+    // ── documents:process ─────────────────────────────────────────────────────
+    // The tip is an opaque hash revealing nothing about the entries behind it, and a
+    // caller holding `documents:process` must be able to obtain the chain evidence for
+    // its own result. See `handlers::audit` and `HaciendaFacade::audit_tip`.
+    RouteSpec {
+        path: "/v1/audit/tip",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(audit::audit_tip),
     },
 ];
 
@@ -181,7 +214,7 @@ pub(crate) mod tests {
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
     /// `{param}` segment with a placeholder.
-    fn substitute_path_parameters(pattern: &str) -> String {
+    pub(crate) fn substitute_path_parameters(pattern: &str) -> String {
         pattern
             .split('/')
             .map(|segment| {

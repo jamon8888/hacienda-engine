@@ -214,6 +214,208 @@ pub struct PiiConfigResponse {
     pub audit_enabled: bool,
 }
 
+// ── Audit DTOs ────────────────────────────────────────────────────────────────
+//
+// Why these are hand-written DTOs rather than `Serialize` on the core types.
+//
+// The audit record is designed to hold no document content — only blake3 digests, spans
+// lengths and categories — and `no_endpoint_returns_corpus_plaintext` asserts that at the
+// HTTP boundary. An explicit field list is what keeps the assertion meaningful over time:
+// a field added to `hacienda_core::audit::AuditEntry` cannot reach the wire until someone
+// adds it here too, and that edit is where the question "does this carry corpus content?"
+// gets asked. Deriving `Serialize` on the core type would forward new fields silently.
+//
+// `GET /v1/audit/export` is the deliberate exception: it returns core's own bytes
+// verbatim, because an evidence envelope only verifies offline if it is byte-for-byte
+// what the verifier expects. See `handlers::audit::audit_export`.
+
+/// Whose audit chain a response describes.
+///
+/// Serialised on **every** audit response, and the reason it exists is that there is only
+/// one possible value today. Segments are per-writer and there is no total order between
+/// writers, so a server can only ever speak for its own node. Saying so in the payload —
+/// rather than in prose a client never reads — is what stops "the audit entries" being
+/// read as the deployment's when it means this node's.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditScope {
+    /// The chain held by the node that served the request, and no other.
+    ThisNode,
+}
+
+/// One audit entry on the wire.
+///
+/// Carries no span text by construction: `span_hash` is a blake3 digest and `span_length`
+/// a count. That is a property of the core entry, and this DTO is where it is pinned.
+#[derive(Debug, Serialize)]
+pub struct AuditEntryDto {
+    pub id: String,
+    pub timestamp: String,
+    /// The PII category, e.g. `Email` — never the value that was found.
+    pub category: String,
+    pub action: hacienda_core::audit::RedactionAction,
+    /// blake3 digest of the span. The span itself is never recorded anywhere.
+    pub span_hash: String,
+    pub span_length: u32,
+    pub confidence: Option<f32>,
+    pub source: hacienda_core::audit::EntitySource,
+    pub pipeline_version: String,
+    pub config_hash: String,
+    /// The authenticated principal, or `null` for an in-process caller.
+    pub principal: Option<String>,
+    /// blake3 over the previous entry's chain hash and this entry's identifying fields.
+    pub chain_hash: String,
+}
+
+impl From<hacienda_core::audit::AuditEntry> for AuditEntryDto {
+    fn from(entry: hacienda_core::audit::AuditEntry) -> Self {
+        Self {
+            id: entry.id,
+            timestamp: entry.timestamp,
+            category: entry.category,
+            action: entry.action,
+            span_hash: entry.span_hash,
+            span_length: entry.span_length,
+            confidence: entry.confidence,
+            source: entry.source,
+            pipeline_version: entry.pipeline_version,
+            config_hash: entry.config_hash,
+            principal: entry.principal,
+            chain_hash: entry.chain_hash,
+        }
+    }
+}
+
+/// One segment seal on the wire.
+#[derive(Debug, Serialize)]
+pub struct SegmentSealDto {
+    pub segment_id: String,
+    /// The writer that produced the segment. This is where a client learns the node
+    /// identity behind [`AuditScope::ThisNode`].
+    pub node_id: String,
+    pub config_hash: String,
+    pub prev_seal_hash: Option<String>,
+    pub sealed_tip: String,
+    pub entry_count: u64,
+    pub opened_at: String,
+    pub sealed_at: String,
+    pub seal_hash: String,
+}
+
+impl From<hacienda_core::audit::SegmentSeal> for SegmentSealDto {
+    fn from(seal: hacienda_core::audit::SegmentSeal) -> Self {
+        Self {
+            segment_id: seal.segment_id,
+            node_id: seal.node_id,
+            config_hash: seal.config_hash,
+            prev_seal_hash: seal.prev_seal_hash,
+            sealed_tip: seal.sealed_tip,
+            entry_count: seal.entry_count,
+            opened_at: seal.opened_at,
+            sealed_at: seal.sealed_at,
+            seal_hash: seal.seal_hash,
+        }
+    }
+}
+
+/// Response from `GET /v1/audit/entries`.
+///
+/// Named for its scope on purpose. A type called `AuditPage` invites the reading "the
+/// audit entries"; this one cannot be read as anything but one node's.
+///
+/// # Paging contract
+///
+/// `next_cursor` is present whenever the page is non-empty and absent only when the page
+/// is empty, so a client pages **until it receives an empty page** — not until
+/// `next_cursor` is `null`. An append-only chain is never finished, only momentarily
+/// caught up, and a caller that reached the end still needs a resumable position to
+/// follow what comes next. See `hacienda_core::audit::AuditPage::next`.
+#[derive(Debug, Serialize)]
+pub struct NodeAuditPage {
+    pub scope: AuditScope,
+    pub entries: Vec<AuditEntryDto>,
+    /// Opaque. Hand it back as `?cursor=`; never parse, construct, or arithmetic on it.
+    pub next_cursor: Option<String>,
+}
+
+/// Response from `GET /v1/audit/seals`.
+#[derive(Debug, Serialize)]
+pub struct NodeSealsResponse {
+    pub scope: AuditScope,
+    pub seals: Vec<SegmentSealDto>,
+}
+
+/// Response from `GET /v1/audit/tip`.
+#[derive(Debug, Serialize)]
+pub struct AuditTipResponse {
+    pub scope: AuditScope,
+    /// The chain head, an opaque blake3 digest.
+    pub tip: String,
+}
+
+/// Which of the chain's integrity checks failed.
+///
+/// The variants are the tamper conditions, not every way a read can go wrong: an I/O
+/// failure is not a verdict on the chain and is reported as a 500 instead, because
+/// answering "broken" when the truth is "could not be read" would raise a tamper alarm
+/// over a full disk.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyFailureKind {
+    /// An entry's recorded hash does not follow its predecessor's.
+    ChainIntegrity,
+    /// A seal's own hash does not match the fields it seals.
+    SegmentIntegrity,
+    /// A seal does not link to the seal before it — a segment was inserted, deleted or
+    /// reordered.
+    SegmentLink,
+    /// A sealed segment holds a different number of entries than its seal recorded.
+    SegmentEntryCount,
+    /// An entry claims a configuration this chain was not written under.
+    ConfigMismatch,
+}
+
+/// Where verification failed, in machine-readable form.
+///
+/// Every field here is a hash, an index, a segment id, or a configuration hash. None of
+/// them can carry document content.
+///
+/// # What "names the entry" means, precisely
+///
+/// For [`VerifyFailureKind::ChainIntegrity`], `entry_index` is the entry's sequence number
+/// **within its segment** and `actual_hash` is that entry's own recorded `chain_hash` —
+/// together they identify the record. `segment_id` is populated for the seal-level
+/// failures, which report it; core's entry-chain check does not carry the segment through,
+/// so it is `null` there. That is a real limitation of the underlying error, stated rather
+/// than papered over with a guess.
+#[derive(Debug, Serialize)]
+pub struct VerifyFailure {
+    pub kind: VerifyFailureKind,
+    /// The core error, rendered. Contains only identifiers and hashes — no path, no
+    /// document content. Built from the classified variants alone; an unclassified error
+    /// never reaches this field.
+    pub detail: String,
+    pub segment_id: Option<String>,
+    pub entry_index: Option<u64>,
+    pub expected_hash: Option<String>,
+    pub actual_hash: Option<String>,
+}
+
+/// Response from `GET /v1/audit/verify`.
+///
+/// A broken chain is a **200 with `verified: false`**, not a 500. The question the caller
+/// asked — "is this chain intact?" — was answered; a 500 would report that the server
+/// failed to answer, which is a different and less useful statement, and one that hides
+/// the identity of the offending record behind a generic error envelope.
+#[derive(Debug, Serialize)]
+pub struct VerifyResponse {
+    pub scope: AuditScope,
+    pub verified: bool,
+    /// Present exactly when `verified` is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<VerifyFailure>,
+}
+
 /// Response from `GET /health`.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
