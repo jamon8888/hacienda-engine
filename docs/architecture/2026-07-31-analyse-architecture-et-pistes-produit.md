@@ -699,6 +699,12 @@ La vague 3 se raccourcit donc, mais pas pour la raison que j'avais avancée d'ab
 
 ## 10. Ce qu'il faut faire en premier
 
+> **Suite donnée.** Le découpage en specs exécutant la parité Enterprise complète, la couche
+> de preuve et les LoRA métiers est dans
+> `superpowers/specs/2026-08-01-hacienda-platform-parity-program.md` — quinze specs en quatre
+> pistes, avec ordre de livraison et décisions à trancher. Il retient la parité totale, donc
+> à l'inverse de la recommandation §9.12.4, qui y est explicitement notée comme réserve levée.
+
 Si une seule chose doit être faite cette semaine : **aligner le README sur la réalité et exposer par API le métier déjà écrit** (audit, review, compliance). Le premier point protège la crédibilité ; le second transforme ~4 000 lignes de code testé et invisible en surface produit vendable, pour quelques centaines de lignes de handlers.
 
 Tout le reste peut suivre le séquencement des trois vagues.
