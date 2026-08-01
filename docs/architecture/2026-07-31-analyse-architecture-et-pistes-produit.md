@@ -24,7 +24,8 @@ Ce qui manque pour la promesse « les entreprises construisent leurs solutions I
 | --- | --- |
 | RAG côté serveur | **Partiel.** Chunking et embeddings existent dans `xberg` au tag épinglé, simplement désactivés ici. La couche de stockage vectoriel a **cessé d'être publiée en amont avant la GA**, mais reste disponible sous MIT dans sa dernière version — à reprendre comme code de Hacienda plutôt qu'à réécrire (§9.1, §9.3) |
 | SDK 14 langages | **Annoncés ✅ dans le README, aucun généré** — `alef.toml` pointe vers 4 fichiers sources inexistants et un dossier `packages/` absent |
-| Serveur MCP | **Absent** — spécifié (9 outils, 4 ressources, 3 prompts) mais aucun code |
+| Serveur MCP | **Absent ici**, mais à moitié gratuit : `xberg` embarque un serveur MCP derrière la feature `mcp` (§9.11.1). Restent à écrire les outils PII/conformité, qui sont le différenciateur |
+| Intégrations RAG (LangChain, LlamaIndex…) | **Absentes** — alors que l'amont en publie huit, versionnées en verrou avec le cœur. C'est la voie RAG la moins chère (§9.11.2) |
 | Multi-tenancy | **Partielle** — isolation par `owner` au niveau des jobs seulement ; pas de tenant de premier ordre, et rien à reprendre en amont (§9.5) |
 | Persistance | **Fichier uniquement** — aucun backend Postgres/S3, ce qui plafonne le déploiement à un nœud |
 | Observabilité | **Docker-compose Prometheus/Grafana/Alertmanager présent, zéro instrumentation dans le code** — aucun `/metrics`, aucun OTel |
@@ -220,7 +221,9 @@ Effort faible, débloque le commercial.
 | **Aligner le README** | Passer les 13 bindings non générés en 🚧, ou les générer. Corriger `alef.toml` (4 sources fantômes). Non négociable. |
 | **Exposer le métier existant** | `/v1/audit/{entries,verify,export}`, `/v1/review/*`, `/v1/compliance/report`. Le code est écrit et testé, il manque les handlers. |
 | **Observabilité réelle** | `/metrics` Prometheus + spans OTel sur `extract`/`ner`/`merge`/`redact`/`audit`. La stack docker-compose existe déjà et ne scrape rien. |
-| **Générer 3 SDK** | Python, Node, Go via alef. Trois vrais valent mieux que quatorze annoncés. |
+| **Générer 3 SDK** | Python, Node, Go via alef. Trois vrais valent mieux que quatorze annoncés. La config amont, qui produit 11 packages, sert de modèle vérifié (§9.11.3). |
+| **Activer `xberg/mcp`** | Le serveur MCP d'extraction est une feature, pas un chantier (§9.11.1). Y greffer ensuite `pii_scan`, `pii_redact`, `pii_explain`. Déplacé de la vague 2. |
+| **Un *document loader* LangChain** | La voie RAG la moins chère : rédaction + audit dans le chargeur, le client garde son moteur (§9.11.2). |
 | **Vendorer xberg** | Miroir interne ou `cargo vendor`, pour ne plus dépendre de la disponibilité d'un dépôt tiers en CI. |
 
 ### Vague 2 — « Rendre déployable en entreprise » (2–3 mois)
@@ -230,7 +233,7 @@ Effort faible, débloque le commercial.
 | **`TenantId` de premier ordre** | Caller, stores, KeyResolver, segments d'audit. À faire avant toute donnée en production. |
 | **Backends Postgres + S3** | Derrière les traits existants. Débloque le multi-réplique. |
 | **Clés dans un KMS** | Aujourd'hui `HACIENDA_PSEUDONYM_KEY_<ID>` en variable d'environnement (64 octets hex). Un acheteur régulé exigera Vault/KMS/HSM. Le trait `KeyResolver` est déjà la bonne couture. |
-| **Serveur MCP** | Spécifié depuis 2025 (9 outils, 4 ressources, 3 prompts). C'est le mode d'intégration IA le plus demandé aujourd'hui, et `pii_explain` répond directement à l'AI Act Art. 13. |
+| ~~Serveur MCP~~ | **Déplacé en vague 1** — la base est une feature `xberg/mcp` (§9.11.1), pas un développement. |
 | **Rate limiting, quotas, métriques de facturation** | Prérequis de toute offre SaaS. |
 
 ### Vague 3 — « Devenir une plateforme RAG » (voir l'évaluation chiffrée en §9.10)
@@ -324,7 +327,7 @@ Ces cinq points conditionnent le reste et relèvent d'un arbitrage produit, pas 
 2. **Quelle frontière open/commercial ?** Voir §6.4.
 3. **Une verticale ou une plateforme horizontale ?** Une plateforme horizontale sans référence client se vend mal. *Recommandation : M&A d'abord, horizontal ensuite.*
 4. **xberg reste-t-il un fournisseur amont ou faut-il l'internaliser ?** Question de contrôle stratégique sur la moitié basse du produit.
-5. **RAG complet (vecteurs + recherche) ou RAG-ready (bundles pour un moteur tiers) ?** Le second est bien moins coûteux et suffit à beaucoup de clients qui ont déjà LlamaIndex ou LangChain. *Recommandation : RAG-ready par API d'abord, vecteurs si la demande le justifie.*
+5. ~~**RAG complet ou RAG-ready ?**~~ **Tranchée par l'exemple amont** (§9.11.2) : huit intégrations first-party LangChain / LlamaIndex / CrewAI / Spring AI / n8n montrent que le RAG-ready se livre par intégrations de frameworks, sans posséder de moteur vectoriel. Un *document loader* qui rédige et audite suffit à la promesse « RAG conforme ». Le store vectoriel devient une décision de deuxième temps, motivée par une demande client réelle.
 
 ---
 
@@ -352,8 +355,11 @@ Kreuzberg, Inc. applique donc exactement la stratégie open-core recommandée en
 
 Au v1.0.2, ce que Hacienda peut déclarer sans rien forker :
 
-- `xberg` — extraction 97 formats, NER, rédaction, **chunking** (`xberg/chunking`, avec `chunking/rag.rs`), embeddings, reranking. Tout cela est bien là et sous MIT.
-- les crates de binding (`xberg-ffi`, `xberg-node`, `xberg-py`, `xberg-wasm`, `xberg-jni`, `xberg-php`) et les 14 packages SDK générés.
+- `xberg` — extraction 97 formats, NER, rédaction, **chunking** (`xberg/chunking`, avec `chunking/rag.rs`), embeddings, reranking, **et un serveur MCP complet** derrière la feature `mcp`. Tout cela est bien là et sous MIT.
+- les crates de binding (`xberg-ffi`, `xberg-node`, `xberg-py`, `xberg-wasm`, `xberg-jni`, `xberg-php`) et 11 packages SDK générés.
+- huit **intégrations de frameworks RAG** publiées sur PyPI, npm et Maven Central.
+
+Le détail de ces trois dernières briques — et ce qu'elles changent — est en **§9.11** ; elles pèsent plus lourd que le reste de cette section.
 
 Ce qui n'est **pas** disponible : le trait `VectorStore`, l'IR de filtres/requêtes, le registre de stores, les backends vectoriels, `TenantCtx`, `RehydrationStore`.
 
@@ -449,7 +455,9 @@ Les questions à trancher une fois dedans, par ordre d'impact :
 1. **Licence et mode de distribution.** Crate privée ? dépôt git privé ? artefact binaire ? De cela dépend si Enterprise peut être une dépendance de Hacienda et ce qu'il faut provisionner en CI.
 2. **Enterprise contient-il bien `xberg-rag` et `xberg-doc-store` ?** Si oui, la voie B devient réelle et la vague 3 se raccourcit nettement.
 3. **Le contrat `VectorStore` y est-il stable et documenté**, ou interne au produit ? Un contrat interne ne se décore pas.
-4. **Quelle gouvernance sur l'OSS ?** Qui décide de ce qui reste ouvert, sous quel préavis. La question se pose maintenant qu'un retrait de crates est un précédent établi.
+4. **Quelle gouvernance sur l'OSS ?** Qui décide de ce qui reste ouvert, sous quel préavis. La question se pose maintenant qu'un arrêt de publication est un précédent établi.
+
+En revanche, deux questions que je posais ici sont **résolues** et n'ont plus à attendre l'accès à Enterprise : le serveur MCP est bien dans l'OSS (`crates/xberg/src/mcp/`, en Rust — pas le répertoire TypeScript `mcp-server/` de la rc.5), et les intégrations de frameworks RAG sont publiques et publiées. Voir §9.11.
 
 ### 9.9 Le fork `jamon8888/xberg` : référence, jamais dépendance
 
@@ -536,7 +544,70 @@ La condition de sortie est simple et vérifiable en une journée : **une compila
 
 Différer le palier 3 et écrire nous-mêmes l'équivalent de `xberg-doc-store`.
 
-### 9.11 Effet net sur la feuille de route
+### 9.11 Ce que l'amont livre déjà : SDK, MCP, intégrations RAG, plugins agents
+
+La §9.2 recensait ce qui reste consommable au tag épinglé et sous-estimait largement l'inventaire. Vérification faite sur le tag `v1.0.2` lui-même, quatre briques changent des conclusions prises ailleurs dans ce document.
+
+#### 9.11.1 Serveur MCP — il est dans la crate dont Hacienda dépend déjà
+
+C'est la découverte qui invalide le plus directement un constat du §1. Le serveur MCP n'est pas un projet séparé : il vit dans `crates/xberg/src/mcp/` — `server.rs`, `prompts.rs`, `resources.rs`, `schema.rs`, `params.rs`, `allowed_hosts.rs` — avec un test de contrat dédié (`tests/contract_mcp.rs`). Il est gaté par une simple feature :
+
+```toml
+mcp      = ["tower-service", "dep:rmcp", "tokio-runtime"]
+mcp-http = ["mcp", "api"]
+```
+
+Huit outils sont exposés — `extract`, `extract_batch`, `detect_mime_type`, `cache_stats`, `cache_clear`, `cache_manifest`, `cache_warm`, `get_version` — et le README amont annonce l'ensemble comme **9 outils, 3 prompts, 4 ressources**. C'est *exactement* la forme que la spec `2025-07-24-xberg-pii-ecosystem-design.md` décrivait pour Hacienda (9 outils, 4 ressources, 3 prompts).
+
+Le serveur est aussi distribué comme entrée de registre MCP : `server.json` à la racine déclare `io.github.xberg-io/xberg`, en image OCI `ghcr.io/xberg-io/xberg-cli`, transport stdio, lancé par `xberg mcp --transport stdio`. *(Le fichier porte `version: 5.0.0-rc.10` alors que la crate est en 1.0.2 — incohérence à éclaircir avant de s'appuyer dessus.)*
+
+**Conséquence pour Hacienda.** Le §1 classe le serveur MCP en « absent, à écrire ». C'est vrai pour les outils PII/audit/compliance, qui sont le différenciateur — mais **faux pour la moitié extraction**, disponible par activation d'une feature sur une dépendance déjà déclarée. La bonne trajectoire n'est donc pas d'écrire un serveur MCP de zéro : c'est d'activer `xberg/mcp` et d'y **ajouter** les outils propres à Hacienda (`pii_scan`, `pii_redact`, `pii_explain`, `compliance_report`, `audit_verify`). Cela déplace le chantier MCP de la vague 2 vers la vague 1, et divise son coût.
+
+#### 9.11.2 Intégrations RAG — first-party, publiées, versionnées en phase avec le cœur
+
+`integrations/` regroupe huit intégrations de frameworks, chacune publiée sur le registre de son langage et **versionnée en verrou avec la release du cœur** :
+
+| Intégration | Package | Registre |
+| --- | --- | --- |
+| LangChain (Python) | `langchain-xberg` | PyPI |
+| LangChain (Node) | `langchain-xberg` | npm |
+| LlamaIndex — readers | `llama-index-readers-xberg` | PyPI |
+| LlamaIndex — node parser | `llama-index-node-parser-xberg` | PyPI |
+| LlamaIndex (Node) | `llamaindex-xberg` | npm |
+| CrewAI | `crewai-xberg` | PyPI |
+| txtai | `txtai-xberg` | PyPI |
+| SurrealDB | `surrealdb-xberg` | PyPI |
+| Spring AI | `io.xberg:spring-ai-xberg` | Maven Central |
+| n8n | `@xberg-io/n8n-nodes-xberg` | npm |
+
+**C'est le constat le plus important de cette sous-section, et il rouvre la question RAG.** Le §3.3 et la §9.3 traitent le RAG comme un problème de *stockage vectoriel* — trait, IR, backends — parce que c'est la couche qui a cessé d'être publiée. Mais l'amont démontre qu'il existe une seconde voie, bien moins coûteuse : **être consommable depuis les frameworks RAG que les clients utilisent déjà**, sans posséder de store du tout.
+
+Un `langchain-hacienda` qui expose un *document loader* rédigeant la PII, produisant des chunks déjà rédigés et une entrée d'audit par document, répond à la promesse « RAG conforme » sans écrire une seule ligne de moteur vectoriel. Le client garde son LangChain, son LlamaIndex, son pgvector — et gagne la rédaction et la traçabilité. C'est aussi la §8, décision n°5, tranchée par l'exemple : *« RAG-ready par API d'abord, vecteurs si la demande le justifie »*.
+
+Le fait que ces intégrations soient maintenues en verrou de version avec le cœur (`task version:sync`, `scripts/sync_integration_versions.py`, publication en étage de `publish.yaml`) est également un patron à copier tel quel — c'est la discipline qui empêche une intégration de dériver de la bibliothèque qu'elle enveloppe.
+
+#### 9.11.3 SDK — 11 packages au tag épinglé
+
+`packages/` contient au `v1.0.2` : `csharp`, `dart`, `elixir`, `go`, `java`, `kotlin-android`, `php`, `python`, `ruby`, `swift`, `zig` — plus Node et WASM via `crates/xberg-node` et `crates/xberg-wasm`. La §9.6 reste donc valable et se renforce : la configuration alef amont **fonctionne réellement et produit des artefacts**, ce qui en fait un modèle vérifiable et non théorique pour réparer l'`alef.toml` de Hacienda.
+
+#### 9.11.4 Plugins agents — un canal de distribution déjà outillé
+
+`plugin/` livre un bundle multi-agents : `.claude-plugin`, `.codex-plugin`, `.cursor-plugin`, `.factory-plugin`, `.opencode`, `.hermes`, `gemini-extension.json`, `kimi.plugin.json`, et sept *skills* (`batch-extraction`, `chunking`, `extracting-keywords`, `extracting-tables`, `extracting-with-ocr`, `picking-a-format`, `xberg`). L'installation passe par `/plugin marketplace add xberg-io/xberg`.
+
+Cela confirme l'intuition de la §6.5 — « MCP est un canal de distribution, pas une fonctionnalité » — et montre que le canal est déjà pavé. Un plugin Hacienda proposant « rédige avant de m'envoyer ce document » dans Claude Code, Cursor ou Codex met le produit dans le geste quotidien d'un analyste, pour un coût de packaging.
+
+#### 9.11.5 Ce que cette section change
+
+| Constat antérieur | Correction |
+| --- | --- |
+| §1 : « Serveur MCP — **absent**, aucun code » | Vrai pour les outils PII/conformité ; **la moitié extraction est une feature à activer** sur une dépendance déjà déclarée |
+| §3.3 / §9.3 : RAG = construire une couche vectorielle | **Deuxième voie, bien moins chère** — s'intégrer à LangChain / LlamaIndex / CrewAI / Spring AI, comme l'amont le fait |
+| §6.5 : « MCP est un canal de distribution » | Confirmé, et le canal est **déjà outillé** en amont — 8 cibles d'agents et 7 skills |
+| §8, décision n°5 : RAG complet ou RAG-ready ? | **Tranchée par l'exemple** : le RAG-ready par intégrations est la voie éprouvée |
+
+Cela ne change rien à la §9.1 : la couche de stockage vectoriel a bien cessé d'être publiée. Cela change en revanche son *urgence*. Les intégrations de frameworks apportent la valeur RAG plus vite et à moindre risque ; posséder un store vectoriel devient une décision de deuxième temps, motivée par une demande client réelle plutôt que par la nécessité de combler un trou.
+
+### 9.12 Effet net sur la feuille de route
 
 | Chantier | Estimation initiale | Révisée |
 | --- | --- | --- |
@@ -546,7 +617,8 @@ Différer le palier 3 et écrire nous-mêmes l'équivalent de `xberg-doc-store`.
 | `TenantCtx` | fourni en amont | **à écrire ici**, sur le modèle rc.5 |
 | Réversibilité | deux schémas à concilier | **un seul** — notre `Pseudonymiser` ; contrainte disparue |
 | SDK | à construire | **corriger `alef.toml`** ; la config amont reste le modèle |
-| Serveur MCP | un serveur amont existe | à revérifier — présent à la rc.5, sa présence au tag épinglé reste à confirmer |
+| Serveur MCP | un serveur amont existe | **confirmé** — `crates/xberg/src/mcp/`, feature `mcp`, 9 outils / 3 prompts / 4 ressources (§9.11.1) |
+| Intégrations RAG de frameworks | non envisagées | **voie prioritaire** — 8 intégrations amont à imiter, valeur RAG sans moteur vectoriel (§9.11.2) |
 
 La vague 3 se raccourcit donc, mais pas pour la raison que j'avais avancée d'abord. Ce n'est pas de l'intégration d'une dépendance amont : c'est une **reprise ponctuelle de code MIT qui devient le nôtre**. Le résultat est meilleur que l'intégration — Hacienda possède la couche au lieu de la louer à un fournisseur qui la monétise par ailleurs — pour un coût qui reste très inférieur à une écriture de zéro. Reste à écrire, pour de bon : le décorateur, `TenantCtx`, un backend pgvector, et les endpoints.
 
