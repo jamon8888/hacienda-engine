@@ -5,11 +5,11 @@ extend-exclude = [
   "scripts/",
   "poly.toml",
   # French-language prose. `typos` is an English dictionary, so it reads "moteur" as
-  # "motor", "ressources" as "resources", "amont" as "amount" — 91 corrections that would
-  # each make the text wrong. Excluded by file rather than by directory so English
-  # documents added under docs/architecture/ are still checked. Same reason `superpowers/`
-  # is excluded above: it holds the French design specs.
-  "docs/architecture/2026-07-31-analyse-architecture-et-pistes-produit.md",
+  # "motor", "ressources" as "resources", "amont" as "amount" — corrections that would each
+  # make the text wrong. `docs/architecture/` is the French architecture corpus (analysis +
+  # index); English documents belong at the `docs/` root, where they stay checked. Same
+  # reason `superpowers/` is excluded above: it holds the French design specs.
+  "docs/architecture/",
 ]
 
 [default.extend-words]
