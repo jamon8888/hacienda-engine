@@ -85,6 +85,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the audit CSV export gained a `principal` column, between `config_hash` and
+  `chain_hash`. "Who revealed this value" is the question a PII audit extract exists to
+  answer, and `principal` is inside `compute_chain_hash`, so the field was already covered
+  and trustworthy — the extract was simply dropping it, leaving every row attributable to
+  nobody. Consumers that index columns by position must shift by one. Fixed now rather than
+  later: the CSV shipped in 0.1.0 four days ago, has no caller in the repository, and 0.x
+  SemVer permits the break on a minor bump — the cost only grows with each consumer.
+  The column does **not** make CSV verifiable and is not intended to: a flat table carries
+  no segment boundaries, so no row's sequence number or predecessor hash is recoverable,
+  and no seals accompany it. CSV remains a tabular extract for analysts, spreadsheets, and
+  SIEMs. For evidence, use `hacienda_core::audit::export_store` with `ExportFormat::Json`
+  or `ExportFormat::JsonLines`, which emit a segment-grouped envelope carrying the seals
+  and verify offline.
 - **Breaking:** `HaciendaFacade::process_batch`'s per-document work (PII detection) now
   runs concurrently over a bounded worker pool. `HaciendaResult.pii` still holds one result
   per document in input order — that contract (`facade.rs:39`) is preserved by collecting

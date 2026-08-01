@@ -32,7 +32,11 @@ pub use entry::{
 };
 pub use error::AuditError;
 #[cfg(not(target_arch = "wasm32"))]
-pub use export::{export, export_csv, export_json, export_json_lines, ExportFormat};
+pub use export::{
+    evidence_envelope, export, export_csv, export_json, export_json_lines, export_store,
+    export_store_csv, write_evidence_json_lines, EvidenceEnvelope, EvidenceHeader, EvidenceSegment,
+    ExportFormat, EVIDENCE_ENVELOPE_VERSION,
+};
 pub use segment::{compute_seal_hash, verify_seal_chain, NodeId, Segment, SegmentSeal};
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(deprecated)]
