@@ -1,0 +1,213 @@
+{
+  "cases": [
+    {
+      "id": "fr-001",
+      "lang": "fr",
+      "text": "Jean-Baptiste Moreau a rencontré Élodie de La Fontaine à Lyon le 12 mars.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 20,
+          "label": "person"
+        },
+        {
+          "start": 34,
+          "end": 56,
+          "label": "person"
+        },
+        {
+          "start": 60,
+          "end": 64,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "fr-002",
+      "lang": "fr",
+      "text": "Contactez Me François d'Aubigné, avocat chez Dupont & Associés, au 01 42 68 53 12.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 33,
+          "label": "person"
+        },
+        {
+          "start": 47,
+          "end": 65,
+          "label": "organization"
+        },
+        {
+          "start": 70,
+          "end": 84,
+          "label": "phone"
+        }
+      ]
+    },
+    {
+      "id": "fr-003",
+      "lang": "fr",
+      "text": "La société Dupont SARL a signé un contrat avec Société Générale.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 24,
+          "label": "organization"
+        },
+        {
+          "start": 50,
+          "end": 70,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-004",
+      "lang": "fr",
+      "text": "Envoyez le dossier à sophie.lefebvre@example.fr avant vendredi.",
+      "entities": [
+        {
+          "start": 22,
+          "end": 48,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "fr-005",
+      "lang": "fr",
+      "text": "M. Bernard Béranger habite à Aix-en-Provence.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 20,
+          "label": "person"
+        },
+        {
+          "start": 31,
+          "end": 46,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "fr-006",
+      "lang": "fr",
+      "text": "L'organisation Médecins Sans Frontières recrute à Genève.",
+      "entities": [
+        {
+          "start": 15,
+          "end": 41,
+          "label": "organization"
+        },
+        {
+          "start": 53,
+          "end": 60,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "fr-007",
+      "lang": "fr",
+      "text": "Le numéro de Camille de la Tour est le 06 12 34 56 78.",
+      "entities": [
+        {
+          "start": 14,
+          "end": 32,
+          "label": "person"
+        },
+        {
+          "start": 40,
+          "end": 54,
+          "label": "phone"
+        }
+      ]
+    },
+    {
+      "id": "fr-008",
+      "lang": "fr",
+      "text": "Le cabinet Jean Dupont & Fils a été fondé en 1950.",
+      "entities": [
+        {
+          "start": 11,
+          "end": 29,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-009",
+      "lang": "fr",
+      "text": "Contactez Dr Amélie Nguyễn-Dupuis au +33 6 98 76 54 32 ou par email amelie.nguyen@exemple.com.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 36,
+          "label": "person"
+        },
+        {
+          "start": 40,
+          "end": 57,
+          "label": "phone"
+        },
+        {
+          "start": 71,
+          "end": 96,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "fr-010",
+      "lang": "fr",
+      "text": "La mairie de Saint-Étienne a reçu une lettre de M. Étienne d'Anjou.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 27,
+          "label": "location"
+        },
+        {
+          "start": 53,
+          "end": 69,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-011",
+      "lang": "fr",
+      "text": "BNP Paribas a ouvert une agence à Nice.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 11,
+          "label": "organization"
+        },
+        {
+          "start": 35,
+          "end": 39,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "fr-012",
+      "lang": "fr",
+      "text": "Écrivez à contact@bnpparibas.fr ou appelez le 01 40 14 45 46.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 33,
+          "label": "email"
+        },
+        {
+          "start": 48,
+          "end": 62,
+          "label": "phone"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,144 @@
+{
+  "cases": [
+    {
+      "id": "fin-001",
+      "lang": "fr",
+      "text": "Veuillez virer les fonds sur l'IBAN FR7630006000011234567890189.",
+      "entities": [
+        {
+          "start": 36,
+          "end": 63,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-002",
+      "lang": "fr",
+      "text": "Le code SWIFT de la banque est BNPAFRPPXXX.",
+      "entities": [
+        {
+          "start": 31,
+          "end": 42,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-003",
+      "lang": "fr",
+      "text": "Numero de compte : 00123456789, code guichet 00456.",
+      "entities": [
+        {
+          "start": 19,
+          "end": 30,
+          "label": "account_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-004",
+      "lang": "en",
+      "text": "Please wire to routing number 021000021 at Chase Bank.",
+      "entities": [
+        {
+          "start": 30,
+          "end": 39,
+          "label": "routing_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-005",
+      "lang": "en",
+      "text": "Card number 4111 1111 1111 1111 expires in June.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 31,
+          "label": "card_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-006",
+      "lang": "en",
+      "text": "IBAN: DE89370400440532013000, Swift: COBADEFFXXX.",
+      "entities": [
+        {
+          "start": 6,
+          "end": 28,
+          "label": "iban"
+        },
+        {
+          "start": 37,
+          "end": 48,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-007",
+      "lang": "en",
+      "text": "Account number 987654321, routing 111000025.",
+      "entities": [
+        {
+          "start": 15,
+          "end": 24,
+          "label": "account_number"
+        },
+        {
+          "start": 34,
+          "end": 43,
+          "label": "routing_number"
+        }
+      ]
+    },
+    {
+      "id": "fin-008",
+      "lang": "fr",
+      "text": "Le numero de carte est 5500 0000 0000 0004 et le code SWIFT associe est SOGEFRPP.",
+      "entities": [
+        {
+          "start": 23,
+          "end": 42,
+          "label": "card_number"
+        },
+        {
+          "start": 72,
+          "end": 80,
+          "label": "swift_code"
+        }
+      ]
+    },
+    {
+      "id": "fin-009",
+      "lang": "fr",
+      "text": "Merci de crediter le compte IBAN ES9121000418450200051332.",
+      "entities": [
+        {
+          "start": 33,
+          "end": 57,
+          "label": "iban"
+        }
+      ]
+    },
+    {
+      "id": "fin-010",
+      "lang": "en",
+      "text": "Routing number 026009593 and card number 4012888888881881 were provided.",
+      "entities": [
+        {
+          "start": 15,
+          "end": 24,
+          "label": "routing_number"
+        },
+        {
+          "start": 41,
+          "end": 57,
+          "label": "card_number"
+        }
+      ]
+    }
+  ]
+}

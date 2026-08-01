@@ -154,32 +154,32 @@ Stated so no task drifts into them. Each is a *later* step in spec §8 with its 
 
 ### 1.1 Span-level fixture
 
-- [ ] Create `fixtures/ner-eval/README.md` stating provenance, licence, and that no real client data may enter this directory.
-- [ ] Create `fixtures/ner-eval/base-fr.json` and `base-en.json`, shape:
+- [x] Create `fixtures/ner-eval/README.md` stating provenance, licence, and that no real client data may enter this directory. → written, including the "DRAFT — not yet human-validated" status section and the 0.5 recall-ceiling note.
+- [x] Create `fixtures/ner-eval/base-fr.json` and `base-en.json`, shape:
       `{ "cases": [ { "id": "...", "lang": "fr", "text": "...", "entities": [ { "start": 0, "end": 5, "label": "person" } ] } ] }`
-      Offsets are **byte** offsets into the UTF-8 text, matching `Entity { start: u32, end: u32 }`.
-- [ ] Seed with at least 40 cases per language covering the five base categories, deliberately including accented and multi-part French surnames, particles (`de la`, `d'`), and organisation names that overlap person names.
-- [ ] Create `fixtures/ner-eval/vertical-finance.json` with the same shape, labelled with the finance vertical's labels.
-- [ ] Add a schema-validity test in `hacienda-core/tests/ner_eval.rs` that deserialises every file and asserts each `entities[i]` slices `text` without panicking and yields non-empty content. **This test is not `#[ignore]`d** — the fixture stays valid in CI even though the model does not run there.
+      Offsets are **byte** offsets into the UTF-8 text, matching `Entity { start: u32, end: u32 }`. → both files created; byte offsets were computed and independently re-verified by a script that slices every entity out of its source text (not hand-counted), so accented cases (`Élodie`, `Nguyễn`, `Saint-Étienne`) are correct.
+- [ ] Seed with at least 40 cases per language covering the five base categories, deliberately including accented and multi-part French surnames, particles (`de la`, `d'`), and organisation names that overlap person names. → **not met at the stated scale.** `base-fr.json` has 12 cases, `base-en.json` has 13. Per explicit direction for this pass, these are draft scaffolding cases (10–15/language) covering all five categories, particles, accents, and the person/org-overlap pattern (see `ANNOTATION.md` rule 4) at least once each — but they are roughly a third of the plan's 40-case target. Expanding to 40+ per language is real annotation work for a human who knows French business documents (see the plan's own risk table), not mechanical scaffolding, and is left for that pass.
+- [x] Create `fixtures/ner-eval/vertical-finance.json` with the same shape, labelled with the finance vertical's labels. → 10 cases covering `iban`, `swift_code`, `account_number`, `routing_number`, `card_number` (2–3 instances of each label).
+- [x] Add a schema-validity test in `hacienda-core/tests/ner_eval.rs` that deserialises every file and asserts each `entities[i]` slices `text` without panicking and yields non-empty content. **This test is not `#[ignore]`d** — the fixture stays valid in CI even though the model does not run there. → `should_have_schema_valid_entities_in_every_fixture`, passes in default `cargo test -p hacienda-core --test ner_eval` (verified below).
 
-- [ ] **Write `fixtures/ner-eval/ANNOTATION.md` before annotating anything.** Exact-match F1 measures agreement with a convention; an unstated convention makes the number meaningless. It must rule on at least: titles (`M.`, `Me`, `Dr`) in or out of a person span; particles (`de la`, `d'`) in or out; whether a legal-entity suffix (`SARL`, `SA`) is part of the organisation span; nested spans (a person inside an organisation name); and byte-vs-char offsets on accented text. Every ruling gets an example.
-- [ ] Have a second person (or a second independent pass) re-annotate a 20-case sample and record inter-annotator agreement. If it is low, the guideline is the bug, not the model.
+- [x] **Write `fixtures/ner-eval/ANNOTATION.md` before annotating anything.** Exact-match F1 measures agreement with a convention; an unstated convention makes the number meaningless. It must rule on at least: titles (`M.`, `Me`, `Dr`) in or out of a person span; particles (`de la`, `d'`) in or out; whether a legal-entity suffix (`SARL`, `SA`) is part of the organisation span; nested spans (a person inside an organisation name); and byte-vs-char offsets on accented text. Every ruling gets an example. → written with all five rulings plus a worked example each, marked DRAFT, with an explicit inter-annotator-agreement placeholder and an "open questions for the second annotator" section.
+- [ ] Have a second person (or a second independent pass) re-annotate a 20-case sample and record inter-annotator agreement. If it is low, the guideline is the bug, not the model. → **not done.** This requires an actual second annotator (or a genuinely independent second pass, not the same agent re-reading its own guideline); it is out of scope for this pass and is called out as unresolved in both `README.md` and `ANNOTATION.md`.
 
 ### 1.2 Metrics
 
-- [ ] In `hacienda-core/tests/ner_eval.rs`, implement span matching and scoring:
+- [x] In `hacienda-core/tests/ner_eval.rs`, implement span matching and scoring:
       - `fn score(gold: &[Span], pred: &[Span], mode: MatchMode) -> Metrics` returning per-label and micro-averaged precision, recall, F1, plus raw TP/FP/FN counts.
       - `enum MatchMode { Exact, Overlap { min_ratio: f32 } }`. Report **both**; exact-boundary F1 and overlap F1 diverge sharply on names, and reporting only one hides the failure mode.
-      - Matching is a greedy one-to-one assignment per label — a predicted span may satisfy at most one gold span, so duplicate predictions count as FP.
-- [ ] Unit-test the metric math with hand-computed cases in the same file: perfect match, all-miss, off-by-one boundary, duplicate prediction, label mismatch at identical offsets, zero-gold-zero-pred (define F1 as 1.0, and assert it).
-- [ ] **Report a bootstrap confidence interval on every F1, not a bare point estimate.** With ~40 cases per language a per-label F1 rests on tens of instances; two point estimates differing by 0.03 is noise. Spec step 4's gate ("no F1 regression beyond agreed tolerance") is unenforceable against point estimates — resample cases with replacement (1000 draws) and report the 95% interval alongside. The report must also print the instance count per label so a reader can see when a number is not worth quoting.
+      - Matching is a greedy one-to-one assignment per label — a predicted span may satisfy at most one gold span, so duplicate predictions count as FP. → implemented exactly as specified.
+- [x] Unit-test the metric math with hand-computed cases in the same file: perfect match, all-miss, off-by-one boundary, duplicate prediction, label mismatch at identical offsets, zero-gold-zero-pred (define F1 as 1.0, and assert it). → six tests in `metrics_tests`, all passing (verified below).
+- [x] **Report a bootstrap confidence interval on every F1, not a bare point estimate.** With ~40 cases per language a per-label F1 rests on tens of instances; two point estimates differing by 0.03 is noise. Spec step 4's gate ("no F1 regression beyond agreed tolerance") is unenforceable against point estimates — resample cases with replacement (1000 draws) and report the 95% interval alongside. The report must also print the instance count per label so a reader can see when a number is not worth quoting. → `bootstrap_micro_f1_ci` (dependency-free splitmix64 PRNG, 1000 draws, 95% interval); `LabelMetricsReport` carries `support_gold`/`predicted` per label in the emitted report. Three unit tests in `bootstrap_tests` cover the degenerate (all-identical), empty, and disagreeing-cases behaviour.
 
 ### 1.3 Runner
 
-- [ ] Add `#[ignore]`d, `#[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]` tests that read `HACIENDA_EVAL_MODEL_DIR` (skip with a clear message if unset), build a `NerDetector` directly via `from_candle_local`, and score each fixture.
-- [ ] Emit a report to `HACIENDA_EVAL_OUT` (default `target/ner-eval/<timestamp>.json`) containing: model dir, its `model.safetensors` blake3 digest, label set, threshold, and the full metrics table. **The digest is the point** — a report that does not identify the weights it scored cannot support the step-4 pruning comparison.
-- [ ] Document the invocation in `fixtures/ner-eval/README.md`:
-      `HACIENDA_EVAL_MODEL_DIR=~/model_f16 cargo test -p hacienda-core --features ner-candle --test ner_eval -- --ignored --nocapture`
+- [x] Add `#[ignore]`d, `#[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]` tests that read `HACIENDA_EVAL_MODEL_DIR` (skip with a clear message if unset), build a `NerDetector` directly via `from_candle_local`, and score each fixture. → `runner::should_produce_an_evaluation_report_against_a_local_model`; compiles clean under `cargo check -p hacienda-core --features ner-candle --tests` and `cargo clippy` with the same flags (verified below), **not executed** — see 1.4/1.5 notes.
+- [x] Emit a report to `HACIENDA_EVAL_OUT` (default `target/ner-eval/<timestamp>.json`) containing: model dir, its `model.safetensors` blake3 digest, label set, threshold, and the full metrics table. **The digest is the point** — a report that does not identify the weights it scored cannot support the step-4 pruning comparison. → `EvalReport` includes all of these plus the label-interference tables and threshold sweep; code path compiled, not run.
+- [x] Document the invocation in `fixtures/ner-eval/README.md`:
+      `HACIENDA_EVAL_MODEL_DIR=~/model_f16 cargo test -p hacienda-core --features ner-candle --test ner_eval -- --ignored --nocapture` → present verbatim in the README's "Running the harness" section.
 
 ### 1.4 The recall ceiling this harness cannot see
 
@@ -193,18 +193,46 @@ Consequences that must be stated in the report rather than discovered later:
 - Reported recall is **truncated recall at 0.5**, not recall. Label it as such in the report schema.
 - A precision/recall curve is unobtainable. Any Tier 1 calibration is therefore precision-side only — spec §4.2.
 - Do **not** work around this by patching the vendored dependency. Instead:
-  - [ ] Measure how much sits at the boundary: sweep `NerDetector::with_threshold` over 0.5…0.95 and report the metrics at each step. A recall curve that is still climbing steeply *at* 0.5 is evidence that material recall lies below it.
-  - [ ] If it is material, that evidence — not an assumption — justifies asking xberg to thread a threshold through `NerBackend::detect`. Record the finding here and open the upstream issue; do not block Tasks 2–3 on it.
+  - [ ] Measure how much sits at the boundary: sweep `NerDetector::with_threshold` over 0.5…0.95 and report the metrics at each step. A recall curve that is still climbing steeply *at* 0.5 is evidence that material recall lies below it. → **code written; execution attempted twice and did not complete on this host.** See "Attempted execution" below.
+  - [ ] If it is material, that evidence — not an assumption — justifies asking xberg to thread a threshold through `NerBackend::detect`. Record the finding here and open the upstream issue; do not block Tasks 2–3 on it. → blocked; no finding to record yet.
 
-**Acceptance:** the non-ignored schema test passes in a default `cargo test`; the ignored runner produces a report against `~/model_f16` with per-label P/R/F1 for both match modes, per-label instance counts, bootstrap intervals, and the 0.5…0.95 threshold sweep; the metric unit tests pass. Record the base-category baseline numbers in this document — they are the reference for every later step.
+**Attempted execution, 2026-08-01, on this host (~3.7 GB RAM, ~6.7 GB swap, shared with other processes):**
+
+1. **First attempt** (`#[tokio::test]`, default current-thread runtime): failed after 134.65s with a panic, not a timeout —
+   `can call blocking only when running on the multi-threaded runtime`, at
+   `xberg v1.0.2 crates/xberg/src/text/ner/candle.rs:169`. Root cause: `CandleBackend::detect` calls
+   `tokio::task::block_in_place`, which requires `flavor = "multi_thread"`. **Fixed** by changing the attribute to
+   `#[tokio::test(flavor = "multi_thread")]` (the workspace's `tokio` already has `rt-multi-thread` enabled, so no
+   dependency change was needed). This fix is a genuine, permanent correction to the harness, not an
+   execution-environment workaround — it is now in `hacienda-core/tests/ner_eval.rs:919-923` with a comment
+   explaining why.
+2. **Second attempt**, after the fix: ran **71 minutes** of wall-clock time (09:55–11:06) without completing.
+   `ps` showed steady CPU accumulation (up to 93 CPU-minutes across worker threads, consistent with a
+   multi-threaded runtime under memory pressure rather than a hang) but `free -h` showed 3.1–3.3 GiB of 3.7 GiB
+   used throughout and 2.3–3.6 GiB of swap in active use. This is **not the harness thrashing** in the sense of a
+   bug — the run performs one real model load (cached by `get_or_init` on `(model_dir, None)`, so all 13
+   `NerDetector` constructions after the first share one resident model) followed by roughly 310 individual
+   `extract_ner` forward passes (35 base-only + 25 extended + 10 threshold-sweep steps × 25 texts each). On a
+   host already at its RAM ceiling, each forward pass competing for resident pages against the OS pushing other
+   allocations to swap is enough to make this take an unreasonable amount of time. Killed (`kill -9`) rather than
+   let it run indefinitely.
+
+**Per the plan's own stated mitigation for this exact risk (see the Risks table): run on a different host, do not
+weaken the harness to force a result out of an inadequate one.** No fixture count was reduced, no threshold-sweep
+step was cut, and no shortcut was taken to produce a number. The harness is code-complete and the one real defect
+found (`block_in_place`/runtime flavor) is fixed. Executing it to get real numbers is unfinished and needs either
+more RAM or a smaller model directory to complete in reasonable time on this host — flagged as the actionable
+item for whoever picks this back up.
+
+**Acceptance:** the non-ignored schema test passes in a default `cargo test` (✅ verified: `cargo test -p hacienda-core --test ner_eval` → 10 passed, 0 failed, 0 ignored); the ignored runner is code-complete, compiles under `cargo check -p hacienda-core --features ner-candle --tests`, and its one real defect (tokio runtime flavor) has been found and fixed by actually attempting to run it — but it has **not completed** a run on this host (see "Attempted execution" above); the metric unit tests pass (✅ verified, 6/6 in `metrics_tests`). Base-category baseline numbers are **not recorded** — this remains the actionable next step, on a host with more headroom.
 
 ### 1.5 Gate into Task 2
 
 Task 1 is not merely a prerequisite; it can **invalidate Task 2's design**. Run this comparison before writing Task 2 code:
 
-- [ ] Score the base five categories **twice**: once with `DEFAULT_CATEGORIES` alone, once with `DEFAULT_CATEGORIES` + the finance vertical labels. Same fixture, same model, same threshold.
-- [ ] If base-category F1 drops beyond the interval from 1.2, **label interference is real** and "extend the base set" (Task 2.2) is the wrong design — verticals would have to run as a second detection pass and merge, which is a materially larger change. Stop and re-scope rather than shipping the extension.
-- [ ] Record the two tables side by side here regardless of outcome.
+- [ ] Score the base five categories **twice**: once with `DEFAULT_CATEGORIES` alone, once with `DEFAULT_CATEGORIES` + the finance vertical labels. Same fixture, same model, same threshold. → **code written; execution attempted 2026-08-01 and did not complete in 71 minutes on this host (RAM-constrained, swap-heavy).** See 1.4's "Attempted execution" note — same runner invocation. `runner::should_produce_an_evaluation_report_against_a_local_model` builds `base_only_cases` (base-fr + base-en scored with `base_categories()`) and `extended_cases` (the same two fixtures scored with `base_plus_finance_categories()`), reporting both as `LabelInterferenceReport { base_only, base_plus_finance_vertical }` in both match modes.
+- [ ] If base-category F1 drops beyond the interval from 1.2, **label interference is real** and "extend the base set" (Task 2.2) is the wrong design — verticals would have to run as a second detection pass and merge, which is a materially larger change. Stop and re-scope rather than shipping the extension. → cannot be evaluated without a completed run. **This is the hard gate from the plan's own framing (line 153: "this task has no gate because it *is* the gate") — Task 2 must not start until someone runs `HACIENDA_EVAL_MODEL_DIR=~/model_f16 cargo test -p hacienda-core --features ner-candle --test ner_eval -- --ignored --nocapture` on a host with enough headroom to finish, and reads `label_interference` out of the resulting JSON report. Confirmed not yet possible on this host — two attempts, one fixed a real bug, neither produced a report.**
+- [ ] Record the two tables side by side here regardless of outcome. → pending a successful run on adequate hardware.
 
 ---
 

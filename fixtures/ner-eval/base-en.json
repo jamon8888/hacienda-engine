@@ -1,0 +1,235 @@
+{
+  "cases": [
+    {
+      "id": "en-001",
+      "lang": "en",
+      "text": "John Smith met with Sarah O'Connor in New York on March 3rd.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 10,
+          "label": "person"
+        },
+        {
+          "start": 20,
+          "end": 34,
+          "label": "person"
+        },
+        {
+          "start": 38,
+          "end": 46,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-002",
+      "lang": "en",
+      "text": "Please contact Dr. Emily Chen, attorney at Chen & Partners, at 415-555-0192.",
+      "entities": [
+        {
+          "start": 19,
+          "end": 29,
+          "label": "person"
+        },
+        {
+          "start": 43,
+          "end": 58,
+          "label": "organization"
+        },
+        {
+          "start": 63,
+          "end": 75,
+          "label": "phone"
+        }
+      ]
+    },
+    {
+      "id": "en-003",
+      "lang": "en",
+      "text": "Global Dynamics Inc. signed a deal with Umbrella Corporation.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 20,
+          "label": "organization"
+        },
+        {
+          "start": 40,
+          "end": 60,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-004",
+      "lang": "en",
+      "text": "Send the file to jane.doe@example.com before Friday.",
+      "entities": [
+        {
+          "start": 17,
+          "end": 37,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "en-005",
+      "lang": "en",
+      "text": "Mr. Robert Johnson lives in San Francisco.",
+      "entities": [
+        {
+          "start": 4,
+          "end": 18,
+          "label": "person"
+        },
+        {
+          "start": 28,
+          "end": 41,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-006",
+      "lang": "en",
+      "text": "The organization Doctors Without Borders is hiring in Geneva.",
+      "entities": [
+        {
+          "start": 17,
+          "end": 40,
+          "label": "organization"
+        },
+        {
+          "start": 54,
+          "end": 60,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-007",
+      "lang": "en",
+      "text": "Mary van der Berg's number is (555) 123-4567.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 17,
+          "label": "person"
+        },
+        {
+          "start": 30,
+          "end": 44,
+          "label": "phone"
+        }
+      ]
+    },
+    {
+      "id": "en-008",
+      "lang": "en",
+      "text": "Tesla, led by Elon Musk, is headquartered in Austin.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 5,
+          "label": "organization"
+        },
+        {
+          "start": 14,
+          "end": 23,
+          "label": "person"
+        },
+        {
+          "start": 45,
+          "end": 51,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-009",
+      "lang": "en",
+      "text": "The firm Smith & Sons was founded in 1920.",
+      "entities": [
+        {
+          "start": 9,
+          "end": 21,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-010",
+      "lang": "en",
+      "text": "Contact Dr. Alice Martinez-O'Brien at +1 212 555 0199 or by email alice.martinez@example.org.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 34,
+          "label": "person"
+        },
+        {
+          "start": 38,
+          "end": 53,
+          "label": "phone"
+        },
+        {
+          "start": 66,
+          "end": 92,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "en-011",
+      "lang": "en",
+      "text": "The city of Springfield received a letter from Mr. James Anderson.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 23,
+          "label": "location"
+        },
+        {
+          "start": 51,
+          "end": 65,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-012",
+      "lang": "en",
+      "text": "Goldman Sachs opened an office in Chicago.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 13,
+          "label": "organization"
+        },
+        {
+          "start": 34,
+          "end": 41,
+          "label": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-013",
+      "lang": "en",
+      "text": "Write to support@goldmansachs.com or call 312-555-0100.",
+      "entities": [
+        {
+          "start": 9,
+          "end": 33,
+          "label": "email"
+        },
+        {
+          "start": 42,
+          "end": 54,
+          "label": "phone"
+        }
+      ]
+    }
+  ]
+}
