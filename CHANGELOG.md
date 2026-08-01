@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The audit chain is reachable over HTTP.** `GET /v1/audit/entries`, `/verify`, `/seals`,
+  `/export` and `/tip`. `AuditStore` gained `history()`, which pages across sealed segments and
+  the open one — `entries()` only ever returned the currently open segment, so an endpoint built
+  on it would have advertised "the audit entries" while serving a fraction of them, and an
+  auditor would read absence where events exist.
+- Paging is by an opaque `(segment_id, index)` cursor, never an offset: the chain only grows, so
+  an offset drifts mid-pagination. The index is the sequence number the chain hash already
+  commits to, not an incidental array position. Page until you receive an empty page — a caller
+  that has caught up keeps a resumable cursor, which is what makes the log tailable.
+- **`export_store()` produces an offline-verifiable evidence envelope** (JSON or JSON-Lines):
+  entries grouped by segment, with the seals. The grouping is load-bearing rather than
+  cosmetic — verification needs each entry's predecessor hash and sequence number, and both
+  restart per segment, so a flat list cannot carry them. It deliberately does not route through
+  `AuditChain`, which cannot represent multi-segment history.
+- `GET /v1/audit/verify` answers 200 with the result even when the chain is broken, naming the
+  offending entry or seal. A broken chain is an answer, not a server error.
 - **Real pseudonymisation.** `RedactionMode::Pseudonymize` now emits a keyed, deterministic,
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal
@@ -85,6 +101,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`export_csv` now includes a `principal` column**, between `config_hash` and `chain_hash`.
+  Attribution is covered by `compute_chain_hash`, so dropping it from an extract silently
+  withheld the field the extract exists to carry: who read a value. **This shifts every column
+  after `config_hash`** — consumers parsing by position must be updated; those parsing by header
+  are unaffected. Taken now because the crate is 0.x, the CSV export shipped four days ago in
+  0.1.0, and nothing in the workspace calls it; the cost only grows with each consumer.
+- CSV remains a **tabular extract, not an evidence envelope**, and no column can change that:
+  it has no segment boundaries, so a verifier can recover neither the sequence number nor where
+  the previous hash resets. Evidence goes through `export_store()` with JSON or JSON-Lines. The
+  export endpoint says which one you received, in a header and in the download filename.
 - **Breaking:** the audit CSV export gained a `principal` column, between `config_hash` and
   `chain_hash`. "Who revealed this value" is the question a PII audit extract exists to
   answer, and `principal` is inside `compute_chain_hash`, so the field was already covered
@@ -95,7 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The column does **not** make CSV verifiable and is not intended to: a flat table carries
   no segment boundaries, so no row's sequence number or predecessor hash is recoverable,
   and no seals accompany it. CSV remains a tabular extract for analysts, spreadsheets, and
-  SIEMs. For evidence, use `hacienda_core::audit::export_store` with `ExportFormat::Json`
+  SIEM tools. For evidence, use `hacienda_core::audit::export_store` with `ExportFormat::Json`
   or `ExportFormat::JsonLines`, which emit a segment-grouped envelope carrying the seals
   and verify offline.
 - **Breaking:** `HaciendaFacade::process_batch`'s per-document work (PII detection) now

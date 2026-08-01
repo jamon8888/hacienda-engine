@@ -293,16 +293,16 @@ La limite est documentée sur le type plutôt que masquée.
 
 ## Tâche 5 — Documentation
 
-- [ ] **Étape 5.1** — Décrire les cinq routes dans le document OpenAPI. **Si S4 n'est pas encore
+- [x] **Étape 5.1** — Décrire les cinq routes dans le document OpenAPI. **Si S4 n'est pas encore
       livré**, ajouter au moins les chemins ; le schéma complet viendra avec S4.
-- [ ] **Étape 5.2** — Documenter dans le README de l'API **ce que la chaîne prouve** et en quoi
+- [x] **Étape 5.2** — Documenter dans le README de l'API **ce que la chaîne prouve** et en quoi
       elle diffère d'un journal d'activité. C'est l'argument commercial (spec §2), et il doit
       être lisible par un acheteur, pas seulement par un développeur.
-- [ ] **Étape 5.4** — Documenter que `history` rend **l'histoire de ce nœud**, pas celle du
+- [x] **Étape 5.4** — Documenter que `history` rend **l'histoire de ce nœud**, pas celle du
       déploiement : il n'existe pas d'ordre total inter-nœuds (`store_file.rs:116-122`). Dire
       « les entrées d'audit » en pensant « celles de ce nœud » est le mode d'échec que la tâche 1
       existe pour fermer ; le reproduire à l'échelle du déploiement serait la même faute.
-- [ ] **Étape 5.3** — Entrée `CHANGELOG.md` sous `[Unreleased] / Added`.
+- [x] **Étape 5.3** — Entrée `CHANGELOG.md` sous `[Unreleased] / Added`.
 
 ---
 

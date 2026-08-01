@@ -34,7 +34,7 @@ use crate::audit::store::AuditStore;
 const EXPORT_PAGE_SIZE: usize = 1024;
 
 /// Envelope format version, present in every envelope so a verifier written against
-/// version 1 can refuse a version it does not understand rather than mis-read it.
+/// version 1 can refuse a version it does not understand rather than misinterpret it.
 pub const EVIDENCE_ENVELOPE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

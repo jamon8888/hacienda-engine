@@ -232,7 +232,7 @@ mod tests {
     }
 
     /// Segment ids are uuid v4 today but `Segment::open_with_id` takes any string, so
-    /// splitting on the first colon would silently mis-parse a legitimate id later.
+    /// splitting on the first colon would silently misinterpret a legitimate id later.
     #[test]
     fn should_split_a_segment_id_containing_a_colon_at_the_last_colon() {
         let cursor = AuditCursor {
