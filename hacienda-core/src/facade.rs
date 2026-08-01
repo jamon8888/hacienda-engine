@@ -982,6 +982,14 @@ mod tests {
             self.inner.entries().await
         }
 
+        async fn history(
+            &self,
+            after: Option<&crate::audit::AuditCursor>,
+            limit: usize,
+        ) -> Result<crate::audit::AuditPage, AuditError> {
+            self.inner.history(after, limit).await
+        }
+
         async fn tip(&self) -> Result<String, AuditError> {
             self.inner.tip().await
         }
@@ -1091,6 +1099,17 @@ mod tests {
 
         async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
             Ok(Vec::new())
+        }
+
+        async fn history(
+            &self,
+            _after: Option<&crate::audit::AuditCursor>,
+            _limit: usize,
+        ) -> Result<crate::audit::AuditPage, AuditError> {
+            Ok(crate::audit::AuditPage {
+                entries: Vec::new(),
+                next: None,
+            })
         }
 
         async fn tip(&self) -> Result<String, AuditError> {
@@ -2301,6 +2320,14 @@ mod tests {
 
         async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
             self.inner.entries().await
+        }
+
+        async fn history(
+            &self,
+            after: Option<&crate::audit::AuditCursor>,
+            limit: usize,
+        ) -> Result<crate::audit::AuditPage, AuditError> {
+            self.inner.history(after, limit).await
         }
 
         async fn tip(&self) -> Result<String, AuditError> {

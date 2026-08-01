@@ -98,7 +98,7 @@ Deux constats supplémentaires, non bloquants mais structurants :
 ## Tâche 1 — Lecture de l'histoire complète
 
 - [x] **Étape 1.1** — Investigation faite. Voir la section ci-dessus.
-- [ ] **Étape 1.2** — Ajouter les types de curseur dans `hacienda-core/src/audit/` :
+- [x] **Étape 1.2** — Ajouter les types de curseur dans `hacienda-core/src/audit/` :
 
       ```rust
       /// Position immuable dans la chaîne : l'entrée à `index` dans le segment `segment_id`.
@@ -110,7 +110,7 @@ Deux constats supplémentaires, non bloquants mais structurants :
       pub struct AuditPage { pub entries: Vec<AuditEntry>, pub next: Option<AuditCursor> }
       ```
 
-- [ ] **Étape 1.3** — Ajouter au trait `AuditStore` :
+- [x] **Étape 1.3** — Ajouter au trait `AuditStore` :
 
       ```rust
       /// Entrées des segments scellés puis du segment ouvert, plus anciennes d'abord,
@@ -130,22 +130,22 @@ Deux constats supplémentaires, non bloquants mais structurants :
       Le trait doit rester **objet-safe** — propriété épinglée par
       `should_construct_arc_dyn_audit_store` (`store.rs:497-502`).
 
-- [ ] **Étape 1.4** — Implémenter pour les trois backends. Pour `FileAuditStore` :
+- [x] **Étape 1.4** — Implémenter pour les trois backends. Pour `FileAuditStore` :
       **segments scellés depuis le disque, segment ouvert depuis `state.open`** — jamais
       `read_jsonl` sur le fichier vivant (constat 1).
-- [ ] **Étape 1.5** — Ne **pas** prendre `io_order` en lecture : cela bloquerait tous les
+- [x] **Étape 1.5** — Ne **pas** prendre `io_order` en lecture : cela bloquerait tous les
       `append` pendant une lecture disque O(n), et un verrou ne peut de toute façon pas couvrir
       deux requêtes HTTP. La correction de la pagination vient de l'immuabilité du curseur, pas
       d'un verrou.
-- [ ] **Étape 1.6** — Test : forcer deux rotations, vérifier que `history` rend **toutes** les
+- [x] **Étape 1.6** — Test : forcer deux rotations, vérifier que `history` rend **toutes** les
       entrées, dans l'ordre, à travers les segments scellés.
-- [ ] **Étape 1.7** — Test : paginer pendant qu'un `append` concurrent tourne ; aucune entrée
+- [x] **Étape 1.7** — Test : paginer pendant qu'un `append` concurrent tourne ; aucune entrée
       sautée ni dupliquée. Les entrées ajoutées après la frappe du curseur apparaissent
       simplement sur une page ultérieure — croissance, pas dérive.
-- [ ] **Étape 1.8** — Test : après `close()`, `history` rend le segment final depuis le disque.
+- [x] **Étape 1.8** — Test : après `close()`, `history` rend le segment final depuis le disque.
       `entries()` rend vide dans cet état (`store_file.rs:488-492`) ; `history` **ne doit pas**
       hériter de ce comportement.
-- [ ] **Étape 1.9** — Un curseur inconnu rend une erreur explicite, jamais un redémarrage
+- [x] **Étape 1.9** — Un curseur inconnu rend une erreur explicite, jamais un redémarrage
       silencieux depuis le début — qui dupliquerait.
 
 ## Tâche 2 — Export depuis un store
@@ -216,6 +216,26 @@ vérifiable. Cela transformerait une table en demi-enveloppe, mal taillée pour 
 illisible en tableur, et toujours sans les sceaux nécessaires à la chaîne inter-segments.
 - [ ] **Étape 2.5** — Test : exporter après deux rotations, puis vérifier la chaîne **hors du
       serveur** à partir du seul export, sceaux compris.
+
+## Contrat hérité de la tâche 1 — à respecter en tâche 3
+
+Trois décisions prises à l'implémentation que le plan ne couvrait pas. Elles engagent le
+contrat HTTP.
+
+1. **`AuditPage::next` est `Some` dès que la page est non vide ; `None` seulement quand la page
+   est vide.** Le contrat client est donc « paginer jusqu'à recevoir une page vide », pas
+   « paginer jusqu'à ce que `next_cursor` soit nul ». Raison : une chaîne d'audit ne fait que
+   croître, et un appelant arrivé au bout doit garder un curseur reprenable pour suivre les
+   entrées suivantes. L'alternative le laisserait sans point de reprise, donc contraint à
+   relire depuis le début en dédupliquant — précisément ce que le curseur existe pour éviter.
+   Coût : un aller-retour supplémentaire pour vider l'histoire.
+2. **`limit == 0` rend une page vide avec `next: None`**, sans erreur côté core. Avec la
+   sémantique ci-dessus, un client ne peut pas la distinguer de « à jour ». **Le handler HTTP
+   doit donc rejeter ou borner `limit == 0`**, et ne pas laisser passer.
+3. **Les fichiers scellés sont lus en ligne, pas sur `spawn_blocking`** — même exposition que
+   `verify()` aujourd'hui. Un handler appelant `history()` bloque donc un worker du runtime sur
+   de l'E/S disque. Ce n'est pas une régression, mais la tâche 3 en hérite : décider
+   explicitement plutôt que de le découvrir sous charge.
 
 ## Tâche 3 — Les cinq routes
 

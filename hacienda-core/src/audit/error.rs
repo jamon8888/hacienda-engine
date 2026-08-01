@@ -69,6 +69,16 @@ pub enum AuditError {
     #[error("the audit store is closed and cannot accept '{operation}'")]
     StoreClosed { operation: &'static str },
 
+    /// A pagination cursor could not be resolved to a position in this history.
+    ///
+    /// Covers both a cursor that does not parse and one that parses but names a segment
+    /// or an index this store does not hold. Both are reported rather than quietly
+    /// restarting from the beginning of the history: a caller that trusted the cursor
+    /// would then record every entry it already had a second time, and could not tell the
+    /// duplicate run from new activity.
+    #[error("audit cursor '{cursor}' is not a position in this history: {reason}")]
+    UnresolvableCursor { cursor: String, reason: String },
+
     /// A non-file persistence backend failed. `Io` is file-specific (it carries a
     /// `std::io::Error`); this is the equivalent for backends like
     /// [`IndexedDbAuditStore`](crate::audit::IndexedDbAuditStore) (Track L5) whose
