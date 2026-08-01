@@ -665,6 +665,7 @@ impl HaciendaFacade {
         }
 
         let principal = caller.principal_id().map(str::to_owned);
+        let vertical = self.configured_vertical_provenance();
         let inputs: Vec<AuditEntryInput> = entities
             .iter()
             .map(|entity| {
@@ -687,11 +688,25 @@ impl HaciendaFacade {
                     // The store owns config_hash — see `record_audit`.
                     config_hash: String::new(),
                     principal: principal.clone(),
+                    vertical: vertical.clone(),
                 }
             })
             .collect();
 
         Ok(store.append(inputs).await?)
+    }
+
+    /// The audit-chain provenance value for this facade's configured vertical, if any.
+    ///
+    /// See [`crate::pii::VerticalConfig::provenance_id`] and
+    /// [`crate::audit::AuditEntry::vertical`] for what this value means and why it is
+    /// more than a bare id.
+    fn configured_vertical_provenance(&self) -> Option<String> {
+        self.config
+            .pii
+            .as_ref()
+            .and_then(|pii| pii.vertical.as_ref())
+            .map(crate::pii::VerticalConfig::provenance_id)
     }
 
     /// Record the glossary against the *original* text, before redaction rewrites it.
@@ -729,6 +744,7 @@ impl HaciendaFacade {
         };
 
         let principal = caller.principal_id().map(str::to_owned);
+        let vertical = self.configured_vertical_provenance();
         let inputs: Vec<AuditEntryInput> = result
             .audit_log
             .iter()
@@ -746,6 +762,7 @@ impl HaciendaFacade {
                 // the ownership explicit and removes the reason to read it first.
                 config_hash: String::new(),
                 principal: principal.clone(),
+                vertical: vertical.clone(),
             })
             .collect();
 

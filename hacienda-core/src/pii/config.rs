@@ -28,6 +28,11 @@ pub struct PipelineConfig {
     /// `HaciendaResult::pii`) and every document is still audited and reviewed exactly
     /// once, regardless of completion order.
     pub concurrency: usize,
+    /// The zero-shot label extension for this pipeline, if one is configured.
+    ///
+    /// `None` runs the base five categories only. This field is deliberately not yet
+    /// threaded into detection — see `VerticalConfig`'s own docs.
+    pub vertical: Option<VerticalConfig>,
 }
 
 impl Default for PipelineConfig {
@@ -40,7 +45,110 @@ impl Default for PipelineConfig {
             audit: AuditConfig::default(),
             model: ModelConfig::default(),
             concurrency: 1,
+            vertical: None,
         }
+    }
+}
+
+/// A schema-level NER specialisation: a stable identifier plus the zero-shot labels it
+/// hands the NER backend in addition to the base categories.
+///
+/// A vertical is a **label set**, not a model or a trained adapter — see the
+/// `vertical-lora-training` project convention. This type is currently config-schema
+/// only: nothing in the pipeline reads it yet. Threading it into detection is separate,
+/// gated work (see
+/// `superpowers/plans/2026-07-31-vertical-model-specialisation-implementation.md` Task
+/// 2.2), so constructing a `PipelineConfig` with `vertical: Some(..)` today changes
+/// nothing about what is detected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerticalConfig {
+    /// Stable identifier recorded in the audit chain.
+    pub id: String,
+    /// Zero-shot labels handed to the NER backend in addition to the base categories.
+    pub labels: Vec<String>,
+}
+
+impl VerticalConfig {
+    /// Validate the vertical's shape independent of how (or whether) it is used.
+    ///
+    /// This does not depend on any detector, model, or redaction mode — a malformed
+    /// vertical is a configuration error in every build profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiiError::InvalidVertical`] when:
+    /// - `id` is empty (after trimming),
+    /// - `labels` is empty,
+    /// - any label is empty after trimming whitespace,
+    /// - any label contains `[`, `:`, or `]` (the pseudonym token's delimiters — see
+    ///   `category_label` in `crate::redaction::pseudonym`, which this mirrors), or
+    /// - two labels are equal after case-folding.
+    pub fn validate(&self) -> Result<(), PiiError> {
+        if self.id.trim().is_empty() {
+            return Err(PiiError::InvalidVertical {
+                id: self.id.clone(),
+                reason: "id must not be empty".to_string(),
+            });
+        }
+        if self.labels.is_empty() {
+            return Err(PiiError::InvalidVertical {
+                id: self.id.clone(),
+                reason: "labels must not be empty".to_string(),
+            });
+        }
+
+        let mut seen = std::collections::HashSet::with_capacity(self.labels.len());
+        for label in &self.labels {
+            if label.trim().is_empty() {
+                return Err(PiiError::InvalidVertical {
+                    id: self.id.clone(),
+                    reason: format!("label '{label}' is empty"),
+                });
+            }
+            if label.contains('[') || label.contains(':') || label.contains(']') {
+                return Err(PiiError::InvalidVertical {
+                    id: self.id.clone(),
+                    reason: format!("label '{label}' contains a token delimiter ('[', ':' or ']')"),
+                });
+            }
+            if !seen.insert(label.to_lowercase()) {
+                return Err(PiiError::InvalidVertical {
+                    id: self.id.clone(),
+                    reason: format!("label '{label}' is a duplicate (case-insensitive)"),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The value recorded in the audit chain's `vertical` field: `"<id>@<digest>"`, where
+    /// `digest` is the first 8 hex characters of the blake3 hash of the sorted,
+    /// case-folded label set.
+    ///
+    /// An id alone would be a false provenance claim — the same id with a different label
+    /// set detects different things, and the audit record's job is to say what *was*
+    /// detectable. The digest makes a silently-edited label set visible without recording
+    /// the labels themselves in every entry. Sorting and case-folding before hashing means
+    /// reordering or re-casing the label list in config does not spuriously change every
+    /// subsequent entry's provenance value.
+    pub fn provenance_id(&self) -> String {
+        let mut labels: Vec<String> = self
+            .labels
+            .iter()
+            .map(|label| label.to_lowercase())
+            .collect();
+        labels.sort_unstable();
+
+        let mut hasher = blake3::Hasher::new();
+        for label in &labels {
+            hasher.update(label.as_bytes());
+            hasher.update(b"\0");
+        }
+        let digest = hasher.finalize().to_hex().to_string();
+
+        format!("{}@{}", self.id, &digest[..8])
     }
 }
 
@@ -188,5 +296,162 @@ mod tests {
         let error = PipelineConfig::from_file(Path::new("/nonexistent/hacienda.toml")).unwrap_err();
         assert!(matches!(error, PiiError::ConfigIo { .. }));
         assert!(error.to_string().contains("/nonexistent/hacienda.toml"));
+    }
+
+    #[test]
+    fn should_default_to_no_vertical() {
+        assert_eq!(PipelineConfig::default().vertical, None);
+    }
+
+    fn finance_vertical() -> VerticalConfig {
+        VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["iban".to_string(), "swift_code".to_string()],
+        }
+    }
+
+    #[test]
+    fn should_accept_a_well_formed_vertical() {
+        assert!(finance_vertical().validate().is_ok());
+    }
+
+    #[test]
+    fn should_reject_an_empty_id() {
+        let vertical = VerticalConfig {
+            id: String::new(),
+            ..finance_vertical()
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+        assert!(error.to_string().contains("id must not be empty"));
+    }
+
+    #[test]
+    fn should_reject_a_whitespace_only_id() {
+        let vertical = VerticalConfig {
+            id: "   ".to_string(),
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_empty_labels() {
+        let vertical = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec![],
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+        assert!(error.to_string().contains("labels must not be empty"));
+    }
+
+    #[test]
+    fn should_reject_a_whitespace_only_label() {
+        let vertical = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["   ".to_string()],
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+        assert!(error.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn should_reject_a_label_containing_an_open_bracket() {
+        let vertical = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["iban[".to_string()],
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+        assert!(error.to_string().contains("token delimiter"));
+    }
+
+    #[test]
+    fn should_reject_a_label_containing_a_colon() {
+        let vertical = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["iban:code".to_string()],
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+        assert!(error.to_string().contains("token delimiter"));
+    }
+
+    #[test]
+    fn should_reject_a_label_containing_a_close_bracket() {
+        let vertical = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["iban]".to_string()],
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+        assert!(error.to_string().contains("token delimiter"));
+    }
+
+    #[test]
+    fn should_reject_duplicate_labels_after_case_folding() {
+        let vertical = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["IBAN".to_string(), "iban".to_string()],
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+        assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn should_compute_a_stable_provenance_id_for_well_formed_input() {
+        let id = finance_vertical().provenance_id();
+        assert!(id.starts_with("finance@"));
+        assert_eq!(id.len(), "finance@".len() + 8);
+    }
+
+    #[test]
+    fn should_produce_the_same_provenance_id_regardless_of_label_order() {
+        let a = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["iban".to_string(), "swift_code".to_string()],
+        };
+        let b = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "iban".to_string()],
+        };
+        assert_eq!(a.provenance_id(), b.provenance_id());
+    }
+
+    #[test]
+    fn should_produce_the_same_provenance_id_regardless_of_label_case() {
+        let a = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["IBAN".to_string(), "swift_code".to_string()],
+        };
+        let b = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["iban".to_string(), "SWIFT_code".to_string()],
+        };
+        assert_eq!(a.provenance_id(), b.provenance_id());
+    }
+
+    #[test]
+    fn should_change_the_provenance_id_when_a_label_is_added() {
+        let base = finance_vertical();
+        let mut extended = base.clone();
+        extended.labels.push("account_number".to_string());
+        assert_ne!(base.provenance_id(), extended.provenance_id());
+    }
+
+    #[test]
+    fn should_change_the_provenance_id_when_the_id_changes() {
+        let a = finance_vertical();
+        let b = VerticalConfig {
+            id: "legal".to_string(),
+            ..finance_vertical()
+        };
+        assert_ne!(a.provenance_id(), b.provenance_id());
     }
 }

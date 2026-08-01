@@ -14,7 +14,7 @@ pub mod patterns;
 pub mod pipeline;
 pub mod types;
 
-pub use config::{CliOverrides, ModelConfig, PipelineConfig};
+pub use config::{CliOverrides, ModelConfig, PipelineConfig, VerticalConfig};
 pub use engine::RegexEngine;
 pub use merge::{merge_entities, MergedEntity};
 pub use ner::NerDetector;
@@ -85,4 +85,12 @@ pub enum PiiError {
          (labels must not contain '[', ':', or ']')"
     )]
     InvalidEntityLabel { label: String, reason: String },
+
+    /// A [`config::VerticalConfig`] failed its own shape validation.
+    ///
+    /// This is independent of redaction mode and of whether the NER model is even
+    /// enabled — a malformed vertical is a configuration error in every build profile.
+    /// See [`config::VerticalConfig::validate`].
+    #[error("vertical '{id}' is invalid: {reason}")]
+    InvalidVertical { id: String, reason: String },
 }

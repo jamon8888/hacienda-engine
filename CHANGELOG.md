@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hacienda_core::pii::VerticalConfig` and `PipelineConfig::vertical: Option<VerticalConfig>`
+  — the config schema for a Tier 0 vertical (a stable `id` plus zero-shot `labels`), with
+  `VerticalConfig::validate()` checking non-empty id/labels, no token-delimiter characters
+  (`[`, `:`, `]`) in a label, and no duplicate labels after case-folding. This is schema
+  only: nothing in the detection pipeline reads `vertical` yet.
+- `VerticalConfig::provenance_id()`, producing `"<id>@<digest>"` where `digest` is the
+  first 8 hex characters of the blake3 hash of the sorted, case-folded label set (e.g.
+  `finance@3f9a1c02`). An id alone would be a false provenance claim — the same id with a
+  different label set detects different things.
+- `AuditEntry::vertical: Option<String>` and `AuditEntryInput::vertical: Option<String>`
+  — the entry's `provenance_id()`, or `None` when no vertical was configured. Covered by
+  `compute_chain_hash`, appended after `principal`, so pre-existing chains still verify
+  byte-for-byte. `HaciendaFacade` populates it from the pipeline's configured vertical at
+  both audit-write call sites.
+- `ChainHashFields::vertical: Option<&str>`, hashed as `fields.vertical.unwrap_or("")`.
 - `hacienda-cli` and `hacienda-api` now compile `hacienda-core` with the `ner-candle`
   feature, so `--model-dir`/`--lora-dir` (already accepted by the CLI) actually reach a
   Candle-backed `NerDetector` instead of always failing with `ModelUnavailable`.
@@ -88,6 +103,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `audit::export_csv`'s header gains a `vertical` column, appended **last**
+  (after `chain_hash`), not inserted next to a semantically-related column. This CSV export
+  declares no format version, so any positional-column downstream parser reading the
+  pre-existing columns by index is unaffected; a parser reading by column count, or one
+  that assumes `chain_hash` is the last column, is not. Check any downstream CSV consumer
+  before upgrading.
+- **Breaking:** `ChainHashFields` is now `#[non_exhaustive]`. It already documented adding
+  a field as "a deliberate, reviewable act," and this struct is designed to keep growing.
+  Downstream crates can no longer construct it directly with a struct literal, even with
+  every field named — construction is now confined to this crate, so a future field
+  addition cannot silently break an out-of-crate call site.
 - **Breaking:** `HaciendaFacade::process_batch`'s per-document work (PII detection) now
   runs concurrently over a bounded worker pool. `HaciendaResult.pii` still holds one result
   per document in input order — that contract (`facade.rs:39`) is preserved by collecting

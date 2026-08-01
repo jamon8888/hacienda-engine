@@ -240,7 +240,7 @@ Task 1 is not merely a prerequisite; it can **invalidate Task 2's design**. Run 
 
 ### 2.1 Config
 
-- [ ] Add to `hacienda-core/src/pii/config.rs`:
+- [x] Add to `hacienda-core/src/pii/config.rs`:
       ```rust
       #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
       #[serde(default, deny_unknown_fields)]
@@ -251,9 +251,41 @@ Task 1 is not merely a prerequisite; it can **invalidate Task 2's design**. Run 
           pub labels: Vec<String>,
       }
       ```
-      and `pub vertical: Option<VerticalConfig>` on `PipelineConfig` (default `None`).
-- [ ] Add `pub fn validate(&self) -> Result<(), PiiError>` on `VerticalConfig`: non-empty `id`; non-empty `labels`; every label non-empty after trim; no label containing `[`, `:`, `]` (mirroring `category_label`); no duplicates after case-folding. Return a new `PiiError::InvalidVertical { id, reason }` variant.
-- [ ] Do **not** add a `verticals` array or a selector. One optional vertical, bound at construction.
+      and `pub vertical: Option<VerticalConfig>` on `PipelineConfig` (default `None`). → added exactly as
+      specified. `PipelineConfig`'s `Default` impl is hand-written (not derived), so `vertical: None` was added
+      there explicitly rather than relying on `Option`'s own default — confirmed this is sufficient by testing
+      that `toml::from_str::<HaciendaConfig>("[pii]\n")` (no `vertical` key at all) parses to `vertical: None`
+      (`should_round_trip_a_pii_section_without_a_vertical` in `hacienda-core/tests/config_round_trip.rs`).
+      Since `PipelineConfig` already carries struct-level `#[serde(default, deny_unknown_fields)]` (serde fills
+      *any* missing field from the container's own `Default::default()`, not per-field), **no field-level
+      `#[serde(default)]` on `vertical` was needed**.
+- [x] Add `pub fn validate(&self) -> Result<(), PiiError>` on `VerticalConfig`: non-empty `id`; non-empty
+      `labels`; every label non-empty after trim; no label containing `[`, `:`, `]` (mirroring `category_label`);
+      no duplicates after case-folding. Return a new `PiiError::InvalidVertical { id, reason }` variant. →
+      implemented in `hacienda-core/src/pii/config.rs`; the bracket/colon check is a literal copy of
+      `category_label`'s condition in `redaction/pseudonym.rs:396`. `PiiError::InvalidVertical { id: String,
+      reason: String }` added to `hacienda-core/src/pii/mod.rs`, styled after the existing
+      `InvalidEntityLabel { label, reason }` variant (`#[error("vertical '{id}' is invalid: {reason}")]`). 10
+      unit tests in `pii/config.rs`'s existing `#[cfg(test)] mod tests` block cover: valid config passes; empty
+      id; whitespace-only id; empty labels; whitespace-only label; label containing `[`, `:`, and `]` (one test
+      each); duplicate labels after case-folding (`"IBAN"` vs `"iban"`). All pass:
+      `cargo test -p hacienda-core --lib pii::config` → **16 passed, 0 failed** (6 pre-existing + 10 new).
+- [x] Do **not** add a `verticals` array or a selector. One optional vertical, bound at construction. → confirmed
+      by construction: only `PipelineConfig::vertical: Option<VerticalConfig>` was added, no array, no CLI flag,
+      no wiring into `load_detector`/`assemble`/any detection path, no touch to `facade.rs`/`audit/*`/
+      `hacienda-cli` — verified by `git status`/`git diff` scope after the change (files touched: `pii/config.rs`,
+      `pii/mod.rs`, `tests/config_round_trip.rs`, `CHANGELOG.md`, this plan file).
+
+  **Additional verification for this task:**
+  - `cargo test -p hacienda-core` → **298 passed** (lib) + **9 passed** (`tests/config_round_trip.rs`, incl. the
+    two new vertical round-trip tests) + 10 passed (`tests/ner_eval.rs`, unchanged) + 1 passed
+    (`tests/pii_corpus.rs`, unchanged) + 1 passed (doctest), **0 failed** across all of them.
+  - `cargo clippy -p hacienda-core --all-targets --all-features -- -D warnings` → clean, exit 0.
+  - `cargo fmt --check -p hacienda-core` → found drift in the new `validate()` method's `format!` line length;
+    fixed with `cargo fmt -p hacienda-core -- hacienda-core/src/pii/config.rs`; re-ran `cargo fmt --check
+    -p hacienda-core` → clean, exit 0. (The two pre-existing `hacienda-cli` drift files from Task 0's baseline
+    are untouched and out of this task's scope.)
+  - `CHANGELOG.md` updated under `[Unreleased] / Added` with `VerticalConfig` and `PipelineConfig::vertical`.
 
 ### 2.2 Threading
 
@@ -317,21 +349,27 @@ with different labels detects different things, and the audit record's job is to
 digest makes a silently-edited label set visible. Every step below uses this composed value; `None` when no
 vertical is configured.
 
-- [ ] Add `#[serde(default)] pub vertical: Option<String>` to `AuditEntry` and `pub vertical: Option<String>` to `AuditEntryInput`, documented like `principal`, with a rustdoc note that the value is `id@digest` and why.
-- [ ] Add `VerticalConfig::provenance_id(&self) -> String` producing that value, unit-tested for stability under label reordering and case changes, and for *instability* when a label is added.
-- [ ] Add `pub vertical: Option<&'a str>` to `ChainHashFields`, populate it in `AuditEntry::new` and `chain_hash_fields`, and hash it in `compute_chain_hash` as `fields.vertical.unwrap_or("")` — **appended after `principal`**, so chains written before this field existed hash byte-for-byte identically.
-- [ ] Populate it at both `AuditEntryInput` construction sites in `facade.rs` from the pipeline's configured vertical id.
-- [ ] Add the column to `audit/export.rs`'s CSV header and row. **This is a breaking change to the export format, and the export declares no version** — verified: `export_csv` writes a bare literal header at `export.rs:44-46` with nothing to bump. Append the column last, state the break in `CHANGELOG.md`, and check any downstream parser before merging.
-- [ ] Tests:
-      - `should_verify_a_chain_written_before_the_vertical_field_existed` — construct entries with `vertical: None` and assert the chain hash equals a **hard-coded literal captured before the change**. Capture that literal in Task 0. Without it this test proves nothing.
-      - `should_change_the_chain_hash_when_the_vertical_changes` — same inputs, different vertical id, different hash.
-      - `should_reject_a_tampered_vertical_id` — rewrite `vertical` on a serialised entry, assert verification fails.
-      - Round-trip an entry with `vertical: Some(..)` through JSON and CSV.
-      - `should_change_the_provenance_id_when_a_label_is_added` — same id, one extra label, different digest.
-- [ ] `ChainHashFields` is `pub` with `pub` fields and no `#[non_exhaustive]`; adding a field breaks external construction. Same decision as Task 2.5, and here the case for `#[non_exhaustive]` is stronger, because this struct is *designed* to grow (its own rustdoc calls adding a field "a deliberate, reviewable act"). Add it, and note the semver impact in CHANGELOG.
-- [ ] Add `AuditEntry.vertical` and the CSV column to `CHANGELOG.md`.
+- [x] Add `#[serde(default)] pub vertical: Option<String>` to `AuditEntry` and `pub vertical: Option<String>` to `AuditEntryInput`, documented like `principal`, with a rustdoc note that the value is `id@digest` and why. → added in `hacienda-core/src/audit/entry.rs`; rustdoc on both mirrors `principal`'s wording plus the "an id alone is a false provenance claim" rationale. Every existing `AuditEntryInput` construction site across the crate (`sink.rs`, `store.rs`, `store_file.rs`, `segment.rs`, `chain.rs`, `export.rs`, `facade.rs`, `entry.rs` itself) was updated to set the new field — the compiler caught all of them (no `Default`/`#[non_exhaustive]` on `AuditEntryInput`, so a missed site would not compile).
+- [x] Add `VerticalConfig::provenance_id(&self) -> String` producing that value, unit-tested for stability under label reordering and case changes, and for *instability* when a label is added. → added in `hacienda-core/src/pii/config.rs`; sorts and case-folds labels, hashes each with a `\0` separator (so `["a","bc"]` and `["ab","c"]` don't collide), takes the first 8 hex chars. Five new unit tests: `should_compute_a_stable_provenance_id_for_well_formed_input`, `should_produce_the_same_provenance_id_regardless_of_label_order`, `should_produce_the_same_provenance_id_regardless_of_label_case`, `should_change_the_provenance_id_when_a_label_is_added`, `should_change_the_provenance_id_when_the_id_changes`. All pass.
+- [x] Add `pub vertical: Option<&'a str>` to `ChainHashFields`, populate it in `AuditEntry::new` and `chain_hash_fields`, and hash it in `compute_chain_hash` as `fields.vertical.unwrap_or("")` — **appended after `principal`**, so chains written before this field existed hash byte-for-byte identically. → done exactly as specified; the hash-order comment in `compute_chain_hash` calls out the append-not-insert requirement explicitly, next to the equivalent existing comment for `principal`.
+- [x] Populate it at both `AuditEntryInput` construction sites in `facade.rs` from the pipeline's configured vertical id. → added a private `HaciendaFacade::configured_vertical_provenance(&self) -> Option<String>` reading `self.config.pii.as_ref().and_then(|pii| pii.vertical.as_ref()).map(VerticalConfig::provenance_id)`, called once per method (`record_reveal`, `record_audit`) and cloned per entry in the `.map` closures — confirmed these are the only two `AuditEntryInput {` construction sites in `facade.rs` (`grep -n "AuditEntryInput {" facade.rs` → lines 679, 751 only).
+- [x] Add the column to `audit/export.rs`'s CSV header and row. **This is a breaking change to the export format, and the export declares no version** — verified: `export_csv` writes a bare literal header at `export.rs:44-46` with nothing to bump. Append the column last, state the break in `CHANGELOG.md`, and check any downstream parser before merging. → `vertical` appended after `chain_hash` in both the header literal and `write_csv_row`'s field list; `export_csv`'s rustdoc now states the append-last rationale. No downstream parser exists in this repo to check; the CHANGELOG entry (see below) flags it for whoever owns one outside it.
+- [x] Tests:
+      - `should_verify_a_chain_written_before_the_vertical_field_existed` — asserts `AuditEntry::new(input("id-1"), "prev", 0).chain_hash` equals the literal Task 0 captured (`72eb1d2f14c701e0c58280b2d7fc5132fdc0564a3ed42e7b0c4b84cfdd5a3ee4`) with `vertical: None`. **Passes** — the append-after-`principal` ordering claim is verified, not just asserted.
+      - `should_change_the_chain_hash_when_the_vertical_changes` — three-way distinct hash across `None`/`finance@...`/`legal@...`. Passes.
+      - `should_reject_a_tampered_vertical_id` — mutates `vertical` on a cloned entry and shows the recomputed hash no longer matches the stored one (the same pattern `AuditChain::verify` uses). Passes.
+      - JSON round-trip: `should_round_trip_an_entry_with_a_vertical_through_json` (serialises/deserialises `Some(..)`, checks the value and hash survive) plus `should_deserialize_a_pre_existing_entry_with_no_vertical_key` (a JSON blob with no `vertical` key at all still deserialises, `#[serde(default)]` doing its job). CSV: `should_append_the_vertical_column_last_in_header_and_row` and `should_write_an_empty_vertical_field_when_none_is_configured` in `export.rs` — there is no CSV importer anywhere in this crate, so "round-trip" there means asserting column position and content, not a full write-then-parse cycle.
+      - `should_change_the_provenance_id_when_a_label_is_added` — lives in `pii/config.rs` (see above), not duplicated here.
+- [x] `ChainHashFields` is `pub` with `pub` fields and no `#[non_exhaustive]`; adding a field breaks external construction. Same decision as Task 2.5, and here the case for `#[non_exhaustive]` is stronger, because this struct is *designed* to grow (its own rustdoc calls adding a field "a deliberate, reviewable act"). Add it, and note the semver impact in CHANGELOG. → added; in-crate struct-literal construction (the only construction style this type has ever had) is unaffected, external construction is now a compile error. Semver impact noted in `CHANGELOG.md`.
+- [x] Add `AuditEntry.vertical` and the CSV column to `CHANGELOG.md`. → done, plus `AuditEntryInput.vertical`, `ChainHashFields.vertical`, `VerticalConfig::provenance_id`, and the `#[non_exhaustive]` addition — split across `### Added` (new API surface) and `### Changed` (the two breaking items: the CSV column and `#[non_exhaustive]`), matching this file's existing convention of marking breaking `### Changed` entries **Breaking:**.
 
-**Acceptance:** old-chain verification test passes against the literal captured in Task 0; tamper test fails verification; export round-trips; CHANGELOG updated.
+**Acceptance:** old-chain verification test passes against the literal captured in Task 0 (✅ `cargo test -p hacienda-core --lib audit::entry::tests::should_verify_a_chain_written_before_the_vertical_field_existed` → 1 passed); tamper test fails verification (✅ `should_reject_a_tampered_vertical_id` passes); export round-trips within the limits of this crate having no CSV importer (✅, see above); CHANGELOG updated (✅).
+
+**Additional verification for this task:**
+- `cargo test -p hacienda-core` → **332 passed** (lib: 311, `tests/config_round_trip.rs`: 9, `tests/ner_eval.rs`: 10, `tests/pii_corpus.rs`: 1, doctest: 1), **0 failed**, 2 ignored (pre-existing, unrelated to this task).
+- `cargo clippy -p hacienda-core --all-targets --all-features -- -D warnings` → clean, exit 0.
+- `cargo fmt --check -p hacienda-core` → found drift in `provenance_id`'s method-chain formatting; fixed with `cargo fmt -p hacienda-core -- hacienda-core/src/pii/config.rs`; re-ran `cargo fmt --check -p hacienda-core` → clean, exit 0.
+- Scope check: only `hacienda-core/src/{pii/config.rs, audit/entry.rs, audit/{sink,store,store_file,segment,chain,export}.rs, facade.rs}` and `CHANGELOG.md`/this plan file were touched. `hacienda-cli`/`hacienda-api` reference neither `AuditEntryInput` nor `ChainHashFields` (`grep -rl` came back empty), so nothing outside `hacienda-core` needed a change or was scope-checked at build time here — per the plan's own RAM-constraint guidance, `cargo test --workspace` was not run.
 
 ---
 
@@ -360,3 +398,23 @@ success, and it costs one task instead of a quarter spent on adapters for a capa
 Tasks 2 and 3 touch disjoint files (`pii/*` + `hacienda-cli/*` vs `audit/*`) except for the two `AuditEntryInput` construction sites in `facade.rs`, which Task 3 owns. They can run in parallel if Task 2 lands first or the facade edit is coordinated.
 
 Task 1 must not be deferred "until there is time". It is the only task here that changes what the project *knows*.
+
+**Decision, 2026-08-01 — splitting Task 2 to unblock Task 3 while gate 1.5 stays open:**
+
+Gate 1.5 has not closed on this host (see Task 1.4/1.5's "Attempted execution" notes — two runs, neither
+completed). Rather than block all downstream work, Task 2 is split:
+
+- **Task 2.1 only** (the `VerticalConfig` struct + `validate()` on it) may proceed now. It is pure config schema —
+  it does not thread anything into `load_detector`, does not change NER behaviour, and carries none of the
+  label-interference risk the gate exists to catch. Nothing in gate 1.5's possible outcomes changes this struct's
+  shape.
+- **Task 2.2–2.5 remain blocked** on gate 1.5. Task 2.2 is the actual architectural bet ("extend
+  `DEFAULT_CATEGORIES`, one detector, one pass") that the gate can falsify. Writing the threading code, its
+  detection tests (2.3), and the surface exposure (2.4) before the gate closes risks building code that has to be
+  thrown away for a two-pass detect-and-merge design instead — see the Risks table's label-interference row.
+- **Task 3 may proceed in full**, consuming the `VerticalConfig` type from 2.1. Task 3 records `id@digest`
+  provenance in the audit chain; nothing in it depends on NER model quality or gate 1.5's outcome.
+
+If gate 1.5 later shows label interference and Task 2.2's design has to change, Task 2.1's `VerticalConfig` struct
+and Task 3's provenance field survive unchanged — the provenance value (`id@digest` of the *configured* labels)
+is meaningful regardless of which detection strategy consumes it.

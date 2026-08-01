@@ -5,6 +5,7 @@
 //! does not control. A single field that does not round-trip would not be a detail; it
 //! would mean the config file of §6.3 cannot express extraction settings at all.
 
+use hacienda_core::pii::{PipelineConfig, VerticalConfig};
 use hacienda_core::HaciendaConfig;
 
 fn round_trip(config: &HaciendaConfig) -> String {
@@ -100,6 +101,42 @@ fn should_reject_a_key_that_was_removed_rather_than_ignoring_it() {
     let error = toml::from_str::<HaciendaConfig>("[pii.audit]\nlog_path = \"audit.log\"\n")
         .expect_err("a removed key must be reported, not skipped");
     assert!(error.to_string().contains("log_path"), "{error}");
+}
+
+// ── VerticalConfig (Task 2.1) ────────────────────────────────────────────────
+//
+// `VerticalConfig` is config-schema only at this point (see
+// `superpowers/plans/2026-07-31-vertical-model-specialisation-implementation.md` Task
+// 2.1) — these tests only prove the TOML shape survives, not that anything reads it.
+
+#[test]
+fn should_round_trip_a_pii_section_without_a_vertical() {
+    // `[pii.vertical]` must remain optional: a file written before this field existed
+    // must still parse under `deny_unknown_fields`.
+    let config: HaciendaConfig = toml::from_str("[pii]\n").expect("deserialize");
+    assert!(config.pii.expect("pii section").vertical.is_none());
+}
+
+#[test]
+fn should_round_trip_a_pii_section_with_a_vertical() {
+    let config = HaciendaConfig {
+        pii: Some(PipelineConfig {
+            vertical: Some(VerticalConfig {
+                id: "finance".to_string(),
+                labels: vec!["iban".to_string(), "swift_code".to_string()],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let text = round_trip(&config);
+    assert!(text.contains("[pii.vertical]"), "{text}");
+    assert!(text.contains("id = \"finance\""), "{text}");
+
+    let back: HaciendaConfig = toml::from_str(&text).expect("deserialize");
+    let vertical = back.pii.expect("pii section").vertical.expect("vertical");
+    assert_eq!(vertical.id, "finance");
+    assert_eq!(vertical.labels, vec!["iban", "swift_code"]);
 }
 
 #[test]

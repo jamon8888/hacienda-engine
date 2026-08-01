@@ -85,6 +85,17 @@ pub struct AuditEntry {
     /// still verify.
     #[serde(default)]
     pub principal: Option<String>,
+    /// The configured vertical this entry's detection ran under, as `"<id>@<digest>"`
+    /// (see [`crate::pii::VerticalConfig::provenance_id`]), or `None` when no vertical
+    /// was configured.
+    ///
+    /// An id alone would be a false provenance claim — the same id with a different
+    /// label set detects different things, and the audit record's job is to say what
+    /// *was* detectable. Covered by [`compute_chain_hash`], appended after `principal`,
+    /// so `None` hashes as the empty string and chains written before this field existed
+    /// still verify.
+    #[serde(default)]
+    pub vertical: Option<String>,
     /// blake3 over the previous chain hash and this entry's identifying fields.
     pub chain_hash: String,
 }
@@ -103,6 +114,8 @@ pub struct AuditEntryInput {
     pub config_hash: String,
     /// See [`AuditEntry::principal`].
     pub principal: Option<String>,
+    /// See [`AuditEntry::vertical`].
+    pub vertical: Option<String>,
 }
 
 impl AuditEntry {
@@ -121,6 +134,7 @@ impl AuditEntry {
                 span_hash: &input.span_hash,
                 config_hash: &input.config_hash,
                 principal: input.principal.as_deref(),
+                vertical: input.vertical.as_deref(),
             },
         );
 
@@ -136,6 +150,7 @@ impl AuditEntry {
             pipeline_version: input.pipeline_version,
             config_hash: input.config_hash,
             principal: input.principal,
+            vertical: input.vertical,
             chain_hash,
         }
     }
@@ -149,6 +164,7 @@ impl AuditEntry {
             span_hash: &self.span_hash,
             config_hash: &self.config_hash,
             principal: self.principal.as_deref(),
+            vertical: self.vertical.as_deref(),
         }
     }
 }
@@ -160,7 +176,12 @@ impl AuditEntry {
 /// act, and no caller can silently transpose two `&str` arguments — which for a
 /// tamper-evidence primitive would be a defect that only shows up as a verification
 /// failure months later.
+///
+/// `#[non_exhaustive]`: this struct is designed to grow, and external construction with
+/// every field named is exactly the "deliberate, reviewable act" this doc already asks
+/// for — a positional or `..Default::default()` construction would defeat that.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ChainHashFields<'a> {
     pub id: &'a str,
     pub category: &'a str,
@@ -168,6 +189,10 @@ pub struct ChainHashFields<'a> {
     pub span_hash: &'a str,
     pub config_hash: &'a str,
     pub principal: Option<&'a str>,
+    /// See [`AuditEntry::vertical`]. Hashed **after** `principal` — appending rather than
+    /// inserting keeps every chain written before this field existed hashing
+    /// byte-for-byte identically.
+    pub vertical: Option<&'a str>,
 }
 
 /// Compute the chain hash linking an entry to its predecessor.
@@ -186,6 +211,9 @@ pub fn compute_chain_hash(prev_chain_hash: &str, seq: u64, fields: ChainHashFiel
     // Absent attribution hashes as the empty string so that chains written before this
     // field existed continue to verify byte-for-byte.
     hasher.update(fields.principal.unwrap_or("").as_bytes());
+    // Appended after `principal`, not inserted earlier, for the same reason: chains
+    // written before the vertical field existed must hash byte-for-byte identically.
+    hasher.update(fields.vertical.unwrap_or("").as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 
@@ -205,6 +233,7 @@ mod tests {
             pipeline_version: "1.0".into(),
             config_hash: "cfg".into(),
             principal: None,
+            vertical: None,
         }
     }
 
@@ -257,6 +286,7 @@ mod tests {
             span_hash: "abc",
             config_hash: "cfg",
             principal: None,
+            vertical: None,
         };
         let empty_string_principal = ChainHashFields {
             principal: Some(""),
@@ -266,6 +296,126 @@ mod tests {
             compute_chain_hash("prev", 0, fields),
             compute_chain_hash("prev", 0, empty_string_principal)
         );
+    }
+
+    /// The literal Task 0 captured *before* the `vertical` field existed
+    /// (`AuditEntry::new(input("id-1"), "prev", 0).chain_hash` against the unmodified
+    /// `entry.rs:192` fixture). `vertical` is appended after `principal` in
+    /// `compute_chain_hash`, so an entry with `vertical: None` today must still hash to
+    /// exactly this value — this is the one test that proves the ordering claim rather
+    /// than merely asserting it.
+    #[test]
+    fn should_verify_a_chain_written_before_the_vertical_field_existed() {
+        let entry = AuditEntry::new(input("id-1"), "prev", 0);
+        assert_eq!(
+            entry.chain_hash,
+            "72eb1d2f14c701e0c58280b2d7fc5132fdc0564a3ed42e7b0c4b84cfdd5a3ee4"
+        );
+    }
+
+    #[test]
+    fn should_change_the_chain_hash_when_the_vertical_changes() {
+        let none = AuditEntry::new(input("id-1"), "prev", 0);
+        let finance = AuditEntry::new(
+            AuditEntryInput {
+                vertical: Some("finance@3f9a1c02".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+        let legal = AuditEntry::new(
+            AuditEntryInput {
+                vertical: Some("legal@0badc0de".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+        assert_ne!(none.chain_hash, finance.chain_hash);
+        assert_ne!(finance.chain_hash, legal.chain_hash);
+    }
+
+    /// Absent vertical must hash as nothing at all, not as a sentinel string, mirroring
+    /// `should_hash_an_absent_principal_as_no_bytes` above.
+    #[test]
+    fn should_hash_an_absent_vertical_as_no_bytes() {
+        let fields = ChainHashFields {
+            id: "id-1",
+            category: "Email",
+            action: &RedactionAction::Mask,
+            span_hash: "abc",
+            config_hash: "cfg",
+            principal: None,
+            vertical: None,
+        };
+        let empty_string_vertical = ChainHashFields {
+            vertical: Some(""),
+            ..fields
+        };
+        assert_eq!(
+            compute_chain_hash("prev", 0, fields),
+            compute_chain_hash("prev", 0, empty_string_vertical)
+        );
+    }
+
+    #[test]
+    fn should_reject_a_tampered_vertical_id() {
+        let entry = AuditEntry::new(
+            AuditEntryInput {
+                vertical: Some("finance@3f9a1c02".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+
+        let mut tampered = entry.clone();
+        tampered.vertical = Some("finance@deadbeef".into());
+
+        let recomputed = compute_chain_hash("prev", 0, tampered.chain_hash_fields());
+        assert_ne!(
+            tampered.chain_hash, recomputed,
+            "chain verification must not accept a rewritten vertical id"
+        );
+    }
+
+    #[test]
+    fn should_round_trip_an_entry_with_a_vertical_through_json() {
+        let entry = AuditEntry::new(
+            AuditEntryInput {
+                vertical: Some("finance@3f9a1c02".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let round_tripped: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.vertical, Some("finance@3f9a1c02".to_string()));
+        assert_eq!(round_tripped.chain_hash, entry.chain_hash);
+    }
+
+    /// Entries serialised before `vertical` existed have no such key in their JSON.
+    #[test]
+    fn should_deserialize_a_pre_existing_entry_with_no_vertical_key() {
+        let json = r#"{
+            "id": "id-1",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "category": "Email",
+            "action": "mask",
+            "span_hash": "abc",
+            "span_length": 10,
+            "confidence": 1.0,
+            "source": "regex",
+            "pipeline_version": "1.0",
+            "config_hash": "cfg",
+            "chain_hash": "72eb1d2f14c701e0c58280b2d7fc5132fdc0564a3ed42e7b0c4b84cfdd5a3ee4"
+        }"#;
+        let entry: AuditEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.vertical, None);
+        assert_eq!(entry.principal, None);
     }
 
     // The mode-to-action mapping moved to `RedactionEngine::audit_action` along with the
