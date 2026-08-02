@@ -405,6 +405,38 @@ impl HaciendaFacade {
         audit.and(review)
     }
 
+    /// Get a snapshot of the current entity glossary.
+    ///
+    /// Requires `audit:read` capability (same sensitivity class as audit — the glossary
+    /// contains detected entity terms in clear text).
+    ///
+    /// Returns an empty `Vec` when glossary is not configured.
+    pub async fn glossary_snapshot_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Vec<GlossaryEntry>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self
+            .glossary
+            .as_ref()
+            .map(|g| lock(g).entries())
+            .unwrap_or_default())
+    }
+
+    /// Generate a compliance report for the current pipeline configuration.
+    ///
+    /// Requires `audit:read` capability (DPIA/ModelCard/DORA/Checklist are derived from
+    /// the same pipeline facts that audit guards).
+    ///
+    /// Returns `None` when compliance is not configured.
+    pub async fn compliance_report_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<ComplianceReport>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self.compliance.as_ref().map(|c| c.report(None)))
+    }
+
     /// Extract, detect, redact, audit, review, and generate compliance artefacts.
     ///
     /// # Errors
@@ -2203,6 +2235,108 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), HaciendaError::PiiDisabled));
+    }
+
+    // ── Phase 10: glossary_snapshot_with_auth and compliance_report_with_auth ──────
+
+    #[tokio::test]
+    async fn should_return_the_current_glossary_snapshot() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.glossary = Some(crate::glossary::GlossaryConfig {
+            enabled: true,
+            min_count: 2, // Need at least 2 occurrences to publish
+            ..Default::default()
+        });
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        // Process a document with repeated email to populate the glossary
+        // Email is detected by regex, so no model needed
+        let _ = facade
+            .process(text_input("mail alice@example.com and alice@example.com"))
+            .await
+            .unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let entries = facade.glossary_snapshot_with_auth(caller).await.unwrap();
+
+        assert!(!entries.is_empty());
+        assert_eq!(entries[0].term, "alice@example.com");
+        assert_eq!(entries[0].category, "Email");
+        assert_eq!(entries[0].count, 2);
+    }
+
+    #[tokio::test]
+    async fn should_reject_glossary_without_audit_read_capability() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.glossary = Some(crate::glossary::GlossaryConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.glossary_snapshot_with_auth(caller).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_return_empty_glossary_when_not_configured() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let entries = facade.glossary_snapshot_with_auth(caller).await.unwrap();
+
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn should_generate_a_compliance_report_for_the_active_config() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let report = facade.compliance_report_with_auth(caller).await.unwrap();
+
+        assert!(report.is_some());
+        let report = report.unwrap();
+        assert!(report.dpia.is_some());
+        assert!(report.model_card.is_some());
+        assert!(report.checklist.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_reject_compliance_without_audit_read_capability() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.compliance_report_with_auth(caller).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_return_none_compliance_when_not_configured() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let report = facade.compliance_report_with_auth(caller).await.unwrap();
+
+        assert!(report.is_none());
     }
 
     // ── Concurrency spike (Task 4, Step 1 — closes #30) ─────────────────────────

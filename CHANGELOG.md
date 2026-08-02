@@ -21,6 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recording the token reveal in the audit chain. `HaciendaFacade` now holds a
   cloned `Arc<Pseudonymiser>` so the de-pseudonymisation path is available
   outside a live pipeline run.
+
+- **Postgres store backend (Phase 9).** `AuditStore`, `ReviewStore`, `JobStore`
+  implementations backed by Postgres via `sqlx`, plus new stores for document
+  versions, presets, and API keys. All stores share a single `PgPool` injected
+  at process start (no global state). Schema includes `audit_segments`,
+  `audit_entries`, `review_items`, `jobs`, `document_versions`, `presets`,
+  `api_keys` tables with indexes. Migrations run explicitly via `--migrate`
+  flag — never implicitly in library code.
+- `HaciendaFacade::with_stores` extended with optional parameters for the
+  three new store types (`DocumentVersionStore`, `PresetStore`, `ApiKeyStore`).
+- `hacienda-core` gains a `postgres` feature flag (off by default) to gate
+  `sqlx` dependency for wasm32 and non-Postgres consumers.
+
+- **Phase 5 routes: audit, review, compliance, glossary (Phase 10).** 7 new
+  endpoints: `GET /v1/audit`, `GET /v1/audit/verify`, `GET /v1/review`,
+  `POST /v1/review/{id}/decide`, `GET /v1/compliance/dpia`,
+  `GET /v1/compliance/report`, `GET /v1/glossary`. All guarded by
+  `audit:read` except review decide which requires `review:decide`.
+- `HaciendaFacade::glossary_snapshot_with_auth` and
+  `HaciendaFacade::compliance_report_with_auth` — new facade accessors
+  exposing existing core logic (previously write-only from the route layer).
+- `ApiError::from` now maps `ReviewError` variants to appropriate HTTP codes.
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal
   values yield equal tokens across processes and runs, so a reader can follow one

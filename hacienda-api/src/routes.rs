@@ -23,7 +23,7 @@ use hacienda_core::{
 };
 
 use crate::{
-    handlers::{documents, info, jobs, openapi, pii},
+    handlers::{audit_review, documents, info, jobs, openapi, pii},
     state::ApiState,
 };
 
@@ -108,6 +108,42 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/pii/config",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(pii::pii_config),
+    },
+    // ── audit:read endpoints (Phase 10) ─────────────────────────────────────────
+    RouteSpec {
+        path: "/v1/audit",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_audit),
+    },
+    RouteSpec {
+        path: "/v1/audit/verify",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::verify_audit),
+    },
+    RouteSpec {
+        path: "/v1/review",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_review),
+    },
+    RouteSpec {
+        path: "/v1/review/{id}/decide",
+        access: Access::Capability(Capability::ReviewDecide),
+        make_router: || post(audit_review::decide_review),
+    },
+    RouteSpec {
+        path: "/v1/compliance/dpia",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_compliance_dpia),
+    },
+    RouteSpec {
+        path: "/v1/compliance/report",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_compliance_report),
+    },
+    RouteSpec {
+        path: "/v1/glossary",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_glossary),
     },
 ];
 

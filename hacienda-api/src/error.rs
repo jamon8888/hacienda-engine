@@ -243,6 +243,24 @@ impl From<HaciendaError> for ApiError {
     }
 }
 
+/// Convert a [`hacienda_core::review::ReviewError`] into an [`ApiError`].
+impl From<hacienda_core::review::ReviewError> for ApiError {
+    fn from(err: hacienda_core::review::ReviewError) -> Self {
+        use hacienda_core::review::ReviewError;
+        match err {
+            ReviewError::NotFound(_) => ApiError::not_found(),
+            ReviewError::AlreadyDecided(_) => {
+                ApiError::invalid_request("review item already decided")
+            }
+            ReviewError::InvalidTransition { .. } => {
+                ApiError::invalid_request("invalid review status transition")
+            }
+            ReviewError::Io { .. } => ApiError::internal(),
+            ReviewError::Json(_) => ApiError::internal(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
