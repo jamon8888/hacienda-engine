@@ -20,6 +20,20 @@ pub enum HaciendaError {
     #[error(transparent)]
     Authz(#[from] crate::auth::AuthzError),
 
+    /// A pseudonym token operation failed.
+    ///
+    /// This variant exists so that `PseudonymError` can convert directly to
+    /// `HaciendaError` without requiring the caller to manually map through
+    /// `RedactionError` and `PiiError`. The underlying error is preserved for
+    /// diagnostics while the HTTP layer can collapse all token errors to a
+    /// single 400 response.
+    #[error(transparent)]
+    Pseudonym(#[from] crate::redaction::PseudonymError),
+
+    /// An API key operation failed.
+    #[error(transparent)]
+    ApiKey(#[from] crate::auth::keys::ApiKeyError),
+
     /// A detection or redaction operation was requested but no `[pii]` section is
     /// configured, so there is no pipeline to run.
     ///

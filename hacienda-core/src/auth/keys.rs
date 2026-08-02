@@ -138,6 +138,17 @@ impl fmt::Debug for ApiKeyPair {
     }
 }
 
+/// An API key record (never stores the raw key).
+#[derive(Debug, Clone)]
+pub struct ApiKey {
+    pub id: uuid::Uuid,
+    pub key_hash: String,
+    pub owner: String,
+    pub capabilities: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

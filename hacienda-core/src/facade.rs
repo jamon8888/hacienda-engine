@@ -1,7 +1,7 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
 use crate::audit::{AuditEntry, AuditEntryInput, AuditStore, InMemoryAuditStore, RedactionAction};
-use crate::auth::{Caller, Capability};
+use crate::auth::{ApiKeyStore, Caller, Capability, CapabilitySet};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
@@ -38,6 +38,11 @@ pub struct HaciendaFacade {
     audit_store: Option<Arc<dyn AuditStore>>,
     review_queue: Option<ReviewQueue>,
     glossary: Option<Mutex<EntityGlossary>>,
+    /// The persistence backend for API keys.
+    ///
+    /// `None` when API key auth is not configured. When `Some`, enables
+    /// `issue_key_with_auth`, `revoke_key_with_auth`, and token resolution.
+    api_key_store: Option<Arc<dyn ApiKeyStore>>,
 }
 
 /// Everything one [`HaciendaFacade::process`] call produced.
@@ -131,7 +136,7 @@ impl HaciendaFacade {
     ///
     /// [`FileAuditStore`]: crate::audit::FileAuditStore
     pub fn new(config: HaciendaConfig) -> Result<Self, HaciendaError> {
-        Self::build(config, None, None, None)
+        Self::build(config, None, None, None, None)
     }
 
     /// Build a facade that can mint and reverse pseudonym tokens.
@@ -170,22 +175,23 @@ impl HaciendaFacade {
             None => Pseudonymiser::new(resolver, retired),
         }
         .map_err(key_error)?;
-        Self::build(config, Some(Arc::new(pseudonymiser)), None, None)
+        Self::build(config, Some(Arc::new(pseudonymiser)), None, None, None)
     }
 
     /// Build a facade with explicit store backends.
     ///
-    /// Use this when you need a durable audit record or a shared review store. The
-    /// caller owns the store's lifetime — the facade holds an `Arc` clone and does not
-    /// close the store on drop. Call [`close`](Self::close) before dropping the facade
-    /// when you have supplied a `FileAuditStore`, so the open segment is sealed before
-    /// the file handle is released.
+    /// Use this when you need a durable audit record, a shared review store, or API key
+    /// management. The caller owns the store's lifetime — the facade holds an `Arc` clone
+    /// and does not close the store on drop. Call [`close`](Self::close) before dropping
+    /// the facade when you have supplied a `FileAuditStore`, so the open segment is sealed
+    /// before the file handle is released.
     ///
-    /// Supplying `None` for either store falls back to the same default as
-    /// [`new`](Self::new): an in-memory audit store when auditing is enabled, and no
-    /// review queue when `config.review` is `None`.
+    /// Supplying `None` for any store falls back to the same default as
+    /// [`new`](Self::new): an in-memory audit store when auditing is enabled, no review
+    /// queue when `config.review` is `None`, and no API key store when auth is not
+    /// configured.
     ///
-    /// Supplying a store overrides the config in both cases. A review store passed here
+    /// Supplying a store overrides the config in all cases. A review store passed here
     /// builds a queue even when `config.review` is `None`, using
     /// [`ReviewConfig::default`] for the threshold and deadline — handing over a durable
     /// store and receiving no queue would discard every decision made against it.
@@ -197,8 +203,9 @@ impl HaciendaFacade {
         config: HaciendaConfig,
         audit_store: Option<Arc<dyn AuditStore>>,
         review_store: Option<Arc<dyn ReviewStore>>,
+        api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
-        Self::build(config, None, audit_store, review_store)
+        Self::build(config, None, audit_store, review_store, api_key_store)
     }
 
     /// Shared construction. Accepts all optional overrides and applies defaults for any
@@ -208,6 +215,7 @@ impl HaciendaFacade {
         pseudonymiser: Option<Arc<Pseudonymiser>>,
         audit_store: Option<Arc<dyn AuditStore>>,
         review_store: Option<Arc<dyn ReviewStore>>,
+        api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
         let pii_pipeline = config
             .pii
@@ -260,6 +268,7 @@ impl HaciendaFacade {
             pii_pipeline,
             pseudonymiser,
             audit_store,
+            api_key_store,
             config,
         })
     }
@@ -282,6 +291,70 @@ impl HaciendaFacade {
     ) -> Result<Option<&ReviewQueue>, HaciendaError> {
         caller.require(Capability::ReviewDecide)?;
         Ok(self.review_queue.as_ref())
+    }
+
+    /// Issue a new API key for the given owner with the specified capabilities.
+    ///
+    /// Requires `auth:manage` capability. Returns the raw key (shown once) and the
+    /// stored key record. The raw key is never stored — only its Argon2id hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Authz`] without `AuthManage` capability.
+    /// Returns [`HaciendaError::ApiKey`] if key generation or storage fails.
+    /// Returns [`HaciendaError::ApiKey`] wrapping [`ApiKeyError::Generation`]
+    /// if no API key store is configured.
+    pub async fn issue_key_with_auth(
+        &self,
+        caller: Caller<'_>,
+        owner: &str,
+        capabilities: Vec<Capability>,
+    ) -> Result<(crate::auth::keys::ApiKeyPair, crate::auth::keys::ApiKey), HaciendaError> {
+        caller.require(Capability::AuthManage)?;
+        let store = self
+            .api_key_store
+            .as_ref()
+            .ok_or_else(|| crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into()))?;
+        let pair = crate::auth::keys::generate_key()?;
+        let key = store.create(&pair.key_hash, owner, capabilities).await?;
+        Ok((pair, key))
+    }
+
+    /// Revoke an API key by its ID.
+    ///
+    /// Requires `auth:manage` capability. The key is marked as revoked and can no
+    /// longer be used for authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Authz`] without `AuthManage` capability.
+    /// Returns [`HaciendaError::ApiKey`] if no API key store is configured or revocation fails.
+    pub async fn revoke_key_with_auth(
+        &self,
+        caller: Caller<'_>,
+        key_id: uuid::Uuid,
+    ) -> Result<(), HaciendaError> {
+        caller.require(Capability::AuthManage)?;
+        let store = self
+            .api_key_store
+            .as_ref()
+            .ok_or_else(|| crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into()))?;
+        store.revoke(key_id).await?;
+        Ok(())
+    }
+
+    /// Resolve a bearer token to its capability set.
+    ///
+    /// This is used by the auth middleware. The token is hashed and looked up
+    /// in the API key store. Returns `None` if the token is not found, revoked,
+    /// or malformed. The raw token is never stored — only its Argon2id hash.
+    pub async fn resolve_token(&self, bearer_token: &str) -> Option<CapabilitySet> {
+        let store = self.api_key_store.as_ref()?;
+        let key = store.get_by_hash(bearer_token).await.ok()??;
+        if key.revoked_at.is_some() {
+            return None;
+        }
+        serde_json::from_value(key.capabilities).ok()
     }
 
     /// A snapshot of the open segment's audit entries.
@@ -1501,6 +1574,7 @@ mod tests {
             HaciendaConfig::default().with_pii(pii_config()),
             Some(Arc::clone(&counting_store) as Arc<dyn AuditStore>),
             None,
+            None,
         )
         .unwrap();
 
@@ -1564,6 +1638,7 @@ mod tests {
                 config.clone(),
                 Some(Arc::clone(&store) as Arc<dyn AuditStore>),
                 None,
+                None,
             )
             .unwrap();
 
@@ -1592,6 +1667,7 @@ mod tests {
             let facade = HaciendaFacade::with_stores(
                 config.clone(),
                 Some(Arc::clone(&store) as Arc<dyn AuditStore>),
+                None,
                 None,
             )
             .unwrap();
@@ -1631,13 +1707,14 @@ mod tests {
 
         // First run: submit an item and decide it.
         {
-            let store = Arc::new(FileReviewStore::open(&log).expect("open store for first run"));
-            let facade = HaciendaFacade::with_stores(
-                config.clone(),
-                None,
-                Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
-            )
-            .unwrap();
+let store = Arc::new(FileReviewStore::open(&log).expect("open store for first run"));
+        let facade = HaciendaFacade::with_stores(
+            config.clone(),
+            None,
+            Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
+            None,
+        )
+        .unwrap();
 
             let queue = facade
                 .review_queue()
@@ -1674,6 +1751,7 @@ mod tests {
                 config,
                 None,
                 Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
+                None,
             )
             .unwrap();
 
@@ -1704,6 +1782,7 @@ mod tests {
             HaciendaConfig::default().with_pii(pii_config()),
             None,
             Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
+            None,
         )
         .unwrap();
 
@@ -1725,7 +1804,7 @@ mod tests {
 
         let store = Arc::new(InMemoryReviewStore::new());
         let facade =
-            HaciendaFacade::with_stores(config, None, Some(store as Arc<dyn ReviewStore>)).unwrap();
+            HaciendaFacade::with_stores(config, None, Some(store as Arc<dyn ReviewStore>), None).unwrap();
 
         let queue = facade.review_queue().expect(
             "passing a review store must build a queue; dropping it silently loses every decision",
@@ -1786,8 +1865,9 @@ mod tests {
     async fn should_fail_the_batch_when_the_audit_store_fails() {
         let failing_store = Arc::new(FailingAuditStore);
         let facade = HaciendaFacade::with_stores(
-            HaciendaConfig::default().with_pii(pii_config()),
-            Some(failing_store as Arc<dyn AuditStore>),
+            config.clone(),
+            Some(Arc::clone(&failing_store) as Arc<dyn AuditStore>),
+            None,
             None,
         )
         .unwrap();
@@ -1870,6 +1950,7 @@ mod tests {
             review_queue: None,
             glossary: None,
             pseudonymiser: None,
+            api_key_store: None,
         }
     }
 
@@ -2433,21 +2514,22 @@ mod tests {
     /// the same way `facade_with_model_entity` does above — there is no public
     /// constructor that accepts both a caller-supplied detector and a non-default
     /// `concurrency`, and there does not need to be one just for this test.
-    fn facade_with_pipeline(
-        pipeline: PiiPipeline,
-        audit_store: Option<Arc<dyn AuditStore>>,
-    ) -> HaciendaFacade {
-        let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
-        HaciendaFacade {
-            config,
-            pii_pipeline: Some(Arc::new(pipeline)),
-            compliance: None,
-            audit_store,
-            review_queue: None,
-            glossary: None,
-            pseudonymiser: None,
-        }
+fn facade_with_pipeline(
+    pipeline: PiiPipeline,
+    audit_store: Option<Arc<dyn AuditStore>>,
+) -> HaciendaFacade {
+    let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
+    HaciendaFacade {
+        config,
+        pii_pipeline: Some(Arc::new(pipeline)),
+        compliance: None,
+        audit_store,
+        review_queue: None,
+        glossary: None,
+        pseudonymiser: None,
+        api_key_store: None,
     }
+}
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn should_return_pii_results_in_input_order_under_concurrency() {
@@ -2503,6 +2585,7 @@ mod tests {
         let facade = HaciendaFacade::with_stores(
             HaciendaConfig::default().with_pii(config),
             Some(Arc::clone(&counting_store) as Arc<dyn AuditStore>),
+            None,
             None,
         )
         .unwrap();
@@ -2715,6 +2798,7 @@ mod tests {
             let facade = HaciendaFacade::with_stores(
                 HaciendaConfig::default().with_pii(config),
                 Some(Arc::clone(&timing_store) as Arc<dyn AuditStore>),
+                None,
                 None,
             )
             .unwrap();
