@@ -5,10 +5,12 @@
 //! - `pii:reveal` — `include_text=true` on scan; raw span access
 //! - `audit:read` / `audit:export` — audit trail access
 //! - `review:decide` — approving or rejecting detections
+//! - `auth:manage` — API key issuance and revocation
 //! - `raw:extract` — `/xberg/v1/*` when passthrough is compiled in
 
 pub mod authn;
 pub mod authz;
+pub mod keys;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -27,6 +29,8 @@ pub enum Capability {
     AuditExport,
     /// Decide review items (approve/reject/modify).
     ReviewDecide,
+    /// Manage API keys (issue, revoke, list).
+    AuthManage,
     /// Raw xberg passthrough (unredacted). Only available with `xberg-passthrough` feature.
     RawExtract,
 }
@@ -40,6 +44,7 @@ impl Capability {
             Self::AuditRead,
             Self::AuditExport,
             Self::ReviewDecide,
+            Self::AuthManage,
             Self::RawExtract,
         ]
     }
@@ -53,6 +58,7 @@ impl std::fmt::Display for Capability {
             Self::AuditRead => write!(f, "audit:read"),
             Self::AuditExport => write!(f, "audit:export"),
             Self::ReviewDecide => write!(f, "review:decide"),
+            Self::AuthManage => write!(f, "auth:manage"),
             Self::RawExtract => write!(f, "raw:extract"),
         }
     }
@@ -68,6 +74,7 @@ impl std::str::FromStr for Capability {
             "audit:read" => Ok(Self::AuditRead),
             "audit:export" => Ok(Self::AuditExport),
             "review:decide" => Ok(Self::ReviewDecide),
+            "auth:manage" => Ok(Self::AuthManage),
             "raw:extract" => Ok(Self::RawExtract),
             _ => Err(format!("unknown capability: {s}")),
         }

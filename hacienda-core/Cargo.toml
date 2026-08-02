@@ -31,6 +31,11 @@ unicode-normalization = { workspace = true }
 web-time = { workspace = true }
 zeroize = { workspace = true }
 
+# Argon2id for API key hashing (Phase 11).
+argon2 = { workspace = true }
+# Random number generation for API key entropy.
+rand = { workspace = true }
+
 # Postgres backend (Phase 9). Gated behind `postgres` feature.
 sqlx = { workspace = true, optional = true }
 
