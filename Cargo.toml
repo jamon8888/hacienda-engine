@@ -84,6 +84,10 @@ xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", feature
 # Key material must not survive a drop. `PseudonymKey` holds the secret that
 # de-pseudonymises an entire corpus.
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
+# Postgres client for Phase 9 durable store backend. `runtime-tokio` for pool,
+# `postgres` for the driver, `uuid`/`chrono`/`json` for compile-time checked
+# query! macros with native types. `migrate` feature for embedded migrations.
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate"] }
 
 # Profiles must live in the workspace root manifest. Cargo silently ignores
 # `[profile.*]` in path dependencies, so the tuning in ../xberg/Cargo.toml has never
