@@ -545,6 +545,59 @@ pub(crate) mod tests {
         );
     }
 
+    /// `GET /v1/review` and `POST /v1/review/{id}/decide` are declared under two
+    /// different capabilities in the route table (`audit:read` and `review:decide`
+    /// respectively) — reading the queue and deciding on an item are different
+    /// privileges. Before `HaciendaFacade::review_queue_read_with_auth` existed,
+    /// `get_review` called the same `review_queue_with_auth` as `decide_review`, which
+    /// unconditionally required `review:decide` — so a caller with only `audit:read`
+    /// passed the route-level guard and was then rejected by the facade. This test pins
+    /// the fixed, distinct behaviour at the HTTP layer (Phase 10 Task 2 Step 3).
+    #[tokio::test]
+    async fn review_read_and_decide_require_distinct_capabilities() {
+        let app = build_router(test_state());
+
+        // audit:read alone must be authorised to list the queue.
+        let list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/review")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            list_response.status().as_u16(),
+            403,
+            "audit:read alone must authorise GET /v1/review"
+        );
+
+        // audit:read alone must NOT be authorised to decide on an item.
+        let decide_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/review/some-id/decide")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"decision":"approve","reviewer":"r","comment":"c"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            decide_response.status().as_u16(),
+            403,
+            "audit:read alone must not authorise POST /v1/review/{{id}}/decide"
+        );
+    }
+
     /// An oversized body must yield 413 with the error envelope, not axum's default
     /// `text/plain` rejection.
     ///

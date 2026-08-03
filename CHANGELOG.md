@@ -434,6 +434,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hash-chained audit log with blake3
 - JWT authentication for API
 
+### Fixed
+
+- **`GET /v1/review` required `review:decide` instead of the route table's declared
+  `audit:read` (Phase 10).** `get_review` and `decide_review` both called
+  `HaciendaFacade::review_queue_with_auth`, which unconditionally required
+  `Capability::ReviewDecide` — so a caller with only `audit:read` passed the route-level
+  guard on `GET /v1/review` and was then rejected by the facade. New
+  `HaciendaFacade::review_queue_read_with_auth` requires `audit:read`, used by `get_review`
+  only; `decide_review` keeps the original `review_queue_with_auth` (`review:decide`).
+  Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
+  (no handler-level test exercised the two capabilities' distinction).
+
 ## [0.1.0] - 2026-07-28
 
 ### Added

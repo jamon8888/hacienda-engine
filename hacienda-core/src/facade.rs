@@ -282,7 +282,7 @@ impl HaciendaFacade {
         self.review_queue.as_ref()
     }
 
-    /// Get the review queue with authentication context.
+    /// Get the review queue with authentication context, for making a decision on an item.
     ///
     /// Requires `review:decide` capability.
     pub fn review_queue_with_auth(
@@ -290,6 +290,21 @@ impl HaciendaFacade {
         caller: Caller<'_>,
     ) -> Result<Option<&ReviewQueue>, HaciendaError> {
         caller.require(Capability::ReviewDecide)?;
+        Ok(self.review_queue.as_ref())
+    }
+
+    /// Get the review queue with authentication context, for reading its contents.
+    ///
+    /// Requires `audit:read` capability — same sensitivity class as the audit log itself
+    /// (D6's reasoning applied a third time). Distinct from [`Self::review_queue_with_auth`],
+    /// which requires `review:decide`: listing the queue and deciding on an item are
+    /// different privileges, and `GET /v1/review` is declared under `Capability::AuditRead`
+    /// in the route table — a caller with only that capability must not be rejected here.
+    pub fn review_queue_read_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<&ReviewQueue>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
         Ok(self.review_queue.as_ref())
     }
 
@@ -2429,6 +2444,62 @@ mod tests {
         let report = facade.compliance_report_with_auth(caller).await.unwrap();
 
         assert!(report.is_none());
+    }
+
+    // ── Phase 10 Task 2 Step 3: review_queue_read_with_auth vs review_queue_with_auth ──
+    //
+    // `GET /v1/review` is declared under `Capability::AuditRead` in the route table, and
+    // `POST /v1/review/{id}/decide` under `Capability::ReviewDecide` — two different
+    // privileges. Before `review_queue_read_with_auth` existed, `get_review` called
+    // `review_queue_with_auth`, which unconditionally required `ReviewDecide` — so a
+    // caller with only `audit:read` would pass the route-level guard and then be
+    // rejected by the facade. These tests pin the fixed, distinct behaviour.
+
+    #[tokio::test]
+    async fn should_read_review_queue_with_audit_read_capability() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.review = Some(ReviewConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let queue = facade.review_queue_read_with_auth(caller).unwrap();
+
+        assert!(queue.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_reject_review_queue_read_without_audit_read_capability() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        let ctx = principal_with(&[Capability::ReviewDecide]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.review_queue_read_with_auth(caller);
+
+        // `ReviewQueue` (the `Ok` payload) has no `Debug` impl, so `unwrap_err` is unusable here.
+        let Err(err) = result else {
+            panic!("expected an authz error");
+        };
+        assert!(matches!(err, HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_reject_review_decide_without_review_decide_capability() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        // audit:read is sufficient to read the queue but not to decide on an item —
+        // the inverse of the bug this test module documents above.
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.review_queue_with_auth(caller);
+
+        let Err(err) = result else {
+            panic!("expected an authz error");
+        };
+        assert!(matches!(err, HaciendaError::Authz(_)));
     }
 
     // ── Phase 11 Task 2: issue_key_with_auth / revoke_key_with_auth ─────────────

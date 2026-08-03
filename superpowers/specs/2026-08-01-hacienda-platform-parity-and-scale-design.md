@@ -483,10 +483,25 @@ parallel with an unproven device path.
    `InMemoryApiKeyStore` and `PostgresApiKeyStore`. Revocation-latency caching (Phase 11
    Task 4) was deliberately deferred — no measurement yet shows uncached per-request
    resolution is a real bottleneck.
-5. **Phase 5 (audit/review/compliance/glossary routes) still unshipped**, per the integration
-   spec's own unchanged file comment (§3.2). Independent of everything in this spec but sits
-   at the same priority tier as gap 4 — both are "the capability model exists, the HTTP
-   surface using it doesn't."
+5. ~~**Phase 5 (audit/review/compliance/glossary routes) still unshipped**, per the integration
+   spec's own unchanged file comment (§3.2).~~ **Closed by Phase 10.** `GET /v1/audit`,
+   `GET /v1/audit/verify`, `GET /v1/review`, `POST /v1/review/{id}/decide`,
+   `GET /v1/compliance/dpia`, `GET /v1/compliance/report`, `GET /v1/glossary` are implemented
+   (`hacienda-api/src/handlers/audit_review.rs`) and route-table-reflected
+   (`every_guarded_route_reflected_in_auth_state`, `route_table_has_no_duplicate_paths` both
+   pass), backed by two new facade accessors (`glossary_snapshot_with_auth`,
+   `compliance_report_with_auth`, both tested). CLI parity re-check (Phase 10 Task 3)
+   confirmed the CLI's own audit/review/compliance/glossary subcommands remain deliberately
+   absent — no change to that judgment. **Bug found and fixed while closing this gap:**
+   writing the missing two-capability test (Task 2 Step 3) found that `GET /v1/review`
+   actually required `review:decide` (via a facade call shared with `decide_review`)
+   instead of the route table's declared `audit:read` — fixed with a new
+   `review_queue_read_with_auth` facade method scoped to `audit:read`; see CHANGELOG's
+   `Fixed` entry. **Known gap, still not closed:** the route suite has not been re-run
+   with `PostgresAuditStore`/`PostgresReviewStore` wired into the test `ApiState` (Phase 10
+   Task 2 Step 5) — the routes call facade methods only, so this is expected to be a
+   formality, but it is unverified and requires a live Postgres this environment does not
+   have running.
 6. **hacienda-sdks repo does not exist**, and cannot productively start (§8's precondition)
    until `/openapi.json` schema completeness is verified — this is a documentation/tooling
    gap, not a design gap, but it blocks every downstream SDK consumer including the eventual
@@ -507,7 +522,7 @@ avoid renumbering shipped work.
 |---|---|---|---|
 | 8 | `POST /v1/pii/reveal` | Gap 1 (§9 above) | — |
 | 9 | Postgres store backend: segments, review, jobs (completes integration spec §8 gap 4/§12.6), plus new tables for versions/presets/keys | Gap 2 | — |
-| 10 | Phase 5 from the integration spec: `/v1/audit/*`, `/v1/review/*`, `/v1/compliance/*`, `/v1/glossary` | Gap 5 | Phase 9 (needs a durable review/audit store to be worth exposing over HTTP) |
+| 10 | Phase 5 from the integration spec: `/v1/audit/*`, `/v1/review/*`, `/v1/compliance/*`, `/v1/glossary` — **done** | Gap 5 | Phase 9 (needs a durable review/audit store to be worth exposing over HTTP) |
 | 11 | `/v1/auth/keys` issuance + revocation — **done** | Gap 4 | Phase 9 |
 | 12 | Task 1 (`RagStore` trait + types/filter/query IR + `InMemoryVectorStore`) — **done**, `crates/hacienda-rag`; Task 2 (`PgVectorStore` backend, `postgres` feature) — **done**; Task 3 (route existence confirmed, answer-synthesis scope decided: not built, 5 of 8 confirmed `/v1/rag/*` routes built and tested) — **done**; 3 routes (list-collections, list-documents, migrate-embeddings) remain unbuilt — no `RagStore` trait primitive serves them | Gap 3 (mostly closed — see §9) | Phase 9; backend architecture and trait shape already decided (§7, §3.7, Decision 2) — this phase is route verification + implementation, not design |
 | 13 | `/v1/jobs` list + result, presets, versions/diff, presigned uploads, `/v1/usage` — **done** | — | Phase 9; usage additionally needs Phase 10's audit routes as its read-model source |
