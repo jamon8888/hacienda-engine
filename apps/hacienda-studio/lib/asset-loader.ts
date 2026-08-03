@@ -18,7 +18,7 @@ const TESSDATA_STORE = "tessdata";
  */
 const MODEL_BASE =
   import.meta.env.VITE_MODEL_BASE_URL ??
-  "https://huggingface.co/fastino/GLiNER2-Guardrails-PII-Multi/resolve/main";
+  "https://huggingface.co/jamon8888/gliner2-guardrails-pii-f16/resolve/main";
 const MODEL_URL = `${MODEL_BASE}/model.safetensors`;
 const TOKENIZER_URL = `${MODEL_BASE}/tokenizer.json`;
 // The encoder config (mdeberta-v3-base), not the top-level extractor config —

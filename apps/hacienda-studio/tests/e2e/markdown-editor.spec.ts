@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import { visitFresh } from "./fixtures";
 
 /**
  * Track F3: CodeMirror renders in the real app with a PII span decorated, and — the
@@ -7,14 +8,6 @@ import { test, expect, type Page } from "@playwright/test";
  */
 const NOTE =
   "Contact Jean Dupont at jean.dupont@cabinet-exemple.fr regarding the deal.";
-
-async function visitFresh(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.setItem("xberg-studio-visited", "true");
-  });
-  await page.goto("/");
-  await page.waitForSelector('input[type="file"]:not([disabled])');
-}
 
 test.describe("MarkdownEditor PII decorations (Track F3)", () => {
   test("renders the document with the detected PII span highlighted", async ({ page }) => {

@@ -1,7 +1,10 @@
 import { test, expect } from "@playwright/test";
+import { mockNerModelAssets, skipOnboarding } from "./fixtures";
 
 test.describe("xberg-studio", () => {
   test("loads and shows onboarding", async ({ page }) => {
+    // Onboarding's own preloadAssets() would otherwise reach the real model host.
+    await mockNerModelAssets(page);
     // Clear visited flag so onboarding appears
     await page.addInitScript(() => {
       localStorage.removeItem("xberg-studio-visited");
@@ -21,16 +24,14 @@ test.describe("xberg-studio", () => {
     page,
   }) => {
     // Pre-set visited flag to skip onboarding
-    await page.addInitScript(() => {
-      localStorage.setItem("xberg-studio-visited", "true");
-    });
+    await skipOnboarding(page);
     await page.goto("/");
     await page.waitForLoadState("domcontentloaded");
     // Onboarding should NOT appear; drop zone should be visible
     await page.waitForSelector(".drop-zone", { timeout: 10000 });
     await expect(page.locator(".onboarding-overlay")).not.toBeVisible();
     // The drop zone announces itself as busy until the worker handshake lands.
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
     await expect(page.locator("text=Drop files here")).toBeVisible();
   });
 
@@ -40,7 +41,7 @@ test.describe("xberg-studio", () => {
     });
     await page.goto("/");
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
     await page.setInputFiles('input[type="file"]', {
       name: "test.exe",

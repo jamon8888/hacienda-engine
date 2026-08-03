@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
+import { visitFresh } from "./fixtures";
 
 /**
  * Track D1: "one test where the output differs with the flag on and off" for
@@ -15,14 +16,6 @@ import JSZip from "jszip";
  */
 const NOTE =
   "Contact Jean Dupont at jean.dupont@cabinet-exemple.fr regarding the deal.";
-
-async function visitFresh(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.setItem("xberg-studio-visited", "true");
-  });
-  await page.goto("/");
-  await page.waitForSelector('input[type="file"]:not([disabled])');
-}
 
 /**
  * Does not navigate — call `visitFresh` (and toggle any config) first. A

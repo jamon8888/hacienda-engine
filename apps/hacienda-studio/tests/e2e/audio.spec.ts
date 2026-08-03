@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { visitFresh } from "./fixtures";
 
 /**
  * Track D3: an audio fixture through the full pipeline (the old plan's Phase
@@ -32,14 +33,6 @@ import { test, expect, type Page } from "@playwright/test";
  * whisper-web can't run in a worker) — not the same generic failure, so the
  * toggle still has a provable effect even though neither path succeeds yet.
  */
-
-async function visitFresh(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.setItem("xberg-studio-visited", "true");
-  });
-  await page.goto("/");
-  await page.waitForSelector('input[type="file"]:not([disabled])');
-}
 
 /**
  * A minimal but genuinely valid 16-bit PCM mono WAV file (silence) —
@@ -79,7 +72,9 @@ function silentWav(durationSeconds = 0.5, sampleRate = 16000): Buffer {
  * fires the banner (if any) is already in the DOM to read directly.
  */
 async function uploadAudioFixture(page: Page): Promise<string | null> {
-  const download = page.waitForEvent("download", { timeout: 30000 });
+  // 60s, not the default: real AudioContext decode + wasm extraction of this fixture is
+  // CPU-heavy, and this host is constrained enough that 30s occasionally isn't enough.
+  const download = page.waitForEvent("download", { timeout: 60000 });
 
   await page.setInputFiles('input[type="file"]', {
     name: "meeting.wav",
