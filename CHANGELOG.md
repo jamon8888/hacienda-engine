@@ -166,6 +166,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`result.pii` is empty, so zipping it with `result.extraction.results` yields zero
   entries regardless of extraction success). Pre-existing before this task's changes.
 
+- **`POST /v1/uploads/presign`, `POST /v1/uploads/confirm` (Phase 13 Task 4).** Presigned
+  uploads for large documents that should not transit the API server as a base64 body.
+  `hacienda_core::store::object::ObjectStore` trait (`presign_put`, `head`) with an
+  `S3ObjectStore` implementation behind a new `s3` Cargo feature, working against AWS S3 or
+  any S3-compatible endpoint (MinIO, R2, GCS S3-compat) via `S3Config::endpoint`. Uses
+  `rusty-s3` for pure-computation request signing and `reqwest` only for the `HEAD` call
+  `confirm_upload` issues. Both routes require `documents:process`, since a presigned upload
+  is a precursor step to `/v1/documents` and carries the same class of content; opt-in via a
+  new `ApiState::with_object_store(Arc<dyn ObjectStore>)` builder (mirrors
+  `with_version_store`), 400 when no store is attached. `confirm_upload`'s storage key is
+  derived solely from the server-issued `upload_id`, never from the client-supplied
+  `filename` — the SSRF-safety argument this reopens (spec §5) holds because no
+  client-supplied URL or path ever reaches `ObjectStore::head`/`presign_put`.
+
+- **`GET /v1/usage` (Phase 13 Task 5).** Per-principal usage metering, derived from the audit
+  chain rather than tracked separately (Decision 3): entity count (row count) and byte count
+  (`SUM(span_length)`), optionally windowed by `?since=`/`?until=` on `created_at`.
+  Document count is deliberately not reported — `AuditEntry` carries no `document_id`, so it
+  cannot be derived without a schema change or silently mis-counting zero-redaction documents.
+  New `hacienda_core::store::postgres::usage::{UsageStore, PostgresUsageStore}` queries
+  `audit_entries` directly rather than going through `AuditStore::entries`, which is scoped to
+  only the currently-open segment — a usage read-model needs sealed history too, or a billing
+  window would under-report every time a segment rotates. Guarded by `audit:read`, the same
+  capability as `/v1/audit` and `/v1/compliance/*`, since this is a read-model over that same
+  data. Opt-in via a new `ApiState::with_usage_store(Arc<dyn UsageStore>)` builder (mirrors
+  `with_object_store`), 400 when no store is attached. Fixed a bug surfaced by the live
+  integration test: `span_length` is `BIGINT`, and Postgres's `SUM(BIGINT)` returns `NUMERIC`,
+  not `BIGINT`, which failed the runtime column-type check — fixed with an explicit
+  `::BIGINT` cast on the aggregate.
+
 - **`hacienda-rag` crate: `RagStore` trait, backend-agnostic IR, in-memory backend (Phase 12
   Task 1).** New workspace member `crates/hacienda-rag`, recovered near-verbatim from xberg's
   own MIT-licensed `xberg-rag` crate (removed from that workspace pre-1.0 in commit

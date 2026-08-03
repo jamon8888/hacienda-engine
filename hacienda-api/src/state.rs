@@ -1,7 +1,9 @@
 //! Shared application state threaded through every handler.
 
 use hacienda_core::jobs::JobStore;
+use hacienda_core::store::object::ObjectStore;
 use hacienda_core::store::postgres::presets::PresetStore;
+use hacienda_core::store::postgres::usage::UsageStore;
 use hacienda_core::store::postgres::versions::DocumentVersionStore;
 use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::RagStore;
@@ -59,6 +61,16 @@ pub struct ApiState {
     /// (`ApiError::invalid_request`) — like `PresetStore`, `DocumentVersionStore` has no
     /// in-memory backend (Postgres-only), so this is opt-in the same way.
     pub(crate) version_store: Option<Arc<dyn DocumentVersionStore>>,
+    /// Object store backing `/v1/uploads/presign` and `/v1/uploads/confirm`. `None` means
+    /// those routes are disabled (`ApiError::invalid_request`) — like `PresetStore` and
+    /// `DocumentVersionStore`, `ObjectStore`'s only implementation (`S3ObjectStore`) needs
+    /// a live bucket, so this is opt-in the same way.
+    pub(crate) object_store: Option<Arc<dyn ObjectStore>>,
+    /// Usage read-model backing `GET /v1/usage`. `None` means that route is disabled
+    /// (`ApiError::invalid_request`) — like `PresetStore`/`DocumentVersionStore`,
+    /// `UsageStore`'s only implementation queries `audit_entries` directly (Postgres-only),
+    /// so this is opt-in the same way.
+    pub(crate) usage_store: Option<Arc<dyn UsageStore>>,
 }
 
 impl ApiState {
@@ -76,6 +88,8 @@ impl ApiState {
             rag_store: None,
             preset_store: None,
             version_store: None,
+            object_store: None,
+            usage_store: None,
         }
     }
 
@@ -101,6 +115,23 @@ impl ApiState {
     #[must_use]
     pub fn with_version_store(mut self, version_store: Arc<dyn DocumentVersionStore>) -> Self {
         self.version_store = Some(version_store);
+        self
+    }
+
+    /// Enable `/v1/uploads/presign` and `/v1/uploads/confirm` by attaching a store.
+    /// Builder-style, mirroring `with_version_store` exactly, so existing call sites are
+    /// unaffected.
+    #[must_use]
+    pub fn with_object_store(mut self, object_store: Arc<dyn ObjectStore>) -> Self {
+        self.object_store = Some(object_store);
+        self
+    }
+
+    /// Enable `GET /v1/usage` by attaching a store. Builder-style, mirroring
+    /// `with_object_store` exactly, so existing call sites are unaffected.
+    #[must_use]
+    pub fn with_usage_store(mut self, usage_store: Arc<dyn UsageStore>) -> Self {
+        self.usage_store = Some(usage_store);
         self
     }
 }

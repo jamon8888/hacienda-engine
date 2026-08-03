@@ -299,6 +299,33 @@ impl From<hacienda_core::store::postgres::versions::VersionError> for ApiError {
     }
 }
 
+/// Convert a [`hacienda_core::store::object::ObjectStoreError`] into an [`ApiError`].
+///
+/// The only variant, `Request`, is always host/backend-shaped (a network failure or an
+/// unexpected status from the object store) — 500, logged on the host side only, since
+/// the wrapped message can include the presigned URL, which carries `X-Amz-Signature`.
+/// "Object not yet uploaded" is not represented here: `ObjectStore::head` returns
+/// `Ok(None)` for that, a normal value the `confirm_upload` handler maps to 404 itself,
+/// not an error variant.
+impl From<hacienda_core::store::object::ObjectStoreError> for ApiError {
+    fn from(err: hacienda_core::store::object::ObjectStoreError) -> Self {
+        tracing::error!(error = %err, "object store error processing request");
+        ApiError::internal()
+    }
+}
+
+/// Convert a [`hacienda_core::store::postgres::usage::UsageError`] into an [`ApiError`].
+///
+/// Its only variant, `Database`, is always host-shaped — 500, logged on the host side
+/// only, matching the `PresetError`/`VersionError` mapping above (`sqlx::Error`'s
+/// `Display` can include table/column names that should not reach the wire).
+impl From<hacienda_core::store::postgres::usage::UsageError> for ApiError {
+    fn from(err: hacienda_core::store::postgres::usage::UsageError) -> Self {
+        tracing::error!(error = %err, "usage store error processing request");
+        ApiError::internal()
+    }
+}
+
 /// Convert a [`hacienda_rag::RagError`] into an [`ApiError`].
 ///
 /// `CollectionNotFound` is the only variant a caller can trigger by naming an

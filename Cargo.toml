@@ -41,6 +41,19 @@ clap = { version = "4", features = ["derive", "env"] }
 # base32 for pseudonym tokens (BASE32_NOPAD — no `=` to escape inside a token).
 data-encoding = "2.11"
 regex = "1.10"
+# HTTP client for the presigned-upload `confirm` step's server-side HEAD request against
+# the object store (Phase 13 Task 4). Already resolved transitively via `xberg`'s `hf-hub`
+# dependency with a rustls (not native-tls/openssl) backend and no other TLS stack appears
+# anywhere else in Cargo.lock — matching that backend explicitly here rather than pulling
+# a second one.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+# Pure-computation AWS SigV4 presigned-URL signing (Phase 13 Task 4). Deliberately not
+# `aws-sdk-s3`: that pulls its own credential-provider chain, retry/tower middleware stack,
+# and a second HTTP client, none of which this feature needs — the client PUTs directly to
+# the presigned URL, and the server only ever issues a HEAD to confirm completion (via
+# `reqwest` above). `rusty-s3` has no HTTP client of its own; it only computes SigV4 URLs,
+# which keeps this dependency-light on a RAM-constrained build host.
+rusty-s3 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3"
@@ -52,6 +65,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # NFKC normalisation. Part of the pseudonym token contract: it decides which spellings
 # co-refer, so changing it later re-derives every token ever emitted.
 unicode-normalization = "0.1"
+# `rusty-s3`'s `Bucket::new` takes a `url::Url` directly and does not re-export the
+# `url` crate itself — needed by `S3Config::endpoint` (Phase 13 Task 4). Already resolved
+# transitively via `reqwest`/`rusty-s3`; version pinned to match.
+url = "2.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Drop-in `Instant`/`SystemTime` for code that must run on both native targets and
 # wasm32-unknown-unknown (Track L3): passes through to `std::time` natively, backs onto

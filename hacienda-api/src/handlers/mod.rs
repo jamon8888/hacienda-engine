@@ -14,6 +14,8 @@ pub mod openapi;
 pub mod pii;
 pub mod presets;
 pub mod rag;
+pub mod uploads;
+pub mod usage;
 pub mod versions;
 
 use axum::http::request::Parts;

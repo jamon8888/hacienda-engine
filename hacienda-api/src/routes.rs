@@ -23,7 +23,10 @@ use hacienda_core::{
 };
 
 use crate::{
-    handlers::{audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, versions},
+    handlers::{
+        audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, uploads, usage,
+        versions,
+    },
     state::ApiState,
 };
 
@@ -238,6 +241,35 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/documents/{id}/diff/{diff_job_id}",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(versions::get_diff_job),
+    },
+    // ── documents:process endpoints, presigned uploads (Phase 13 Task 4) ────────
+    // A presigned upload is a precursor step to `/v1/documents` — the bytes never
+    // transit this server — so it is gated under the same `DocumentsProcess`
+    // capability as the route it feeds, matching presets/RAG/versions above.
+    // `ObjectStore` has no in-memory backend (S3-compatible only), same opt-in
+    // shape as `PresetStore`/`DocumentVersionStore`: these routes 400 when
+    // `ApiState::object_store` is `None`.
+    RouteSpec {
+        path: "/v1/uploads/presign",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(uploads::presign_upload),
+    },
+    RouteSpec {
+        path: "/v1/uploads/confirm",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(uploads::confirm_upload),
+    },
+    // ── audit:read endpoints, usage/metering (Phase 13 Task 5) ──────────────────
+    // A read-model over the audit chain (Decision 3, platform-parity spec §10) —
+    // gated under the same `AuditRead` capability as `/v1/audit`, `/v1/audit/verify`,
+    // and `/v1/compliance/*` above, since usage is derived from that same data, not
+    // a separate source of truth. `UsageStore` has no in-memory backend
+    // (Postgres-only), same opt-in shape as presets/versions/uploads: this route
+    // 400s when `ApiState::usage_store` is `None`.
+    RouteSpec {
+        path: "/v1/usage",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(usage::get_usage),
     },
 ];
 
@@ -1312,5 +1344,192 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(response.status().as_u16(), 404);
+    }
+
+    /// Without a configured object store, both `/v1/uploads/*` routes must fail
+    /// cleanly (400), not panic or 500 — uploads are opt-in per
+    /// `ApiState::object_store`, same as presets/RAG/versions.
+    #[tokio::test]
+    async fn upload_routes_without_a_configured_store_yield_400() {
+        let app = build_router(test_state_no_auth());
+
+        let presign = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/uploads/presign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"filename":"a.txt","mime_type":"text/plain"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(presign.status().as_u16(), 400);
+
+        let confirm = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/uploads/confirm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"upload_id":"{}"}}"#,
+                        uuid::Uuid::new_v4()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirm.status().as_u16(), 400);
+    }
+
+    /// Upload routes require `documents:process`, same as every other
+    /// content-bearing route — a token without it must be 403. Auth enforcement
+    /// happens before the handler runs, so this does not need a live store.
+    #[tokio::test]
+    async fn upload_routes_require_documents_process_capability() {
+        let facade = std::sync::Arc::new(
+            hacienda_core::HaciendaFacade::new(hacienda_core::HaciendaConfig::default()).unwrap(),
+        );
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/uploads/presign")
+                    .header("authorization", "Bearer hcd_pii:reveal_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"filename":"a.txt","mime_type":"text/plain"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// Without a configured usage store, `GET /v1/usage` must fail cleanly (400),
+    /// not panic or 500 — usage is opt-in per `ApiState::usage_store`, same as
+    /// presets/versions/uploads.
+    #[tokio::test]
+    async fn usage_route_without_a_configured_store_yields_400() {
+        let app = build_router(test_state_no_auth());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// The usage route requires `audit:read`, same as `/v1/audit` and
+    /// `/v1/compliance/*` — a token without it must be 403. Auth enforcement
+    /// happens before the handler runs, so this does not need a live store.
+    #[tokio::test]
+    async fn usage_route_requires_audit_read_capability() {
+        let facade = std::sync::Arc::new(
+            hacienda_core::HaciendaFacade::new(hacienda_core::HaciendaConfig::default()).unwrap(),
+        );
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/usage")
+                    .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// Full round trip against a real `PostgresUsageStore`: append audit entries for
+    /// a principal via `PostgresAuditStore`, then confirm `GET /v1/usage` aggregates
+    /// them into the expected entity/byte counts. Requires a live Postgres — ignored
+    /// by default, same convention as the preset/version lifecycle tests above. Run
+    /// with:
+    ///   DATABASE_URL=postgres://... cargo test -p hacienda-api --lib \
+    ///     routes::tests::usage_route_aggregates_audit_entries -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn usage_route_aggregates_audit_entries() {
+        use hacienda_core::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
+        use hacienda_core::store::postgres::audit::PostgresAuditStore;
+        use hacienda_core::store::postgres::connection::{connect, migrate};
+        use hacienda_core::store::postgres::usage::{PostgresUsageStore, UsageStore};
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+
+        let audit_store = PostgresAuditStore::new(pool.clone());
+        let principal = format!("avocat-{}", uuid::Uuid::new_v4());
+        audit_store
+            .append(vec![AuditEntryInput {
+                id: uuid::Uuid::new_v4().to_string(),
+                category: "Email".to_string(),
+                action: RedactionAction::Mask,
+                span_hash: "hash".to_string(),
+                span_length: 42,
+                confidence: Some(1.0),
+                source: EntitySource::Regex,
+                pipeline_version: "1.0".to_string(),
+                config_hash: "cfg".to_string(),
+                principal: Some(principal.clone()),
+            }])
+            .await
+            .expect("append failed");
+
+        let store: Arc<dyn UsageStore> = Arc::new(PostgresUsageStore::new(pool));
+        let app = build_router(test_state_no_auth().with_usage_store(store));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let record = json["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["principal"].as_str() == Some(principal.as_str()))
+            .expect("principal missing from usage response");
+        assert_eq!(record["entity_count"].as_i64().unwrap(), 1);
+        assert_eq!(record["byte_count"].as_i64().unwrap(), 42);
     }
 }
