@@ -14,6 +14,10 @@ jobs = []
 # Postgres store backend (Phase 9). Off by default so wasm32 and non-Postgres
 # consumers don't pull sqlx.
 postgres = ["sqlx"]
+# S3-compatible object storage backend for presigned uploads (Phase 13 Task 4). Off by
+# default so wasm32 and non-upload consumers don't pull reqwest/rusty-s3; the browser
+# does its own presigned PUT directly, never through this crate.
+s3 = ["dep:reqwest", "dep:rusty-s3", "dep:url"]
 
 [dependencies]
 aes-siv = { workspace = true }
@@ -38,6 +42,14 @@ rand = { workspace = true }
 
 # Postgres backend (Phase 9). Gated behind `postgres` feature.
 sqlx = { workspace = true, optional = true }
+
+# S3-compatible object storage (Phase 13 Task 4). Gated behind `s3` feature — see the
+# `s3` feature comment above and the workspace `Cargo.toml` comments on both crates for
+# why `rusty-s3` (pure SigV4 computation) + `reqwest` (the confirm-step HEAD request)
+# rather than `aws-sdk-s3`.
+reqwest = { workspace = true, optional = true }
+rusty-s3 = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 # `axum` and `tokio` are native-only: `axum` is the auth middleware's server framework
 # (`auth/authz.rs`, gated out of the crate on wasm32 — see `lib.rs`), and `tokio`'s

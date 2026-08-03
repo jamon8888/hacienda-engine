@@ -510,7 +510,7 @@ avoid renumbering shipped work.
 | 10 | Phase 5 from the integration spec: `/v1/audit/*`, `/v1/review/*`, `/v1/compliance/*`, `/v1/glossary` | Gap 5 | Phase 9 (needs a durable review/audit store to be worth exposing over HTTP) |
 | 11 | `/v1/auth/keys` issuance + revocation — **done** | Gap 4 | Phase 9 |
 | 12 | Task 1 (`RagStore` trait + types/filter/query IR + `InMemoryVectorStore`) — **done**, `crates/hacienda-rag`; Task 2 (`PgVectorStore` backend, `postgres` feature) — **done**; Task 3 (route existence confirmed, answer-synthesis scope decided: not built, 5 of 8 confirmed `/v1/rag/*` routes built and tested) — **done**; 3 routes (list-collections, list-documents, migrate-embeddings) remain unbuilt — no `RagStore` trait primitive serves them | Gap 3 (mostly closed — see §9) | Phase 9; backend architecture and trait shape already decided (§7, §3.7, Decision 2) — this phase is route verification + implementation, not design |
-| 13 | `/v1/jobs` list + result, presets, versions/diff, presigned uploads, `/v1/usage` | — | Phase 9; usage additionally needs Phase 10's audit routes as its read-model source |
+| 13 | `/v1/jobs` list + result, presets, versions/diff, presigned uploads, `/v1/usage` — **done** | — | Phase 9; usage additionally needs Phase 10's audit routes as its read-model source |
 | 14 | `hacienda-sdks` repo, Python + TypeScript, `target: "cloud"` only | Gap 6 | Phases 8, 10, 11, 12, 13 (needs a stable, complete OpenAPI surface — this is why SDK work is last, not first) |
 | 15 | Cactus device-target spike (GLiNER2 span-head via `cactus convert`) + `target: "device"` prototype in one language | Gap 7 | Phase 14's SDK scaffolding, but not on any cloud-route phase |
 
@@ -544,10 +544,14 @@ against an unbuilt capability model would have.
   not a premise. Additionally, the recovered source surfaces a feature this spec has no design
   for at all: streaming answer synthesis (`stream.rs`, §3.7) — worth an explicit scope decision
   before Phase 12, not a silent omission.
-- **Usage-as-a-read-model (Decision 3) assumes audit entries carry enough detail to bill
+- ~~**Usage-as-a-read-model (Decision 3) assumes audit entries carry enough detail to bill
   from.** Not yet checked against `AuditChain`'s actual entry schema — if entries don't carry
   a billable unit (bytes processed, entity count, etc.), Decision 3 needs revisiting before
-  Phase 13, not after.
+  Phase 13, not after.~~ **Resolved in Phase 13 Task 5:** `AuditEntry` carries `principal`
+  and `span_length`, both attributable and summable per-principal and time-windowed — entity
+  count and byte count are real billable units. Document count is *not* derivable (no
+  `document_id` on the entry) and is deliberately omitted from `GET /v1/usage` rather than
+  guessed at.
 - **The device-target SDK method surface (§8) is speculative until Phase 15's spike lands.**
   Everything in this spec's SDK section describing what device-mode "can't do" (multi-tenant
   RAG collections, segment reconciliation) is a reasonable inference from Cactus's C FFI

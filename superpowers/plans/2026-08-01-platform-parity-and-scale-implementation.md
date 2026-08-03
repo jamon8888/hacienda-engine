@@ -1167,26 +1167,98 @@ Decision 3, so the audit routes' data model must be stable first).
 
 ### Task 4 — Presigned uploads: `/v1/uploads/presign`, `/v1/uploads/confirm`
 
-- [ ] **Step 1.** Confirm the SSRF analysis in spec §5 holds: `confirm` fetches by a
-      server-issued key from hacienda's own bucket, never a client-supplied URL. Any deviation
-      from this in implementation is a stop-the-line issue per `input-validation`/OWASP #10.
-- [ ] **Step 2 (red → green).** Standard presigned-URL flow (S3-compatible or equivalent —
-      backend choice deferred to whichever object storage the deployment target already uses;
-      not pre-decided here since no such dependency exists in the workspace today).
+- [x] **Step 1.** SSRF analysis holds: `confirm_upload` (`hacienda-api/src/handlers/uploads.rs`)
+      derives its lookup key solely from the server-issued `upload_id` via `object_key()`, never
+      from client input — `filename` is accepted but deliberately unread (see `PresignUploadRequest`
+      doc comment in `dto.rs`), so it cannot steer or collide with another upload's storage path.
+      No client-supplied URL or path reaches `ObjectStore::head`/`presign_put`.
+- [x] **Step 2 (red → green).** `hacienda_core::store::object::ObjectStore` trait (`presign_put`,
+      `head`) with an `S3ObjectStore` implementation (`rusty-s3` for pure-computation presigning,
+      `reqwest` only for the `HEAD` in `confirm`) behind the `s3` feature — works against AWS S3
+      or any S3-compatible endpoint (MinIO, R2, GCS S3-compat) via `S3Config::endpoint`. Routes
+      `POST /v1/uploads/presign` and `POST /v1/uploads/confirm` are wired into `ROUTE_TABLE` under
+      `Capability::DocumentsProcess`, opt-in per `ApiState::object_store` (400 when unconfigured,
+      matching the `PresetStore`/`DocumentVersionStore` pattern). Tests in `routes.rs`:
+      `upload_routes_without_a_configured_store_yield_400`,
+      `upload_routes_require_documents_process_capability` — both green.
 
 ### Task 5 — `GET /v1/usage`
 
-- [ ] **Step 1.** Verify the Assumed-table risk from the spec's §11 before building: does
-      `AuditEntry` actually carry enough detail (document count, byte count, entity count) to
-      derive billable usage, or does Decision 3 need revisiting? Read `audit/entry.rs`'s actual
-      field list as the first step of this task, not an afterthought.
-- [ ] **Step 2 (red → green).** A read-model aggregation over `AuditStore::entries`/`seals`
-      (or a dedicated Postgres aggregate query once Phase 9's tables are the backing store),
-      grouped by principal and time window.
+- [x] **Step 1.** Verified against `audit/entry.rs`'s actual field list: `AuditEntry` carries
+      `principal` (`Option<String>`) and `span_length` (`u32`, redacted-span byte count), both
+      attributable and summable — but **no `document_id`**. So entity-count (row count) and
+      byte-count (`SUM(span_length)`) are derivable per-principal and time-windowed exactly as
+      Decision 3 assumed; document-count is **not** derivable without either a schema change or
+      silently mis-counting documents that produced zero redactions, and is deliberately omitted
+      from the response rather than guessed. This resolves the spec's §11 open risk precisely:
+      entries do carry a billable unit, just not every unit Decision 3's framing assumed.
+      Also confirmed `AuditStore::entries()` is scoped to the currently-open segment only (see
+      its doc comment and the `WHERE segment_id = (SELECT ... WHERE sealed_at IS NULL ...)`
+      shape in `store/postgres/audit.rs`), so a usage read-model built on it would under-report
+      every time a segment rotates — this is why Step 2 queries `audit_entries` directly instead.
+- [x] **Step 2 (red → green).** New `hacienda_core::store::postgres::usage` module:
+      `UsageStore` trait (`summary(since, until) -> Vec<UsageRecord>`), `PostgresUsageStore`
+      querying `audit_entries` directly (all segments, sealed or not — not `AuditStore::entries`,
+      per Step 1's finding), grouped by `principal` (`NULL` groups every `Caller::Trusted` entry,
+      matching how `AuditEntry::principal` itself represents unattributed entries) and windowed
+      by `created_at >= since` / `< until` (either bound optional). Uses runtime-checked
+      `sqlx::query_as::<_, UsageRow>()` with an explicit `#[derive(sqlx::FromRow)]` struct rather
+      than the `query_as!` macro, since neither a live `DATABASE_URL` nor a `.sqlx` cache entry
+      for this query was available at write time — documented as a deliberate deviation in the
+      module's doc comment.
+      `ApiState` gained `usage_store: Option<Arc<dyn UsageStore>>` + `with_usage_store` builder,
+      mirroring `with_object_store` exactly — 400 when unconfigured. New DTOs in `dto.rs`:
+      `UsageQuery` (`since`/`until`, both optional), `UsageRecordDto` (with
+      `From<UsageRecord>`), `UsageResponse`. `UsageError -> ApiError` mapping added to
+      `error.rs` (`Database` -> 500, host-logged only — no client-triggerable variant exists).
+      `GET /v1/usage` wired into `ROUTE_TABLE` under `Capability::AuditRead` — reusing the same
+      capability as `/v1/audit`, `/v1/audit/verify`, and `/v1/compliance/*`, since usage is a
+      read-model over that same audit chain, not a separate concern (the spec's §4.1 table lists
+      `/v1/usage` under "metering" but does not assign it a capability; `AuditRead` is the
+      established precedent for every other audit-chain-derived read route). Automatically
+      covered by `every_guarded_route_reflected_in_auth_state` and
+      `route_table_has_no_duplicate_paths`.
+- [x] **Step 3 (green).** Verify. `cargo check -p hacienda-api`: clean. `cargo clippy -p
+      hacienda-api -p hacienda-core --all-targets -- -D warnings`: clean. `cargo test -p
+      hacienda-api --lib routes::` → 22 passed, 4 ignored, 0 failed. New tests:
+      `usage_route_without_a_configured_store_yields_400` (400 with no store configured),
+      `usage_route_requires_audit_read_capability` (403 for a token missing `audit:read`).
+      Live-Postgres tests (docker container `hacienda-pg` restarted — had stopped between
+      sessions, same host-state note as Task 3):
+      `DATABASE_URL=postgres://hacienda:hacienda_dev@127.0.0.1:5432/hacienda cargo test -p
+      hacienda-core --features postgres --lib store::postgres::usage -- --ignored
+      --test-threads=1` → 2 passed (`should_aggregate_entity_and_byte_counts_per_principal`,
+      `since_in_the_future_excludes_everything`); `cargo test -p hacienda-api --lib
+      routes::tests::usage_route_aggregates_audit_entries -- --ignored` → 1 passed (real
+      round trip: append via `PostgresAuditStore`, aggregate via `GET /v1/usage`). `poly fmt
+      --check` on all 8 touched/created files: clean.
+
+      Two real bugs surfaced and fixed while running the live tests, not just written blind:
+      1. `SUM(span_length)` — `span_length` is `BIGINT` in `audit_entries` (migration
+         `0001_init.sql`), and Postgres's `SUM(BIGINT)` returns `NUMERIC`, not `BIGINT`. The
+         runtime-checked `UsageRow::byte_count: i64` failed to decode it
+         (`ColumnDecode { ... "mismatched types; Rust type i64 ... is not compatible with SQL
+         type NUMERIC" }`) — caught immediately by the live integration test, not assumed away.
+         Fixed with an explicit `::BIGINT` cast on the aggregate, documented inline.
+      2. The integration test itself (`should_aggregate_entity_and_byte_counts_per_principal`)
+         hardcoded literal principal names (`"avocat-7"`, `"avocat-9"`) instead of suffixing them
+         per run. `audit_entries` is append-only and never cleaned up between runs by design, so
+         re-running the test accumulated rows under the same principal across invocations
+         (surfaced as `entity_count`: expected 2, got 4, after two runs) — a test-independence
+         violation, not a store bug. Fixed by suffixing every principal with a fresh UUID per
+         run, and relaxed the `principal: None` assertions to `>=` since that bucket has no
+         per-run key to isolate on.
 
 ### Task 6 — Verification and documentation
 
-- [ ] **Step 1.** CHANGELOG; spec §10 Phase 13 marked shipped.
+- [x] **Step 1.** CHANGELOG; spec §10 Phase 13 marked shipped.
+      <!-- CHANGELOG.md: added entries for Task 4 (presigned uploads) and Task 5
+           (GET /v1/usage) under [Unreleased], matching the style of the Task 1-3 entries
+           already present. Spec `2026-08-01-hacienda-platform-parity-and-scale-design.md`:
+           §10 Phasing table row for Phase 13 now reads "— **done**"; §11 Open Risks'
+           usage/Decision 3 risk struck through with a "Resolved in Phase 13 Task 5" note
+           summarizing the actual finding (entity/byte count derivable, document count is
+           not). -->
 
 ---
 
