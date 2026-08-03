@@ -1,0 +1,32 @@
+[package]
+name = "hacienda-rag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vector-store contract and retrieval IR for hacienda RAG, recovered from xberg's MIT-licensed xberg-rag crate (removed pre-1.0; see git history at 77e2fd3d71^)"
+
+[features]
+# Postgres `pgvector` store backend (Phase 12). Off by default so consumers
+# that only need the in-memory backend don't pull sqlx — mirrors
+# `hacienda-core`'s own `postgres` feature (see `hacienda-core/Cargo.toml`).
+postgres = ["dep:sqlx", "dep:pgvector", "dep:uuid", "dep:chrono"]
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+xberg = { workspace = true }
+
+# Postgres backend (Phase 12). Gated behind the `postgres` feature.
+sqlx = { workspace = true, optional = true }
+# pgvector's `sqlx` feature registers `pgvector::Vector` as a sqlx-encodable
+# Postgres `vector` column type. Not a workspace dependency yet (this is its
+# first consumer in the workspace).
+pgvector = { version = "0.4", features = ["sqlx"], optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }

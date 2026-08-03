@@ -6,11 +6,15 @@
 //! where the extension-to-Caller mapping lives, and they carry a safety comment.
 
 pub mod audit_review;
+pub mod auth;
 pub mod documents;
 pub mod info;
 pub mod jobs;
 pub mod openapi;
 pub mod pii;
+pub mod presets;
+pub mod rag;
+pub mod versions;
 
 use axum::http::request::Parts;
 use hacienda_core::auth::{AuthContext, AuthExtension, Caller};

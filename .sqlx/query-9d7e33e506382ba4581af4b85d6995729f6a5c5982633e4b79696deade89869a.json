@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) as total,\n                COUNT(*) FILTER (WHERE status = 'pending') as pending,\n                COUNT(*) FILTER (WHERE status = 'in_review') as in_review,\n                COUNT(*) FILTER (WHERE status = 'approved') as approved,\n                COUNT(*) FILTER (WHERE status = 'rejected') as rejected,\n                COUNT(*) FILTER (WHERE status = 'modified') as modified\n            FROM review_items\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "in_review",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "approved",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "rejected",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "modified",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "9d7e33e506382ba4581af4b85d6995729f6a5c5982633e4b79696deade89869a"
+}

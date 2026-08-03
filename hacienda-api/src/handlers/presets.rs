@@ -1,0 +1,82 @@
+//! Handlers for `/v1/presets/*`.
+//!
+//! Thin CRUD over `PresetStore` (`hacienda_core::store::postgres::presets`) — presets
+//! are inert config, not part of the audit-bearing pipeline, so there is no facade
+//! logic here beyond capability enforcement (handled by the route table, not this
+//! module). All four routes require `documents:process` and are 400
+//! (`ApiError::invalid_request`) when no store is configured (`ApiState::preset_store`
+//! is `None`), mirroring `handlers/rag.rs`'s `require_store` pattern exactly. Unlike
+//! `RagStore`, `PresetStore` has no in-memory implementation — Postgres is its only
+//! backend — so this opt-in is the only way to disable the routes at runtime.
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use uuid::Uuid;
+
+use crate::{
+    dto::{CreatePresetRequest, PresetListResponse, PresetResponse},
+    error::ApiError,
+    extract::Json as SafeJson,
+    state::ApiState,
+};
+
+/// Returns the configured store, or a client-safe error if presets are disabled.
+fn require_store(
+    state: &ApiState,
+) -> Result<&std::sync::Arc<dyn hacienda_core::store::postgres::presets::PresetStore>, ApiError> {
+    state
+        .preset_store
+        .as_ref()
+        .ok_or_else(|| ApiError::invalid_request("Presets are not enabled on this server."))
+}
+
+/// `POST /v1/presets` — create a preset.
+pub async fn create_preset(
+    State(state): State<ApiState>,
+    SafeJson(body): SafeJson<CreatePresetRequest>,
+) -> Result<(StatusCode, Json<PresetResponse>), ApiError> {
+    let store = require_store(&state)?;
+    let preset = store
+        .create(&body.name, body.config)
+        .await
+        .map_err(ApiError::from)?;
+    Ok((StatusCode::CREATED, Json(PresetResponse::from(preset))))
+}
+
+/// `GET /v1/presets` — list all presets.
+pub async fn list_presets(
+    State(state): State<ApiState>,
+) -> Result<Json<PresetListResponse>, ApiError> {
+    let store = require_store(&state)?;
+    let presets = store.list().await.map_err(ApiError::from)?;
+    Ok(Json(PresetListResponse {
+        presets: presets.into_iter().map(PresetResponse::from).collect(),
+    }))
+}
+
+/// `GET /v1/presets/{id}` — fetch one preset by id.
+pub async fn get_preset(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PresetResponse>, ApiError> {
+    let store = require_store(&state)?;
+    let preset = store
+        .get(id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(Json(PresetResponse::from(preset)))
+}
+
+/// `DELETE /v1/presets/{id}`.
+pub async fn delete_preset(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let store = require_store(&state)?;
+    store.delete(id).await.map_err(ApiError::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}

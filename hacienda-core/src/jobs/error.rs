@@ -28,3 +28,12 @@ pub enum JobError {
     #[error("job store internal error: {0}")]
     Internal(String),
 }
+
+/// Lets Postgres backend code use `?` directly on `sqlx::Error`. Gated behind the
+/// `postgres` feature so non-Postgres consumers never pull in `sqlx` for this impl.
+#[cfg(feature = "postgres")]
+impl From<sqlx::Error> for JobError {
+    fn from(e: sqlx::Error) -> Self {
+        JobError::Internal(e.to_string())
+    }
+}

@@ -35,6 +35,13 @@ pub struct DocumentInput {
     pub mime_type: String,
     /// Document bytes encoded as standard base64.
     pub content_base64: String,
+    /// Optional client-supplied document identity, enabling versioning
+    /// (`GET /v1/documents/{id}/versions`, `GET /v1/documents/{id}`, `/diff`). Mirrors
+    /// xberg-sdks' documented `document_id` field (`CHANGELOG.md` `[0.3.0]`). Omit to
+    /// process without recording a version — requires `ApiState::version_store` to be
+    /// configured when present, or the request is rejected with 400.
+    #[serde(default)]
+    pub document_id: Option<uuid::Uuid>,
 }
 
 impl DocumentInput {
@@ -89,6 +96,18 @@ pub struct ReviewDecideRequest {
     pub decision: String, // "approve", "reject", "modify"
     pub reviewer: String,
     pub comment: String,
+}
+
+/// Body for `POST /v1/auth/keys`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueKeyRequest {
+    /// The owning principal for the new key (a service name or user id).
+    pub owner: String,
+    /// Capability names in wire form, e.g. `"documents:process"`. Parsed via
+    /// `Capability::from_str`; an unrecognised name is a 400, never a key issued
+    /// with fewer capabilities than requested.
+    pub capabilities: Vec<String>,
 }
 
 // ── Response DTOs ─────────────────────────────────────────────────────────────
@@ -167,6 +186,12 @@ pub struct DocumentResult {
     /// Detected PII categories and positions. Span text is never included here —
     /// `POST /v1/documents` does not support `include_text`.
     pub entities: Vec<EntityDto>,
+    /// Echoes the request's `document_id` when versioning was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<uuid::Uuid>,
+    /// The server-assigned 1-based version sequence, present alongside `document_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_sequence: Option<i64>,
 }
 
 /// Response from `POST /v1/documents`.
@@ -219,6 +244,46 @@ impl From<hacienda_core::jobs::Job> for JobResponse {
             error: job.error,
         }
     }
+}
+
+/// Query parameters for `GET /v1/jobs`.
+#[derive(Debug, Deserialize)]
+pub struct JobListQuery {
+    /// Filter to jobs in this status. Omit to list all statuses.
+    #[serde(default)]
+    pub status: Option<hacienda_core::jobs::JobStatus>,
+    /// Maximum jobs to return. Defaults to 50, capped at 200.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Number of matching jobs to skip before the returned page. Defaults to 0.
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
+
+/// Response from `GET /v1/jobs`.
+///
+/// `total` is the count of jobs matching `status` (and visible to the caller) before
+/// `limit`/`offset` are applied, so a client can tell whether more pages remain.
+#[derive(Debug, Serialize)]
+pub struct JobListResponse {
+    pub jobs: Vec<JobResponse>,
+    pub total: usize,
+}
+
+/// Response from `GET /v1/jobs/{id}/result`.
+///
+/// Deliberately distinct from [`JobResponse`]: a polling loop that only needs to know
+/// whether a job is done should not pay to deserialize a potentially large `result`
+/// payload on every poll. This endpoint is for the caller that already knows the job is
+/// (or might be) finished and wants the payload; `GET /v1/jobs/{id}` remains the
+/// lightweight status-only poll.
+#[derive(Debug, Serialize)]
+pub struct JobResultResponse {
+    pub status: hacienda_core::jobs::JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Audit entry DTO for wire serialization.
@@ -345,6 +410,31 @@ pub struct ReviewDecideResponse {
     pub audit_chain_tip: Option<String>,
 }
 
+/// Response from `POST /v1/auth/keys`.
+///
+/// `raw_key` appears here exactly once, on issuance. It is never stored (only its
+/// Argon2id hash and BLAKE3 lookup digest are), never logged, and never returned by
+/// any other endpoint — a caller that loses it must revoke and re-issue.
+#[derive(Debug, Serialize)]
+pub struct IssueKeyResponse {
+    pub id: uuid::Uuid,
+    /// The plaintext key. Shown once; do not log this response.
+    pub raw_key: String,
+    pub owner: String,
+    pub capabilities: Vec<String>,
+    pub created_at: String,
+}
+
+/// Response from `GET /v1/auth/config`.
+///
+/// Reports only what is genuinely available today: whether auth is enforced and the
+/// resolver type declared in configuration. Never key material, never issued tokens.
+#[derive(Debug, Serialize)]
+pub struct AuthConfigResponse {
+    pub enabled: bool,
+    pub resolver: String,
+}
+
 /// Response from `GET /v1/pii/config`.
 ///
 /// An explicit allowlist of fields rather than a derived `Serialize` on `PipelineConfig`.
@@ -383,4 +473,157 @@ pub struct InfoResponse {
     pub name: &'static str,
     pub version: &'static str,
     pub description: &'static str,
+}
+
+// ── RAG (`/v1/rag/*`) ───────────────────────────────────────────────────────
+
+/// Body for `POST /v1/rag/collections/{name}/documents`.
+///
+/// Thin wrapper over `hacienda_rag`'s own IR types (`DocumentRecord`, `ChunkRecord`)
+/// rather than a duplicate field-for-field DTO — those types are already
+/// `Serialize`/`Deserialize` and wire-shaped, and hacienda-api adds no
+/// transformation on top of them (unlike `DocumentInput`, which must base64-decode
+/// and construct an `ExtractInput`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsertDocumentRequest {
+    pub document: hacienda_rag::DocumentRecord,
+    #[serde(default)]
+    pub chunks: Vec<hacienda_rag::ChunkRecord>,
+}
+
+/// Response from `POST /v1/rag/collections/{name}/documents`.
+#[derive(Debug, Serialize)]
+pub struct UpsertDocumentResponse {
+    pub document_id: hacienda_rag::DocumentId,
+}
+
+// ── Presets (`/v1/presets/*`) ────────────────────────────────────────────────
+
+/// Body for `POST /v1/presets`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePresetRequest {
+    pub name: String,
+    pub config: serde_json::Value,
+}
+
+/// Wire shape for a preset, shared by create/get/list responses.
+#[derive(Debug, Serialize)]
+pub struct PresetResponse {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub config: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<hacienda_core::store::postgres::presets::Preset> for PresetResponse {
+    fn from(preset: hacienda_core::store::postgres::presets::Preset) -> Self {
+        Self {
+            id: preset.id,
+            name: preset.name,
+            config: preset.config,
+            created_at: preset.created_at,
+        }
+    }
+}
+
+/// Response from `GET /v1/presets`.
+#[derive(Debug, Serialize)]
+pub struct PresetListResponse {
+    pub presets: Vec<PresetResponse>,
+}
+
+// ── Document versions (`/v1/documents/{id}/versions`, `/{id}`, `/diff*`) ──────
+
+/// One version's summary within `GET /v1/documents/{id}/versions`.
+///
+/// Deliberately excludes `content`/`entities` — those are the payload of
+/// `GET /v1/documents/{id}` (latest version), not a bulk listing. A document with many
+/// versions should not force a client to download every redacted body just to see
+/// how many versions exist and when they were created.
+#[derive(Debug, Serialize)]
+pub struct DocumentVersionSummaryDto {
+    pub version_sequence: i64,
+    pub content_hash: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<hacienda_core::store::postgres::versions::DocumentVersion> for DocumentVersionSummaryDto {
+    fn from(v: hacienda_core::store::postgres::versions::DocumentVersion) -> Self {
+        Self {
+            version_sequence: v.version_sequence,
+            content_hash: v.content_hash,
+            created_at: v.created_at,
+        }
+    }
+}
+
+/// Response from `GET /v1/documents/{id}/versions`. Newest first, matching
+/// `DocumentVersionStore::list_versions`'s documented ordering.
+#[derive(Debug, Serialize)]
+pub struct DocumentVersionListResponse {
+    pub document_id: uuid::Uuid,
+    pub versions: Vec<DocumentVersionSummaryDto>,
+}
+
+/// Response from `GET /v1/documents/{id}` — the latest version's full envelope,
+/// extraction result inline (per §4.3 of the platform-parity spec).
+#[derive(Debug, Serialize)]
+pub struct DocumentEnvelopeResponse {
+    pub document_id: uuid::Uuid,
+    pub version_sequence: i64,
+    pub content: String,
+    pub entities: Vec<EntityDto>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Query parameters for `GET /v1/documents/{id}/diff`.
+#[derive(Debug, Deserialize)]
+pub struct DocumentDiffQuery {
+    pub from: i64,
+    pub to: i64,
+}
+
+/// A single line in a line-based diff between two versions' redacted content.
+///
+/// Deserialize is needed alongside Serialize: the async diff fallback round-trips
+/// this through `JobStore`'s `result_json` (`GET /v1/documents/{id}/diff/{diff_job_id}`
+/// parses it back out), not just serializes it once for the response body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffLineDto {
+    /// `"equal"`, `"insert"`, or `"delete"`.
+    pub op: String,
+    pub text: String,
+}
+
+/// Response from `GET /v1/documents/{id}/diff` when computed synchronously (the
+/// common case — most diffs are small, per §4.3).
+#[derive(Debug, Serialize)]
+pub struct DocumentDiffResponse {
+    pub document_id: uuid::Uuid,
+    pub from: i64,
+    pub to: i64,
+    pub lines: Vec<DiffLineDto>,
+}
+
+/// Response from `GET /v1/documents/{id}/diff` when the 2-second synchronous budget
+/// is exceeded (`202 Accepted`), and from `GET /v1/documents/{id}/diff/{diff_job_id}`
+/// while that job is still running.
+#[derive(Debug, Serialize)]
+pub struct DiffJobAcceptedResponse {
+    pub diff_job_id: String,
+}
+
+/// Response from `GET /v1/documents/{id}/diff/{diff_job_id}`, polling an async diff.
+///
+/// Always `200` while the job exists, mirroring `GET /v1/jobs/{id}/result`: `lines` is
+/// present only once `succeeded`, `error` only once `failed`.
+#[derive(Debug, Serialize)]
+pub struct DiffJobResultResponse {
+    pub status: hacienda_core::jobs::JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<DiffLineDto>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

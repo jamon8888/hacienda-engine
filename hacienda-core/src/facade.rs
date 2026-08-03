@@ -311,12 +311,13 @@ impl HaciendaFacade {
         capabilities: Vec<Capability>,
     ) -> Result<(crate::auth::keys::ApiKeyPair, crate::auth::keys::ApiKey), HaciendaError> {
         caller.require(Capability::AuthManage)?;
-        let store = self
-            .api_key_store
-            .as_ref()
-            .ok_or_else(|| crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into()))?;
+        let store = self.api_key_store.as_ref().ok_or_else(|| {
+            crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
+        })?;
         let pair = crate::auth::keys::generate_key()?;
-        let key = store.create(&pair.key_hash, owner, capabilities).await?;
+        let key = store
+            .create(&pair.key_hash, &pair.lookup_hash, owner, capabilities)
+            .await?;
         Ok((pair, key))
     }
 
@@ -335,23 +336,30 @@ impl HaciendaFacade {
         key_id: uuid::Uuid,
     ) -> Result<(), HaciendaError> {
         caller.require(Capability::AuthManage)?;
-        let store = self
-            .api_key_store
-            .as_ref()
-            .ok_or_else(|| crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into()))?;
+        let store = self.api_key_store.as_ref().ok_or_else(|| {
+            crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
+        })?;
         store.revoke(key_id).await?;
         Ok(())
     }
 
     /// Resolve a bearer token to its capability set.
     ///
-    /// This is used by the auth middleware. The token is hashed and looked up
-    /// in the API key store. Returns `None` if the token is not found, revoked,
-    /// or malformed. The raw token is never stored — only its Argon2id hash.
+    /// This is used by the auth middleware. The presented token is first looked up by
+    /// its deterministic lookup digest (Argon2id's salted hash cannot serve as a lookup
+    /// key — see the `auth::keys` module docs), then the match is confirmed with a full
+    /// Argon2id [`verify_key`](crate::auth::keys::verify_key) check against the stored
+    /// hash before any capability is granted. Returns `None` if the token is not found,
+    /// fails verification, is revoked, or is malformed. The raw token is never stored —
+    /// only its hashes.
     pub async fn resolve_token(&self, bearer_token: &str) -> Option<CapabilitySet> {
         let store = self.api_key_store.as_ref()?;
-        let key = store.get_by_hash(bearer_token).await.ok()??;
+        let lookup_hash = crate::auth::keys::lookup_key(bearer_token);
+        let key = store.get_by_lookup_hash(&lookup_hash).await.ok()??;
         if key.revoked_at.is_some() {
+            return None;
+        }
+        if !crate::auth::keys::verify_key(bearer_token, &key.key_hash).ok()? {
             return None;
         }
         serde_json::from_value(key.capabilities).ok()
@@ -1079,6 +1087,8 @@ mod tests {
     use super::*;
     use crate::audit::store::AuditStore;
     use crate::audit::{AuditEntry, AuditEntryInput, AuditError, FileAuditStore, NodeId};
+    use crate::auth::authn::TokenResolver as _;
+    use crate::auth::InMemoryApiKeyStore;
     use crate::glossary::GlossaryConfig;
     use crate::pii::PipelineConfig;
     use crate::redaction::{
@@ -1707,14 +1717,14 @@ mod tests {
 
         // First run: submit an item and decide it.
         {
-let store = Arc::new(FileReviewStore::open(&log).expect("open store for first run"));
-        let facade = HaciendaFacade::with_stores(
-            config.clone(),
-            None,
-            Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
-            None,
-        )
-        .unwrap();
+            let store = Arc::new(FileReviewStore::open(&log).expect("open store for first run"));
+            let facade = HaciendaFacade::with_stores(
+                config.clone(),
+                None,
+                Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
+                None,
+            )
+            .unwrap();
 
             let queue = facade
                 .review_queue()
@@ -1804,7 +1814,8 @@ let store = Arc::new(FileReviewStore::open(&log).expect("open store for first ru
 
         let store = Arc::new(InMemoryReviewStore::new());
         let facade =
-            HaciendaFacade::with_stores(config, None, Some(store as Arc<dyn ReviewStore>), None).unwrap();
+            HaciendaFacade::with_stores(config, None, Some(store as Arc<dyn ReviewStore>), None)
+                .unwrap();
 
         let queue = facade.review_queue().expect(
             "passing a review store must build a queue; dropping it silently loses every decision",
@@ -1865,7 +1876,7 @@ let store = Arc::new(FileReviewStore::open(&log).expect("open store for first ru
     async fn should_fail_the_batch_when_the_audit_store_fails() {
         let failing_store = Arc::new(FailingAuditStore);
         let facade = HaciendaFacade::with_stores(
-            config.clone(),
+            HaciendaConfig::default().with_pii(pii_config()),
             Some(Arc::clone(&failing_store) as Arc<dyn AuditStore>),
             None,
             None,
@@ -2420,6 +2431,129 @@ let store = Arc::new(FileReviewStore::open(&log).expect("open store for first ru
         assert!(report.is_none());
     }
 
+    // ── Phase 11 Task 2: issue_key_with_auth / revoke_key_with_auth ─────────────
+    //
+    // `issue_key_with_auth` and `revoke_key_with_auth` previously had no coverage at
+    // all. These tests exercise them end to end against an `InMemoryApiKeyStore`,
+    // including the capability guard and the round trip through
+    // `authn::ApiKeyTokenResolver` — the resolver the Axum auth middleware actually
+    // calls (`authn::TokenResolver`, distinct from the capability-set-only
+    // `auth::TokenResolver`).
+
+    fn facade_with_key_store() -> (HaciendaFacade, Arc<InMemoryApiKeyStore>) {
+        let store = Arc::new(InMemoryApiKeyStore::new());
+        let facade = HaciendaFacade::with_stores(
+            HaciendaConfig::default(),
+            None,
+            None,
+            Some(Arc::clone(&store) as Arc<dyn ApiKeyStore>),
+        )
+        .unwrap();
+        (facade, store)
+    }
+
+    #[tokio::test]
+    async fn should_reject_issue_key_without_auth_manage_capability() {
+        let (facade, _store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .issue_key_with_auth(caller, "owner-1", vec![Capability::DocumentsProcess])
+            .await;
+
+        assert!(matches!(result, Err(HaciendaError::Authz(_))));
+    }
+
+    #[tokio::test]
+    async fn should_reject_revoke_key_without_auth_manage_capability() {
+        let (facade, _store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .revoke_key_with_auth(caller, uuid::Uuid::new_v4())
+            .await;
+
+        assert!(matches!(result, Err(HaciendaError::Authz(_))));
+    }
+
+    #[tokio::test]
+    async fn should_issue_a_key_and_authenticate_with_it_via_the_token_resolver() {
+        let (facade, store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::AuthManage]);
+        let caller = Caller::Principal(&ctx);
+
+        let issued_caps = vec![Capability::DocumentsProcess, Capability::AuditRead];
+        let (pair, record) = facade
+            .issue_key_with_auth(caller, "owner-1", issued_caps.clone())
+            .await
+            .expect("issue must succeed with AuthManage");
+        assert_eq!(record.owner, "owner-1");
+        assert!(record.revoked_at.is_none());
+
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(store as Arc<dyn ApiKeyStore>);
+        let token = resolver
+            .resolve(&pair.raw_key)
+            .await
+            .expect("resolve must not error")
+            .expect("a freshly issued key must resolve");
+
+        assert_eq!(token.principal_id, "owner-1");
+        for cap in &issued_caps {
+            assert!(
+                token.capabilities.has(*cap),
+                "resolved token missing capability {cap}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn should_stop_authenticating_a_revoked_key() {
+        let (facade, store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::AuthManage]);
+        let caller = Caller::Principal(&ctx);
+
+        let (pair, record) = facade
+            .issue_key_with_auth(caller, "owner-1", vec![Capability::DocumentsProcess])
+            .await
+            .expect("issue must succeed");
+
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(
+            Arc::clone(&store) as Arc<dyn ApiKeyStore>
+        );
+        assert!(
+            resolver.resolve(&pair.raw_key).await.unwrap().is_some(),
+            "key must authenticate before revocation"
+        );
+
+        facade
+            .revoke_key_with_auth(caller, record.id)
+            .await
+            .expect("revoke must succeed with AuthManage");
+
+        let resolved_after_revoke = resolver
+            .resolve(&pair.raw_key)
+            .await
+            .expect("resolve must not error even for a revoked key");
+        assert!(
+            resolved_after_revoke.is_none(),
+            "a revoked key must not authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_resolver_rejects_a_key_that_was_never_issued() {
+        let store = Arc::new(InMemoryApiKeyStore::new());
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(store as Arc<dyn ApiKeyStore>);
+
+        let resolved = resolver
+            .resolve("hcd_live_not-a-real-key")
+            .await
+            .expect("resolve must not error");
+        assert!(resolved.is_none());
+    }
+
     // ── Concurrency spike (Task 4, Step 1 — closes #30) ─────────────────────────
     //
     // Throwaway proof-of-compile, not part of `process_batch_with_auth`. Every
@@ -2514,22 +2648,22 @@ let store = Arc::new(FileReviewStore::open(&log).expect("open store for first ru
     /// the same way `facade_with_model_entity` does above — there is no public
     /// constructor that accepts both a caller-supplied detector and a non-default
     /// `concurrency`, and there does not need to be one just for this test.
-fn facade_with_pipeline(
-    pipeline: PiiPipeline,
-    audit_store: Option<Arc<dyn AuditStore>>,
-) -> HaciendaFacade {
-    let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
-    HaciendaFacade {
-        config,
-        pii_pipeline: Some(Arc::new(pipeline)),
-        compliance: None,
-        audit_store,
-        review_queue: None,
-        glossary: None,
-        pseudonymiser: None,
-        api_key_store: None,
+    fn facade_with_pipeline(
+        pipeline: PiiPipeline,
+        audit_store: Option<Arc<dyn AuditStore>>,
+    ) -> HaciendaFacade {
+        let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
+        HaciendaFacade {
+            config,
+            pii_pipeline: Some(Arc::new(pipeline)),
+            compliance: None,
+            audit_store,
+            review_queue: None,
+            glossary: None,
+            pseudonymiser: None,
+            api_key_store: None,
+        }
     }
-}
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn should_return_pii_results_in_input_order_under_concurrency() {

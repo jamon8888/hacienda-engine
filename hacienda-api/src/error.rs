@@ -257,6 +257,80 @@ impl From<hacienda_core::review::ReviewError> for ApiError {
             }
             ReviewError::Io { .. } => ApiError::internal(),
             ReviewError::Json(_) => ApiError::internal(),
+            ReviewError::Internal(_) => ApiError::internal(),
+        }
+    }
+}
+
+/// Convert a [`hacienda_core::store::postgres::presets::PresetError`] into an [`ApiError`].
+///
+/// `NotFound` is the only client-triggerable variant (naming an absent preset id) — 404.
+/// `Database` is host-shaped (connection loss, constraint violation) — 500, logged on the
+/// host side only, since `sqlx::Error`'s `Display` can include table/column names that
+/// should not reach the wire.
+impl From<hacienda_core::store::postgres::presets::PresetError> for ApiError {
+    fn from(err: hacienda_core::store::postgres::presets::PresetError) -> Self {
+        use hacienda_core::store::postgres::presets::PresetError;
+        match &err {
+            PresetError::NotFound => ApiError::not_found(),
+            PresetError::Database(_) => {
+                tracing::error!(error = %err, "preset store error processing request");
+                ApiError::internal()
+            }
+        }
+    }
+}
+
+/// Convert a [`hacienda_core::store::postgres::versions::VersionError`] into an [`ApiError`].
+///
+/// `NotFound` is the only client-triggerable variant (naming an absent document id or
+/// version sequence) — 404. `Database` is host-shaped — 500, logged on the host side
+/// only, matching the `PresetError` mapping above.
+impl From<hacienda_core::store::postgres::versions::VersionError> for ApiError {
+    fn from(err: hacienda_core::store::postgres::versions::VersionError) -> Self {
+        use hacienda_core::store::postgres::versions::VersionError;
+        match &err {
+            VersionError::NotFound => ApiError::not_found(),
+            VersionError::Database(_) => {
+                tracing::error!(error = %err, "version store error processing request");
+                ApiError::internal()
+            }
+        }
+    }
+}
+
+/// Convert a [`hacienda_rag::RagError`] into an [`ApiError`].
+///
+/// `CollectionNotFound` is the only variant a caller can trigger by naming an
+/// absent collection — 404. Every validation-shaped variant (bad query, filter,
+/// embedding dimension/count mismatch) is a client-supplied-body fault — 400, and
+/// the message is safe to forward verbatim: `RagError`'s `Display` never includes
+/// document/chunk content, only field names, counts, and dimensions (see
+/// `crates/hacienda-rag/src/error.rs`). `CollectionAlreadyExists`,
+/// `UnsupportedMode`, `Core`, and `Backend` are host/backend-shaped — 500, logged
+/// on the host side only, matching every other internal-error mapping in this file.
+impl From<hacienda_rag::RagError> for ApiError {
+    fn from(err: hacienda_rag::RagError) -> Self {
+        use hacienda_rag::RagError;
+        match &err {
+            RagError::CollectionNotFound(_) => ApiError::not_found(),
+            RagError::EmbeddingDimMismatch { .. }
+            | RagError::EmbeddingCountMismatch { .. }
+            | RagError::FilterUnknownField { .. }
+            | RagError::FilterTypeMismatch { .. }
+            | RagError::FilterComplexityExceeded { .. }
+            | RagError::InvalidQuery(_) => ApiError::invalid_request(err.to_string()),
+            RagError::CollectionAlreadyExists(_)
+            | RagError::UnsupportedMode { .. }
+            | RagError::Core(_)
+            | RagError::Backend(_) => {
+                tracing::error!(error = %err, "rag store error processing request");
+                ApiError::internal()
+            }
+            _ => {
+                tracing::error!(error = %err, "unhandled rag store error variant");
+                ApiError::internal()
+            }
         }
     }
 }

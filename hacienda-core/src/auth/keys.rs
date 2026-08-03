@@ -3,6 +3,17 @@
 //! Keys are high-entropy random tokens (`rand`-generated, ≥256 bits) prefixed for
 //! identification (`hcd_live_<base62>`). The raw key is never stored — only its
 //! Argon2id hash. Verification uses constant-time comparison via `argon2::verify_raw`.
+//!
+//! Argon2id embeds a fresh random salt in every hash it produces, so hashing the same
+//! raw key twice yields two different strings. That is the whole point of Argon2id as a
+//! *storage* hash — it defends the database if it leaks — but it also means a stored
+//! `key_hash` can never be recomputed from a presented key and used as a lookup key.
+//! `lookup_key` fills that gap with a separate, deterministic BLAKE3 digest, stored
+//! alongside `key_hash` purely so [`ApiKeyStore::get_by_lookup_hash`] has something to
+//! index on. `key_hash` still does all the actual verification work
+//! ([`verify_key`]); `lookup_hash` never gates access on its own.
+//!
+//! [`ApiKeyStore::get_by_lookup_hash`]: crate::auth::ApiKeyStore::get_by_lookup_hash
 
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -28,13 +39,17 @@ pub enum ApiKeyError {
     InvalidFormat,
 }
 
-/// A generated API key pair: the raw key (shown once) and its Argon2id hash (stored).
+/// A generated API key pair: the raw key (shown once) and its stored hashes.
 #[derive(Clone)]
 pub struct ApiKeyPair {
     /// The raw key, shown to the user exactly once. Format: `hcd_live_<base62>`.
     pub raw_key: String,
-    /// The Argon2id hash of the raw key, stored in the database.
+    /// The Argon2id hash of the raw key, stored in the database. Used for verification
+    /// only — see the module docs for why it cannot also serve as a lookup key.
     pub key_hash: String,
+    /// The deterministic BLAKE3 digest of the raw key, stored in the database and
+    /// indexed for lookup by [`ApiKeyStore::get_by_lookup_hash`](crate::auth::ApiKeyStore::get_by_lookup_hash).
+    pub lookup_hash: String,
 }
 
 /// Generate a new API key and its hash.
@@ -59,8 +74,13 @@ pub fn generate_key() -> Result<ApiKeyPair, ApiKeyError> {
 
     let raw_key = format!("hcd_live_{}", encoded);
     let key_hash = hash_key(&raw_key)?;
+    let lookup_hash = lookup_key(&raw_key);
 
-    Ok(ApiKeyPair { raw_key, key_hash })
+    Ok(ApiKeyPair {
+        raw_key,
+        key_hash,
+        lookup_hash,
+    })
 }
 
 /// Hash an API key using Argon2id.
@@ -75,6 +95,18 @@ fn hash_key(key: &str) -> Result<String, ApiKeyError> {
         .hash_password(key.as_bytes(), &salt)
         .map(|hash| hash.to_string())
         .map_err(|e| ApiKeyError::Hashing(e.to_string()))
+}
+
+/// Compute the deterministic lookup digest for a raw API key.
+///
+/// This is a plain BLAKE3 hash, hex-encoded — the same construction
+/// `InMemoryTokenStore::secret_key` in `auth::authn` uses for static tokens. It is
+/// deliberately *not* a slow password hash: unlike `key_hash`, which exists to defend a
+/// leaked database, `lookup_hash` exists only so a presented key can be looked up by
+/// value. Verification of possession still goes through [`verify_key`] against
+/// `key_hash`; `lookup_hash` never gates access on its own.
+pub fn lookup_key(raw_key: &str) -> String {
+    blake3::hash(raw_key.as_bytes()).to_hex().to_string()
 }
 
 /// Verify a candidate key against a stored Argon2id hash.
@@ -123,8 +155,13 @@ impl ApiKeyConfig {
 
         let raw_key = format!("{}{}", self.prefix, encoded);
         let key_hash = hash_key(&raw_key)?;
+        let lookup_hash = lookup_key(&raw_key);
 
-        Ok(ApiKeyPair { raw_key, key_hash })
+        Ok(ApiKeyPair {
+            raw_key,
+            key_hash,
+            lookup_hash,
+        })
     }
 }
 
@@ -134,6 +171,7 @@ impl fmt::Debug for ApiKeyPair {
         f.debug_struct("ApiKeyPair")
             .field("raw_key", &"<redacted>")
             .field("key_hash", &self.key_hash)
+            .field("lookup_hash", &self.lookup_hash)
             .finish()
     }
 }
@@ -142,7 +180,11 @@ impl fmt::Debug for ApiKeyPair {
 #[derive(Debug, Clone)]
 pub struct ApiKey {
     pub id: uuid::Uuid,
+    /// Argon2id hash, used for verification (defense-in-depth if the database leaks).
     pub key_hash: String,
+    /// Deterministic BLAKE3 digest, indexed for lookup by presented key. See the module
+    /// docs for why this exists separately from `key_hash`.
+    pub lookup_hash: String,
     pub owner: String,
     pub capabilities: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -205,5 +247,37 @@ mod tests {
         let pair = generate_key().unwrap();
         // hcd_live_ (9) + 32 base62 chars = 41 chars
         assert_eq!(pair.raw_key.len(), 41);
+    }
+
+    #[test]
+    fn lookup_key_is_deterministic_for_the_same_input() {
+        let pair = generate_key().unwrap();
+        assert_eq!(lookup_key(&pair.raw_key), lookup_key(&pair.raw_key));
+        assert_eq!(pair.lookup_hash, lookup_key(&pair.raw_key));
+    }
+
+    #[test]
+    fn lookup_key_differs_for_different_inputs() {
+        let k1 = generate_key().unwrap();
+        let k2 = generate_key().unwrap();
+        assert_ne!(lookup_key(&k1.raw_key), lookup_key(&k2.raw_key));
+        assert_ne!(k1.lookup_hash, k2.lookup_hash);
+    }
+
+    /// Unlike `key_hash`, which is salted and differs across calls, `lookup_hash` must be
+    /// stable so the store can index on it.
+    #[test]
+    fn generate_key_produces_a_stable_lookup_hash_but_a_varying_key_hash() {
+        let pair = generate_key().unwrap();
+        let rehash = hash_key(&pair.raw_key).unwrap();
+        assert_ne!(
+            pair.key_hash, rehash,
+            "Argon2id must salt differently on each call"
+        );
+        assert_eq!(
+            pair.lookup_hash,
+            lookup_key(&pair.raw_key),
+            "lookup_hash must be reproducible from the raw key"
+        );
     }
 }
