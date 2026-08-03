@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
+import { mockNerModelAssets, skipOnboarding } from "./fixtures";
 
 /**
  * Hosts the app is permitted to contact. Everything else is a compliance
@@ -38,13 +39,11 @@ test.describe("network egress", () => {
   }) => {
     const external = recordExternalRequests(page);
 
-    await page.addInitScript(() => {
-      localStorage.setItem("xberg-studio-visited", "true");
-    });
+    await skipOnboarding(page);
     await page.goto("/");
     // Not `.drop-zone`: it renders while the worker is still compiling the
     // WASM module, and the input is disabled until the handshake lands.
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
     const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
@@ -58,6 +57,10 @@ test.describe("network egress", () => {
   });
 
   test("ships no reference to a third-party CDN", async ({ page }) => {
+    // Onboarding is not skipped here (this test only checks the initial DOM), but the
+    // main thread's preloadAssets() still fires and would otherwise reach the real
+    // model host in the background — mock it for the same reason every other test does.
+    await mockNerModelAssets(page);
     await page.goto("/");
 
     const remoteReferences = await page.evaluate(() =>
@@ -84,11 +87,9 @@ test.describe("PII redaction export contract", () => {
   test("redacted output ships no IBAN in the markdown or the entity/KG export", async ({
     page,
   }) => {
-    await page.addInitScript(() => {
-      localStorage.setItem("xberg-studio-visited", "true");
-    });
+    await skipOnboarding(page);
     await page.goto("/");
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
     await page.click("button.config-toggle");
     await page.check(
