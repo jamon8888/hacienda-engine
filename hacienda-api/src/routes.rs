@@ -14,7 +14,7 @@
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use hacienda_core::{
@@ -23,7 +23,7 @@ use hacienda_core::{
 };
 
 use crate::{
-    handlers::{audit_review, documents, info, jobs, openapi, pii},
+    handlers::{audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, versions},
     state::ApiState,
 };
 
@@ -85,9 +85,19 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         make_router: || post(documents::process_documents_async),
     },
     RouteSpec {
+        path: "/v1/jobs",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(jobs::list_jobs),
+    },
+    RouteSpec {
         path: "/v1/jobs/{id}",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(jobs::get_job),
+    },
+    RouteSpec {
+        path: "/v1/jobs/{id}/result",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(jobs::get_job_result),
     },
     RouteSpec {
         path: "/v1/pii/scan",
@@ -144,6 +154,90 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/glossary",
         access: Access::Capability(Capability::AuditRead),
         make_router: || get(audit_review::get_glossary),
+    },
+    // ── auth:manage endpoints (Phase 11 Task 3) ─────────────────────────────────
+    RouteSpec {
+        path: "/v1/auth/keys",
+        access: Access::Capability(Capability::AuthManage),
+        make_router: || post(auth::issue_key),
+    },
+    RouteSpec {
+        path: "/v1/auth/keys/{id}",
+        access: Access::Capability(Capability::AuthManage),
+        make_router: || delete(auth::revoke_key),
+    },
+    RouteSpec {
+        path: "/v1/auth/config",
+        access: Access::Capability(Capability::AuthManage),
+        make_router: || get(auth::get_auth_config),
+    },
+    // ── documents:process endpoints, RAG (Phase 12 Task 3) ───────────────────────
+    // Reuses `DocumentsProcess`, not a dedicated capability: RAG collections carry
+    // the same class of redacted document content `/v1/documents` already gates
+    // under it — see Task 3 Step 2's verification note in the plan file. Only the
+    // routes `RagStore` can actually serve today are registered; list-
+    // collections/list-documents/reindex/migrate-embeddings need trait extensions
+    // first (same note).
+    RouteSpec {
+        path: "/v1/rag/collections",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(rag::create_collection),
+    },
+    RouteSpec {
+        path: "/v1/rag/collections/{name}",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(rag::get_collection).delete(rag::delete_collection),
+    },
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/documents",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(rag::upsert_document),
+    },
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/retrieve",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(rag::retrieve),
+    },
+    // ── documents:process endpoints, presets (Phase 13 Task 2) ──────────────────
+    // Presets are inert config (a saved pipeline configuration), not part of the
+    // audit-bearing pipeline itself — gated under the same DocumentsProcess
+    // capability as every other config/inert-data route, matching RAG's rationale
+    // above. `PresetStore` has no in-memory backend (Postgres-only), so these
+    // routes 400 when `ApiState::preset_store` is `None`.
+    RouteSpec {
+        path: "/v1/presets",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(presets::list_presets).post(presets::create_preset),
+    },
+    RouteSpec {
+        path: "/v1/presets/{id}",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(presets::get_preset).delete(presets::delete_preset),
+    },
+    // ── documents:process endpoints, document versions/diff (Phase 13 Task 3) ──
+    // `DocumentVersionStore` has no in-memory backend (Postgres-only), same opt-in
+    // shape as presets/RAG — these routes 400 when `ApiState::version_store` is
+    // `None`. Gated under the same `DocumentsProcess` capability as `/v1/documents`
+    // itself, since a version's content is exactly that route's redacted output.
+    RouteSpec {
+        path: "/v1/documents/{id}/versions",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(versions::list_document_versions),
+    },
+    RouteSpec {
+        path: "/v1/documents/{id}",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(versions::get_document),
+    },
+    RouteSpec {
+        path: "/v1/documents/{id}/diff",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(versions::diff_document),
+    },
+    RouteSpec {
+        path: "/v1/documents/{id}/diff/{diff_job_id}",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(versions::get_diff_job),
     },
 ];
 
@@ -244,6 +338,13 @@ pub(crate) mod tests {
         let auth = AuthState::new(Arc::new(DevTokenResolver));
         let jobs = InMemoryJobStore::new().into_arc();
         ApiState::new(facade, jobs, auth, ApiLimits::default())
+    }
+
+    /// A state with auth disabled and an in-memory RAG store attached.
+    fn state_with_rag() -> ApiState {
+        use hacienda_rag::{InMemoryVectorStore, RagStore};
+        let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
+        test_state_no_auth().with_rag_store(store)
     }
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
@@ -610,5 +711,606 @@ pub(crate) mod tests {
                 spec.path
             );
         }
+    }
+
+    /// Full lifecycle: create a collection, upsert a document, retrieve it back,
+    /// then delete the collection. Exercises every RAG route end to end against the
+    /// real router (not the store directly), so a routing/DTO wiring bug fails here.
+    #[tokio::test]
+    async fn rag_collection_document_retrieve_and_delete_round_trip() {
+        let app = build_router(state_with_rag());
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"c1","embedding_dim":3,"distance_metric":"cosine","index_method":"flat"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status().as_u16(), 201);
+
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections/c1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status().as_u16(), 200);
+
+        let upsert_body = r#"{
+            "document": {"external_id": "doc-1", "full_text": "hello world"},
+            "chunks": [
+                {"ordinal": 0, "content": "hello world", "embedding": [1.0, 0.0, 0.0]}
+            ]
+        }"#;
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upsert.status().as_u16(), 201);
+
+        let retrieve_body =
+            r#"{"mode":"vector","query_vector":[1.0,0.0,0.0],"top_k":5,"include_content":true}"#;
+        let retrieve = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/retrieve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(retrieve_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retrieve.status().as_u16(), 200);
+        let retrieve_bytes = axum::body::to_bytes(retrieve.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let retrieve_json: serde_json::Value = serde_json::from_slice(&retrieve_bytes).unwrap();
+        assert_eq!(
+            retrieve_json["chunks"][0]["content"].as_str().unwrap(),
+            "hello world"
+        );
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/rag/collections/c1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status().as_u16(), 204);
+
+        let get_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections/c1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_after_delete.status().as_u16(), 404);
+    }
+
+    /// `GET` on a collection that was never created must be 404, not 500 or 200
+    /// with a null body.
+    #[tokio::test]
+    async fn rag_get_missing_collection_is_404() {
+        let app = build_router(state_with_rag());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 404);
+    }
+
+    /// Without a configured RAG store, every `/v1/rag/*` route must fail cleanly
+    /// (400), not panic or 500 — RAG is opt-in per `ApiState::rag_store`.
+    #[tokio::test]
+    async fn rag_routes_without_a_configured_store_yield_400() {
+        let app = build_router(test_state_no_auth());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"c1","embedding_dim":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// RAG routes require `documents:process`, same as every other content-bearing
+    /// route — a token without it must be 403.
+    #[tokio::test]
+    async fn rag_routes_require_documents_process_capability() {
+        // Auth is disabled in `state_with_rag`; build with auth enabled instead so
+        // a missing capability is actually observable.
+        let facade = std::sync::Arc::new(
+            hacienda_core::HaciendaFacade::new(hacienda_core::HaciendaConfig::default()).unwrap(),
+        );
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let store: Arc<dyn hacienda_rag::RagStore> =
+            Arc::new(hacienda_rag::InMemoryVectorStore::new("test"));
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(store);
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections")
+                    .header("authorization", "Bearer hcd_pii:reveal_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"c1","embedding_dim":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// Without a configured preset store, every `/v1/presets*` route must fail
+    /// cleanly (400), not panic or 500 — presets are opt-in per
+    /// `ApiState::preset_store`, same as RAG.
+    #[tokio::test]
+    async fn presets_routes_without_a_configured_store_yield_400() {
+        let app = build_router(test_state_no_auth());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/presets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// Preset routes require `documents:process`, same as every other
+    /// content-bearing route — a token without it must be 403. Auth enforcement
+    /// happens before the handler runs, so this does not need a live store.
+    #[tokio::test]
+    async fn presets_routes_require_documents_process_capability() {
+        let facade = std::sync::Arc::new(
+            hacienda_core::HaciendaFacade::new(hacienda_core::HaciendaConfig::default()).unwrap(),
+        );
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/presets")
+                    .header("authorization", "Bearer hcd_pii:reveal_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// Full lifecycle against a real `PostgresPresetStore`: create, list, get,
+    /// delete, then confirm the deleted preset 404s. Requires a live Postgres —
+    /// ignored by default, same convention as
+    /// `hacienda-core`'s `store::postgres::presets` tests. Run with:
+    ///   DATABASE_URL=postgres://... cargo test -p hacienda-api --lib \
+    ///     routes::tests::preset_route_create_list_get_delete_round_trip -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn preset_route_create_list_get_delete_round_trip() {
+        use hacienda_core::store::postgres::connection::{connect, migrate};
+        use hacienda_core::store::postgres::presets::PostgresPresetStore;
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+        let store: Arc<dyn hacienda_core::store::postgres::presets::PresetStore> =
+            Arc::new(PostgresPresetStore::new(pool));
+
+        let app = build_router(test_state_no_auth().with_preset_store(store));
+
+        let name = format!("preset-{}", uuid::Uuid::new_v4());
+        let create_body = format!(r#"{{"name":"{name}","config":{{"mode":"mask"}}}}"#);
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/presets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(create_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status().as_u16(), 201);
+        let create_bytes = axum::body::to_bytes(create.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&create_bytes).unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["name"].as_str().unwrap(), name);
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/presets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status().as_u16(), 200);
+        let list_bytes = axum::body::to_bytes(list.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        assert!(list_json["presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"].as_str().unwrap() == id));
+
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/presets/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status().as_u16(), 200);
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/presets/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status().as_u16(), 204);
+
+        let get_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/presets/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_after_delete.status().as_u16(), 404);
+    }
+
+    /// Without a configured version store, every `/v1/documents/{id}/versions`,
+    /// `/{id}`, and `/diff` route must fail cleanly (400), not panic or 500 —
+    /// versioning is opt-in per `ApiState::version_store`, same as presets/RAG.
+    ///
+    /// `/v1/documents/{id}/diff/{diff_job_id}` is deliberately excluded here: it
+    /// polls `JobStore` directly (mirroring `GET /v1/jobs/{id}`) and never touches
+    /// `version_store`, so its behaviour with no store configured is "404, no such
+    /// job" rather than "400, versioning disabled" — covered separately below.
+    ///
+    /// `/v1/documents/{id}` and `/v1/documents` are distinct route table entries
+    /// (static `async` segment vs. `{id}` param — matchit disambiguates them), so
+    /// this only exercises the version-specific paths, not the base upload route.
+    #[tokio::test]
+    async fn document_version_routes_without_a_configured_store_yield_400() {
+        let app = build_router(test_state_no_auth());
+        let id = uuid::Uuid::new_v4();
+
+        for path in [
+            format!("/v1/documents/{id}/versions"),
+            format!("/v1/documents/{id}"),
+            format!("/v1/documents/{id}/diff?from=1&to=2"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(path.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                400,
+                "path {path} without a configured version store must 400, got {}",
+                response.status()
+            );
+        }
+    }
+
+    /// The diff-job polling route does not depend on `version_store` — it looks up
+    /// `JobStore` directly, same as `/v1/jobs/{id}`. With no store configured and no
+    /// such job, the correct outcome is 404 (unknown job id), not 400.
+    #[tokio::test]
+    async fn document_version_diff_job_poll_without_a_store_is_404_not_400() {
+        let app = build_router(test_state_no_auth());
+        let id = uuid::Uuid::new_v4();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/documents/{id}/diff/some-job-id"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 404);
+    }
+
+    /// Document version routes require `documents:process`, same as every other
+    /// content-bearing route — a token without it must be 403. Auth enforcement
+    /// happens before the handler runs, so this does not need a live store.
+    #[tokio::test]
+    async fn document_version_routes_require_documents_process_capability() {
+        let facade = std::sync::Arc::new(
+            hacienda_core::HaciendaFacade::new(hacienda_core::HaciendaConfig::default()).unwrap(),
+        );
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        let app = build_router(state);
+        let id = uuid::Uuid::new_v4();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/documents/{id}/versions"))
+                    .header("authorization", "Bearer hcd_pii:reveal_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// Full lifecycle against a real `PostgresDocumentVersionStore`: submit two
+    /// versions of the same `document_id` via `POST /v1/documents`, list them,
+    /// fetch the latest full envelope, diff the two versions, and poll the diff
+    /// job id even though the diff completed synchronously (still `200` with
+    /// results, not a dead end). Requires a live Postgres — ignored by default,
+    /// same convention as the preset lifecycle test above. Run with:
+    ///   DATABASE_URL=postgres://... cargo test -p hacienda-api --lib \
+    ///     routes::tests::document_version_create_list_get_diff_round_trip -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn document_version_create_list_get_diff_round_trip() {
+        use data_encoding::BASE64;
+        use hacienda_core::store::postgres::connection::{connect, migrate};
+        use hacienda_core::store::postgres::versions::DocumentVersionStore;
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+        let store: Arc<dyn DocumentVersionStore> = Arc::new(
+            hacienda_core::store::postgres::versions::PostgresDocumentVersionStore::new(pool),
+        );
+
+        // `process_documents` zips `result.extraction.results` with `result.pii` — with
+        // no PII pipeline configured, `result.pii` is empty and the zip yields zero
+        // documents regardless of what was submitted (a separate, pre-existing bug in
+        // `documents.rs`, not something this test should paper over). Enable PII with
+        // the default `Mask` mode (needs no key resolver) so the response is populated
+        // and this test actually exercises the versioning path.
+        let pii_config = hacienda_core::pii::PipelineConfig::default();
+        let config = hacienda_core::HaciendaConfig::default().with_pii(pii_config);
+        let facade = Arc::new(hacienda_core::HaciendaFacade::new(config).unwrap());
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
+        let state =
+            ApiState::new(facade, jobs, auth, ApiLimits::default()).with_version_store(store);
+
+        let app = build_router(state);
+        let document_id = uuid::Uuid::new_v4();
+
+        let submit = |text: &str| {
+            let body_content = BASE64.encode(text.as_bytes());
+            format!(
+                r#"{{"documents":[{{"filename":"a.txt","mime_type":"text/plain","content_base64":"{body_content}","document_id":"{document_id}"}}]}}"#
+            )
+        };
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(submit("line one\nline two")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status().as_u16(), 200);
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(submit("line one\nline three")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status().as_u16(), 200);
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/documents/{document_id}/versions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status().as_u16(), 200);
+        let list_bytes = axum::body::to_bytes(list.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        let versions = list_json["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0]["version_sequence"].as_i64().unwrap(), 2);
+        assert_eq!(versions[1]["version_sequence"].as_i64().unwrap(), 1);
+
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/documents/{document_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status().as_u16(), 200);
+        let get_bytes = axum::body::to_bytes(get.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_bytes).unwrap();
+        assert_eq!(get_json["version_sequence"].as_i64().unwrap(), 2);
+        assert!(get_json["content"].as_str().unwrap().contains("line three"));
+
+        let diff = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/documents/{document_id}/diff?from=1&to=2"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Small documents finish inside the 2-second budget: expect a synchronous 200.
+        assert_eq!(diff.status().as_u16(), 200);
+        let diff_bytes = axum::body::to_bytes(diff.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let diff_json: serde_json::Value = serde_json::from_slice(&diff_bytes).unwrap();
+        let lines = diff_json["lines"].as_array().unwrap();
+        assert!(lines
+            .iter()
+            .any(|l| l["op"] == "equal" && l["text"] == "line one"));
+        assert!(lines
+            .iter()
+            .any(|l| l["op"] == "delete" && l["text"] == "line two"));
+        assert!(lines
+            .iter()
+            .any(|l| l["op"] == "insert" && l["text"] == "line three"));
+    }
+
+    /// Diffing an out-of-range version sequence must be 404, not 500 or a panic.
+    #[tokio::test]
+    #[ignore]
+    async fn document_version_diff_with_missing_version_is_404() {
+        use hacienda_core::store::postgres::connection::{connect, migrate};
+        use hacienda_core::store::postgres::versions::DocumentVersionStore;
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+        let store: Arc<dyn DocumentVersionStore> = Arc::new(
+            hacienda_core::store::postgres::versions::PostgresDocumentVersionStore::new(pool),
+        );
+
+        let app = build_router(test_state_no_auth().with_version_store(store));
+        let document_id = uuid::Uuid::new_v4();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/documents/{document_id}/diff?from=1&to=2"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 404);
     }
 }

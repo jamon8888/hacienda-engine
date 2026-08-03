@@ -43,6 +43,197 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HaciendaFacade::compliance_report_with_auth` — new facade accessors
   exposing existing core logic (previously write-only from the route layer).
 - `ApiError::from` now maps `ReviewError` variants to appropriate HTTP codes.
+
+- **API key generation and Argon2id hashing (Phase 11 Task 1).** `hacienda_core::auth::keys`
+  gains `generate_key()` and `ApiKeyPair { raw_key, key_hash }`. Keys are 256 bits of
+  `OsRng` entropy, base62-encoded and prefixed (`hcd_live_<43 chars>`) for identification
+  in logs and support requests without revealing the key itself. Only `key_hash` — an
+  Argon2id hash with a unique per-key salt — is ever persisted; `raw_key` is returned once
+  at issuance and cannot be recovered from the hash. `ApiKeyPair`'s hand-written `Debug`
+  redacts `raw_key` so an accidental `{:?}` in a log line cannot leak it. `verify_key`
+  compares in constant time via `argon2::verify_password`, avoiding a timing oracle on
+  key validity. Design Decision D7 considered reusing `aes-siv` — already a workspace
+  dependency for pseudonymisation — but rejected it: AEAD ciphers are fast and
+  deterministic by design, so using one for key hashing would make stolen hashes
+  brute-forceable at AEAD speed rather than Argon2id speed. `argon2 = "0.5"` was added
+  as a new dependency instead, per OWASP guidance to hash credentials slowly.
+  **Breaking (unreleased):** `Capability` gains a new variant, `AuthManage`. `Capability`
+  is not `#[non_exhaustive]`, so an embedder who matches on it exhaustively (no wildcard
+  arm) fails to compile until they handle the new variant — flagged per this crate's own
+  semver policy regardless of the fact that nothing has shipped yet.
+
+- **Deterministic API key lookup and `ApiKeyTokenResolver` (Phase 11 Task 2).**
+  Argon2id salts every hash it produces, so `key_hash` alone could never be used to
+  look up a stored `ApiKey` from a freshly presented key — only to verify one already
+  found by some other means. `hacienda_core::auth::keys` gains `lookup_key(raw_key)`,
+  a deterministic BLAKE3 digest computed once at issuance and again on every
+  presented key; `ApiKeyPair` and `ApiKey` both gain a `lookup_hash` field alongside
+  `key_hash`. **Breaking (unreleased):** `ApiKeyStore::create` now takes both
+  `key_hash` and `lookup_hash`, and `get_by_hash` is renamed `get_by_lookup_hash` to
+  describe what it actually searches on; `api_keys.lookup_hash TEXT NOT NULL UNIQUE`
+  was added to the (unshipped) `0001_init.sql` migration. `key_hash` still does all
+  verification via `verify_key` — `lookup_hash` never gates access on its own.
+  `hacienda_core::auth::authn::ApiKeyTokenResolver` is a new `authn::TokenResolver`
+  (the trait the Axum auth middleware actually calls) that authenticates a bearer
+  token against any `Arc<dyn ApiKeyStore>`: look up by `lookup_key(token)`, reject if
+  revoked, confirm with `verify_key` against the stored `key_hash`, then map
+  `owner`/`capabilities` onto a `Token`. It takes the store directly via
+  `ApiKeyTokenResolver::new` rather than through `TokenResolverType`/
+  `build_token_resolver`, since it needs a live store handle that `AuthConfig`'s
+  serializable fields cannot carry — the same reasoning `HaciendaFacade::with_stores`
+  already uses for its optional stores.
+
+- **API key management routes (Phase 11 Task 3).** 3 new endpoints, all guarded by
+  `auth:manage`: `POST /v1/auth/keys` (issue — the raw key appears exactly once, in
+  this response, and is never logged or echoed elsewhere), `DELETE /v1/auth/keys/{id}`
+  (revoke, 204, idempotent so a missing/already-revoked id cannot be probed for),
+  and `GET /v1/auth/config` (reports `enabled`/`resolver`, never key material).
+  `hacienda-api/src/handlers/auth.rs` follows the existing `handlers/audit_review.rs`
+  pattern: extract the `Caller` from request extensions, let
+  `HaciendaFacade::{issue_key_with_auth, revoke_key_with_auth}` enforce the
+  capability, map errors through `ApiError::from`. `get_auth_config` has no facade
+  method behind it (there is nothing to call — the fields come straight off
+  `HaciendaFacade::config()`), so it asserts `auth:manage` itself rather than relying
+  solely on the route table's declared requirement, matching every other handler's
+  defense-in-depth. **Known limitation, tested rather than hidden:**
+  `resolver` reports `HaciendaConfig::auth.resolver` — the *declared* configuration —
+  not necessarily the resolver instance actually wired into the live `AuthState`,
+  which exposes no introspection getter for which resolver it holds. An embedder who
+  wires a store-backed `ApiKeyTokenResolver` in directly (the documented reason that
+  type bypasses `TokenResolverType`) makes this field stale; the test
+  `auth_config_resolver_reflects_declared_config_not_the_live_resolver` demonstrates
+  this rather than papering over it. Fixing it needs an `AuthState` introspection API
+  in `hacienda-core`, out of scope here.
+
+- **`GET /v1/jobs`, `GET /v1/jobs/{id}/result` (Phase 13 Task 1).** Both guarded by
+  `documents:process`, same as the existing `GET /v1/jobs/{id}`. `list_jobs` filters by
+  `?status=`, is tenant-scoped (a principal sees only jobs it owns; a trusted in-process
+  caller sees all), and paginates in-process over `JobStore::list`'s full result via
+  `?limit=`/`?offset=` (default 50, capped at 200) — the store's `list` signature has no
+  pagination parameters, so `total` reflects the caller-visible count before slicing rather
+  than a store-level count. `get_job_result` is deliberately distinct from `get_job`: a
+  polling loop that only needs job status should not pay to deserialize a potentially large
+  `result` on every poll. It always returns 200 regardless of job state (`result`/`error`
+  simply absent until the job settles) and applies the same 404-not-403 ownership check as
+  `get_job` to avoid turning job ids into a membership oracle (OWASP A01). New
+  `extract::Query<T>` extractor mirrors the existing `Json<T>` pattern so a malformed query
+  string fails into the `{"error": {...}}` envelope rather than axum's default plain-text
+  rejection.
+
+- **`GET/POST /v1/presets`, `GET/DELETE /v1/presets/{id}` (Phase 13 Task 2).** Thin CRUD
+  routes over Phase 9's `PresetStore`, guarded by `documents:process` — presets are inert
+  config, not part of the audit-bearing pipeline. Opt-in via a new
+  `ApiState::with_preset_store(Arc<dyn PresetStore>)` builder (mirrors `with_rag_store`
+  exactly); routes 400 (`ApiError::invalid_request`) when no store is attached. Unlike
+  `RagStore`, `PresetStore` has no in-memory backend (Postgres-only), so `hacienda-api` now
+  depends on `hacienda-core`'s `postgres` feature unconditionally rather than gating it
+  behind a second opt-in Cargo feature — the runtime opt-out already exists via the
+  `Option<Arc<dyn PresetStore>>` field.
+- Fixed a latent Phase 9 defect this uncovered: `hacienda-core`'s `postgres` feature could
+  not compile in any environment (including CI's `--all-features`/`--each-feature` jobs)
+  because sqlx's compile-time `query!` macros need either a live `DATABASE_URL` or a
+  committed offline query cache, and neither existed. Generated `.sqlx/` (44 cached queries)
+  via `cargo sqlx prepare --workspace -- --features postgres -p hacienda-core` against a
+  real Postgres instance; sqlx picks this up automatically with no `DATABASE_URL` or
+  `SQLX_OFFLINE` needed. This was never previously exercised by CI on this branch, so it is
+  a fix to a pre-existing gap, not a regression.
+
+- **`GET /v1/documents/{id}/versions`, `GET /v1/documents/{id}`, `GET /v1/documents/{id}/diff`,
+  `GET /v1/documents/{id}/diff/{diff_job_id}` (Phase 13 Task 3).** Document versioning and
+  diffing over Phase 9's `DocumentVersionStore`, guarded by `documents:process` since a
+  version's content is exactly `/v1/documents`' own redacted output. `POST /v1/documents`
+  gains an optional `document_id` field on each input; supplying it stores that document's
+  redacted output as a new version (idempotent on identical content, sequence increments on
+  change) and echoes `document_id`/`version_sequence` back in the response. Opt-in via a new
+  `ApiState::with_version_store(Arc<dyn DocumentVersionStore>)` builder (mirrors
+  `with_preset_store`); routes 400 when no store is attached, except
+  `/diff/{diff_job_id}`, which polls `JobStore` directly (same shape as
+  `GET /v1/jobs/{id}/result`) and is unaffected by whether versioning is configured.
+  `/diff` is synchronous by default under a 2-second wall-clock budget; past the budget it
+  hands the still-running computation off to a detached task and returns `202 Accepted` with
+  a `diff_job_id` to poll, reusing `JobStore` rather than a second async mechanism. The diff
+  itself is a hand-written LCS-based line diff (`str::lines()`) — no diff crate exists in the
+  workspace, and a byte-level diff is sufficient per the platform-parity spec.
+- **Breaking schema change (unreleased): `document_versions` gains `content`/`entities_json`
+  columns; `DocumentVersionStore::create_version` gains matching parameters.** The table
+  previously stored only `content_hash`, making `GET /v1/documents/{id}` and `/diff`
+  impossible to implement — there was nowhere to read the actual redacted text back from.
+  Migration `0002_document_version_content.sql` adds `content TEXT NOT NULL` and
+  `entities_json JSONB NOT NULL`; both are the pipeline's redacted output, never raw input,
+  consistent with Decision 1 (content-addressing by hash of redacted output, not raw input).
+- Known gap surfaced (not fixed here, out of scope for this task): `POST /v1/documents`
+  silently returns `{"documents":[]}` for any batch when no PII pipeline is configured
+  (`result.pii` is empty, so zipping it with `result.extraction.results` yields zero
+  entries regardless of extraction success). Pre-existing before this task's changes.
+
+- **`hacienda-rag` crate: `RagStore` trait, backend-agnostic IR, in-memory backend (Phase 12
+  Task 1).** New workspace member `crates/hacienda-rag`, recovered near-verbatim from xberg's
+  own MIT-licensed `xberg-rag` crate (removed from that workspace pre-1.0 in commit
+  `77e2fd3d711ecf6a673ff1ceb0a17abc9a2c4e64`). `RagStore` (renamed from `VectorStore` to read
+  alongside `AuditStore`/`ReviewStore`/`JobStore`) is an object-safe, `async_trait` vector-store
+  contract, backed by a neutral type/filter/query intermediate representation
+  (`CollectionSpec`, `DocumentRecord`, `ChunkRecord`, `Filter`, `RetrieveQuery`,
+  `RetrieveMode::{Vector, FullText, Hybrid, Sparse, LateInteraction}`) and a `Capabilities`
+  negotiation type so callers can discover what a given backend actually supports.
+  `InMemoryVectorStore` is the pure-Rust reference backend. The upstream crate's process-global
+  registry was dropped in favor of constructor injection (no global state, matching this
+  codebase's own convention); registry-only error variants (`AlreadyRegistered`,
+  `NotRegistered`, `InvalidName`) were dropped from `RagError` accordingly. 49 tests,
+  `cargo clippy -p hacienda-rag --all-targets -- -D warnings` clean.
+- **`PgVectorStore`: durable `pgvector`-backed `RagStore` (Phase 12 Task 2).** New
+  `crates/hacienda-rag/src/backends/pgvector.rs`, gated behind a new `postgres` Cargo feature
+  (off by default, matching `hacienda-core`'s own `postgres` gating) so in-memory-only
+  consumers never pull `sqlx`/`pgvector`/`uuid`/`chrono`. Migrations
+  (`crates/hacienda-rag/migrations/0001_init.sql`) create `rag_collections`, `rag_documents`,
+  `rag_chunks` and are run explicitly, never implicitly from a constructor. Distance metrics
+  map to pgvector operators (`Cosine` → `<=>`, `L2` → `<->`, `InnerProduct` → `<#>`);
+  `IndexMethod::Diskann` has no pgvector equivalent and is substituted with HNSW at
+  index-build time with a `tracing::warn!`, and `capabilities()` never advertises `Diskann` so
+  callers can discover the substitution in advance rather than being surprised by it.
+  `RetrieveMode::Hybrid` fuses vector and full-text candidates via reciprocal rank fusion
+  (k=60); `Sparse`/`LateInteraction` are stored as JSONB pass-through, not yet scoreable by
+  this backend. Uses `sqlx::query`/`QueryBuilder` (not the `query!`/`query_as!` compile-time
+  macros) because `retrieve`/`delete_by_filter` compile arbitrary `Filter` trees to SQL at
+  runtime and because the macros need a live, already-migrated `DATABASE_URL` at `cargo build`
+  time. **Known deployment issue:** `hacienda-rag`'s and `hacienda-core`'s migrations are both
+  numbered `0001`; sqlx's `_sqlx_migrations` table is one-per-physical-database, so running
+  both crates' migrations against the same database produces `VersionMismatch(1)` — a
+  production deployment must point `hacienda-rag` at a distinct database from
+  `hacienda-core`'s stores until this is resolved. 57 non-live tests plus 19 `#[ignore]`d
+  live tests (`DATABASE_URL`-gated, run against a real `pgvector/pgvector` Postgres instance,
+  mirroring `hacienda-core`'s own live-Postgres test convention rather than testcontainers).
+  Route existence for `/v1/rag/*` was confirmed against the real, CI-synced `xberg-sdks`
+  OpenAPI spec (Phase 12 Task 3 Step 1); answer-synthesis (streaming LLM answers over
+  retrieved chunks) was explicitly scoped out of Phase 12 (Task 3 Step 4) — no upstream route
+  exists to build a contract against.
+
+- **`/v1/rag/*` HTTP routes (Phase 12 Task 3).** `POST /v1/rag/collections`,
+  `GET`/`DELETE /v1/rag/collections/{name}`, `POST /v1/rag/collections/{name}/documents`, and
+  `POST /v1/rag/collections/{name}/retrieve` — the 5 of 8 confirmed `/v1/rag/*` routes that map
+  onto an existing `RagStore` method. List-collections, list-documents, per-document reindex,
+  and migrate-embeddings (plus the RAG-specific use of the jobs-poll route) have no trait
+  primitive to serve them and are not built; adding them needs new `RagStore` methods first,
+  which is a trait-design task of its own. All 5 routes require `Capability::DocumentsProcess`
+  (no new capability variant — a RAG collection carries the same class of redacted content
+  `/v1/documents` already gates) and are 400 (`ApiError::invalid_request`) rather than 404 or
+  500 when `ApiState::rag_store` is `None`, since RAG is opt-in per deployment. Handlers call
+  `Arc<dyn RagStore>` directly with no facade wrapper (mirrors `JobStore`, already held
+  directly on `ApiState`); `retrieve` fetches the `CollectionSpec` first and calls
+  `RetrieveQuery::validate` against it before the query reaches the store. Audit-logging parity
+  with `/v1/documents` was considered and explicitly deferred: `HaciendaFacade::record_audit`
+  is keyed to entity spans from the redaction pipeline, and a RAG upsert has none to attribute
+  without inventing a fictitious `PiiOutput` or a new audit-event shape. `hacienda serve`
+  attaches an `InMemoryVectorStore` by default, the same in-memory-by-default precedent as its
+  job store; an embedder wanting durability constructs a `PgVectorStore` and passes it to
+  `ApiState::with_rag_store` instead. Writing the round-trip route test surfaced a real,
+  pre-existing bug: `PrimaryScore`'s `Vector`/`FullText`/`Sparse`/`LateInteraction` variants
+  were tuple newtypes under `#[serde(tag = "kind")]`, which `serde_json` cannot serialize
+  (internally-tagged enums require variant content to be a map, not a bare scalar) — every real
+  `retrieve` call over HTTP 500'd. Fixed by giving each variant a named `score` field; no
+  existing test had round-tripped a `RetrieveOutput` through `serde_json` before this route
+  test did.
+
+- **Real pseudonymisation.** `RedactionMode::Pseudonymize` now emits a keyed, deterministic,
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal
   values yield equal tokens across processes and runs, so a reader can follow one

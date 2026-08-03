@@ -12,8 +12,8 @@ pub mod authn;
 pub mod authz;
 pub mod keys;
 
+pub use crate::auth::keys::ApiKey;
 use async_trait::async_trait;
-use crate::auth::keys::{ApiKey, ApiKeyError};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -272,12 +272,31 @@ pub trait TokenResolver: Send + Sync {
 /// shared across tasks.
 #[async_trait]
 pub trait ApiKeyStore: Send + Sync {
-    /// Create a new API key record (stores hash only).
-    async fn create(&self, key_hash: &str, owner: &str, capabilities: Vec<Capability>)
-        -> Result<ApiKey, crate::auth::keys::ApiKeyError>;
+    /// Create a new API key record.
+    ///
+    /// `key_hash` is the Argon2id hash (verification only — see
+    /// `crate::auth::keys` module docs for why it cannot double as a lookup key).
+    /// `lookup_hash` is the deterministic BLAKE3 digest used by
+    /// [`Self::get_by_lookup_hash`] to find this record from a presented key.
+    async fn create(
+        &self,
+        key_hash: &str,
+        lookup_hash: &str,
+        owner: &str,
+        capabilities: Vec<Capability>,
+    ) -> Result<ApiKey, crate::auth::keys::ApiKeyError>;
 
-    /// Look up an API key by its hash.
-    async fn get_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError>;
+    /// Look up an API key by its deterministic lookup digest (see
+    /// [`crate::auth::keys::lookup_key`]).
+    ///
+    /// This is *not* a lookup by `key_hash` — Argon2id salts every hash it produces, so a
+    /// freshly computed `key_hash` for a presented key never matches the stored one.
+    /// Callers must still call `crate::auth::keys::verify_key` against the returned
+    /// record's `key_hash` before trusting the match.
+    async fn get_by_lookup_hash(
+        &self,
+        lookup_hash: &str,
+    ) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError>;
 
     /// Revoke an API key by ID.
     async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError>;
@@ -303,6 +322,7 @@ impl ApiKeyStore for InMemoryApiKeyStore {
     async fn create(
         &self,
         key_hash: &str,
+        lookup_hash: &str,
         owner: &str,
         capabilities: Vec<Capability>,
     ) -> Result<ApiKey, crate::auth::keys::ApiKeyError> {
@@ -311,17 +331,26 @@ impl ApiKeyStore for InMemoryApiKeyStore {
         let key = ApiKey {
             id,
             key_hash: key_hash.to_string(),
+            lookup_hash: lookup_hash.to_string(),
             owner: owner.to_string(),
             capabilities: serde_json::to_value(capabilities).unwrap(),
             created_at: now,
             revoked_at: None,
         };
-        self.keys.lock().unwrap().insert(key_hash.to_string(), key.clone());
+        // Keyed by `lookup_hash`, the deterministic digest — `key_hash` is salted and
+        // would never match a freshly hashed presented key. See the `keys` module docs.
+        self.keys
+            .lock()
+            .unwrap()
+            .insert(lookup_hash.to_string(), key.clone());
         Ok(key)
     }
 
-    async fn get_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError> {
-        Ok(self.keys.lock().unwrap().get(key_hash).cloned())
+    async fn get_by_lookup_hash(
+        &self,
+        lookup_hash: &str,
+    ) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError> {
+        Ok(self.keys.lock().unwrap().get(lookup_hash).cloned())
     }
 
     async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError> {
@@ -333,7 +362,11 @@ impl ApiKeyStore for InMemoryApiKeyStore {
     }
 
     async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError> {
-        Ok(self.keys.lock().unwrap().values()
+        Ok(self
+            .keys
+            .lock()
+            .unwrap()
+            .values()
             .filter(|k| k.owner == owner)
             .cloned()
             .collect())

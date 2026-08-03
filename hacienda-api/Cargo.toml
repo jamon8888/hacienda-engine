@@ -8,8 +8,11 @@ license.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
 data-encoding = { workspace = true }
-hacienda-core = { path = "../hacienda-core", features = ["jobs"] }
+hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres"] }
+hacienda-rag = { path = "../crates/hacienda-rag" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

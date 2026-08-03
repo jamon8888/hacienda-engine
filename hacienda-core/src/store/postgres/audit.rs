@@ -6,15 +6,15 @@
 //! Phase 1 Design Decision D3.
 
 use crate::audit::{
-    entry::{AuditEntry, AuditEntryInput},
+    entry::{AuditEntry, AuditEntryInput, EntitySource, RedactionAction},
     error::AuditError,
-    segment::verify_seal_chain,
-    segment::{SegmentSeal, GENESIS_HASH},
-    AuditStore,
+    segment::{compute_seal_hash, verify_seal_chain, SegmentSeal},
+    AuditStore, GENESIS_HASH,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use std::sync::Arc;
+use uuid::Uuid;
 
 /// Postgres-backed [`AuditStore`].
 #[derive(Clone)]
@@ -31,66 +31,60 @@ impl PostgresAuditStore {
 
 #[async_trait]
 impl AuditStore for PostgresAuditStore {
-    async fn append(
-        &self,
-        inputs: Vec<AuditEntryInput>,
-    ) -> Result<Vec<AuditEntry>, AuditError> {
+    async fn append(&self, inputs: Vec<AuditEntryInput>) -> Result<Vec<AuditEntry>, AuditError> {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
 
         // We need to get the current open segment, or create one.
         // This is done in a single transaction to maintain atomicity.
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| AuditError::Io {
-                path: "transaction".into(),
-                source: e.into(),
-            })?;
+        let mut tx = self.pool.begin().await?;
 
         // Get or create the open segment.
-        let segment_id = get_or_create_open_segment(&mut tx, &inputs[0].config_hash).await?;
+        let (segment_id, segment_config_hash) =
+            get_or_create_open_segment(&mut tx, &inputs[0].config_hash).await?;
 
         // Insert all entries in this batch.
         let mut entries = Vec::with_capacity(inputs.len());
         let mut sequence_num = get_next_sequence_num(&mut tx, segment_id).await?;
+        let mut prev_chain_hash = get_prev_chain_hash(&mut tx, segment_id, sequence_num).await?;
 
         for input in inputs {
             sequence_num += 1;
-            let entry = insert_entry(&mut tx, segment_id, sequence_num, input).await?;
+            let entry = insert_entry(
+                &mut tx,
+                segment_id,
+                sequence_num,
+                input,
+                &prev_chain_hash,
+                &segment_config_hash,
+            )
+            .await?;
+            prev_chain_hash = entry.chain_hash.clone();
             entries.push(entry);
         }
 
         // Update segment entry count.
         sqlx::query!(
             "UPDATE audit_segments SET entry_count = $1 WHERE segment_id = $2",
-            sequence_num as i64,
+            sequence_num,
             segment_id
         )
         .execute(&mut *tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "update_segment".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| AuditError::Io {
-                path: "commit".into(),
-                source: e.into(),
-            })?;
+        tx.commit().await?;
 
         Ok(entries)
     }
 
     async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
-        let rows = sqlx::query!(
+        let rows = sqlx::query_as!(
+            AuditEntryRow,
             r#"
-            SELECT id, segment_id, sequence_num, category, action, span_hash,
-                   span_length, confidence, source, pipeline_version, config_hash, principal, created_at
+            SELECT id, category, action, span_hash,
+                   span_length, confidence, source, pipeline_version, config_hash, principal,
+                   chain_hash, created_at
             FROM audit_entries
             WHERE segment_id = (
                 SELECT segment_id FROM audit_segments
@@ -102,31 +96,22 @@ impl AuditStore for PostgresAuditStore {
             "#
         )
         .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "entries".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| AuditEntry {
-                id: row.id,
-                category: row.category,
-                action: row.action.parse().unwrap_or(crate::audit::entry::RedactionAction::Mask),
-                span_hash: row.span_hash,
-                span_length: row.span_length as u32,
-                confidence: row.confidence,
-                source: row.source.parse().unwrap_or(crate::audit::entry::EntitySource::Regex),
-                pipeline_version: row.pipeline_version,
-                config_hash: row.config_hash,
-                principal: row.principal,
-                chain_hash: String::new(), // Will be computed by caller if needed
-            })
-            .collect())
+        rows.into_iter().map(row_to_entry).collect()
     }
 
     async fn tip(&self) -> Result<String, AuditError> {
+        // Mirrors the in-memory reference's `tip()` (`audit/store.rs`): the open
+        // segment's own last entry is the head whenever it has one. Each segment's
+        // entry chain restarts at genesis, so continuity across a rotation lives in
+        // the *seal* chain — only fall through to the newest seal (or genesis) when
+        // the open segment is empty or absent.
+        let open_entries = self.entries().await?;
+        if let Some(last) = open_entries.last() {
+            return Ok(last.chain_hash.clone());
+        }
+
         // Get the latest seal's sealed_tip, or genesis if no seals exist.
         let row = sqlx::query!(
             r#"
@@ -137,11 +122,7 @@ impl AuditStore for PostgresAuditStore {
             "#
         )
         .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "tip".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
         Ok(row
             .and_then(|r| r.sealed_tip)
@@ -149,42 +130,26 @@ impl AuditStore for PostgresAuditStore {
     }
 
     async fn seals(&self) -> Result<Vec<SegmentSeal>, AuditError> {
-        let rows = sqlx::query!(
+        let rows = sqlx::query_as!(
+            SealRow,
             r#"
-            SELECT segment_id, node_id, config_hash, prev_seal_hash, sealed_tip, entry_count, created_at, sealed_at
+            SELECT segment_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
+                   entry_count, created_at, sealed_at
             FROM audit_segments
             WHERE sealed_at IS NOT NULL
             ORDER BY created_at
             "#
         )
         .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "seals".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| SegmentSeal {
-                segment_id: row.segment_id.to_string(),
-                node_id: row.node_id,
-                config_hash: row.config_hash,
-                prev_seal_hash: row.prev_seal_hash,
-                sealed_tip: row.sealed_tip.unwrap_or_default(),
-                entry_count: row.entry_count as u64,
-            })
-            .collect())
+        rows.into_iter().map(row_to_seal).collect()
     }
 
     async fn verify(&self) -> Result<(), AuditError> {
         // Verify seal chain
         let seals = self.seals().await?;
-        verify_seal_chain(&seals).map_err(|e| AuditError::ChainIntegrity {
-            index: 0,
-            expected: String::new(),
-            actual: e.to_string(),
-        })?;
+        verify_seal_chain(&seals)?;
 
         // Verify each sealed segment's entries
         for seal in &seals {
@@ -201,162 +166,240 @@ impl AuditStore for PostgresAuditStore {
     }
 
     async fn rotate(&self) -> Result<SegmentSeal, AuditError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| AuditError::Io {
-                path: "transaction".into(),
-                source: e.into(),
-            })?;
+        let mut tx = self.pool.begin().await?;
 
         // Get current open segment
         let segment_row = sqlx::query!(
-            "SELECT segment_id, node_id, config_hash, entry_count FROM audit_segments WHERE sealed_at IS NULL"
+            "SELECT segment_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL"
         )
         .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "rotate_select".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
-        let entries = self.get_segment_entries(&segment_row.segment_id).await?;
-        let tip = self.compute_tip(&entries).await?;
+        let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
+        let tip = compute_tip(&entries);
+        let prev_seal_hash = get_latest_seal_hash(&mut tx).await?;
+        let sealed_at = Utc::now();
 
-        // Seal the segment
+        let seal_hash = compute_seal_hash(
+            prev_seal_hash.as_deref(),
+            &segment_row.segment_id.to_string(),
+            &segment_row.node_id,
+            &segment_row.config_hash,
+            &tip,
+            segment_row.entry_count as u64,
+            &segment_row.created_at.to_rfc3339(),
+            &sealed_at.to_rfc3339(),
+        );
+
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
-            prev_seal_hash: self.get_latest_seal_hash(&mut tx).await?,
+            prev_seal_hash,
             sealed_tip: tip.clone(),
             entry_count: segment_row.entry_count as u64,
+            opened_at: segment_row.created_at.to_rfc3339(),
+            sealed_at: sealed_at.to_rfc3339(),
+            seal_hash: seal_hash.clone(),
         };
 
-        let seal_hash = seal.compute_hash();
-
         sqlx::query!(
-            "UPDATE audit_segments SET sealed_at = now(), sealed_tip = $1 WHERE segment_id = $2",
+            "UPDATE audit_segments SET sealed_at = $1, sealed_tip = $2, seal_hash = $3 WHERE segment_id = $4",
+            sealed_at,
             tip,
-            seal.segment_id
+            seal_hash,
+            segment_row.segment_id
         )
         .execute(&mut *tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "rotate_update".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
         // Create new open segment
-        let new_segment_id = sqlx::query!(
+        sqlx::query!(
             r#"
             INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash)
             VALUES ($1, $2, $3)
-            RETURNING segment_id
             "#,
             segment_row.node_id,
             segment_row.config_hash,
             seal_hash
         )
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "rotate_insert".into(),
-            source: e.into(),
-        })?
-        .segment_id;
+        .execute(&mut *tx)
+        .await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| AuditError::Io {
-                path: "rotate_commit".into(),
-                source: e.into(),
-            })?;
+        tx.commit().await?;
 
         Ok(seal)
     }
 
     async fn close(&self) -> Result<SegmentSeal, AuditError> {
         // Similar to rotate but without creating a new segment
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| AuditError::Io {
-                path: "transaction".into(),
-                source: e.into(),
-            })?;
+        let mut tx = self.pool.begin().await?;
 
         let segment_row = sqlx::query!(
-            "SELECT segment_id, node_id, config_hash, entry_count FROM audit_segments WHERE sealed_at IS NULL"
+            "SELECT segment_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL"
         )
         .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "close_select".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
         let Some(segment_row) = segment_row else {
-            return Err(AuditError::StoreClosed {
-                operation: "close",
-            });
+            return Err(AuditError::StoreClosed { operation: "close" });
         };
 
-        let entries = self.get_segment_entries(&segment_row.segment_id).await?;
-        let tip = self.compute_tip(&entries).await?;
+        let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
+        let tip = compute_tip(&entries);
+        let prev_seal_hash = get_latest_seal_hash(&mut tx).await?;
+        let sealed_at = Utc::now();
+
+        let seal_hash = compute_seal_hash(
+            prev_seal_hash.as_deref(),
+            &segment_row.segment_id.to_string(),
+            &segment_row.node_id,
+            &segment_row.config_hash,
+            &tip,
+            segment_row.entry_count as u64,
+            &segment_row.created_at.to_rfc3339(),
+            &sealed_at.to_rfc3339(),
+        );
 
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
-            prev_seal_hash: self.get_latest_seal_hash(&mut tx).await?,
+            prev_seal_hash,
             sealed_tip: tip.clone(),
             entry_count: segment_row.entry_count as u64,
+            opened_at: segment_row.created_at.to_rfc3339(),
+            sealed_at: sealed_at.to_rfc3339(),
+            seal_hash: seal_hash.clone(),
         };
 
         sqlx::query!(
-            "UPDATE audit_segments SET sealed_at = now(), sealed_tip = $1 WHERE segment_id = $2",
+            "UPDATE audit_segments SET sealed_at = $1, sealed_tip = $2, seal_hash = $3 WHERE segment_id = $4",
+            sealed_at,
             tip,
+            seal_hash,
             segment_row.segment_id
         )
         .execute(&mut *tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "close_update".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| AuditError::Io {
-                path: "close_commit".into(),
-                source: e.into(),
-            })?;
+        tx.commit().await?;
 
         Ok(seal)
     }
 }
 
-// Helper functions
+// ── row <-> domain conversions ────────────────────────────────────────────────
 
+/// Confidence is stored as `DOUBLE PRECISION` (f64) because Postgres has no native f32,
+/// but the domain type is `f32` (matches [`AuditEntryInput::confidence`]). `as f32` is a
+/// narrowing cast; acceptable here because confidence scores are bounded in `[0, 1]` and
+/// the precision Postgres can't represent is well below what any detector reports.
+fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
+    Ok(AuditEntry {
+        id: row.id,
+        timestamp: row.created_at.to_rfc3339(),
+        category: row.category,
+        action: row
+            .action
+            .parse::<RedactionAction>()
+            .map_err(AuditError::Backend)?,
+        span_hash: row.span_hash,
+        span_length: row.span_length as u32,
+        confidence: row.confidence.map(|c| c as f32),
+        source: row
+            .source
+            .parse::<EntitySource>()
+            .map_err(AuditError::Backend)?,
+        pipeline_version: row.pipeline_version,
+        config_hash: row.config_hash,
+        principal: row.principal,
+        chain_hash: row.chain_hash,
+    })
+}
+
+fn row_to_seal(row: SealRow) -> Result<SegmentSeal, AuditError> {
+    let sealed_at = row.sealed_at.ok_or_else(|| {
+        AuditError::Backend(format!("segment {} has no sealed_at", row.segment_id))
+    })?;
+    let sealed_tip = row.sealed_tip.ok_or_else(|| {
+        AuditError::Backend(format!("segment {} has no sealed_tip", row.segment_id))
+    })?;
+    let seal_hash = row.seal_hash.ok_or_else(|| {
+        AuditError::Backend(format!("segment {} has no seal_hash", row.segment_id))
+    })?;
+
+    Ok(SegmentSeal {
+        segment_id: row.segment_id.to_string(),
+        node_id: row.node_id,
+        config_hash: row.config_hash,
+        prev_seal_hash: row.prev_seal_hash,
+        sealed_tip,
+        entry_count: row.entry_count as u64,
+        opened_at: row.created_at.to_rfc3339(),
+        sealed_at: sealed_at.to_rfc3339(),
+        seal_hash,
+    })
+}
+
+/// Compute the tip of a segment from its entries — the last entry's chain hash, or
+/// genesis if the segment is empty.
+fn compute_tip(entries: &[AuditEntry]) -> String {
+    match entries.last() {
+        Some(entry) => entry.chain_hash.clone(),
+        None => GENESIS_HASH.to_owned(),
+    }
+}
+
+// ── row shapes (sqlx::query! anonymous records, named here for reuse) ─────────
+
+struct AuditEntryRow {
+    id: String,
+    category: String,
+    action: String,
+    span_hash: String,
+    span_length: i64,
+    confidence: Option<f64>,
+    source: String,
+    pipeline_version: String,
+    config_hash: String,
+    principal: Option<String>,
+    chain_hash: String,
+    created_at: DateTime<Utc>,
+}
+
+struct SealRow {
+    segment_id: Uuid,
+    node_id: String,
+    config_hash: String,
+    prev_seal_hash: Option<String>,
+    sealed_tip: Option<String>,
+    seal_hash: Option<String>,
+    entry_count: i64,
+    created_at: DateTime<Utc>,
+    sealed_at: Option<DateTime<Utc>>,
+}
+
+// ── helper functions ────────────────────────────────────────────────────────
+
+/// Returns the currently open segment's id and *its* `config_hash` — not
+/// necessarily `config_hash`, which is only used to seed a brand-new segment.
+/// Callers must stamp the returned config hash onto every entry they insert (see
+/// [`insert_entry`]), mirroring [`crate::audit::chain::AuditChain::push`], which
+/// always stamps the chain's own config hash onto an appended input rather than
+/// trusting the caller's copy.
 async fn get_or_create_open_segment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config_hash: &str,
-) -> Result<uuid::Uuid, AuditError> {
+) -> Result<(Uuid, String), AuditError> {
     let row = sqlx::query!(
-        "SELECT segment_id FROM audit_segments WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1"
+        "SELECT segment_id, config_hash FROM audit_segments WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1"
     )
     .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| AuditError::Io {
-        path: "get_open_segment".into(),
-        source: e.into(),
-    })?;
+    .await?;
 
     if let Some(row) = row {
-        return Ok(row.segment_id);
+        return Ok((row.segment_id, row.config_hash));
     }
 
     // No open segment, create one
@@ -366,166 +409,119 @@ async fn get_or_create_open_segment(
         config_hash
     )
     .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| AuditError::Io {
-        path: "create_segment".into(),
-        source: e.into(),
-    })?;
+    .await?;
 
-    Ok(row.segment_id)
+    Ok((row.segment_id, config_hash.to_owned()))
 }
 
 async fn get_next_sequence_num(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    segment_id: uuid::Uuid,
+    segment_id: Uuid,
 ) -> Result<i64, AuditError> {
     let row = sqlx::query!(
         "SELECT COALESCE(MAX(sequence_num), 0) as max_seq FROM audit_entries WHERE segment_id = $1",
         segment_id
     )
     .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| AuditError::Io {
-        path: "max_sequence".into(),
-        source: e.into(),
-    })?;
+    .await?;
 
     Ok(row.max_seq.unwrap_or(0))
 }
 
+/// The chain hash of the entry immediately preceding `sequence_num` in `segment_id`, or
+/// [`GENESIS_HASH`] if `sequence_num` is the first position in the segment (i.e. the
+/// segment currently has no entries).
+async fn get_prev_chain_hash(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    segment_id: Uuid,
+    current_sequence_num: i64,
+) -> Result<String, AuditError> {
+    if current_sequence_num == 0 {
+        return Ok(GENESIS_HASH.to_owned());
+    }
+
+    let row = sqlx::query!(
+        "SELECT chain_hash FROM audit_entries WHERE segment_id = $1 AND sequence_num = $2",
+        segment_id,
+        current_sequence_num
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(row.chain_hash)
+}
+
 async fn insert_entry(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    segment_id: uuid::Uuid,
+    segment_id: Uuid,
     sequence_num: i64,
-    input: AuditEntryInput,
+    mut input: AuditEntryInput,
+    prev_chain_hash: &str,
+    segment_config_hash: &str,
 ) -> Result<AuditEntry, AuditError> {
-    let chain_hash = compute_chain_hash_for_insert(tx, segment_id, sequence_num, &input).await?;
+    // The segment's config hash always wins, mirroring `AuditChain::push` (which
+    // stamps `input.config_hash = self.config_hash` before minting). Trusting the
+    // caller's copy instead would let entries minted under a stale config slip into
+    // a segment whose column says otherwise, and `verify_open_entries` — which
+    // rebuilds an `AuditChain` from the *segment's* config hash — would then reject
+    // every entry in the batch as `ConfigMismatch`.
+    input.config_hash = segment_config_hash.to_owned();
+
+    // seq passed to `AuditEntry::new` is 0-based to match `AuditChain`'s convention
+    // (see `AuditChain::push`/`verify`), while `sequence_num` here is the 1-based
+    // position within the segment used for storage ordering.
+    let entry = AuditEntry::new(input, prev_chain_hash, (sequence_num - 1) as u64);
 
     sqlx::query!(
         r#"
         INSERT INTO audit_entries (id, segment_id, sequence_num, category, action, span_hash,
-                                  span_length, confidence, source, pipeline_version, config_hash, principal)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                  span_length, confidence, source, pipeline_version, config_hash,
+                                  principal, chain_hash, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         "#,
-        input.id,
+        entry.id,
         segment_id,
         sequence_num,
-        input.category,
-        input.action.to_string(),
-        input.span_hash,
-        input.span_length as i64,
-        input.confidence,
-        input.source.to_string(),
-        input.pipeline_version,
-        input.config_hash,
-        input.principal
+        entry.category,
+        entry.action.to_string(),
+        entry.span_hash,
+        entry.span_length as i64,
+        entry.confidence.map(|c| c as f64),
+        entry.source.to_string(),
+        entry.pipeline_version,
+        entry.config_hash,
+        entry.principal,
+        entry.chain_hash,
+        DateTime::parse_from_rfc3339(&entry.timestamp)
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now())
     )
     .execute(&mut **tx)
-    .await
-    .map_err(|e| AuditError::Io {
-        path: "insert_entry".into(),
-        source: e.into(),
-    })?;
+    .await?;
 
-    Ok(AuditEntry {
-        id: input.id,
-        category: input.category,
-        action: input.action,
-        span_hash: input.span_hash,
-        span_length: input.span_length,
-        confidence: input.confidence,
-        source: input.source,
-        pipeline_version: input.pipeline_version,
-        config_hash: input.config_hash,
-        principal: input.principal,
-        chain_hash,
-    })
-}
-
-async fn compute_chain_hash_for_insert(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    segment_id: uuid::Uuid,
-    sequence_num: i64,
-    input: &AuditEntryInput,
-) -> Result<String, AuditError> {
-    // Get previous entry's chain_hash
-    let prev_hash = if sequence_num == 1 {
-        crate::audit::GENESIS_HASH.to_owned()
-    } else {
-        sqlx::query!(
-            "SELECT chain_hash FROM audit_entries WHERE segment_id = $1 AND sequence_num = $2",
-            segment_id,
-            sequence_num - 1
-        )
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "prev_hash".into(),
-            source: e.into(),
-        })?
-        .chain_hash
-    };
-
-    // Compute new chain hash
-    use crate::audit::chain::AuditChain;
-    let mut chain = AuditChain::new(input.config_hash.clone());
-    // We need to replay from genesis... this is inefficient.
-    // For now, use blake3 directly matching AuditChain logic.
-    use blake3::Hasher;
-    let mut hasher = Hasher::new();
-    hasher.update(prev_hash.as_bytes());
-    hasher.update(input.id.as_bytes());
-    hasher.update(input.category.as_bytes());
-    hasher.update(input.action.to_string().as_bytes());
-    hasher.update(input.span_hash.as_bytes());
-    hasher.update(&input.span_length.to_le_bytes());
-    if let Some(c) = input.confidence {
-        hasher.update(&c.to_le_bytes());
-    }
-    hasher.update(input.source.to_string().as_bytes());
-    hasher.update(input.pipeline_version.as_bytes());
-    hasher.update(input.config_hash.as_bytes());
-    if let Some(p) = &input.principal {
-        hasher.update(p.as_bytes());
-    }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(entry)
 }
 
 impl PostgresAuditStore {
     async fn get_segment_entries(&self, segment_id: &str) -> Result<Vec<AuditEntry>, AuditError> {
-        let rows = sqlx::query!(
+        let segment_id = Uuid::parse_str(segment_id)
+            .map_err(|e| AuditError::Backend(format!("invalid segment id '{segment_id}': {e}")))?;
+
+        let rows = sqlx::query_as!(
+            AuditEntryRow,
             r#"
             SELECT id, category, action, span_hash, span_length, confidence, source,
-                   pipeline_version, config_hash, principal
+                   pipeline_version, config_hash, principal, chain_hash, created_at
             FROM audit_entries
             WHERE segment_id = $1
             ORDER BY sequence_num
             "#,
-            uuid::Uuid::parse_str(segment_id).unwrap()
+            segment_id
         )
         .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "segment_entries".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| AuditEntry {
-                id: row.id,
-                category: row.category,
-                action: row.action.parse().unwrap_or(crate::audit::entry::RedactionAction::Mask),
-                span_hash: row.span_hash,
-                span_length: row.span_length as u32,
-                confidence: row.confidence,
-                source: row.source.parse().unwrap_or(crate::audit::entry::EntitySource::Regex),
-                pipeline_version: row.pipeline_version,
-                config_hash: row.config_hash,
-                principal: row.principal,
-                chain_hash: String::new(),
-            })
-            .collect())
+        rows.into_iter().map(row_to_entry).collect()
     }
 
     async fn get_config_hash(&self) -> Result<String, AuditError> {
@@ -533,38 +529,161 @@ impl PostgresAuditStore {
             "SELECT config_hash FROM audit_segments WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1"
         )
         .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "config_hash".into(),
-            source: e.into(),
-        })?;
+        .await?;
 
         Ok(row
             .map(|r| r.config_hash)
             .unwrap_or_else(|| "default".to_string()))
     }
+}
 
-    async fn get_latest_seal_hash(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> Result<Option<String>, AuditError> {
-        let row = sqlx::query!(
-            "SELECT sealed_tip FROM audit_segments WHERE sealed_at IS NOT NULL ORDER BY sealed_at DESC LIMIT 1"
-        )
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| AuditError::Io {
-            path: "latest_seal".into(),
-            source: e.into(),
-        })?;
+/// Same as [`PostgresAuditStore::get_segment_entries`] but reads within an open
+/// transaction, so `rotate`/`close` see entries written earlier in the same transaction.
+async fn get_segment_entries_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    segment_id: Uuid,
+) -> Result<Vec<AuditEntry>, AuditError> {
+    let rows = sqlx::query_as!(
+        AuditEntryRow,
+        r#"
+        SELECT id, category, action, span_hash, span_length, confidence, source,
+               pipeline_version, config_hash, principal, chain_hash, created_at
+        FROM audit_entries
+        WHERE segment_id = $1
+        ORDER BY sequence_num
+        "#,
+        segment_id
+    )
+    .fetch_all(&mut **tx)
+    .await?;
 
-        Ok(row.and_then(|r| r.sealed_tip))
+    rows.into_iter().map(row_to_entry).collect()
+}
+
+async fn get_latest_seal_hash(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<Option<String>, AuditError> {
+    let row = sqlx::query!(
+        "SELECT seal_hash FROM audit_segments WHERE sealed_at IS NOT NULL ORDER BY sealed_at DESC LIMIT 1"
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(row.and_then(|r| r.seal_hash))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::postgres::connection::{connect, migrate};
+    use std::sync::Arc;
+
+    // These tests are ignored by default because they require a running Postgres
+    // (see `connection.rs`'s `connect_and_migrate` test for the pattern). Run with:
+    //   DATABASE_URL=postgres://... cargo test -p hacienda-core --features postgres \
+    //     --lib store::postgres::audit -- --ignored --test-threads=1
+    //
+    // `--test-threads=1` matters here: every store shares one Postgres instance, and
+    // `AuditStore::entries`/`tip` read whatever segment is currently open store-wide
+    // (mirroring the single-writer-node production design, not a test bug) — running
+    // audit tests concurrently with each other would race on that shared open segment.
+
+    async fn test_store() -> PostgresAuditStore {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+        PostgresAuditStore::new(pool)
     }
 
-    async fn compute_tip(&self, entries: &[AuditEntry]) -> Result<String, AuditError> {
-        if entries.is_empty() {
-            return Ok(crate::audit::GENESIS_HASH.to_owned());
+    fn test_input(id: &str, config_hash: &str) -> AuditEntryInput {
+        AuditEntryInput {
+            id: id.to_owned(),
+            category: "email".to_owned(),
+            action: RedactionAction::Mask,
+            span_hash: blake3::hash(id.as_bytes()).to_hex().to_string(),
+            span_length: 12,
+            confidence: Some(0.95),
+            source: EntitySource::Regex,
+            pipeline_version: "test-pipeline-1".to_owned(),
+            config_hash: config_hash.to_owned(),
+            principal: None,
         }
-        Ok(entries.last().unwrap().chain_hash.clone())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_append_entries_and_read_them_back_from_a_fresh_store() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+        let inputs = ids
+            .iter()
+            .map(|id| test_input(id, &config_hash))
+            .collect::<Vec<_>>();
+
+        let appended = store.append(inputs).await.expect("append failed");
+        assert_eq!(appended.len(), 3);
+
+        // Simulate a fresh reader by opening a brand-new pool/store rather than reusing
+        // the writer's connection, proving the entries were durably committed.
+        let database_url = std::env::var("DATABASE_URL").unwrap();
+        let fresh_pool = connect(&database_url).await.expect("connect failed");
+        let fresh_store = PostgresAuditStore::new(fresh_pool);
+
+        let entries = fresh_store.entries().await.expect("entries failed");
+        for id in &ids {
+            assert!(
+                entries.iter().any(|e| &e.id == id),
+                "entry {id} missing from fresh read"
+            );
+        }
+
+        fresh_store.verify().await.expect("chain must verify");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_not_corrupt_the_chain_when_appends_race() {
+        let store = Arc::new(test_store().await);
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+
+        // Bootstrap an open segment up front so every racing append targets the same
+        // segment rather than each trying to create one.
+        store
+            .append(vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
+            .await
+            .expect("bootstrap append failed");
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let store = Arc::clone(&store);
+            let config_hash = config_hash.clone();
+            handles.push(tokio::spawn(async move {
+                let id = Uuid::new_v4().to_string();
+                store.append(vec![test_input(&id, &config_hash)]).await
+            }));
+        }
+
+        let mut succeeded = 0;
+        for handle in handles {
+            if handle.await.expect("task panicked").is_ok() {
+                succeeded += 1;
+            }
+        }
+
+        // Under READ COMMITTED, some racing appends may lose the unique
+        // (segment_id, sequence_num) race and return an error rather than corrupt
+        // data — see the `insert_entry` sequencing. At least the bootstrap append
+        // and (typically) most of the racers succeed; the invariant under test is
+        // that whatever did commit forms a valid, verifiable chain.
+        assert!(
+            succeeded > 0,
+            "expected at least one racing append to succeed"
+        );
+        store
+            .verify()
+            .await
+            .expect("chain must verify after concurrent appends");
     }
 }
