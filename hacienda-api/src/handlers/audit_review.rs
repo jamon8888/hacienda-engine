@@ -74,7 +74,7 @@ pub async fn get_review(
 
     let queue = state
         .facade
-        .review_queue_with_auth(caller)
+        .review_queue_read_with_auth(caller)
         .map_err(ApiError::from)?;
 
     let items = match queue {

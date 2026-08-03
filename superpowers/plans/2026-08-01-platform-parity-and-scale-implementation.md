@@ -532,36 +532,65 @@ before this phase is declared complete for a horizontally-scaled deployment.
 
 ### Task 1 — Facade accessors the routes are missing
 
-- [ ] **Step 1 (red).** `should_return_the_current_glossary_snapshot` and
+- [x] **Step 1 (red).** <!-- verified: hacienda-core/src/facade.rs tests
+      should_return_the_current_glossary_snapshot, should_reject_glossary_without_audit_read_capability,
+      should_return_empty_glossary_when_not_configured, should_generate_a_compliance_report_for_the_active_config
+      all present and passing (`cargo test -p hacienda-core glossary`, `compliance`). -->
+      `should_return_the_current_glossary_snapshot` and
       `should_generate_a_compliance_report_for_the_active_config`, both failing to compile
       against not-yet-existing facade methods.
-- [ ] **Step 2.** `glossary_snapshot_with_auth(&self, caller) -> Result<Vec<GlossaryEntry>, HaciendaError>`
+- [x] **Step 2.** <!-- verified: hacienda-core/src/facade.rs:495 glossary_snapshot_with_auth,
+      enforces Capability::AuditRead, returns empty Vec when glossary not configured. -->
+      `glossary_snapshot_with_auth(&self, caller) -> Result<Vec<GlossaryEntry>, HaciendaError>`
       — reads `self.glossary` (already `Some` whenever config enables it), enforces
       `Capability::AuditRead` (glossary is a read of accumulated detections, same sensitivity
       class as audit — no new capability per D6's reasoning applied a second time).
-- [ ] **Step 3.** `compliance_report_with_auth(&self, caller) -> Result<ComplianceReport, HaciendaError>`
+- [x] **Step 3.** <!-- verified: hacienda-core/src/facade.rs:513 compliance_report_with_auth,
+      enforces Capability::AuditRead. -->
+      `compliance_report_with_auth(&self, caller) -> Result<ComplianceReport, HaciendaError>`
       — calls `self.compliance.as_ref().map(|g| g.generate(...))`, enforcing `AuditRead` per D6.
-- [ ] **Step 4 (green).** Tests pass; verify.
+- [x] **Step 4 (green).** <!-- verified: `cargo test -p hacienda-core glossary compliance` all pass. --> Tests pass; verify.
 
 ### Task 2 — Routes
 
-- [ ] **Step 1 (red).** Four `RouteSpec` entries: `GET /v1/audit`, `GET /v1/audit/verify`,
+- [x] **Step 1 (red).** <!-- verified: hacienda-api/src/routes.rs:126-158 has all seven
+      RouteSpec entries under the "audit:read endpoints (Phase 10)" comment block;
+      Capability::ReviewDecide confirmed present in the Capability enum and used for
+      /v1/review/{id}/decide, the other six use Capability::AuditRead. -->
+      Four `RouteSpec` entries: `GET /v1/audit`, `GET /v1/audit/verify`,
       `GET /v1/review`, `POST /v1/review/{id}/decide`, `GET /v1/compliance/dpia`,
       `GET /v1/compliance/report`, `GET /v1/glossary` — all under `Capability::AuditRead`
       except `/v1/review/{id}/decide`, which needs `Capability::ReviewDecide` (already exists,
       per Ground Truth's capability list — confirm during implementation whether it is in the
       `Capability::all()` list alongside the six already found, since the grep in this plan's
       research only confirmed `ReviewDecide`'s presence in doc comments, not its enum variant).
-- [ ] **Step 2.** Handlers mirror `pii.rs`'s existing shape exactly: extract caller, delegate
+- [x] **Step 2.** <!-- verified: hacienda-api/src/handlers/audit_review.rs (203 lines) —
+      get_audit, verify_audit, get_review, decide_review, get_compliance_dpia,
+      get_compliance_report, get_glossary all follow pii.rs's caller-extract/delegate/map-error shape. -->
+      Handlers mirror `pii.rs`'s existing shape exactly: extract caller, delegate
       to the facade method, map errors, return DTO with `audit_chain_tip` where applicable.
-- [ ] **Step 3 (green).** Extend `routes.rs`'s reflection tests (no new test *logic*, per
+- [x] **Step 3 (green).** <!-- verified: every_guarded_route_reflected_in_auth_state and
+      route_table_has_no_duplicate_paths both pass with the 7 new entries present
+      (`cargo test -p hacienda-api reflected`, `no_duplicate`). Writing the per-handler
+      two-capability-distinction test this step calls for
+      (routes.rs::review_read_and_decide_require_distinct_capabilities) found a real bug:
+      get_review called the same review_queue_with_auth as decide_review, which
+      unconditionally required review:decide, so audit:read alone (the route table's
+      declared requirement for GET /v1/review) was rejected by the facade. Fixed by adding
+      HaciendaFacade::review_queue_read_with_auth (requires audit:read only), used by
+      get_review; decide_review keeps review_queue_with_auth (review:decide). Three new
+      facade tests plus the one route test now cover this; see CHANGELOG Fixed entry. --> Extend `routes.rs`'s reflection tests (no new test *logic*, per
       Global Constraints — the existing `every_guarded_route_reflected_in_auth_state` and
       `route_table_has_no_duplicate_paths` cover new entries automatically) plus per-handler
       tests for `/v1/review/{id}/decide`'s two-capability distinction (decide vs read), mirroring
       the existing `guarded_handler_observes_the_caller_not_trusted` /
       `documents_process_alone_is_authorised_for_a_scan_without_text` pair.
-- [ ] **Step 4.** Verify against in-memory/file stores.
-- [ ] **Step 5 (gated on Phase 9).** Re-run the full route test suite with `PostgresAuditStore`/
+- [x] **Step 4.** <!-- verified: reflection tests pass against the default (in-memory/file) test ApiState. --> Verify against in-memory/file stores.
+- [ ] **Step 5 (gated on Phase 9).** <!-- not done: no test in routes.rs wires
+      PostgresAuditStore/PostgresReviewStore into the test ApiState for these 7 routes —
+      grep confirms only the Phase 13 usage-route test uses PostgresAuditStore. The routes
+      call facade methods only, so this is expected to be a formality, but it has not been
+      run. --> Re-run the full route test suite with `PostgresAuditStore`/
       `PostgresReviewStore` wired into the test `ApiState` builder, confirming the routes are
       backend-agnostic (they should be — they call facade methods, not stores, directly).
 
@@ -573,14 +602,19 @@ still reflects intent — if the routes exist but the CLI doesn't, that is consi
 API being the primary surface for these features; do not add CLI subcommands as a side effect
 of this phase unless the spec is amended to ask for them.
 
-- [ ] **Step 1.** Re-read `hacienda-api-cli-surface.md` after Task 2 lands; if unchanged,
+- [x] **Step 1.** <!-- verified: .ai-rulez/domains/hacienda-pii/rules/hacienda-api-cli-surface.md
+      still states CLI audit/review/compliance/glossary subcommands are "deliberately absent
+      (not stubbed)". Judgment unchanged — no action taken. --> Re-read `hacienda-api-cli-surface.md` after Task 2 lands; if unchanged,
       no action. If the routes' existence changes that judgment, raise it as a separate,
       explicit decision rather than silently adding CLI commands here.
 
 ### Task 4 — Verification and documentation
 
-- [ ] **Step 1.** CHANGELOG: `Added` for 7 routes, 2 facade methods. Not breaking.
-- [ ] **Step 2.** Spec: §9 Gap 5 struck; §4.2 table rows marked shipped.
+- [x] **Step 1.** <!-- verified: CHANGELOG.md has a "Phase 5 routes: audit, review,
+      compliance, glossary (Phase 10)" Added entry listing all 7 routes and the 2 new
+      facade accessors. --> CHANGELOG: `Added` for 7 routes, 2 facade methods. Not breaking.
+- [x] **Step 2.** <!-- done in this pass: superpowers/specs/2026-08-01-hacienda-platform-parity-and-scale-design.md
+      §9 Gap 5 struck, §4.2/§10 table row 10 marked shipped. --> Spec: §9 Gap 5 struck; §4.2 table rows marked shipped.
 
 ---
 
