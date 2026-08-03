@@ -25,14 +25,51 @@ const TOKENIZER_URL = `${MODEL_BASE}/tokenizer.json`;
 // NerModel.load reads hidden_size, layer counts and vocab size from this.
 const ENCODER_CONFIG_URL = `${MODEL_BASE}/encoder_config/config.json`;
 
+export interface DownloadProgress {
+  receivedBytes: number;
+  /** `null` when the server doesn't send `content-length` (e.g. chunked transfer-encoding). */
+  totalBytes: number | null;
+}
+
 /**
  * A URL that does not resolve is answered by the SPA fallback with index.html
  * and HTTP 200, so `response.ok` alone does not prove an asset was returned —
  * the HTML reaches the consumer disguised as model weights and fails much
  * later, somewhere unrelated. Reject non-asset responses at the boundary.
+ *
+ * Reads the body as a stream (rather than `response.arrayBuffer()`) for two reasons: it lets
+ * large assets — the ~614MB model dwarfs the ~16MB tokenizer and <1KB config — report
+ * incremental `onProgress`, and it lets a connection that stalls partway through (no bytes for
+ * `stallTimeoutMs`) abort with a real error instead of leaving the fetch pending forever. A
+ * plain `await fetch()` has no such timeout: nothing rejects, nothing resolves, and the
+ * onboarding screen sits at a frozen percentage indefinitely with no way to tell "still
+ * downloading" from "actually stuck" — this is exactly what fixes that report.
  */
-export async function fetchAsset(url: string): Promise<Uint8Array> {
-  const response = await fetch(url);
+export async function fetchAsset(
+  url: string,
+  options: { onProgress?: (progress: DownloadProgress) => void; stallTimeoutMs?: number } = {},
+): Promise<Uint8Array> {
+  const { onProgress, stallTimeoutMs = 30_000 } = options;
+  const controller = new AbortController();
+  let stallTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+  const armStallTimer = () => {
+    if (stallTimer !== undefined) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => controller.abort(), stallTimeoutMs);
+  };
+
+  let response: Response;
+  armStallTimer();
+  try {
+    response = await fetch(url, { signal: controller.signal });
+  } catch (e) {
+    if (controller.signal.aborted) {
+      throw new Error(`Download of ${url} stalled: no response within ${stallTimeoutMs / 1000}s`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(stallTimer);
+  }
+
   if (!response.ok) {
     throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
   }
@@ -44,7 +81,44 @@ export async function fetchAsset(url: string): Promise<Uint8Array> {
     );
   }
 
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  const totalBytes = Number(response.headers.get("content-length")) || null;
+  const reader = response.body?.getReader();
+  let bytes: Uint8Array;
+  if (!reader) {
+    // No streaming body available (older environment) — fall back to a single whole-buffer
+    // read, same as before streaming/progress support existed.
+    bytes = new Uint8Array(await response.arrayBuffer());
+    onProgress?.({ receivedBytes: bytes.length, totalBytes: bytes.length });
+  } else {
+    const chunks: Uint8Array[] = [];
+    let receivedBytes = 0;
+    try {
+      for (;;) {
+        armStallTimer();
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        receivedBytes += value.length;
+        onProgress?.({ receivedBytes, totalBytes });
+      }
+    } catch (e) {
+      if (controller.signal.aborted) {
+        throw new Error(
+          `Download of ${url} stalled: no data received for ${stallTimeoutMs / 1000}s`,
+        );
+      }
+      throw e;
+    } finally {
+      clearTimeout(stallTimer);
+    }
+    bytes = new Uint8Array(receivedBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+  }
+
   if (bytes[0] === 0x3c) {
     throw new Error(
       `Expected an asset at ${url} but the response body begins with '<' — the URL does not resolve.`,
@@ -75,7 +149,9 @@ export async function isModelCached(): Promise<boolean> {
   return !!(model && tokenizer && config);
 }
 
-export async function loadNerModel(): Promise<{
+export async function loadNerModel(
+  onProgress?: (progress: DownloadProgress) => void,
+): Promise<{
   model: Uint8Array;
   tokenizer: Uint8Array;
   encoderConfig: Uint8Array;
@@ -93,8 +169,11 @@ export async function loadNerModel(): Promise<{
     return { model, tokenizer, encoderConfig: config };
   }
 
+  // Only the model's own progress is reported — it dwarfs the tokenizer (~16MB) and config
+  // (<1KB), so tracking all three separately would add complexity without changing what the
+  // user sees in any meaningful way.
   const [modelData, tokenizerData, configData] = await Promise.all([
-    fetchAsset(MODEL_URL),
+    fetchAsset(MODEL_URL, { onProgress }),
     fetchAsset(TOKENIZER_URL),
     fetchAsset(ENCODER_CONFIG_URL),
   ]);
