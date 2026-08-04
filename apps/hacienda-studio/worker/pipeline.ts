@@ -745,7 +745,12 @@ self.onmessage = async (event: MessageEvent) => {
   console.log("[Worker] Received message:", type, files?.length);
 
   if (type === "init") {
-    wasmReady = initEngine(Boolean(skipNer));
+    // `Boolean(skipNer)` previously coerced any truthy value — including the string
+    // `"false"` — to `true`, silently skipping neural NER init for a well-formed
+    // `{ skipNer: false }` payload sent as a stringly-typed value. Only an actual boolean
+    // `true` should skip it; anything else (including a missing field, on init messages
+    // from an older/mismatched build of App.tsx) defaults to the safe `false`.
+    wasmReady = initEngine(skipNer === true);
     await wasmReady;
     self.postMessage({ type: "ready" });
     return;

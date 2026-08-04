@@ -200,17 +200,25 @@ async function probeRangeSupport(
 
 /**
  * Downloads one byte range, retrying the whole range from scratch (up to
- * `RANGE_CHUNK_MAX_RETRIES` times) if the connection stalls or drops. A retry can double-count
- * the bytes it had already received on the failed attempt in `onProgress`'s running total —
- * cosmetic only, since `onChunk` writes into the shared output buffer by absolute offset and
- * the final assembled bytes are unaffected either way.
+ * `RANGE_CHUNK_MAX_RETRIES` times) if the connection stalls or drops, answers with a status
+ * other than 206 (a CDN node dropping `Range`, or a redirect that strips the header), or sends
+ * more bytes than the requested range covers. Any of those would otherwise either silently
+ * hand back the wrong bytes or throw a raw `RangeError` from `bytes.set` deep inside
+ * `fetchAssetInRanges` when a later chunk no longer lines up with its intended offset.
+ * `rangeReceivedBytes` (this range's own received-byte count, passed to `onChunk`) resets to 0
+ * on each retry so a caller accumulating progress per range never counts a failed attempt's
+ * bytes twice.
  */
 async function fetchRangeWithRetry(
   url: string,
   start: number,
   end: number,
   stallTimeoutMs: number,
-  onChunk: (chunk: Uint8Array, offset: number) => void,
+  onChunk: (
+    chunk: Uint8Array,
+    offset: number,
+    rangeReceivedBytes: number,
+  ) => void,
 ): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     let offset = start;
@@ -220,8 +228,20 @@ async function fetchRangeWithRetry(
         { headers: { Range: `bytes=${start}-${end}` } },
         stallTimeoutMs,
         (chunk) => {
-          onChunk(chunk, offset);
+          if (offset + chunk.length > end + 1) {
+            throw new Error(
+              `Range ${start}-${end} of ${url} returned more bytes than requested.`,
+            );
+          }
+          onChunk(chunk, offset, offset + chunk.length - start);
           offset += chunk.length;
+        },
+        (response) => {
+          if (response.status !== 206) {
+            throw new Error(
+              `Range ${start}-${end} of ${url} was answered with HTTP ${response.status}, not 206.`,
+            );
+          }
         },
       );
       return;
@@ -233,9 +253,11 @@ async function fetchRangeWithRetry(
 
 /**
  * Downloads `url` as `RANGED_DOWNLOAD_CONCURRENCY` concurrent byte-range requests instead of
- * one stream — see `FetchAssetOptions.parallel` for why. Returns `null` (never throws for
- * "unsupported") when the server doesn't answer ranges or the file is too small for this to be
- * worth it, so the caller can fall back to `fetchAsset`'s plain sequential path.
+ * one stream — see `FetchAssetOptions.parallel` for why. Returns `null` (never throws) both
+ * when the server doesn't answer ranges/the file is too small for this to be worth it, and
+ * when a range ends up failing every retry (e.g. a CDN node that stops honoring `Range`
+ * mid-download) — either way the caller falls back to `fetchAsset`'s plain sequential path
+ * instead of a broken parallel download taking down the whole asset fetch.
  */
 async function fetchAssetInRanges(
   url: string,
@@ -247,7 +269,17 @@ async function fetchAssetInRanges(
     return null;
 
   const bytes = new Uint8Array(totalBytes);
-  let receivedBytes = 0;
+  // Per-range confirmed byte counts rather than one shared running total — a retry restarts
+  // its range from scratch, and a shared counter would keep the bytes the failed attempt had
+  // already added, letting `receivedBytes` exceed `totalBytes` and the onboarding percentage
+  // exceed 100%.
+  const receivedPerRange = new Map<number, number>();
+  const reportProgress = (): void => {
+    if (!onProgress) return;
+    let receivedBytes = 0;
+    for (const n of receivedPerRange.values()) receivedBytes += n;
+    onProgress({ receivedBytes, totalBytes });
+  };
   const chunkSize = Math.ceil(totalBytes / RANGED_DOWNLOAD_CONCURRENCY);
   const ranges = Array.from(
     { length: RANGED_DOWNLOAD_CONCURRENCY },
@@ -257,15 +289,29 @@ async function fetchAssetInRanges(
     }),
   ).filter(({ start }) => start < totalBytes);
 
-  await Promise.all(
-    ranges.map(({ start, end }) =>
-      fetchRangeWithRetry(url, start, end, stallTimeoutMs, (chunk, offset) => {
-        bytes.set(chunk, offset);
-        receivedBytes += chunk.length;
-        onProgress?.({ receivedBytes, totalBytes });
-      }),
-    ),
-  );
+  try {
+    await Promise.all(
+      ranges.map(({ start, end }) =>
+        fetchRangeWithRetry(
+          url,
+          start,
+          end,
+          stallTimeoutMs,
+          (chunk, offset, rangeReceivedBytes) => {
+            bytes.set(chunk, offset);
+            receivedPerRange.set(start, rangeReceivedBytes);
+            reportProgress();
+          },
+        ),
+      ),
+    );
+  } catch (e) {
+    console.warn(
+      `[asset-loader] Parallel range download of ${url} failed, falling back to a sequential download:`,
+      e,
+    );
+    return null;
+  }
 
   assertNotHtmlBody(bytes, url);
   return bytes;
@@ -309,15 +355,37 @@ export async function fetchAsset(
   return bytes;
 }
 
-async function getDB() {
-  return openDB(DB_NAME, DB_VERSION, {
-    upgrade(db) {
-      if (!db.objectStoreNames.contains(MODEL_STORE))
-        db.createObjectStore(MODEL_STORE);
-      if (!db.objectStoreNames.contains(TESSDATA_STORE))
-        db.createObjectStore(TESSDATA_STORE);
-    },
-  });
+// Cached rather than opening a fresh connection on every call: an unclosed IndexedDB
+// connection is otherwise left dangling per call (every `loadNerModel`/`loadTessdata`/
+// `isModelCached` invocation), and a test calling `indexedDB.deleteDatabase(DB_NAME)` after
+// exercising this module would block on the native `onblocked` event waiting for a connection
+// nothing ever closes. See `closeDB` below.
+let dbPromise: ReturnType<typeof openDB> | null = null;
+
+function getDB() {
+  if (!dbPromise) {
+    dbPromise = openDB(DB_NAME, DB_VERSION, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains(MODEL_STORE))
+          db.createObjectStore(MODEL_STORE);
+        if (!db.objectStoreNames.contains(TESSDATA_STORE))
+          db.createObjectStore(TESSDATA_STORE);
+      },
+    });
+  }
+  return dbPromise;
+}
+
+/**
+ * Closes the shared IndexedDB connection opened by `getDB` and clears the cache so the next
+ * `getDB()` call reopens fresh. Exists for tests that need `indexedDB.deleteDatabase(DB_NAME)`
+ * to actually settle instead of blocking on `onblocked`.
+ */
+export async function closeDB(): Promise<void> {
+  if (!dbPromise) return;
+  const db = await dbPromise;
+  db.close();
+  dbPromise = null;
 }
 
 export async function isModelCached(): Promise<boolean> {

@@ -1,6 +1,11 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { fetchAsset, validateFile, loadTessdata } from "./asset-loader";
+import {
+  fetchAsset,
+  validateFile,
+  loadTessdata,
+  closeDB,
+} from "./asset-loader";
 
 function file(type: string, size = 1024): File {
   return new File([new Uint8Array(size)], "upload", { type });
@@ -119,7 +124,7 @@ describe("fetchAsset with parallel: true", () => {
       "fetch",
       vi.fn(async (_url: string, init?: RequestInit) => {
         const range = /^bytes=(\d+)-(\d+)$/.exec(
-          (init?.headers as Record<string, string> | undefined)?.Range ?? "",
+          new Headers(init?.headers).get("Range") ?? "",
         );
         if (!range)
           throw new Error("expected every request to carry a Range header");
@@ -149,6 +154,61 @@ describe("fetchAsset with parallel: true", () => {
     expect(onProgress).toHaveBeenCalled();
     const last = onProgress.mock.calls.at(-1)?.[0];
     expect(last).toEqual({ receivedBytes: total, totalBytes: total });
+  });
+
+  it("retries a range that comes back non-206 (e.g. a CDN node dropping Range) and reassembles correctly", async () => {
+    const concurrency = 6;
+    const chunkSize = 6 * 1024 * 1024;
+    const total = chunkSize * concurrency;
+    const full = new Uint8Array(total);
+    for (let i = 0; i < concurrency; i++) {
+      full[i * chunkSize] = i + 1;
+      full[(i + 1) * chunkSize - 1] = 100 + i;
+    }
+
+    const flakyRangeStart = chunkSize * 2;
+    let flakyAttempts = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const range = /^bytes=(\d+)-(\d+)$/.exec(
+          new Headers(init?.headers).get("Range") ?? "",
+        );
+        if (!range)
+          throw new Error("expected every request to carry a Range header");
+        const start = Number(range[1]);
+        const end = Number(range[2]);
+
+        if (start === flakyRangeStart && flakyAttempts++ === 0) {
+          // Simulate a CDN node that ignores Range and answers with the full body and a 200
+          // instead of a 206 partial response — this must be retried, not written into the
+          // shared output buffer as if it were the requested slice.
+          return new Response(full, {
+            status: 200,
+            headers: { "content-type": "application/octet-stream" },
+          });
+        }
+
+        return new Response(full.slice(start, end + 1), {
+          status: 206,
+          headers: {
+            "content-type": "application/octet-stream",
+            "content-range": `bytes ${start}-${end}/${total}`,
+          },
+        });
+      }),
+    );
+
+    const bytes = await fetchAsset("/model.safetensors", { parallel: true });
+
+    expect(bytes.length).toBe(total);
+    for (let i = 0; i < concurrency; i++) {
+      expect(bytes[i * chunkSize]).toBe(i + 1);
+      expect(bytes[(i + 1) * chunkSize - 1]).toBe(100 + i);
+    }
+    // Exactly one failed attempt followed by one successful retry for the flaky range.
+    expect(flakyAttempts).toBe(2);
   });
 });
 
@@ -199,6 +259,10 @@ describe("validateFile", () => {
 describe("loadTessdata", () => {
   afterEach(async () => {
     vi.unstubAllGlobals();
+    // Without closing the connection `loadTessdata` opened, `deleteDatabase` blocks on the
+    // native `onblocked` event (neither onsuccess nor onerror fires) until that connection is
+    // garbage collected — which isn't deterministic enough for a test to depend on.
+    await closeDB();
     await new Promise<void>((resolve, reject) => {
       const req = indexedDB.deleteDatabase("xberg-studio-assets");
       req.onsuccess = () => resolve();
@@ -220,7 +284,10 @@ describe("loadTessdata", () => {
     await expect(loadTessdata("eng")).resolves.toEqual(traineddata);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toContain("eng.traineddata");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("eng.traineddata"),
+      expect.anything(),
+    );
   });
 
   it("skips the network on a cache hit", async () => {

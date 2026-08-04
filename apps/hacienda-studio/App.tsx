@@ -93,6 +93,11 @@ export function App() {
   // (a single boolean) leaves the onboarding percentage frozen at 33% for the entire
   // multi-minute download with no way to tell "still downloading" from "actually stuck".
   const [nerDownloadProgress, setNerDownloadProgress] = useState<DownloadProgress | null>(null);
+  // Same reasoning as `nerModelDegraded`: `assets.tessdata` is set to true even when the
+  // `.traineddata` download fails, so onboarding doesn't get stuck waiting on OCR (most
+  // uploads aren't scanned documents). This flag is what actually records that failure, so
+  // the UI can show "unavailable" instead of a false "✓ Cached".
+  const [tessdataDegraded, setTessdataDegraded] = useState(false);
   // The drop zone renders before the worker finishes its handshake, and the handshake is
   // slow — it compiles a 48 MB WASM module. Dropping a file into that window used to throw
   // on a null worker and silently do nothing.
@@ -154,8 +159,11 @@ export function App() {
         } catch (e) {
           // Tesseract OCR falls back to no text extraction for scanned images/PDFs — it
           // does not block onboarding the way a missing NER model would, since most
-          // uploads aren't scanned documents.
+          // uploads aren't scanned documents. `tessdataDegraded` is what keeps the
+          // Onboarding UI honest about that (see the nerModel/nerModelDegraded pair above);
+          // `assets.tessdata` still flips true right below so Continue doesn't stay disabled.
           console.warn("[App] Tesseract data download failed, OCR will be unavailable:", e);
+          setTessdataDegraded(true);
         }
         setAssets((a) => ({ ...a, tessdata: true }));
         localStorage.setItem("xberg-studio-visited", "true");
@@ -163,6 +171,7 @@ export function App() {
       } catch (e) {
         console.error("[App] preloadAssets error:", e);
         setNerModelDegraded(true);
+        setTessdataDegraded(true);
         setError(
           "Failed to load models — neural PII detection unavailable, falling back to regex-only detection.",
         );
@@ -387,6 +396,7 @@ export function App() {
         assets={assets}
         nerModelDegraded={nerModelDegraded}
         nerDownloadProgress={nerDownloadProgress}
+        tessdataDegraded={tessdataDegraded}
         onComplete={() => {
           setOnboardingComplete(true);
           localStorage.setItem("xberg-studio-visited", "true");

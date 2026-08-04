@@ -19,15 +19,34 @@ const LABELS: Record<AssetKey, string> = {
   tessdata: "Tesseract OCR Data",
 };
 
-function overallPercent(assets: OnboardingState["assets"]): number {
-  const values = Object.values(assets);
-  return Math.round((values.filter(Boolean).length / values.length) * 100);
+/**
+ * The overall percentage weights each of the three assets equally (1/3 each). While the NER
+ * model is downloading, `assets.nerModel` stays `false` until the write to IndexedDB
+ * completes — without folding in `nerDownloadProgress`, the visible percentage would sit
+ * frozen at 33% for the entire multi-minute transfer instead of advancing with it.
+ */
+function overallPercent(
+  assets: OnboardingState["assets"],
+  nerDownloadProgress: DownloadProgress | null,
+): number {
+  const keys = Object.keys(assets) as AssetKey[];
+  let completed = 0;
+  for (const key of keys) {
+    if (assets[key]) {
+      completed += 1;
+    } else if (key === "nerModel" && nerDownloadProgress?.totalBytes) {
+      const { receivedBytes, totalBytes } = nerDownloadProgress;
+      completed += Math.min(receivedBytes / totalBytes, 1);
+    }
+  }
+  return Math.min(100, Math.round((completed / keys.length) * 100));
 }
 
 export function Onboarding({
   assets,
   nerModelDegraded = false,
   nerDownloadProgress = null,
+  tessdataDegraded = false,
   onComplete,
 }: {
   assets: OnboardingState["assets"];
@@ -37,6 +56,10 @@ export function Onboarding({
    * "GLiNER2-Guardrails-PII" row (and the overall percentage) sits frozen at a single fixed
    * value for the whole multi-minute download, indistinguishable from actually being stuck. */
   nerDownloadProgress?: DownloadProgress | null;
+  /** Same shape as `nerModelDegraded`: `assets.tessdata` stays true even when the
+   * `.traineddata` download failed (onboarding must not block on OCR), so this is the only
+   * place that failure is recorded. */
+  tessdataDegraded?: boolean;
   onComplete: () => void;
 }) {
   // `assets.nerModel` is true even when the neural backend failed and the app fell back
@@ -45,6 +68,7 @@ export function Onboarding({
   // instead of trusting `ready`.
   const statusFor = (key: AssetKey, ready: boolean): string => {
     if (key === "nerModel" && nerModelDegraded) return "⚠️ Unavailable — using fallback";
+    if (key === "tessdata" && tessdataDegraded) return "⚠️ Unavailable — OCR disabled";
     if (key === "nerModel" && !ready && nerDownloadProgress) {
       const { receivedBytes, totalBytes } = nerDownloadProgress;
       // The network transfer can finish well before `assets.nerModel` flips true — the
@@ -64,7 +88,7 @@ export function Onboarding({
     return ready ? "✓ Cached" : "↓ Downloading...";
   };
 
-  const percent = overallPercent(assets);
+  const percent = overallPercent(assets, nerDownloadProgress);
   const allReady = assets.xbergWasm && assets.nerModel && assets.tessdata;
 
   return (
@@ -109,7 +133,9 @@ export function Onboarding({
         <ul className="mb-6 flex flex-col gap-2" role="list">
           {(Object.keys(assets) as AssetKey[]).map((key) => {
             const ready = assets[key];
-            const degraded = key === "nerModel" && nerModelDegraded;
+            const degraded =
+              (key === "nerModel" && nerModelDegraded) ||
+              (key === "tessdata" && tessdataDegraded);
             return (
               <li
                 key={key}
