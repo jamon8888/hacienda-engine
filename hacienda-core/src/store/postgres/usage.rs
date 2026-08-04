@@ -72,8 +72,8 @@ impl PostgresUsageStore {
 // or the workspace's committed `.sqlx` offline cache, and this query isn't in that
 // cache. `sqlx::query_as` with an explicit `FromRow` type checks column types at
 // runtime instead, so it compiles without either — consistent with every other
-// Postgres store in this module needing a live `DATABASE_URL` only to *run* its tests,
-// never to build.
+// Postgres store in this module needing a live Postgres only to *run* its tests, never
+// to build.
 #[derive(sqlx::FromRow)]
 struct UsageRow {
     principal: Option<String>,
@@ -125,11 +125,12 @@ mod tests {
     use super::*;
     use crate::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
     use crate::store::postgres::audit::PostgresAuditStore;
-    use crate::store::postgres::connection::{connect, migrate};
+    use crate::store::postgres::test_support;
     use uuid::Uuid;
 
-    // Ignored by default — requires a running Postgres. Run with:
-    //   DATABASE_URL=postgres://... cargo test -p hacienda-core --features postgres \
+    // Ignored by default — shares one Postgres instance with the other postgres-feature
+    // test modules (see `test_support::shared`), so needs `--test-threads=1`. Run with:
+    //   cargo test -p hacienda-core --features postgres \
     //     --lib store::postgres::usage -- --ignored --test-threads=1
 
     fn entry(id: &str, principal: Option<&str>, span_length: u32) -> AuditEntryInput {
@@ -154,10 +155,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn should_aggregate_entity_and_byte_counts_per_principal() {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-        let pool = connect(&database_url).await.expect("connect failed");
-        migrate(&pool).await.expect("migrate failed");
+        let pool = test_support::shared().await.pool();
 
         let audit_store = PostgresAuditStore::new(pool.clone());
         let usage_store = PostgresUsageStore::new(pool);
@@ -216,10 +214,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn since_in_the_future_excludes_everything() {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-        let pool = connect(&database_url).await.expect("connect failed");
-        migrate(&pool).await.expect("migrate failed");
+        let pool = test_support::shared().await.pool();
 
         let audit_store = PostgresAuditStore::new(pool.clone());
         let usage_store = PostgresUsageStore::new(pool);

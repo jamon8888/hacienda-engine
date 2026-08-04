@@ -615,25 +615,24 @@ async fn get_latest_seal_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::postgres::connection::{connect, migrate};
+    use crate::store::postgres::connection::connect;
+    use crate::store::postgres::test_support;
     use std::sync::Arc;
 
-    // These tests are ignored by default because they require a running Postgres
-    // (see `connection.rs`'s `connect_and_migrate` test for the pattern). Run with:
-    //   DATABASE_URL=postgres://... cargo test -p hacienda-core --features postgres \
+    // These tests are ignored by default because they take real wall-clock time to spin
+    // up a Postgres container and share one instance (see below), which the default
+    // multi-threaded test runner would race. Run with:
+    //   cargo test -p hacienda-core --features postgres \
     //     --lib store::postgres::audit -- --ignored --test-threads=1
     //
-    // `--test-threads=1` matters here: every store shares one Postgres instance, and
-    // `AuditStore::entries`/`tip` read whatever segment is currently open store-wide
-    // (mirroring the single-writer-node production design, not a test bug) — running
-    // audit tests concurrently with each other would race on that shared open segment.
+    // `--test-threads=1` matters here: every store shares one Postgres instance (see
+    // `test_support::shared`), and `AuditStore::entries`/`tip` read whatever segment is
+    // currently open store-wide (mirroring the single-writer-node production design, not
+    // a test bug) — running audit tests concurrently with each other would race on that
+    // shared open segment.
 
     async fn test_store() -> PostgresAuditStore {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-        let pool = connect(&database_url).await.expect("connect failed");
-        migrate(&pool).await.expect("migrate failed");
-        PostgresAuditStore::new(pool)
+        PostgresAuditStore::new(test_support::shared().await.pool())
     }
 
     /// A label suffixed with a fresh UUID. `audit_entries.id` is a real `TEXT PRIMARY KEY`
@@ -694,8 +693,9 @@ mod tests {
 
         // Simulate a fresh reader by opening a brand-new pool/store rather than reusing
         // the writer's connection, proving the entries were durably committed.
-        let database_url = std::env::var("DATABASE_URL").unwrap();
-        let fresh_pool = connect(&database_url).await.expect("connect failed");
+        let fresh_pool = connect(test_support::shared().await.database_url())
+            .await
+            .expect("connect failed");
         let fresh_store = PostgresAuditStore::new(fresh_pool);
 
         let entries = fresh_store.entries().await.expect("entries failed");
@@ -771,8 +771,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn should_survive_a_process_restart_against_the_same_database() {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let database_url = test_support::shared().await.database_url().to_owned();
         let config_hash = format!("cfg-{}", Uuid::new_v4());
         let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
 

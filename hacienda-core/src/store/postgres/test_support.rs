@@ -14,6 +14,7 @@ use super::connection;
 use sqlx::PgPool;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
 use testcontainers_modules::postgres::Postgres as PostgresImage;
+use tokio::sync::OnceCell;
 
 /// A running disposable Postgres container plus a migrated pool connected to it.
 ///
@@ -82,4 +83,21 @@ impl PostgresFixture {
     pub fn database_url(&self) -> &str {
         &self.database_url
     }
+}
+
+static SHARED: OnceCell<PostgresFixture> = OnceCell::const_new();
+
+/// A `PostgresFixture` shared by every caller within this test binary, started once on
+/// first use and reused for the rest of the run.
+///
+/// `audit.rs`/`review.rs`/`jobs.rs`'s Postgres-backed test suites are written against a
+/// single shared Postgres instance on purpose — mirroring the production single-writer
+/// design where `AuditStore::entries`/`tip` read whatever segment is open store-wide —
+/// not one throwaway container per test. Use this instead of calling
+/// [`PostgresFixture::start`] directly so those tests keep sharing one database instead
+/// of each racing to seed its own. Callers still need `--test-threads=1` for the reasons
+/// documented on each of those test modules; this only removes the `DATABASE_URL`
+/// requirement, it does not change that constraint.
+pub async fn shared() -> &'static PostgresFixture {
+    SHARED.get_or_init(PostgresFixture::start).await
 }
