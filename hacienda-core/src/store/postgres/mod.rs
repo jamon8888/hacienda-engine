@@ -5,6 +5,12 @@
 
 pub mod connection;
 
+/// Disposable-Postgres test fixture (Phase 9 Task 1 Step 5). `cfg(test)` — the
+/// `testcontainers`/`testcontainers-modules` dev-dependencies it needs are never part of
+/// a published build.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 #[cfg(feature = "postgres")]
 pub mod audit;
 
