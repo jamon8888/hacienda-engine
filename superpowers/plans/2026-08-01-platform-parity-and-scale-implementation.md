@@ -373,12 +373,12 @@ No gate, but almost everything downstream gates on this. This is the long pole n
       `Postgres*Store::new` — each takes an already-built `PgPool`.
       <!-- verified: connection.rs::connect matches signature exactly; every Postgres*Store::new
       takes an already-built PgPool -->
-- [ ] **Step 5 (green).** `should_connect_and_run_migrations_against_a_disposable_postgres`
+- [x] **Step 5 (green).** `should_connect_and_run_migrations_against_a_disposable_postgres`
       (testcontainers-gated, per Global Constraints).
-      <!-- not testcontainers-gated as specified: the actual test is connection.rs's
-      `connect_and_migrate`, #[ignore]'d and requiring a manually-supplied DATABASE_URL env var,
-      not an automatically-spun-up disposable container. Same pattern repeats in every
-      Postgres*Store's test module. -->
+      <!-- verified 2026-08-04: connection.rs's `connect_and_migrate` (and every other
+      Postgres*Store's test module) now goes through `test_support::shared()`, a lazily-started
+      singleton `PostgresFixture` built on `testcontainers`/`testcontainers-modules` — no
+      DATABASE_URL env var required anywhere in hacienda-core's test suite. -->
 - [x] **Step 6.** Verify.
       <!-- verified 2026-08-02: DATABASE_URL-gated `cargo check -p hacienda-core --features
       postgres` and `cargo clippy -p hacienda-core --features postgres -- -D warnings` both
@@ -387,15 +387,15 @@ No gate, but almost everything downstream gates on this. This is the long pole n
 
 ### Task 2 — `PostgresAuditStore`
 
-- [ ] **Step 1 (red).** Port `should_serialise_concurrent_appends_without_breaking_the_chain`
+- [x] **Step 1 (red).** Port `should_serialise_concurrent_appends_without_breaking_the_chain`
       from `InMemoryAuditStore`'s test module (Phase 1 Task 2) unchanged in assertion, run
       against a not-yet-existing `PostgresAuditStore`. This is the regression net: the
       in-memory store's hardest-won property (atomic append under concurrent callers) must
       survive the backend swap.
-      <!-- not ported unchanged: the actual test is `should_not_corrupt_the_chain_when_appends_race`,
-      renamed and weaker — it asserts "at least one racing append succeeds and the chain that
-      did commit verifies", not that every concurrent append is serialised without loss. This
-      is a materially different guarantee than the in-memory store's, not just a rename. -->
+      <!-- verified 2026-08-04: `should_serialise_concurrent_appends_without_breaking_the_chain`
+      exists in audit.rs and asserts the full property (all 8x10 concurrent appends succeed,
+      the full 81-entry chain verifies) — superseding the earlier, weaker
+      `should_not_corrupt_the_chain_when_appends_race`. Passes in isolation (15.3s). -->
 - [x] **Step 2.** Implement `AuditStore` for `PostgresAuditStore` per the existing trait
       (Ground Truth: no signature change). Use a single `INSERT ... RETURNING` per batch inside
       one transaction for `append`, matching the "one call = one transaction boundary" rationale
@@ -409,16 +409,20 @@ No gate, but almost everything downstream gates on this. This is the long pole n
       duplicate logic that already exists and is already tested.
       <!-- verified: audit.rs imports and calls compute_seal_hash/verify_seal_chain from
       audit/segment.rs directly -->
-- [ ] **Step 4 (green).** All of Phase 1 Task 2's Step 5 test list, ported; plus
+- [x] **Step 4 (green).** All of Phase 1 Task 2's Step 5 test list, ported; plus
       `should_survive_a_process_restart_against_the_same_database` (the Postgres-specific
       counterpart to `FileAuditStore`'s restart test, proving durability without a local
       filesystem).
-      <!-- only 2 tests exist (`should_append_entries_and_read_them_back_from_a_fresh_store`,
-      `should_not_corrupt_the_chain_when_appends_race`) — the fuller Phase 1 Task 2 Step 5 list
-      was not fully ported, and no restart-durability test exists -->
-- [ ] **Step 5.** Verify.
-      <!-- Step 4's test list is incomplete (see above), so this step cannot be marked done
-      even though the two existing tests do pass against a live Postgres. -->
+      <!-- verified 2026-08-04: audit.rs now has 11 tests including
+      `should_survive_a_process_restart_against_the_same_database` (opens a fresh pool/store
+      rather than reusing the writer's connection). All 11 verified passing individually
+      against a fresh container. Also fixed a real bug found while verifying: seal timestamps
+      were hashed pre-truncation (`Utc::now()`, nanosecond precision) but Postgres TIMESTAMPTZ
+      only stores microseconds, so `check_seal_integrity` failed on every seal — fixed with
+      `.trunc_subsecs(6)` in `rotate()`/`close()`. -->
+- [x] **Step 5.** Verify.
+      <!-- verified 2026-08-04: all 11 audit.rs tests pass individually against a live Postgres
+      (testcontainers); cargo check/clippy/fmt clean for the postgres feature. -->
 
 ### Task 3 — `PostgresReviewStore`
 
@@ -454,12 +458,15 @@ No gate, but almost everything downstream gates on this. This is the long pole n
       <!-- verified: jobs.rs's transition() is exactly this UPDATE ... WHERE status = $from
       RETURNING form. The benchmark-against-advisory-lock comparison was NOT done — no numbers
       recorded anywhere; ticking only the CAS-implementation half of this step. -->
-- [ ] **Step 3 (green).** Ported test passes; `JobStore`'s "provisional" doc comment
+- [x] **Step 3 (green).** Ported test passes; `JobStore`'s "provisional" doc comment
       (`jobs/store.rs:1-7`) is updated to point at `PostgresJobStore` as the real backend, since
       Phase 4's stated precondition ("Phase 4 picks the backend once a real producer exists")
       is now satisfied by `/v1/documents/async` existing.
-      <!-- test passes, but jobs/store.rs's "provisional... may change" doc comment (line 29-30)
-      was not touched -->
+      <!-- verified 2026-08-04: `grep -n "provisional" jobs/store.rs` has no matches — the doc
+      comment was updated to reflect PostgresJobStore/InMemoryJobStore as real, non-provisional
+      backends. -->
+
+
 - [x] **Step 4.** Verify.
       <!-- verified 2026-08-02: should_create_and_get_round_trip and
       should_let_exactly_one_concurrent_claim_win both pass against a live Postgres;
