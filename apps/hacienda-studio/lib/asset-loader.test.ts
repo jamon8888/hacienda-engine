@@ -1,5 +1,6 @@
+import "fake-indexeddb/auto";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { fetchAsset, validateFile } from "./asset-loader";
+import { fetchAsset, validateFile, loadTessdata } from "./asset-loader";
 
 function file(type: string, size = 1024): File {
   return new File([new Uint8Array(size)], "upload", { type });
@@ -9,7 +10,8 @@ function respondWith(
   body: string | Uint8Array<ArrayBuffer>,
   { status = 200, contentType = "application/octet-stream" } = {},
 ): void {
-  const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
+  const bytes =
+    typeof body === "string" ? new TextEncoder().encode(body) : body;
   vi.stubGlobal(
     "fetch",
     vi.fn(
@@ -76,6 +78,81 @@ describe("fetchAsset", () => {
 });
 
 /**
+ * Track H — the 614MB model is downloaded as concurrent byte-range requests instead of one
+ * stream (see `fetchAssetInRanges` in asset-loader.ts) because a single connection's TCP/QUIC
+ * slow-start ramp otherwise dominates the transfer. `jamon8888/gliner2-guardrails-pii-f16`
+ * confirmed via live requests that huggingface.co's CDN honors `Range` across its redirect and
+ * allows the header cross-origin — these tests cover the two branches that matters if that
+ * ever stops being true.
+ */
+describe("fetchAsset with parallel: true", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to a plain download when the server ignores Range", async () => {
+    const weights = new Uint8Array([0x00, 0x61, 0x73, 0x6d]);
+    respondWith(weights);
+
+    await expect(
+      fetchAsset("/model.safetensors", { parallel: true }),
+    ).resolves.toEqual(weights);
+  });
+
+  it("downloads a large, range-capable asset as concurrent chunks and reassembles it in order", async () => {
+    // Must clear RANGED_DOWNLOAD_MIN_BYTES (32MB) for the parallel path to engage, and divide
+    // evenly by RANGED_DOWNLOAD_CONCURRENCY (6) so each range's boundary is exact. Filling and
+    // then deep-comparing the full 36MB buffer (rather than checking a sentinel byte at each
+    // chunk boundary) made this test itself the bottleneck: tens of millions of per-element JS
+    // loop iterations plus Chai's generic `toEqual` on large typed arrays, compounding badly
+    // under this host's memory pressure.
+    const concurrency = 6;
+    const chunkSize = 6 * 1024 * 1024;
+    const total = chunkSize * concurrency;
+    const full = new Uint8Array(total);
+    for (let i = 0; i < concurrency; i++) {
+      full[i * chunkSize] = i + 1; // first byte of each chunk
+      full[(i + 1) * chunkSize - 1] = 100 + i; // last byte of each chunk
+    }
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const range = /^bytes=(\d+)-(\d+)$/.exec(
+          (init?.headers as Record<string, string> | undefined)?.Range ?? "",
+        );
+        if (!range)
+          throw new Error("expected every request to carry a Range header");
+        const start = Number(range[1]);
+        const end = Number(range[2]);
+        return new Response(full.slice(start, end + 1), {
+          status: 206,
+          headers: {
+            "content-type": "application/octet-stream",
+            "content-range": `bytes ${start}-${end}/${total}`,
+          },
+        });
+      }),
+    );
+
+    const onProgress = vi.fn();
+    const bytes = await fetchAsset("/model.safetensors", {
+      parallel: true,
+      onProgress,
+    });
+
+    expect(bytes.length).toBe(total);
+    for (let i = 0; i < concurrency; i++) {
+      expect(bytes[i * chunkSize]).toBe(i + 1);
+      expect(bytes[(i + 1) * chunkSize - 1]).toBe(100 + i);
+    }
+    expect(onProgress).toHaveBeenCalled();
+    const last = onProgress.mock.calls.at(-1)?.[0];
+    expect(last).toEqual({ receivedBytes: total, totalBytes: total });
+  });
+});
+
+/**
  * Track A3: audio/video were rejected outright before an upload ever reached the
  * worker. `SUPPORTED_MIME_PREFIXES`/`validateFile` used to be duplicated verbatim
  * in lib/types.ts (now removed, unimported, dead) — this is the copy `App.tsx`
@@ -109,5 +186,57 @@ describe("validateFile", () => {
       valid: false,
       error: "Unsupported file type: application/x-executable",
     });
+  });
+});
+
+/**
+ * Regression: `loadTessdata` used to be a stub that returned an empty `Uint8Array` on a
+ * cache miss without ever fetching anything — the onboarding screen marked the "Tesseract
+ * OCR Data" row ready while no `.traineddata` bytes existed anywhere. `fake-indexeddb/auto`
+ * (already used by audit-handle.test.ts) gives a spec-compliant IndexedDB so the cache-hit
+ * path can be exercised for real, not mocked.
+ */
+describe("loadTessdata", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.deleteDatabase("xberg-studio-assets");
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  });
+
+  it("fetches and caches the language file on a cache miss", async () => {
+    const traineddata = new Uint8Array([1, 2, 3, 4]);
+    const fetchMock = vi.fn(
+      async (_url: string) =>
+        new Response(traineddata, {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(loadTessdata("eng")).resolves.toEqual(traineddata);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain("eng.traineddata");
+  });
+
+  it("skips the network on a cache hit", async () => {
+    const traineddata = new Uint8Array([5, 6, 7, 8]);
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(traineddata, {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await loadTessdata("eng");
+    await expect(loadTessdata("eng")).resolves.toEqual(traineddata);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
