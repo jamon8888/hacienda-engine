@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT segment_id, config_hash FROM audit_segments WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1",
+  "query": "SELECT segment_id, config_hash FROM audit_segments WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "f21fd426b508079be57484633f1c3b923e980303632c21f22c75865c2aab8e5e"
+  "hash": "d69221e541c6af124909505fa28f5d9bd3c55106f3cc9bbb42779eba72cfd9ca"
 }
