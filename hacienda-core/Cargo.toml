@@ -106,6 +106,14 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 tower = { version = "0.5", features = ["util"] }
 # Only for hacienda-core/tests/lora_adapter_contract.rs's empty-directory fixture.
 tempfile = { workspace = true }
+# Disposable-Postgres fixture for the `postgres` feature's integration tests (Phase 9 Task
+# 1 Step 5) — see `store/postgres/test_support.rs`. Only ever compiled for `cargo test`, so
+# declaring it unconditionally here (Cargo has no `optional` dev-dependencies) costs
+# non-postgres consumers nothing; every call site that touches it is already behind
+# `#[cfg(feature = "postgres")]` because it lives under `store/postgres/`, which is itself
+# feature-gated (see `store/mod.rs`).
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
 
 # Note: `async-trait` is not repeated here. It used to be a dev-dependency for test doubles
 # implementing xberg's async `NerBackend` trait, but the `AuditStore`/`JobStore` traits made
