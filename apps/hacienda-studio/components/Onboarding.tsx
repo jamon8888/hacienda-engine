@@ -47,6 +47,14 @@ export function Onboarding({
     if (key === "nerModel" && nerModelDegraded) return "⚠️ Unavailable — using fallback";
     if (key === "nerModel" && !ready && nerDownloadProgress) {
       const { receivedBytes, totalBytes } = nerDownloadProgress;
+      // The network transfer can finish well before `assets.nerModel` flips true — the
+      // ~600MB result still has to be written into IndexedDB, which on a memory-constrained
+      // machine can itself take a long time. Without this, the row (and the overall
+      // percentage) looks frozen at "100%" or 33% with no visible difference from actually
+      // being stuck.
+      if (totalBytes && receivedBytes >= totalBytes) {
+        return "⏳ Finalizing... (saving to local cache)";
+      }
       if (totalBytes) {
         const pct = Math.round((receivedBytes / totalBytes) * 100);
         return `↓ Downloading... ${pct}% (${formatMB(receivedBytes)} / ${formatMB(totalBytes)})`;

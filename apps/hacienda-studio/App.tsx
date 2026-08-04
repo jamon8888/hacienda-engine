@@ -8,6 +8,7 @@ import { FileBrowser, buildFileRows } from "./components/FileBrowser";
 import { FileUpload } from "./components/extend/file-upload";
 import {
   loadNerModel,
+  loadTessdata,
   isModelCached,
   preloadXbergWasm,
   validateFile,
@@ -148,6 +149,14 @@ export function App() {
           }
         }
 
+        try {
+          await loadTessdata();
+        } catch (e) {
+          // Tesseract OCR falls back to no text extraction for scanned images/PDFs — it
+          // does not block onboarding the way a missing NER model would, since most
+          // uploads aren't scanned documents.
+          console.warn("[App] Tesseract data download failed, OCR will be unavailable:", e);
+        }
         setAssets((a) => ({ ...a, tessdata: true }));
         localStorage.setItem("xberg-studio-visited", "true");
         return nerFailed;
