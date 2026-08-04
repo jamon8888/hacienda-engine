@@ -387,9 +387,9 @@ client needs interactive auth, that is a distinct spec, not an extension of this
 |---|---|---|
 | RAG collection metadata | Postgres | Small, relational — collection name, config, tenant |
 | RAG vector/BM25 index | **pgvector on the Postgres instance from Decision 5** (§3.5, Decision 2) — mirrors Xberg Enterprise's own tenant-scoped pgvector backend, evidenced by the deleted `xberg-rag` crate's doc comment. No per-replica in-process index, no external vector-store product to operate. Scaling note: pgvector index maintenance (HNSW/IVFFlat rebuilds) is a Postgres-ops concern, not a hacienda-service concern — track it alongside Decision 5's Postgres capacity planning, not as separate state |
-| Document versions | Postgres | Content-addressed by hash of redacted output, not raw input — versioning raw content would defeat Decision 1 |
-| Presets | Postgres | Per-tenant, small |
-| API keys | Postgres | Hashed; revocation-latency property per §6 |
+| Document versions | Postgres (Phase 9, shipped) | Content-addressed by hash of redacted output, not raw input — versioning raw content would defeat Decision 1 |
+| Presets | Postgres (Phase 9, shipped) | Per-tenant, small |
+| API keys | Postgres (Phase 9, shipped) | Hashed; revocation-latency property per §6 |
 | Usage/metering | **Derived, not stored** (Decision 3) — a query over `AuditStore`, so it inherits whatever backend §12.6 gives audit (Postgres) with no separate migration path |
 
 This table is deliberately a superset of the integration spec's §12.2, not a replacement —
@@ -433,11 +433,14 @@ parallel with an unproven device path.
 1. **`POST /v1/pii/reveal` is missing.** A shipped, correct crypto primitive
    (`pseudonym.rs:520-546`) with no caller. Blocks nothing else, but every day it's absent is
    a day pseudonymisation is decorative. No dependencies — buildable now.
-2. **No Postgres backend for any store.** Blocks running more than one `hacienda-api`
-   replica at all, which makes every "horizontal scale" claim in the integration spec's §12
-   currently untested against real multi-node behavior. Blocks §7's Postgres-backed rows
-   (RAG metadata, versions, presets, keys) from having anywhere to live. This is the true
-   long pole, not a nice-to-have — everything in §4 that isn't RAG-index-shaped depends on it.
+2. ~~**No Postgres backend for any store.**~~ **Closed by Phase 9.** Six Postgres-backed store
+   implementations now exist (`hacienda-core/src/store/postgres/`: audit/segments, review,
+   jobs, document_versions, presets, api_keys), backed by the embedded schema in
+   `hacienda-core/migrations/0001_init.sql`, a testcontainers-based disposable-Postgres test
+   fixture (`store/postgres/test_support.rs`), and a `with_stores`-style builder extension on
+   `HaciendaFacade` for wiring them in place of the in-memory defaults. This unblocks running
+   more than one `hacienda-api` replica and gives §7's Postgres-backed rows (versions, presets,
+   keys) somewhere to live.
 3. **RAG route existence on the hosted service is unconfirmed (§3.1, §3.5); the recovery plan
    for everything else is not (§3.7).** The backend *architecture* is evidenced — pgvector on
    Postgres, per §7 and Decision 2 — and the `VectorStore` trait/types/filter/query IR to build
@@ -521,7 +524,7 @@ avoid renumbering shipped work.
 | Phase | Deliverable | Closes | Gated on |
 |---|---|---|---|
 | 8 | `POST /v1/pii/reveal` | Gap 1 (§9 above) | — |
-| 9 | Postgres store backend: segments, review, jobs (completes integration spec §8 gap 4/§12.6), plus new tables for versions/presets/keys | Gap 2 | — |
+| 9 | Postgres store backend: segments, review, jobs (completes integration spec §8 gap 4/§12.6), plus new tables for versions/presets/keys — **done** | Gap 2 | — |
 | 10 | Phase 5 from the integration spec: `/v1/audit/*`, `/v1/review/*`, `/v1/compliance/*`, `/v1/glossary` — **done** | Gap 5 | Phase 9 (needs a durable review/audit store to be worth exposing over HTTP) |
 | 11 | `/v1/auth/keys` issuance + revocation — **done** | Gap 4 | Phase 9 |
 | 12 | Task 1 (`RagStore` trait + types/filter/query IR + `InMemoryVectorStore`) — **done**, `crates/hacienda-rag`; Task 2 (`PgVectorStore` backend, `postgres` feature) — **done**; Task 3 (route existence confirmed, answer-synthesis scope decided: not built, 5 of 8 confirmed `/v1/rag/*` routes built and tested) — **done**; 3 routes (list-collections, list-documents, migrate-embeddings) remain unbuilt — no `RagStore` trait primitive serves them | Gap 3 (mostly closed — see §9) | Phase 9; backend architecture and trait shape already decided (§7, §3.7, Decision 2) — this phase is route verification + implementation, not design |
