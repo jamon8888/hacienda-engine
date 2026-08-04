@@ -206,7 +206,18 @@ mod tests {
     #[test]
     fn should_reject_a_wrong_key() {
         let pair = generate_key().unwrap();
-        assert!(!verify_key("wrong_key", &pair.key_hash).unwrap());
+        // Flip exactly one bit of the last byte rather than substituting an unrelated
+        // string: this proves the hash is sensitive to small, adjacent-input changes
+        // in the actual generated key, not just "some other string fails" (which an
+        // always-false verifier would also pass).
+        let mut mutated = pair.raw_key.clone().into_bytes();
+        let last = mutated.len() - 1;
+        mutated[last] ^= 1; // stays valid ASCII: high bit of every generated char is 0
+        let mutated_key =
+            String::from_utf8(mutated).expect("bit-flip of an ASCII byte stays valid UTF-8");
+
+        assert_ne!(mutated_key, pair.raw_key);
+        assert!(!verify_key(&mutated_key, &pair.key_hash).unwrap());
     }
 
     #[test]
@@ -245,8 +256,35 @@ mod tests {
     #[test]
     fn key_has_sufficient_entropy() {
         let pair = generate_key().unwrap();
-        // hcd_live_ (9) + 32 base62 chars = 41 chars
-        assert_eq!(pair.raw_key.len(), 41);
+        let suffix = pair
+            .raw_key
+            .strip_prefix("hcd_live_")
+            .expect("generated key must carry the hcd_live_ prefix");
+
+        // generate_key() draws 32 bytes from OsRng and base62-encodes them one
+        // char per byte, so the suffix must carry exactly that many characters —
+        // anchored to the function's own entropy buffer size, not a number picked
+        // independently of the implementation.
+        assert_eq!(
+            suffix.len(),
+            32,
+            "suffix should encode all 32 bytes drawn from OsRng, one base62 char per byte"
+        );
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_alphanumeric()),
+            "every suffix character must come from the base62 alphabet: {suffix}"
+        );
+        // Guards against a degenerate encoder collapsing to a constant/low-entropy
+        // output (e.g. an RNG that always returns zeroes) — real entropy should not
+        // produce a single repeated character across 32 draws.
+        assert!(
+            suffix
+                .chars()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1,
+            "suffix must not collapse to a single repeated character: {suffix}"
+        );
     }
 
     #[test]
@@ -278,6 +316,28 @@ mod tests {
             pair.lookup_hash,
             lookup_key(&pair.raw_key),
             "lookup_hash must be reproducible from the raw key"
+        );
+    }
+
+    #[test]
+    fn verify_key_should_take_measurable_time() {
+        // ~keep: Argon2id is deliberately expensive so brute-forcing a leaked
+        // key_hash is impractical; a future regression to a fast hash (e.g. swapping
+        // in SHA-256) would pass every functional test above while silently
+        // reintroducing brute-forceability. The 1ms floor sits comfortably below
+        // Argon2id's real per-call cost (tens of ms under the crate's defaults),
+        // leaving margin against CI timing jitter while still catching a swap to a
+        // hash that's fast enough to matter (anything sub-millisecond).
+        let pair = generate_key().unwrap();
+
+        let start = std::time::Instant::now();
+        let _ = verify_key(&pair.raw_key, &pair.key_hash).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed > std::time::Duration::from_millis(1),
+            "verify_key took {elapsed:?}; expected Argon2id-level cost (>1ms) — \
+             did the hashing algorithm regress to something fast?"
         );
     }
 }
