@@ -197,13 +197,12 @@ describe("validateFile", () => {
  * path can be exercised for real, not mocked.
  */
 describe("loadTessdata", () => {
-  afterEach(async () => {
+  // `getDB()` never closes its IndexedDB connection, and fake-indexeddb — like real
+  // IndexedDB — queues (and never resolves) a `deleteDatabase` behind an open connection.
+  // Isolate tests with distinct cache keys (one `lang` per test) instead of deleting the
+  // database between them.
+  afterEach(() => {
     vi.unstubAllGlobals();
-    await new Promise<void>((resolve, reject) => {
-      const req = indexedDB.deleteDatabase("xberg-studio-assets");
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
   });
 
   it("fetches and caches the language file on a cache miss", async () => {
@@ -234,8 +233,8 @@ describe("loadTessdata", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await loadTessdata("eng");
-    await expect(loadTessdata("eng")).resolves.toEqual(traineddata);
+    await loadTessdata("fra");
+    await expect(loadTessdata("fra")).resolves.toEqual(traineddata);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
