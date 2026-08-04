@@ -232,17 +232,41 @@ impl AuditStore for PostgresAuditStore {
     }
 
     async fn close(&self) -> Result<SegmentSeal, AuditError> {
-        // Similar to rotate but without creating a new segment
+        // Similar to rotate but without creating a new segment. `FOR UPDATE` matches
+        // `get_or_create_open_segment`'s rationale: it serialises concurrent closers on
+        // the same row instead of letting two of them race to seal it.
         let mut tx = self.pool.begin().await?;
 
         let segment_row = sqlx::query!(
-            "SELECT segment_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL"
+            "SELECT segment_id, node_id, config_hash, entry_count, created_at \
+             FROM audit_segments WHERE sealed_at IS NULL FOR UPDATE"
         )
         .fetch_optional(&mut *tx)
         .await?;
 
+        // No open segment: either this store was never opened, or `close` already ran.
+        // The trait documents `close` as idempotent (mirroring `InMemoryAuditStore`'s
+        // `closed_seal` cache), so a second call must return the same seal rather than
+        // erroring — only surface `StoreClosed` when there is truly nothing sealed yet.
         let Some(segment_row) = segment_row else {
-            return Err(AuditError::StoreClosed { operation: "close" });
+            let sealed = sqlx::query_as!(
+                SealRow,
+                r#"
+                SELECT segment_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
+                       entry_count, created_at, sealed_at
+                FROM audit_segments
+                WHERE sealed_at IS NOT NULL
+                ORDER BY sealed_at DESC
+                LIMIT 1
+                "#
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            return match sealed {
+                Some(row) => row_to_seal(row),
+                None => Err(AuditError::StoreClosed { operation: "close" }),
+            };
         };
 
         let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
@@ -388,12 +412,20 @@ struct SealRow {
 /// [`insert_entry`]), mirroring [`crate::audit::chain::AuditChain::push`], which
 /// always stamps the chain's own config hash onto an appended input rather than
 /// trusting the caller's copy.
+///
+/// `FOR UPDATE` takes a row lock on the open segment for the rest of the transaction.
+/// This is the Postgres equivalent of the in-memory store's single `Mutex<State>`
+/// (`audit/store.rs`): without it, two concurrent `append` transactions can both read the
+/// same `MAX(sequence_num)` in [`get_next_sequence_num`] and race to insert the same
+/// `(segment_id, sequence_num)`, so one loses to the `UNIQUE` constraint instead of
+/// serialising behind the other — see `should_serialise_concurrent_appends_without_breaking_the_chain`.
 async fn get_or_create_open_segment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config_hash: &str,
 ) -> Result<(Uuid, String), AuditError> {
     let row = sqlx::query!(
-        "SELECT segment_id, config_hash FROM audit_segments WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1"
+        "SELECT segment_id, config_hash FROM audit_segments \
+         WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE"
     )
     .fetch_optional(&mut **tx)
     .await?;
@@ -596,6 +628,15 @@ mod tests {
         PostgresAuditStore::new(pool)
     }
 
+    /// A label suffixed with a fresh UUID. `audit_entries.id` is a real `TEXT PRIMARY KEY`
+    /// on a database these tests don't tear down between runs (unlike the in-memory store,
+    /// which is fresh per test) — a literal id ported unchanged from `audit/store.rs` would
+    /// collide with itself on a second run against the same database and fail on the
+    /// `PRIMARY KEY` constraint rather than the assertion under test.
+    fn unique_id(label: &str) -> String {
+        format!("{label}-{}", Uuid::new_v4())
+    }
+
     fn test_input(id: &str, config_hash: &str) -> AuditEntryInput {
         AuditEntryInput {
             id: id.to_owned(),
@@ -609,6 +650,24 @@ mod tests {
             config_hash: config_hash.to_owned(),
             principal: None,
         }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_return_one_entry_per_input_in_order() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        let (e1, e2, e3) = (unique_id("e1"), unique_id("e2"), unique_id("e3"));
+        let inputs = vec![
+            test_input(&e1, &config_hash),
+            test_input(&e2, &config_hash),
+            test_input(&e3, &config_hash),
+        ];
+        let entries = store.append(inputs).await.expect("append must succeed");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].id, e1);
+        assert_eq!(entries[1].id, e2);
+        assert_eq!(entries[2].id, e3);
     }
 
     #[tokio::test]
@@ -642,9 +701,18 @@ mod tests {
         fresh_store.verify().await.expect("chain must verify");
     }
 
+    /// Port of `InMemoryAuditStore`'s `should_serialise_concurrent_appends_without_breaking_the_chain`
+    /// (Phase 1 Task 2 Step 5) — same assertion, same shape (8 tasks x 10 appends), against
+    /// `PostgresAuditStore`. Requires `get_or_create_open_segment`'s `FOR UPDATE` row lock:
+    /// without it, two concurrent transactions can read the same `MAX(sequence_num)` and
+    /// race to insert the same `(segment_id, sequence_num)`, so a racer loses to the
+    /// `UNIQUE` constraint instead of serialising behind the lock holder. The old, weaker
+    /// `should_not_corrupt_the_chain_when_appends_race` name/assertion ("at least one
+    /// racing append succeeds") is superseded by this test, not additive — anything it
+    /// covered is a strict subset of "every racing append succeeds".
     #[tokio::test]
     #[ignore]
-    async fn should_not_corrupt_the_chain_when_appends_race() {
+    async fn should_serialise_concurrent_appends_without_breaking_the_chain() {
         let store = Arc::new(test_store().await);
         let config_hash = format!("cfg-{}", Uuid::new_v4());
 
@@ -655,35 +723,268 @@ mod tests {
             .await
             .expect("bootstrap append failed");
 
-        let mut handles = Vec::new();
-        for _ in 0..8 {
+        const TASKS: usize = 8;
+        const ENTRIES_PER_TASK: usize = 10;
+
+        let mut handles = Vec::with_capacity(TASKS);
+        for task in 0..TASKS {
             let store = Arc::clone(&store);
             let config_hash = config_hash.clone();
             handles.push(tokio::spawn(async move {
-                let id = Uuid::new_v4().to_string();
-                store.append(vec![test_input(&id, &config_hash)]).await
+                for entry in 0..ENTRIES_PER_TASK {
+                    let id = format!("task-{task}-entry-{entry}-{}", Uuid::new_v4());
+                    store
+                        .append(vec![test_input(&id, &config_hash)])
+                        .await
+                        .expect("concurrent append must succeed");
+                }
             }));
         }
 
-        let mut succeeded = 0;
         for handle in handles {
-            if handle.await.expect("task panicked").is_ok() {
-                succeeded += 1;
-            }
+            handle.await.expect("task must not panic");
         }
 
-        // Under READ COMMITTED, some racing appends may lose the unique
-        // (segment_id, sequence_num) race and return an error rather than corrupt
-        // data — see the `insert_entry` sequencing. At least the bootstrap append
-        // and (typically) most of the racers succeed; the invariant under test is
-        // that whatever did commit forms a valid, verifiable chain.
-        assert!(
-            succeeded > 0,
-            "expected at least one racing append to succeed"
-        );
+        // Every append serialised behind the row lock, so the full chain must be valid.
         store
             .verify()
             .await
             .expect("chain must verify after concurrent appends");
+
+        let all_entries = store.entries().await.expect("entries");
+        // +1 for the bootstrap entry.
+        assert_eq!(all_entries.len(), TASKS * ENTRIES_PER_TASK + 1);
+    }
+
+    /// The Postgres-specific counterpart to `FileAuditStore`'s restart test: entries and
+    /// seals written by one store/pool must still be there — and still verify — once that
+    /// store is dropped and a fresh one reconnects to the same database. Proves durability
+    /// comes from Postgres itself, not from anything cached in the store/pool.
+    #[tokio::test]
+    #[ignore]
+    async fn should_survive_a_process_restart_against_the_same_database() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+
+        {
+            let store = test_store().await;
+            let inputs = ids
+                .iter()
+                .map(|id| test_input(id, &config_hash))
+                .collect::<Vec<_>>();
+            store.append(inputs).await.expect("append failed");
+            store.rotate().await.expect("rotate failed");
+            store
+                .append(vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
+                .await
+                .expect("post-rotate append failed");
+            // `store` (and its pool) is dropped here — simulates the process exiting.
+        }
+
+        let restarted_pool = connect(&database_url).await.expect("reconnect failed");
+        let restarted = PostgresAuditStore::new(restarted_pool);
+
+        let seals = restarted.seals().await.expect("seals failed");
+        assert_eq!(seals.len(), 1, "the rotated segment's seal must survive a restart");
+
+        let sealed_entries = restarted
+            .get_segment_entries(&seals[0].segment_id)
+            .await
+            .expect("sealed entries failed");
+        for id in &ids {
+            assert!(
+                sealed_entries.iter().any(|e| &e.id == id),
+                "entry {id} missing from sealed segment after restart"
+            );
+        }
+
+        restarted
+            .verify()
+            .await
+            .expect("chain must verify after restart");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_chain_entries_across_two_append_calls() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        store
+            .append(vec![
+                test_input(&Uuid::new_v4().to_string(), &config_hash),
+                test_input(&Uuid::new_v4().to_string(), &config_hash),
+            ])
+            .await
+            .expect("first append");
+        store
+            .append(vec![
+                test_input(&Uuid::new_v4().to_string(), &config_hash),
+                test_input(&Uuid::new_v4().to_string(), &config_hash),
+            ])
+            .await
+            .expect("second append");
+        let entries = store.entries().await.expect("entries");
+        assert_eq!(entries.len(), 4);
+        store
+            .verify()
+            .await
+            .expect("chain must verify after two appends");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_verify_after_a_rotation() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        store
+            .append(vec![test_input(&unique_id("pre-rotate"), &config_hash)])
+            .await
+            .expect("append before rotate");
+        store.rotate().await.expect("rotate");
+        store
+            .append(vec![test_input(&unique_id("post-rotate"), &config_hash)])
+            .await
+            .expect("append after rotate");
+        store.verify().await.expect("verify after rotation");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_link_the_new_segment_to_the_sealed_one_on_rotate() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        store
+            .append(vec![test_input(&unique_id("first"), &config_hash)])
+            .await
+            .expect("append");
+        let seal = store.rotate().await.expect("rotate");
+        let open_entries = store.entries().await.expect("entries");
+        assert_eq!(open_entries.len(), 0, "new segment should start empty");
+
+        store
+            .append(vec![test_input(&unique_id("second"), &config_hash)])
+            .await
+            .expect("append after rotate");
+        let seal2 = store.rotate().await.expect("second rotate");
+        assert_eq!(
+            seal2.prev_seal_hash.as_deref(),
+            Some(seal.seal_hash.as_str()),
+            "successor seal must point at the predecessor"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_report_entries_from_the_open_segment_only() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        store
+            .append(vec![test_input(&unique_id("sealed-1"), &config_hash)])
+            .await
+            .expect("append");
+        store.rotate().await.expect("rotate");
+        let (open1, open2) = (unique_id("open-1"), unique_id("open-2"));
+        store
+            .append(vec![
+                test_input(&open1, &config_hash),
+                test_input(&open2, &config_hash),
+            ])
+            .await
+            .expect("append to new segment");
+        let entries = store.entries().await.expect("entries");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, open1);
+        assert_eq!(entries[1].id, open2);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_be_idempotent_when_closed_twice() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        store
+            .append(vec![test_input(&unique_id("x"), &config_hash)])
+            .await
+            .expect("append");
+        let seal1 = store.close().await.expect("first close");
+        let seal2 = store.close().await.expect("second close");
+        assert_eq!(
+            seal1.seal_hash, seal2.seal_hash,
+            "both close calls must return the same seal"
+        );
+    }
+
+    /// Nothing above ever sees `verify()` return `Err`. A `verify` hardcoded to `Ok(())`
+    /// would pass the whole list — this is the test that would catch that. Tampers a
+    /// sealed entry directly via SQL (bypassing the store's own API, exactly like an
+    /// out-of-band editor of the underlying table would) and requires the error to name
+    /// the sealed segment's chain.
+    #[tokio::test]
+    #[ignore]
+    async fn should_detect_a_tampered_entry_in_a_sealed_segment() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        let (t1, t2) = (unique_id("t1"), unique_id("t2"));
+        store
+            .append(vec![test_input(&t1, &config_hash), test_input(&t2, &config_hash)])
+            .await
+            .expect("append");
+        store.rotate().await.expect("rotate seals the segment");
+        store.verify().await.expect("clean chain verifies");
+
+        sqlx::query!(
+            "UPDATE audit_entries SET category = 'CreditCard' WHERE id = $1",
+            t2
+        )
+        .execute(&store.pool)
+        .await
+        .expect("tamper update failed");
+
+        let err = store
+            .verify()
+            .await
+            .expect_err("a tampered sealed entry must fail verification");
+        assert!(
+            matches!(err, AuditError::ChainIntegrity { index: 1, .. }),
+            "expected ChainIntegrity at index 1, got {err:?}"
+        );
+    }
+
+    /// Deletion breaks the tip too, but the separate `SegmentEntryCount` error is what
+    /// makes "holds 1 entry, seal records 2" actionable instead of an opaque hash
+    /// mismatch — see Design Decision D2. Deletes a row directly via SQL, mirroring
+    /// `should_detect_a_tampered_entry_in_a_sealed_segment`'s out-of-band-edit approach.
+    #[tokio::test]
+    #[ignore]
+    async fn should_report_a_missing_entry_as_a_count_mismatch() {
+        let store = test_store().await;
+        let config_hash = format!("cfg-{}", Uuid::new_v4());
+        let (c1, c2) = (unique_id("c1"), unique_id("c2"));
+        store
+            .append(vec![test_input(&c1, &config_hash), test_input(&c2, &config_hash)])
+            .await
+            .expect("append");
+        store.rotate().await.expect("rotate");
+
+        sqlx::query!("DELETE FROM audit_entries WHERE id = $1", c2)
+            .execute(&store.pool)
+            .await
+            .expect("tamper delete failed");
+
+        let err = store
+            .verify()
+            .await
+            .expect_err("a truncated sealed segment must fail verification");
+        match err {
+            AuditError::SegmentEntryCount {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected, 2);
+                assert_eq!(actual, 1);
+            }
+            other => panic!("expected SegmentEntryCount, got {other:?}"),
+        }
     }
 }
