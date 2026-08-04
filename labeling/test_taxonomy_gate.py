@@ -39,3 +39,27 @@ def test_rejects_an_empty_label():
 def test_missing_taxonomy_file_fails_loudly(tmp_path):
     with pytest.raises(FileNotFoundError):
         _load_entity_types(tmp_path / "does_not_exist.yaml")
+
+
+def test_taxonomy_file_missing_entity_types_key_fails_loudly(tmp_path):
+    path = tmp_path / "business_law.yaml"
+    path.write_text("someOtherKey: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="entityTypes"):
+        _load_entity_types(path)
+
+
+def test_taxonomy_file_that_is_not_a_mapping_fails_loudly(tmp_path):
+    path = tmp_path / "business_law.yaml"
+    path.write_text("- just\n- a\n- list\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mapping"):
+        _load_entity_types(path)
+
+
+def test_taxonomy_file_with_non_string_entity_types_fails_loudly(tmp_path):
+    path = tmp_path / "business_law.yaml"
+    path.write_text("entityTypes:\n  - contracting_party\n  - 42\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be strings"):
+        _load_entity_types(path)

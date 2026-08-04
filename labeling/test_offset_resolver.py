@@ -37,6 +37,16 @@ def test_empty_entity_text_returns_none():
     assert resolve_offset("some text", "", None, None) is None
 
 
+def test_context_matching_neither_occurrence_returns_none():
+    chunk = "Acme shall notify Beta. Beta shall notify Acme in return."
+
+    result = resolve_offset(
+        chunk, "Acme", context_before=None, context_after="does not appear"
+    )
+
+    assert result is None
+
+
 def test_context_disambiguates_the_second_of_two_occurrences():
     chunk = "Acme shall notify Beta. Beta shall notify Acme in return."
 
