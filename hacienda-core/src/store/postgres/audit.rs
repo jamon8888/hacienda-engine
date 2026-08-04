@@ -12,7 +12,7 @@ use crate::audit::{
     AuditStore, GENESIS_HASH,
 };
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -178,7 +178,12 @@ impl AuditStore for PostgresAuditStore {
         let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
         let tip = compute_tip(&entries);
         let prev_seal_hash = get_latest_seal_hash(&mut tx).await?;
-        let sealed_at = Utc::now();
+        // ~keep: truncated to microseconds because Postgres TIMESTAMPTZ has microsecond
+        // resolution — `Utc::now()` carries nanoseconds, so hashing the untruncated value
+        // here and then reading it back post-truncation for `verify()` would compute two
+        // different `to_rfc3339()` strings from what the DB considers the same instant,
+        // breaking `check_seal_integrity` on every seal.
+        let sealed_at = Utc::now().trunc_subsecs(6);
 
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
@@ -272,7 +277,10 @@ impl AuditStore for PostgresAuditStore {
         let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
         let tip = compute_tip(&entries);
         let prev_seal_hash = get_latest_seal_hash(&mut tx).await?;
-        let sealed_at = Utc::now();
+        // ~keep: see the matching truncation in `rotate()` — Postgres TIMESTAMPTZ has
+        // microsecond resolution, so hashing the untruncated `Utc::now()` here would
+        // mismatch the value `verify()` recomputes from after it round-trips the DB.
+        let sealed_at = Utc::now().trunc_subsecs(6);
 
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
