@@ -586,11 +586,39 @@ before this phase is declared complete for a horizontally-scaled deployment.
       the existing `guarded_handler_observes_the_caller_not_trusted` /
       `documents_process_alone_is_authorised_for_a_scan_without_text` pair.
 - [x] **Step 4.** <!-- verified: reflection tests pass against the default (in-memory/file) test ApiState. --> Verify against in-memory/file stores.
-- [ ] **Step 5 (gated on Phase 9).** <!-- not done: no test in routes.rs wires
+- [x] **Step 5 (gated on Phase 9).** <!-- not done: no test in routes.rs wires
       PostgresAuditStore/PostgresReviewStore into the test ApiState for these 7 routes —
       grep confirms only the Phase 13 usage-route test uses PostgresAuditStore. The routes
       call facade methods only, so this is expected to be a formality, but it has not been
-      run. --> Re-run the full route test suite with `PostgresAuditStore`/
+      run. -->
+      <!-- verified 2026-08-04: added
+      routes::tests::audit_review_compliance_glossary_routes_work_against_postgres
+      (hacienda-api/src/routes.rs), mirroring usage_route_aggregates_audit_entries's
+      existing DATABASE_URL/#[ignore] convention exactly — no new feature flag was added
+      to hacienda-api/Cargo.toml because hacienda-core's `postgres` feature is already
+      forwarded unconditionally there (`hacienda-core = { ..., features = ["jobs",
+      "postgres", "s3"] }`), so PostgresAuditStore/PostgresReviewStore were already
+      compiled in; `cargo clippy -p hacienda-api --features postgres` fails with "package
+      does not contain this feature", confirming no such flag exists or is needed. The
+      test builds a HaciendaFacade via HaciendaFacade::with_stores(config,
+      Some(PostgresAuditStore), Some(PostgresReviewStore), None) — ApiState itself has no
+      audit/review store fields; the facade owns them — with pii/review/compliance/
+      glossary all enabled, seeds one audit entry and one pending review item (unique IDs
+      per run, since audit_entries/review_items are shared tables across every Postgres
+      test on this DB), then exercises all 7 routes: GET /v1/audit (finds the seeded
+      entry by principal), GET /v1/audit/verify (chain valid), GET /v1/review (finds the
+      seeded item pending), POST /v1/review/{id}/decide (approves it, 200 with
+      decision=approve), GET /v1/compliance/dpia, GET /v1/compliance/report (model_card
+      name matches the configured model_name), GET /v1/glossary (empty, no doc
+      processed). Ran against a real Postgres (existing `hacienda-pg` docker container,
+      pgvector/pgvector:pg16,
+      DATABASE_URL=postgres://hacienda:hacienda_dev@127.0.0.1:5432/hacienda) with
+      `DATABASE_URL=... cargo test -p hacienda-api --lib
+      routes::tests::audit_review_compliance_glossary_routes_work_against_postgres --
+      --ignored`: 1 passed, 0 failed, confirming the handlers are backend-agnostic as
+      expected. Full `cargo test -p hacienda-api --lib routes::tests` (ignored tests
+      excluded) still passes: 23 passed, 0 failed, 5 ignored. `cargo fmt -p hacienda-api
+      -- --check` and `cargo clippy -p hacienda-api -- -D warnings` both clean. --> Re-run the full route test suite with `PostgresAuditStore`/
       `PostgresReviewStore` wired into the test `ApiState` builder, confirming the routes are
       backend-agnostic (they should be — they call facade methods, not stores, directly).
 
@@ -634,15 +662,32 @@ Gated on Phase 9 (`ApiKeyStore`, Task 5 of Phase 9).
       Add `argon2 = "0.5"` to workspace deps per D7. New module
       `hacienda-core/src/auth/keys.rs`: `generate_key() -> (String /* shown once */, String /* hash to store */)`,
       `verify_key(candidate: &str, stored_hash: &str) -> bool`.
-- [ ] **Step 3 (green).** <!-- not done: entropy (key_has_sufficient_entropy) and
+- [x] **Step 3 (green).** <!-- not done: entropy (key_has_sufficient_entropy) and
       wrong-key-rejection (should_reject_a_wrong_key) tests exist, but should_reject_a_wrong_key
       tests an unrelated string, not a single-byte mutation of the valid key, and there is no
       timing assertion (>1ms) guarding against a regression to a fast hash. Grepped
-      hacienda-core/src/auth/keys.rs for Instant/Duration/elapsed — none found. --> Tests: generation produces sufficient entropy (assert length/charset,
+      hacienda-core/src/auth/keys.rs for Instant/Duration/elapsed — none found. -->
+      <!-- verified 2026-08-04: hacienda-core/src/auth/keys.rs tightened. key_has_sufficient_entropy
+      now strips the hcd_live_ prefix and asserts the 32-char suffix against generate_key()'s own
+      32-byte entropy buffer (not an arbitrary literal), checks every char is base62/alphanumeric,
+      and rejects a degenerate single-repeated-character suffix. should_reject_a_wrong_key was
+      rewritten to generate a real key, XOR-flip one bit of the last byte (stays valid ASCII/UTF-8
+      since generated chars are all base62), and assert verify_key rejects the mutated key instead
+      of an unrelated string. Added verify_key_should_take_measurable_time: times verify_key with
+      std::time::Instant and asserts elapsed > 1ms, with a ~keep comment explaining the margin
+      against Argon2id's real (tens-of-ms) cost vs. CI jitter, and why the assertion exists (guards
+      against a silent regression to a fast, brute-forceable hash). --> Tests: generation produces sufficient entropy (assert length/charset,
       not literal randomness), hash verifies the exact key and rejects any single-byte
       mutation, hashing is slow enough to matter (assert it takes >1ms — a regression to a fast
       hash would pass every functional test and silently reintroduce brute-forceability).
-- [ ] **Step 4.** <!-- not done: depends on Step 3's missing tests. --> Verify.
+- [x] **Step 4.** <!-- not done: depends on Step 3's missing tests. -->
+      <!-- verified 2026-08-04: cargo fmt -p hacienda-core -- --check clean on
+      hacienda-core/src/auth/keys.rs (checked directly with rustfmt --check to avoid noise from
+      pre-existing unrelated diffs in lib.rs and store/postgres/audit.rs, confirmed via git stash
+      to predate this change); cargo clippy -p hacienda-core --all-features -- -D warnings clean;
+      cargo test -p hacienda-core --lib auth::keys: 10 passed, 0 failed (auth is not
+      feature-gated beyond target_arch != wasm32, so default features suffice and avoid an
+      unnecessary --all-features rebuild pulling in candle/tokenizers). --> Verify.
 
 ### Task 2 — Facade: issuance, revocation, resolution
 
