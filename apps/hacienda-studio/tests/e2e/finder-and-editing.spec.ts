@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
+import { visitFresh } from "./fixtures";
 
 /**
  * Track I3/I4: the Finder-like per-file list (`components/FileBrowser.tsx`) and
@@ -10,14 +11,6 @@ import JSZip from "jszip";
 const EMAIL = "jean.dupont@cabinet-exemple.fr";
 const EMPLOYEE_ID = "458213";
 const NOTE = `Contact Jean Dupont at ${EMAIL}. Employee id ${EMPLOYEE_ID} confirmed.`;
-
-async function visitFresh(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.setItem("xberg-studio-visited", "true");
-  });
-  await page.goto("/");
-  await page.waitForSelector('input[type="file"]:not([disabled])');
-}
 
 /** Selects `NOTE[from:to]` by character offset — precise, unlike a pixel-based double-click. */
 async function selectRange(page: Page, from: number, to: number): Promise<void> {
@@ -97,7 +90,12 @@ test.describe("Per-document PII editing (Track I4)", () => {
     await expect(pill).toBeVisible();
     await expect(pill).toHaveText(EMPLOYEE_ID);
 
-    await expect(page.locator('[data-file-row="note.txt"] .file-edited-badge')).toBeVisible();
+    // Longer than the default 5s: selectRange above drives ~60 sequential keyboard.press
+    // calls, and this host is CPU-constrained enough (see pseudonymize.spec.ts) that the
+    // resulting re-render can lag past the default budget.
+    await expect(page.locator('[data-file-row="note.txt"] .file-edited-badge')).toBeVisible({
+      timeout: 20000,
+    });
 
     const exportDownload = page.waitForEvent("download");
     await page.locator(".export-edited").click();

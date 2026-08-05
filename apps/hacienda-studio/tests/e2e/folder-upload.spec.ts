@@ -1,17 +1,12 @@
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import JSZip from "jszip";
+import { skipOnboarding } from "./fixtures";
 
 const NOTE =
   "Contact Jean Dupont at jean.dupont@cabinet-exemple.fr regarding the deal.";
-
-async function skipOnboarding(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.setItem("xberg-studio-visited", "true");
-  });
-}
 
 /**
  * Track I1: folder ingest. Builds a folder with a nested supported document
@@ -41,7 +36,7 @@ test.describe("folder upload (Track I1)", () => {
 
       await skipOnboarding(page);
       await page.goto("/");
-      await page.waitForSelector('input[type="file"]:not([disabled])');
+      await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
       // Switch the single `#file-input` into directory-picking mode before
       // Playwright can populate `webkitRelativePath` on the selected files.

@@ -1,18 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import JSZip from "jszip";
+import { skipOnboarding } from "./fixtures";
 
 const NOTE = [
   "Contact Jean Dupont at jean.dupont@cabinet-exemple.fr.",
   "Acme SAS acquired Beta SARL for a purchase price of 4.2M EUR.",
   "IBAN FR7630006000011234567890189.",
 ].join(" ");
-
-async function skipOnboarding(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.setItem("xberg-studio-visited", "true");
-  });
-}
 
 /**
  * The rest of the e2e suite only asserts that the app renders, so two defects
@@ -39,7 +34,7 @@ test.describe("document pipeline", () => {
     await page.goto("/");
     // Not `.drop-zone`: it renders while the worker is still compiling the
     // WASM module, and the input is disabled until the handshake lands.
-    await page.waitForSelector('input[type="file"]:not([disabled])');
+    await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
     const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {

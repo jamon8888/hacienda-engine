@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
+import { visitFresh } from "./fixtures";
 
 /**
  * Track F1/F2: `redactionMode: "pseudonymize"` end to end — minting in the worker
@@ -11,14 +12,6 @@ import JSZip from "jszip";
 const EMAIL = "jean.dupont@cabinet-exemple.fr";
 const NOTE = `Contact Jean Dupont at ${EMAIL} regarding the deal.`;
 const PASSPHRASE = "correct horse battery staple";
-
-async function visitFresh(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.setItem("xberg-studio-visited", "true");
-  });
-  await page.goto("/");
-  await page.waitForSelector('input[type="file"]:not([disabled])');
-}
 
 async function enablePseudonymizeMode(page: Page): Promise<void> {
   await page.click("button.config-toggle");
@@ -75,7 +68,12 @@ test.describe("redactionMode: pseudonymize (Track F1/F2)", () => {
     await page.getByPlaceholder("Passphrase").fill(PASSPHRASE);
     await page.locator(".pii-reveal-submit").click();
 
-    await expect(page.locator(".pii-revealed-value")).toHaveText(EMAIL.toLowerCase());
+    // deriveKeyHex runs PBKDF2 at 600,000 iterations (OWASP's 2023 minimum) on the main
+    // thread here — the same deliberate cost lib/pseudonymize.test.ts documents needing
+    // 40-60s unit-test timeouts for on this host; Playwright's 5s default is too short.
+    await expect(page.locator(".pii-revealed-value")).toHaveText(EMAIL.toLowerCase(), {
+      timeout: 60000,
+    });
   });
 
   test("fails closed with the wrong passphrase", async ({ page }) => {
@@ -95,7 +93,9 @@ test.describe("redactionMode: pseudonymize (Track F1/F2)", () => {
     await page.getByPlaceholder("Passphrase").fill("wrong passphrase entirely");
     await page.locator(".pii-reveal-submit").click();
 
-    await expect(page.getByText(/wrong passphrase|mask mode/i)).toBeVisible();
+    // Same PBKDF2 cost as above — the wrong-passphrase derivation is just as expensive as
+    // the correct one before it can fail closed.
+    await expect(page.getByText(/wrong passphrase|mask mode/i)).toBeVisible({ timeout: 60000 });
     await expect(page.locator(".pii-revealed-value")).toHaveCount(0);
   });
 });

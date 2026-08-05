@@ -48,6 +48,15 @@ const ADDABLE_CATEGORIES = [
   "other",
 ];
 
+// Module-level, not inline in the JSX below: `@uiw/react-codemirror`'s internal
+// reconfigure effect depends on this prop's *identity* (like `extensions` per the
+// class comment above), and its `onUpdate` fires on that reconfigure dispatch too —
+// an inline `{ ... }` literal here is a fresh reference every render, so every
+// `onUpdate`-driven re-render would reconfigure again, which fires `onUpdate` again,
+// forever. A stable reference is required, not just a memoized one, since this value
+// never changes.
+const BASIC_SETUP = { lineNumbers: false, foldGutter: false };
+
 export function MarkdownEditor({
   value,
   findings,
@@ -107,7 +116,7 @@ export function MarkdownEditor({
         ref={editorRef}
         value={content}
         extensions={extensions}
-        basicSetup={{ lineNumbers: false, foldGutter: false }}
+        basicSetup={BASIC_SETUP}
         className="cm-pii-editor overflow-hidden rounded-md border border-border text-sm"
         onUpdate={onAddFinding ? handleUpdate : undefined}
       />
