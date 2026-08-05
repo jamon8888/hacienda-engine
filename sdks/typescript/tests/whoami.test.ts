@@ -26,13 +26,16 @@ describe("whoami", () => {
   });
 
   it("raises HaciendaApiError on a 400", async () => {
-    await expect(
-      client.pii.revealToken({ token: "not-a-real-token" }),
-    ).rejects.toSatisfy((error: unknown) => {
-      expect(error).toBeInstanceOf(HaciendaApiError);
-      expect((error as HaciendaApiError).statusCode).toBe(400);
-      expect((error as HaciendaApiError).code).toBe("invalid_request");
-      return true;
-    });
+    const error = await client.pii
+      .revealToken({ token: "not-a-real-token" })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(HaciendaApiError);
+    if (!(error instanceof HaciendaApiError)) return;
+    expect(error.statusCode).toBe(400);
+    expect(error.code).toBe("invalid_request");
   });
 });

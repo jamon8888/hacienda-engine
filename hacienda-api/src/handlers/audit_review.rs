@@ -190,8 +190,13 @@ pub async fn get_compliance_dpia(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
+    let report = serde_json::to_value(report.dpia).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise DPIA report");
+        ApiError::internal()
+    })?;
+
     Ok(Json(ComplianceDpiaResponse {
-        report: serde_json::to_value(report.dpia).unwrap_or_default(),
+        report,
         audit_chain_tip,
     }))
 }
@@ -226,8 +231,13 @@ pub async fn get_compliance_report(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
+    let report = serde_json::to_value(report).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise compliance report");
+        ApiError::internal()
+    })?;
+
     Ok(Json(ComplianceReportResponse {
-        report: serde_json::to_value(report).unwrap_or_default(),
+        report,
         audit_chain_tip,
     }))
 }
@@ -258,11 +268,18 @@ pub async fn get_glossary(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
+    let entries = entries
+        .into_iter()
+        .map(|e| {
+            serde_json::to_value(e).map_err(|err| {
+                tracing::error!(error = %err, "failed to serialise glossary entry");
+                ApiError::internal()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(Json(GlossaryResponse {
-        entries: entries
-            .into_iter()
-            .map(|e| serde_json::to_value(e).unwrap_or_default())
-            .collect(),
+        entries,
         audit_chain_tip,
     }))
 }

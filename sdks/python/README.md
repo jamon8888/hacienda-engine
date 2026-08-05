@@ -15,6 +15,16 @@ for entity in result.entities:
 An async client is available as `AsyncHaciendaClient`, mirroring every method as a
 coroutine.
 
+## Retries
+
+Both clients retry a request on `429`, `502`, `503`, and `504` (configurable via
+`retry_statuses`), honoring `Retry-After` when the server sends it and falling back to
+exponential backoff with jitter otherwise. Only idempotent HTTP methods (`GET`, `HEAD`,
+`OPTIONS`, `DELETE`) are replayed — the API has no idempotency-key mechanism for `POST`,
+so a retried `POST` (e.g. `process_documents`, `confirm_upload`) could create a duplicate
+resource if the origin already processed the first attempt. `POST` responses are never
+replayed, even on a retryable status.
+
 ## Development
 
 See [`../README.md`](../README.md) for the shared `sdks/` layout. From this

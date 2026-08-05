@@ -38,7 +38,10 @@ describe("documents", () => {
       documents: [{ mime_type: "text/plain", content_base64: content }],
     });
 
-    expect(accepted.job_id).toBeTruthy();
+    expect(typeof accepted.job_id).toBe("string");
+    expect(accepted.job_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
 
     const job = await client.jobs.getJob(accepted.job_id);
     expect(job.id).toBe(accepted.job_id);

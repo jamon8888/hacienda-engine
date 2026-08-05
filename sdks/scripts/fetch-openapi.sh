@@ -19,11 +19,22 @@ cargo build -p hacienda-cli >&2
 SERVER_PID=$!
 trap 'kill "${SERVER_PID}" 2>/dev/null || true; wait "${SERVER_PID}" 2>/dev/null || true' EXIT
 
+ready=false
 for _ in $(seq 1 50); do
-    if curl -s -o /dev/null "http://${BIND}/health"; then
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        echo "hacienda serve exited before becoming ready" >&2
+        exit 1
+    fi
+    if curl --fail --silent --show-error -o /dev/null "http://${BIND}/health"; then
+        ready=true
         break
     fi
     sleep 0.2
 done
+
+if [[ "${ready}" != true ]]; then
+    echo "hacienda serve did not become ready" >&2
+    exit 1
+fi
 
 curl -sf "http://${BIND}/openapi.json"

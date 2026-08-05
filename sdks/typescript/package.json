@@ -26,6 +26,7 @@
     "generate": "bash scripts/generate.sh",
     "prebuild": "npm run generate",
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "lint": "eslint . && tsc --noEmit",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

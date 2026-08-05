@@ -67,6 +67,7 @@ export async function startHacienda(): Promise<HaciendaServer> {
       cwd: REPO_ROOT,
       stdio: "inherit",
     });
+    build.on("error", reject);
     build.on("exit", (code) =>
       code === 0 ? resolve() : reject(new Error(`cargo build exited ${code}`)),
     );
@@ -79,8 +80,16 @@ export async function startHacienda(): Promise<HaciendaServer> {
     ["serve", "--bind", `127.0.0.1:${port}`],
     { cwd: REPO_ROOT, stdio: "ignore" },
   );
+  proc.on("error", (error) => {
+    console.error("hacienda serve failed to start", error);
+  });
 
-  await waitForHealth(baseUrl);
+  try {
+    await waitForHealth(baseUrl);
+  } catch (error) {
+    proc.kill("SIGKILL");
+    throw error;
+  }
 
   return {
     baseUrl,

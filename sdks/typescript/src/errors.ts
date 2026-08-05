@@ -21,7 +21,15 @@ export class HaciendaApiError extends Error {
 }
 
 interface ErrorEnvelope {
-  error?: { code?: string; message?: string };
+  error?: { code?: unknown; message?: unknown };
+}
+
+function isErrorEnvelope(value: unknown): value is ErrorEnvelope {
+  return typeof value === "object" && value !== null;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 /**
@@ -40,15 +48,22 @@ export async function unwrap<T>(result: {
 }): Promise<T> {
   const { data, response } = result;
   if (response.ok) {
+    // `data` is legitimately undefined for 204 No Content responses
+    // (revokeKey, deleteCollection, deletePreset — all `Promise<void>`), so
+    // this stays permissive rather than throwing on an empty body.
     return data as T;
   }
 
   let code: string | undefined;
   let message = `request failed with status ${response.status}`;
-  const body = result.error as ErrorEnvelope | undefined;
-  if (body?.error) {
-    code = body.error.code;
-    message = body.error.message ?? message;
+  const body = result.error;
+  if (
+    isErrorEnvelope(body) &&
+    typeof body.error === "object" &&
+    body.error !== null
+  ) {
+    code = stringOrUndefined(body.error.code);
+    message = stringOrUndefined(body.error.message) ?? message;
   }
 
   throw new HaciendaApiError(response.status, code, message);

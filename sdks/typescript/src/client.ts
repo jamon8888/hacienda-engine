@@ -28,6 +28,16 @@ export type Target = "cloud";
 
 const DEFAULT_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const RETRY_BACKOFF_BASE_MS = 200;
+const RETRY_JITTER_MS = 100;
+
+// The API has no idempotency-key mechanism for POST, so a retried POST
+// (e.g. /v1/documents, /v1/uploads/confirm) can create a duplicate resource
+// if the origin processed the first attempt before a gateway returned
+// 502/503/504. Only replay methods that are safe to repeat by HTTP
+// semantics — never POST. DELETE is included because the SDK's own delete
+// endpoints (revokeKey, deleteCollection, deletePreset) are idempotent by
+// design: repeating them against an already-deleted resource is a no-op.
+const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS", "DELETE"]);
 
 export interface HaciendaClientOptions {
   baseUrl: string;
@@ -39,22 +49,36 @@ export interface HaciendaClientOptions {
   fetch?: typeof globalThis.fetch;
 }
 
+function retryAfterMs(response: Response): number | undefined {
+  const header = response.headers.get("retry-after");
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+}
+
 function retryingFetch(
   baseFetch: typeof globalThis.fetch,
   maxRetries: number,
   retryStatuses: Set<number>,
 ): typeof globalThis.fetch {
   return async (input, init) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    const replayable = IDEMPOTENT_METHODS.has(method);
     let attempt = 0;
     for (;;) {
       const response = await baseFetch(input, init);
-      if (!retryStatuses.has(response.status) || attempt >= maxRetries) {
+      if (
+        !replayable ||
+        !retryStatuses.has(response.status) ||
+        attempt >= maxRetries
+      ) {
         return response;
       }
-      await response.body?.cancel();
-      await new Promise((resolve) =>
-        setTimeout(resolve, RETRY_BACKOFF_BASE_MS * 2 ** attempt),
-      );
+      const delay =
+        retryAfterMs(response) ??
+        RETRY_BACKOFF_BASE_MS * 2 ** attempt + Math.random() * RETRY_JITTER_MS;
+      await response.body?.cancel().catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, delay));
       attempt += 1;
     }
   };

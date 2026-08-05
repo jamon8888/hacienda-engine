@@ -17,6 +17,7 @@ into `None`, which would make an error indistinguishable from an empty success.
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any, Literal
 from uuid import UUID
@@ -81,6 +82,26 @@ Target = Literal["cloud"]
 
 _DEFAULT_RETRY_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
 _RETRY_BACKOFF_BASE = 0.2
+_RETRY_JITTER_MAX = 0.1
+
+# The API has no idempotency-key mechanism for POST, so a retried POST (e.g.
+# /v1/documents, /v1/uploads/confirm) can create a duplicate resource if the
+# origin processed the first attempt before a gateway returned 502/503/504.
+# Only replay methods that are safe to repeat by HTTP semantics — never POST.
+# DELETE is included because the SDK's own delete endpoints (revoke_key,
+# delete_collection, delete_preset) are idempotent by design: repeating them
+# against an already-deleted resource is a no-op.
+_IDEMPOTENT_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    header = response.headers.get("retry-after")
+    if header is None:
+        return None
+    try:
+        return float(header)
+    except ValueError:
+        return None
 
 
 class _RetryTransport(httpx.BaseTransport):
@@ -88,7 +109,8 @@ class _RetryTransport(httpx.BaseTransport):
 
     Connection-level failures are httpx's own concern (handled by the wrapped
     transport); this only retries responses that completed but reported a
-    transient-shaped status.
+    transient-shaped status, and only for idempotent methods (see
+    `_IDEMPOTENT_METHODS`).
     """
 
     def __init__(
@@ -103,13 +125,21 @@ class _RetryTransport(httpx.BaseTransport):
         self._retry_statuses = retry_statuses
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        replayable = request.method.upper() in _IDEMPOTENT_METHODS
         attempt = 0
         while True:
             response = self._transport.handle_request(request)
-            if response.status_code not in self._retry_statuses or attempt >= self._max_retries:
+            if (
+                not replayable
+                or response.status_code not in self._retry_statuses
+                or attempt >= self._max_retries
+            ):
                 return response
+            delay = _retry_after_seconds(response)
+            if delay is None:
+                delay = _RETRY_BACKOFF_BASE * (2**attempt) + random.uniform(0, _RETRY_JITTER_MAX)
             response.close()
-            time.sleep(_RETRY_BACKOFF_BASE * (2**attempt))
+            time.sleep(delay)
             attempt += 1
 
     def close(self) -> None:
@@ -131,13 +161,21 @@ class _AsyncRetryTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         import asyncio
 
+        replayable = request.method.upper() in _IDEMPOTENT_METHODS
         attempt = 0
         while True:
             response = await self._transport.handle_async_request(request)
-            if response.status_code not in self._retry_statuses or attempt >= self._max_retries:
+            if (
+                not replayable
+                or response.status_code not in self._retry_statuses
+                or attempt >= self._max_retries
+            ):
                 return response
+            delay = _retry_after_seconds(response)
+            if delay is None:
+                delay = _RETRY_BACKOFF_BASE * (2**attempt) + random.uniform(0, _RETRY_JITTER_MAX)
             await response.aclose()
-            await asyncio.sleep(_RETRY_BACKOFF_BASE * (2**attempt))
+            await asyncio.sleep(delay)
             attempt += 1
 
     async def aclose(self) -> None:
