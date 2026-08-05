@@ -106,6 +106,15 @@ temp/
 *.tmp
 *.temp
 
+# SDKs (sdks/python, sdks/typescript) — codegen output, never committed; see
+# sdks/README.md for why there is no vendored spec either.
+sdks/python/src/hacienda_sdk/_generated/
+sdks/typescript/src/_generated/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
 # Config
 *.local.toml
 *.local.yaml

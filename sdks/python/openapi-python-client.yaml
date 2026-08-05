@@ -1,0 +1,5 @@
+project_name_override: hacienda_generated
+package_name_override: hacienda_generated
+use_path_prefixes_for_title_model_names: true
+field_constraints: true
+literal_enums: true

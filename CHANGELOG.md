@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Python and TypeScript SDKs (`sdks/python`, `sdks/typescript`, Phase 14).** Client
+  libraries for the hacienda-engine API, living in this repo (`sdks/`) rather than a
+  separate `hacienda-sdks` repo — the session's GitHub App cannot create repositories, and
+  the monorepo shape turned out simpler regardless: no cross-repo `spec-sync` workflow,
+  since CI builds `hacienda-cli`, starts it, and fetches `/openapi.json` in the same job
+  that generates and tests the client (`sdks/scripts/fetch-openapi.sh`), always against the
+  exact commit under test. Neither package commits generated code (`_generated/` gitignored
+  in both). Python: `HaciendaClient`/`AsyncHaciendaClient` (`openapi-python-client` +
+  `httpx`, `uv`/`ruff`/`mypy`/`pytest`). TypeScript: `HaciendaClient`
+  (`openapi-typescript` types + `openapi-fetch`, joined the existing npm/turbo workspace).
+  Both cover all 44 operations across 14 OpenAPI tags via one namespace per tag
+  (`client.pii.scan_text(...)` / `client.pii.scanText(...)`), a `target: "cloud"` axis
+  (single-variant union, ready for Phase 15's `"device"`), retry-with-backoff on
+  429/502/503/504, and a `.whoami()` shortcut. Every wrapper method routes through the
+  `*_detailed` generated calls and raises a `HaciendaApiError` on any non-2xx response —
+  the plain `sync`/`asyncio` (Python) and openapi-fetch's own `{data, error}` (TypeScript)
+  both collapse errors, including documented 401/403/404/400, into an empty-looking
+  result, which would make an API error indistinguishable from success. 12 pytest + 7
+  vitest tests, all against a live `hacienda serve`, never a mock. New CI:
+  `ci-sdk-python.yaml`, `ci-sdk-typescript.yaml` (triggered on `hacienda-api`/`hacienda-core`
+  changes too, not just `sdks/`, since a schema change must re-run them). `publish-sdk.yaml`
+  scaffolded (PyPI + npm, both OIDC trusted publishing) but not activated — needs
+  org-level trusted-publishing configuration this session cannot provision.
+- **`ReviewDecideRequest.decision` is now a closed enum** (`ReviewDecisionWire`:
+  `approve`/`reject`/`modify`), not a free `String` — the generated OpenAPI schema lists
+  the three valid values instead of an unconstrained string. Found during PR review while
+  building the SDK's generated types.
+- **Compliance/glossary responses use typed envelope DTOs**
+  (`ComplianceDpiaResponse`, `ComplianceReportResponse`, `GlossaryResponse`) instead of
+  bare `serde_json::Value`, so the OpenAPI schema names the stable `report`/`entries` +
+  `audit_chain_tip` shape — the variable report/entry content itself stays opaque
+  (`hacienda-core`'s `ComplianceReport`/`GlossaryEntry` are not `utoipa`-annotated).
 - **Real OpenAPI 3.1 schema for `GET /openapi.json` (Phase 14 precondition).**
   `hacienda-api`'s OpenAPI document was previously a hand-built stub — one
   `{"description": "Access: ..."}` object per path, no HTTP methods, no request/response

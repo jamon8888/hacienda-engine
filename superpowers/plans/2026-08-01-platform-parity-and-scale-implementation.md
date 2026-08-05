@@ -1481,28 +1481,68 @@ Gated on Phases 8, 10, 11, 12, 13 (needs a stable, complete `/v1/*` surface to g
 
 ### Task 2 — Repository scaffold
 
-**Deliberately not started in this pass.** Scoped out by explicit user decision
-(2026-08-05): this pass covers only the `hacienda-engine`-side precondition (Task 1),
-not creation of the new `hacienda-sdks` GitHub repository. Task 1's completion makes
-this task buildable next, not blocked on anything further.
+**Superseded, 2026-08-05: monorepo, not a separate `hacienda-sdks` repo.**
+Attempting the separate-repo path (per the original Step 1 below) failed on a real
+constraint this plan didn't anticipate: the session's GitHub App integration cannot
+create repositories (`403 Resource not accessible by integration`). Rather than block
+on an org-level permission grant, the user chose to place the SDK packages in this
+repo instead, under `sdks/{python,typescript}`. This is a net simplification, not just
+a workaround: it removes the cross-repo `spec-sync` workflow (and the GitHub App/PAT
+it would have needed) entirely, since CI can build `hacienda-cli`, start it, and fetch
+`/openapi.json` in the same job that then generates and tests the client — always
+against the exact commit under test, with no vendored spec to drift.
 
-- [ ] **Step 1.** New repo `hacienda-sdks`, structure mirrored from `xberg-sdks`:
-      `packages/{python,typescript}`, generated-core/hand-wrapper split per §3.1's evidence
-      table (Extraction/Jobs are strong-evidence method groups worth generating confidently
-      first; weaker-evidence groups like the old RAG surface are not applicable here since
-      hacienda's RAG contract is hacienda's own, not xberg's).
-- [ ] **Step 2.** `target: "cloud"` is the only target this phase implements — `target: "device"`
-      is Phase 15's. Build the axis into the config shape now (an enum with one variant) so
-      Phase 15 extends rather than retrofits it.
-- [ ] **Step 3.** CI: codegen-from-`/openapi.json` on a schedule or on hacienda-engine release,
-      with a generated-code header per `generated-code-policy`, and a freshness check
-      (`task generate:sdk && git diff --exit-code`).
+- [x] **Step 1 (superseded).** `sdks/python` and `sdks/typescript`, structure adapted from
+      `xberg-sdks` (`packages/{python,typescript}` → `sdks/{python,typescript}`; one vendored
+      spec collapses to none, since hacienda has one API surface, not xberg's Enterprise+Pro
+      split). Python: `openapi-python-client` generates `_generated/` (gitignored), a
+      hand-written `HaciendaClient`/`AsyncHaciendaClient` in `client.py` wraps it —
+      44 operations across 14 tags, one namespace class per tag
+      (`client.pii.scan_text(...)`, etc.), routed through `sync_detailed`/`asyncio_detailed`
+      and a shared `_unwrap()` that raises `HaciendaApiError` on any non-2xx status (the
+      plain `sync`/`asyncio` convenience functions collapse every error status — including
+      documented 401/403/404/400 — into `None`, which would make an API error indistinguishable
+      from an empty success; not used for that reason). TypeScript: `openapi-typescript`
+      generates types only (`src/_generated/api.d.ts`); `client.ts` wraps a typed
+      `openapi-fetch` client with the same per-tag namespace shape and an `unwrap()` with the
+      same non-2xx-throws contract. Both clients: retry-with-backoff transport (429/502/503/504,
+      configurable), `whoami()` shortcut for `GET /v1/auth/whoami`. `sdks/typescript` joined
+      the existing npm workspace (`package.json`'s `workspaces`) rather than introducing pnpm,
+      matching `apps/hacienda-studio`'s existing eslint/prettier/vitest toolchain instead of
+      `xberg-sdks`' oxlint/oxfmt/tsdown.
+- [x] **Step 2.** `target: Literal["cloud"]` in both clients (Python) / `type Target = "cloud"`
+      (TypeScript) — a union of one, so Phase 15 extends rather than retrofits it.
+- [x] **Step 3 (superseded — simpler than planned).** No freshness check needed: neither
+      package commits generated code (`_generated/` is gitignored in both), so there is
+      nothing to diff against staleness. `sdks/scripts/fetch-openapi.sh` builds
+      `hacienda-cli`, starts `hacienda serve` on loopback, fetches `/openapi.json`, and shuts
+      it down — called by both packages' own `generate` step (dev and CI alike), always
+      against the current checkout. `ci-sdk-python.yaml`/`ci-sdk-typescript.yaml` trigger on
+      `paths: [sdks/<lang>/**, hacienda-api/**, hacienda-core/**]` — a schema change re-runs
+      SDK CI even when no file under `sdks/` changed. `publish-sdk.yaml` is scaffolded
+      (PyPI + npm, both OIDC trusted-publishing) but not exercised — fires only on an
+      `sdk-v*` tag, which needs org-level trusted-publishing configuration this session
+      cannot provision, per Task 3 below.
 
 ### Task 3 — Verification
 
-- [ ] **Step 1.** Each package's own test suite (`pytest`/`vitest`) against a locally running
-      `hacienda-api` instance — an integration test, not a mock, per `testing-anti-patterns`.
-- [ ] **Step 2.** Spec: §9 Gap 6 struck; §10 Phase 14 marked shipped.
+- [x] **Step 1.** `sdks/python/tests/` (pytest, `conftest.py` starts one real `hacienda serve`
+      per test session) and `sdks/typescript/tests/` (vitest, `global-setup.ts` does the same) —
+      12 and 7 tests respectively, all against a locally running `hacienda-api` instance, never
+      a mock, per `testing-anti-patterns`. Found and pinned (not fixed — out of scope, a
+      pre-existing bug) a real defect while writing the extraction round-trip test in both
+      suites: `POST /v1/documents` silently returns `documents: []` whenever no PII pipeline is
+      configured (already documented in this plan's Phase 13 Task 3 completion note) — both
+      test suites assert that actual behavior with a comment citing the finding, rather than
+      the ideal behavior, so CI stays green and honest about a gap that still needs its own
+      fix.
+      <!-- verified 2026-08-05: `uv run pytest` → 12 passed; `npm run test:unit
+      --workspace=sdks/typescript` → 7 passed. `uv run ruff check/format --check`, `uv run
+      mypy src`, `npm run lint`/`format:check --workspace=sdks/typescript`, `uv build`, `npm
+      run build --workspace=sdks/typescript` all clean. `rumdl check sdks/` clean (0 of the
+      92 pre-existing repo-wide markdown-lint issues are under sdks/). -->
+- [ ] **Step 2.** Spec: §9 Gap 6 struck; §10 Phase 14 marked shipped for the monorepo shape
+      (repo-creation precondition still open if a separate repo is revisited later).
 
 ---
 

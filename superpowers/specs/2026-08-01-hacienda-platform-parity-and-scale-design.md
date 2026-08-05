@@ -50,7 +50,7 @@ built to fix.
 | 3 | Metering | **Usage is derived from the audit chain, not tracked separately.** Every billable operation already produces an audit entry (integration spec §5, rule 2); usage aggregation is a read-model over `AuditStore`, not a second source of truth that can drift from it. |
 | 4 | Auth/login | **API-key issuance and rotation, not a session/cookie login.** hacienda is a machine-to-machine API; xberg's `login`/`auth_config` pair maps to `POST /v1/auth/keys` (issue) and `DELETE /v1/auth/keys/{id}` (revoke), not a browser session flow. |
 | 5 | Store backend for scale | **Postgres, as §12.6 already specified** — this spec adds the schema surface for RAG/usage/auth on top of the segments/review/jobs tables §12 already designs for. One backend, not one per subsystem. |
-| 6 | SDK repo | **New sibling repo `hacienda-sdks`, structurally cloned from `xberg-sdks`.** Same codegen-core + hand-wrapper split, same dual-target pattern (§3.2's `_resolve_tier`), retargeted to a `target: "cloud" \| "device"` axis instead of xberg's `"enterprise" \| "pro"`. |
+| 6 | SDK location | ~~New sibling repo `hacienda-sdks`, structurally cloned from `xberg-sdks`.~~ **Corrected 2026-08-05: `sdks/{python,typescript}` in this repo**, not a new one — the session's GitHub App cannot create repos, and the monorepo shape turned out simpler anyway (no cross-repo spec-sync). Same codegen-core + hand-wrapper split, same dual-target pattern, retargeted to a `target: "cloud" \| "device"` axis instead of xberg's `"enterprise" \| "pro"`. See §8. |
 | 7 | Mobile/on-device target | **`target: "device"` is a distinct SDK backend, not a tier of the cloud API.** It talks to an embedded Cactus runtime, not `hacienda-api` over HTTP. The SDK method surface is shared where semantics match (extract, scan) and explicitly narrower where they can't (no audit segment reconciliation on-device; no multi-tenant RAG collections, one local index per app). |
 | 8 | Reveal | **`POST /v1/pii/reveal` ships before any new xberg-parity route**, per §9 Phase ordering — it is the one item that makes an already-shipped control (AES-SIV pseudonymisation) functional rather than decorative. |
 | 9 | xberg's built-in `redaction-rehydrate` feature | **Not adopted.** hacienda keeps its own stateless AES-SIV construction (integration spec §12.3). xberg's `RehydrationMap` is a stored, scrypt-passphrase-encrypted lookup blob — correct for a single-writer document, but reintroduces exactly the shared-mutable-state problem §12's stateless-facade design exists to avoid. See §3.6. |
@@ -399,17 +399,35 @@ segments/review/glossary/pseudonym-keys/adapter-cache rows there are unchanged.
 
 ## 8. SDK Repository Plan
 
-New repo, `hacienda-sdks`, structurally mirroring `xberg-sdks` (confirmed structure:
+**Superseded 2026-08-05: monorepo (`sdks/{python,typescript}` in this repo), not a new
+`hacienda-sdks` repo.** The session's GitHub App integration cannot create repositories
+(`403 Resource not accessible by integration`) — rather than gate on an org-level
+permission grant, the SDK packages live under `sdks/` here instead. This also removes
+the cross-repo `spec-sync` workflow this section originally implied: CI builds
+`hacienda-cli`, starts it, and fetches `/openapi.json` in the same job that generates
+and tests the client, always against the exact commit under test — no vendored spec,
+no cross-repo token. The rest of this section (dual-target axis, language scope, the
+`_resolve_tier` correction below) still describes the actual design; only "new repo,
+structurally mirroring `xberg-sdks`" is no longer accurate — read that as "new
+top-level directory," not "new repo."
+
+~~New repo, `hacienda-sdks`, structurally mirroring `xberg-sdks`~~ (confirmed structure:
 `packages/{python,typescript,go}` + generated-core/hand-wrapper split, `CONTRIBUTING.md`'s
-`scripts/sync-versions.py` + root `VERSION` + unified-tag release process).
+`scripts/sync-versions.py` + root `VERSION` + unified-tag release process) — see correction
+above; `sdks/{python,typescript}` here, `scripts/sync-versions.py` + `VERSION` unchanged in
+spirit.
 
 **What changes from the xberg-sdks template:**
 
 - The dual-target axis is `target: "cloud" | "device"`, not `"enterprise" | "pro"`. Cloud
-  talks to `hacienda-api` over HTTPS with the tier-probe pattern from `client.py`'s
+  talks to `hacienda-api` over HTTPS. ~~with the tier-probe pattern from `client.py`'s
   `_resolve_tier` (adapted: hacienda has one tier, so this becomes a capability-probe against
-  `GET /v1/auth/config` rather than a tier-probe against `/healthz`). Device wraps the Cactus
-  FFI directly — no HTTP client underneath at all for that target.
+  `GET /v1/auth/config` rather than a tier-probe against `/healthz`)~~ **Corrected
+  2026-08-05:** `GET /v1/auth/config` requires `Capability::AuthManage`, which a normal SDK
+  caller does not hold, so it cannot serve as that probe. `GET /v1/auth/whoami` (added
+  specifically for this) reports the calling principal's own granted capabilities instead,
+  gated on `Capability::DocumentsProcess`; both `HaciendaClient`s expose it as `.whoami()`.
+  Device wraps the Cactus FFI directly — no HTTP client underneath at all for that target.
 - Method surface is generated from hacienda's OpenAPI spec for `target: "cloud"` only. There
   is no OpenAPI equivalent for the device target since it's a native FFI call, not a REST
   endpoint — that half of each language package is hand-written, not codegen'd, same as how
@@ -527,25 +545,22 @@ parallel with an unproven device path.
    Task 2 Step 5) — the routes call facade methods only, so this is expected to be a
    formality, but it is unverified and requires a live Postgres this environment does not
    have running.
-6. **hacienda-sdks repo does not exist.** ~~cannot productively start (§8's precondition)
-   until `/openapi.json` schema completeness is verified~~ **Precondition closed
-   2026-08-05:** `/openapi.json` was not merely "unverified" — it was a hand-built stub
+6. ~~**hacienda-sdks repo does not exist.**~~ **Closed by Phase 14 (monorepo shape),
+   2026-08-05.** `/openapi.json` was not merely "unverified" — it was a hand-built stub
    with no HTTP methods, no schemas, and no operations at all (`build_openapi()` emitted
    one `{"description": "Access: ..."}` object per path). Replaced with a real OpenAPI 3.1
    document generated via `utoipa` (`#[derive(ToSchema)]` on all 59 `hacienda-api` DTOs,
    `#[utoipa::path]` on all 44 route-table handlers), verified end-to-end by running
    `openapi-generator-cli generate -g python` and `-g typescript-fetch` against a live
-   instance's `/openapi.json` — both produced complete, syntactically valid typed clients
-   (see the implementation plan's Phase 14 Task 1 for the full verification record). Also
-   added `GET /v1/auth/whoami`, correcting §8's `_resolve_tier` design: `GET
-   /v1/auth/config` requires `Capability::AuthManage`, which a normal SDK caller will not
-   hold, so it cannot serve as the capability probe §8 assumed — `whoami` reports the
-   *calling* principal's own capabilities instead, gated on `Capability::DocumentsProcess`.
-   **What remains open:** the repo itself (Task 2 of Phase 14) — scaffold, codegen CI,
-   `sync-versions.py` — is deliberately not started; this pass covered only the
-   `hacienda-engine`-side precondition, by explicit scope decision, not because anything
-   further blocks it. It blocks every downstream SDK consumer including the eventual
-   Cactus/device target.
+   instance's `/openapi.json` — both produced complete, syntactically valid typed clients.
+   Added `GET /v1/auth/whoami`, correcting §8's `_resolve_tier` design (see §8's own
+   correction). The SDK repo itself does not exist — per §8's correction, `sdks/{python,
+   typescript}` live in this repo instead (GitHub App repo-creation permission gap), fully
+   built: hand-written `HaciendaClient`/`AsyncHaciendaClient` (Python) and `HaciendaClient`
+   (TypeScript) covering all 44 operations across 14 tags, 12 pytest + 7 vitest tests
+   against a live `hacienda serve`, `ci-sdk-python.yaml`/`ci-sdk-typescript.yaml` triggered
+   on schema changes, `publish-sdk.yaml` scaffolded (not activated — needs org-level PyPI/npm
+   trusted-publishing). See the implementation plan's Phase 14 for the full record.
 7. **Cactus device-target spike not run.** Whether `cactus convert` handles GLiNER2's
    span-classification head is still unverified (noted in the prior conversation's gap
    analysis); §8's language-scope decision to defer Dart/device explicitly avoids blocking
@@ -566,7 +581,7 @@ avoid renumbering shipped work.
 | 11 | `/v1/auth/keys` issuance + revocation — **done** | Gap 4 | Phase 9 |
 | 12 | Task 1 (`RagStore` trait + types/filter/query IR + `InMemoryVectorStore`) — **done**, `crates/hacienda-rag`; Task 2 (`PgVectorStore` backend, `postgres` feature) — **done**; Task 3 (route existence confirmed, answer-synthesis scope decided: not built, 5 of 8 confirmed `/v1/rag/*` routes built and tested) — **done**; 3 routes (list-collections, list-documents, migrate-embeddings) remain unbuilt — no `RagStore` trait primitive serves them | Gap 3 (mostly closed — see §9) | Phase 9; backend architecture and trait shape already decided (§7, §3.7, Decision 2) — this phase is route verification + implementation, not design |
 | 13 | `/v1/jobs` list + result, presets, versions/diff, presigned uploads, `/v1/usage` — **done** | — | Phase 9; usage additionally needs Phase 10's audit routes as its read-model source |
-| 14 | `hacienda-sdks` repo, Python + TypeScript, `target: "cloud"` only | Gap 6 | Phases 8, 10, 11, 12, 13 (needs a stable, complete OpenAPI surface — this is why SDK work is last, not first) |
+| 14 | `sdks/{python,typescript}` (monorepo, not a separate `hacienda-sdks` repo — see §8), `target: "cloud"` only — **done** | Gap 6 | Phases 8, 10, 11, 12, 13 (needs a stable, complete OpenAPI surface — this is why SDK work is last, not first) |
 | 15 | Cactus device-target spike (GLiNER2 span-head via `cactus convert`) + `target: "device"` prototype in one language | Gap 7 | Phase 14's SDK scaffolding, but not on any cloud-route phase |
 
 **Why Postgres (Phase 9) gates almost everything:** every new capability in §4 except the
