@@ -599,7 +599,11 @@ async fn write_vault(
 }
 
 fn build_vault_readme(file_count: usize, audit_included: bool) -> String {
-    let documents = if file_count == 1 { "document" } else { "documents" };
+    let documents = if file_count == 1 {
+        "document"
+    } else {
+        "documents"
+    };
     let audit_note = if audit_included {
         "This vault includes an audit chain at `audit/audit.json` (`--audit-out` was given \
          alongside `--vault`)."

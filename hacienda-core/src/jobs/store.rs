@@ -61,6 +61,18 @@ pub trait JobStore: Send + Sync {
     /// Mark a job as `Failed` and record the reason.
     async fn fail(&self, id: &str, error: String) -> Result<Job, JobError>;
 
+    /// Overwrite a running job's progress payload.
+    ///
+    /// A separate verb from `transition`/`finish`/`fail` because progress
+    /// updates happen many times over a job's `Running` lifetime and carry no
+    /// status change — folding them into `transition`'s compare-and-swap
+    /// would force every progress tick to also re-assert `Running == Running`,
+    /// racing against a concurrent `finish`/`fail` for no benefit. Callable
+    /// regardless of current status (including after completion) so a worker
+    /// that reports one last progress tick right before `finish` never fails
+    /// on a race it cannot observe.
+    async fn update_progress(&self, id: &str, progress_json: String) -> Result<Job, JobError>;
+
     /// List all jobs, optionally filtered by status. Ordered by creation time, oldest first.
     async fn list(&self, filter: Option<JobStatus>) -> Result<Vec<Job>, JobError>;
 }
@@ -103,6 +115,7 @@ impl JobStore for InMemoryJobStore {
             updated_at: now,
             result_json: None,
             error: None,
+            progress_json: None,
             owner,
         };
         // Take the guard, insert, drop — no .await while held.
@@ -166,6 +179,19 @@ impl JobStore for InMemoryJobStore {
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
         job.status = JobStatus::Failed;
         job.error = Some(error);
+        job.updated_at = now_rfc3339();
+        Ok(job.clone())
+    }
+
+    async fn update_progress(&self, id: &str, progress_json: String) -> Result<Job, JobError> {
+        let mut guard = self
+            .jobs
+            .lock()
+            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+        let job = guard
+            .get_mut(id)
+            .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
+        job.progress_json = Some(progress_json);
         job.updated_at = now_rfc3339();
         Ok(job.clone())
     }
@@ -314,5 +340,39 @@ mod tests {
         assert_eq!(failed.status, JobStatus::Failed);
         assert_eq!(failed.error.as_deref(), Some(reason.as_str()));
         assert!(failed.result_json.is_none());
+    }
+
+    #[tokio::test]
+    async fn should_overwrite_progress_when_update_progress_repeats() {
+        let store = InMemoryJobStore::new();
+        let job = store.create(None).await.unwrap();
+
+        let updated = store
+            .update_progress(&job.id, r#"{"done":1,"total":10}"#.to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.progress_json.as_deref(),
+            Some(r#"{"done":1,"total":10}"#)
+        );
+
+        let updated = store
+            .update_progress(&job.id, r#"{"done":5,"total":10}"#.to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.progress_json.as_deref(),
+            Some(r#"{"done":5,"total":10}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn should_fail_update_progress_when_job_is_unknown() {
+        let store = InMemoryJobStore::new();
+        let err = store
+            .update_progress("missing", "{}".to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, JobError::NotFound(id) if id == "missing"));
     }
 }

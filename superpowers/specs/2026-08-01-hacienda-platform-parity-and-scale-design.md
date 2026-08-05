@@ -465,13 +465,16 @@ parallel with an unproven device path.
    `--ignored`) tests passing. Route existence against the real, CI-synced `xberg-sdks` OpenAPI
    spec was confirmed (Phase 12 Task 3 Step 1) and the answer-synthesis scope question was
    explicitly decided: not built in Phase 12 (Task 3 Step 4) — no upstream route exists to build
-   a contract against. **Known deployment issue, not yet fixed:** `hacienda-rag`'s and
-   `hacienda-core`'s sqlx migrations are both numbered `0001`; sqlx's `_sqlx_migrations` table is
+   a contract against. **Known deployment issue, now fixed:** `hacienda-rag`'s and
+   `hacienda-core`'s sqlx migrations were both numbered `0001`; sqlx's `_sqlx_migrations` table is
    one-per-physical-database, so running both crates' migrations against the same database
-   produces `VersionMismatch(1)`. A production hacienda-rag deployment must point at a distinct
-   database from hacienda-core's stores until this is resolved (e.g. via a non-colliding
-   migration version range or a dedicated `_sqlx_migrations` table name — a design decision not
-   yet made). The 5 of 8 confirmed `/v1/rag/*` routes that map onto an existing `RagStore`
+   produced `VersionMismatch(1)`. Resolved by renumbering `hacienda-rag`'s migrations into a
+   reserved `0100-0199` range (`hacienda-core` keeps `0001-0099`) — see
+   `hacienda-core/migrations/README.md` for the permanent numbering convention and
+   `crates/hacienda-rag/src/backends/pgvector.rs`'s
+   `live_tests::should_run_both_crates_migrations_against_one_shared_database` for the
+   regression proof. A production hacienda-rag deployment may now share one database with
+   hacienda-core's stores. The 5 of 8 confirmed `/v1/rag/*` routes that map onto an existing `RagStore`
    method (create/get/delete collection, upsert document, retrieve) are now built in
    `hacienda-api` (Phase 12 Task 3 Steps 2/3/5/6), gated on `Capability::DocumentsProcess`, 400
    when no store is configured, with 4 route tests passing. **What remains open:** the other 3

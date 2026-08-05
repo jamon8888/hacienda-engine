@@ -40,6 +40,23 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 # base32 for pseudonym tokens (BASE32_NOPAD — no `=` to escape inside a token).
 data-encoding = "2.11"
+# `Stream`/`StreamExt` combinators for RAG streaming answer synthesis (Track 3,
+# `hacienda-rag`'s `stream` feature) — maps a `liter-llm` token-chunk stream to
+# `AnswerEvent`s without pulling in a full async-runtime-specific stream crate.
+futures = "0.3"
+# Direct LLM client for streaming chat completions (Track 3, `hacienda-rag`'s `stream`
+# feature). A *direct* dependency deliberately bypassing xberg's own `llm` module: that
+# module's `complete_text`/`complete_with_json_schema` are whole-response only (no
+# `chat_stream`), and its client constructor is `pub(crate)` (see
+# `crates/hacienda-rag/src/stream.rs`'s module doc for the investigation). `xberg::LlmConfig`
+# itself is unconditional (no feature gate, pure config data — see
+# `xberg/src/core/config/llm.rs`), so this dependency does NOT enable xberg's own
+# `liter-llm` feature, which would additionally pull in `ocr-pipeline` or ONNX Runtime for
+# no benefit here — mirrors the xberg comment above about not re-adding features without a
+# call site. Version pinned to match xberg's own workspace pin (see xberg's root
+# `Cargo.toml`) so the wire types constructed here match what liter-llm's HTTP layer
+# expects.
+liter-llm = { version = "1.11.3", default-features = false, features = ["native-http", "tracing"] }
 regex = "1.10"
 # HTTP client for the presigned-upload `confirm` step's server-side HEAD request against
 # the object store (Phase 13 Task 4). Already resolved transitively via `xberg`'s `hf-hub`

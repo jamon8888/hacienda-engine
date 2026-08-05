@@ -498,6 +498,133 @@ pub struct UpsertDocumentResponse {
     pub document_id: hacienda_rag::DocumentId,
 }
 
+/// Query parameters shared by `GET /v1/rag/collections` and
+/// `GET /v1/rag/collections/{name}/documents`. Each route applies its own
+/// default/cap to `limit` — see `handlers/rag.rs`'s constants.
+#[derive(Debug, Deserialize)]
+pub struct RagListQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+}
+
+/// Response from `GET /v1/rag/collections`.
+///
+/// `total` is the count of collections before `limit`/`offset` are applied —
+/// the same total-before-pagination contract as `JobListResponse` — but
+/// pushed into the backend (`RagStore::list_collections`) rather than sliced
+/// in-process, since a store that can push `LIMIT`/`OFFSET` into its own
+/// query never has to materialize the full set.
+#[derive(Debug, Serialize)]
+pub struct ListCollectionsResponse {
+    pub collections: Vec<hacienda_rag::CollectionSpec>,
+    pub total: u64,
+}
+
+/// Response from `GET /v1/rag/collections/{name}/documents`.
+///
+/// Hacienda-only addition — the real xberg-sdks OpenAPI spec has no
+/// equivalent route. `DocumentSummary` is already wire-shaped and this crate
+/// adds no transformation on top of it, same rationale as
+/// `UpsertDocumentRequest` reusing `DocumentRecord`/`ChunkRecord` directly.
+#[derive(Debug, Serialize)]
+pub struct ListDocumentsResponse {
+    pub documents: Vec<hacienda_rag::DocumentSummary>,
+    pub total: u64,
+}
+
+/// Body for `POST /v1/rag/collections/{name}/migrate-embeddings`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrateEmbeddingsRequest {
+    /// Target embedding preset name (e.g. `"balanced"`, `"quality"`).
+    /// Validated against `xberg::get_embedding_preset` before any job is
+    /// created — an unknown preset is a 400, not a job that fails later.
+    pub to_source: String,
+    /// The `embedding_version` to record on success. Must be strictly
+    /// greater than the collection's current `embedding_version` — see
+    /// `handlers::rag::migrate_embeddings`'s validation.
+    pub to_version: u32,
+}
+
+/// Response from `POST /v1/rag/collections/{name}/migrate-embeddings` (202 Accepted).
+#[derive(Debug, Serialize)]
+pub struct MigrateEmbeddingsResponse {
+    pub job_id: String,
+    /// The collection's `name`, reused as the "collection id". `RagStore` has
+    /// no separate UUID surrogate id — `CollectionSpec::name` is the only
+    /// addressing key — unlike the real xberg-sdks spec's `format: uuid`
+    /// `collection_id`. Deliberate deviation, noted here for anyone diffing
+    /// against the real OpenAPI spec.
+    pub collection_id: String,
+    pub from_source: Option<String>,
+    pub to_source: String,
+    pub from_version: u32,
+    pub to_version: u32,
+    pub status: hacienda_core::jobs::JobStatus,
+    /// Path the caller should poll for status.
+    pub poll: String,
+}
+
+/// Progress payload persisted via `JobStore::update_progress` while a
+/// migrate-embeddings job runs, and parsed back out of `Job::progress_json`
+/// by `get_migrate_status`.
+///
+/// Deserialize is needed alongside Serialize for the same reason as
+/// `DiffLineDto`: this type round-trips through the job store's opaque JSON
+/// field rather than being serialized once for a response body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrateProgressDto {
+    pub documents_dual_written: u64,
+    pub documents_total: u64,
+    /// Always `"embedding"` in this implementation — included for shape
+    /// parity with the real xberg-sdks `MigrateProgress` schema, which models
+    /// a separate cutover/cleanup phase this implementation does not have
+    /// (embeddings are re-computed and written in place, single phase).
+    pub current_phase: String,
+}
+
+/// Response from `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}`.
+#[derive(Debug, Serialize)]
+pub struct MigrateStatusResponse {
+    pub status: hacienda_core::jobs::JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<MigrateProgressDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Body for `POST /v1/rag/collections/{name}/answer` (Phase 12 Track 3).
+///
+/// `retrieve` and `prompt` are deliberately independent, not derived from one
+/// another: `retrieve` drives what context is fetched (it may carry a
+/// caller-supplied `query_vector` instead of relying on `query_text`), while
+/// `prompt` is the natural-language question sent to the LLM. This mirrors
+/// `hacienda_rag::stream::answer_stream`'s own `(RetrievedContext, prompt)`
+/// split — see that function's doc comment.
+///
+/// `llm` is `xberg::LlmConfig` reused verbatim (same pattern as
+/// `UpsertDocumentRequest` reusing `DocumentRecord`): it already derives
+/// `Deserialize` and carries no fields this crate needs to hide or transform.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerRequest {
+    /// The question sent to the LLM. Redacted for PII before it leaves this
+    /// process — see `handlers::rag_stream::answer`'s module doc.
+    pub prompt: String,
+    /// Retrieval knobs. `include_content` is forced to `true` by the handler
+    /// regardless of what the caller sends: answer synthesis has nothing to
+    /// ground on without chunk text.
+    pub retrieve: hacienda_rag::RetrieveQuery,
+    /// LLM provider/model configuration, passed to `liter-llm` verbatim.
+    pub llm: xberg::LlmConfig,
+    /// Optional system-prompt override — see
+    /// `hacienda_rag::LlmAnswerConfig::system_prompt`.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
 // ── Presets (`/v1/presets/*`) ────────────────────────────────────────────────
 
 /// Body for `POST /v1/presets`.

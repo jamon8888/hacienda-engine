@@ -794,7 +794,11 @@ mod tests {
         let restarted = PostgresAuditStore::new(restarted_pool);
 
         let seals = restarted.seals().await.expect("seals failed");
-        assert_eq!(seals.len(), 1, "the rotated segment's seal must survive a restart");
+        assert_eq!(
+            seals.len(),
+            1,
+            "the rotated segment's seal must survive a restart"
+        );
 
         let sealed_entries = restarted
             .get_segment_entries(&seals[0].segment_id)
@@ -935,7 +939,10 @@ mod tests {
         let config_hash = format!("cfg-{}", Uuid::new_v4());
         let (t1, t2) = (unique_id("t1"), unique_id("t2"));
         store
-            .append(vec![test_input(&t1, &config_hash), test_input(&t2, &config_hash)])
+            .append(vec![
+                test_input(&t1, &config_hash),
+                test_input(&t2, &config_hash),
+            ])
             .await
             .expect("append");
         store.rotate().await.expect("rotate seals the segment");
@@ -970,7 +977,10 @@ mod tests {
         let config_hash = format!("cfg-{}", Uuid::new_v4());
         let (c1, c2) = (unique_id("c1"), unique_id("c2"));
         store
-            .append(vec![test_input(&c1, &config_hash), test_input(&c2, &config_hash)])
+            .append(vec![
+                test_input(&c1, &config_hash),
+                test_input(&c2, &config_hash),
+            ])
             .await
             .expect("append");
         store.rotate().await.expect("rotate");
