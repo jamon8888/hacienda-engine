@@ -930,7 +930,17 @@ here. This phase's job is the two pieces that plan explicitly deferred.
       hacienda-rag deployment must point at a distinct database from hacienda-core's stores, not
       just a distinct schema/table prefix — flagged in Task 5 for documentation, not fixed here
       (fixing it, e.g. via a non-colliding migration version range or a dedicated
-      `_sqlx_migrations` table name, is a design decision out of this task's scope). -->
+      `_sqlx_migrations` table name, is a design decision out of this task's scope).
+
+      **Follow-up 2026-08-04 (Phase 12 close-out, Track 1): fixed.** Renumbered
+      `hacienda-rag`'s migrations from `0001_init.sql` into a reserved `0100_init.sql`
+      (`hacienda-core` keeps `0001-0099`, `hacienda-rag` gets `0100-0199` — see the new
+      `hacienda-core/migrations/README.md`). Added a regression test,
+      `live_tests::should_run_both_crates_migrations_against_one_shared_database` in
+      `crates/hacienda-rag/src/backends/pgvector.rs`, that runs both crates' migrators against
+      one shared Postgres database and asserts `_sqlx_migrations` contains rows in both the
+      `<100` and `>=100` ranges. A production hacienda-rag deployment no longer needs a distinct
+      database from hacienda-core's stores. -->
       Ported test suite passes against `PgVectorStore`.
 - [x] **Step 5.** <!-- verified: `cargo clippy -p hacienda-rag --all-targets --features postgres
       -- -D warnings` clean (re-run by me after the Step 3 fixes); `cargo fmt -p hacienda-rag --
