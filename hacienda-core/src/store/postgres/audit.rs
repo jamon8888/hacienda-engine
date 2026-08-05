@@ -346,6 +346,10 @@ fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
         pipeline_version: row.pipeline_version,
         config_hash: row.config_hash,
         principal: row.principal,
+        // The `audit_entries` table has no `vertical` column yet — the postgres backend
+        // does not persist vertical provenance. Tracked separately from this fix, which
+        // only restores compilation after `AuditEntry` gained the field.
+        vertical: None,
         chain_hash: row.chain_hash,
     })
 }
@@ -656,6 +660,7 @@ mod tests {
             pipeline_version: "test-pipeline-1".to_owned(),
             config_hash: config_hash.to_owned(),
             principal: None,
+            vertical: None,
         }
     }
 

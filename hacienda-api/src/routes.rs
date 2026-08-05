@@ -1975,6 +1975,7 @@ pub(crate) mod tests {
                 pipeline_version: "1.0".to_string(),
                 config_hash: "cfg".to_string(),
                 principal: Some(principal.clone()),
+                vertical: None,
             }])
             .await
             .expect("append failed");
@@ -2058,6 +2059,7 @@ pub(crate) mod tests {
                 pipeline_version: "1.0".to_string(),
                 config_hash: "cfg".to_string(),
                 principal: Some(principal.clone()),
+                vertical: None,
             }])
             .await
             .expect("append failed");
