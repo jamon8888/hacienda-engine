@@ -199,21 +199,18 @@ impl DocumentVersionStore for PostgresDocumentVersionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::postgres::connection::{connect, migrate};
+    use crate::store::postgres::test_support;
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    // Ignored by default — requires a running Postgres. Run with:
-    //   DATABASE_URL=postgres://... cargo test -p hacienda-core --features postgres \
+    // Ignored by default — shares one Postgres instance with the other postgres-feature
+    // test modules (see `test_support::shared`), so needs `--test-threads=1`. Run with:
+    //   cargo test -p hacienda-core --features postgres \
     //     --lib store::postgres::versions -- --ignored --test-threads=1
 
     async fn test_store() -> PostgresDocumentVersionStore {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-        let pool = connect(&database_url).await.expect("connect failed");
-        migrate(&pool).await.expect("migrate failed");
-        PostgresDocumentVersionStore::new(pool)
+        PostgresDocumentVersionStore::new(test_support::shared().await.pool())
     }
 
     #[tokio::test]

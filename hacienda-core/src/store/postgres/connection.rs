@@ -74,15 +74,15 @@ pub async fn migrate_from_embedded(pool: &PgPool) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::postgres::test_support::PostgresFixture;
 
-    // This test is ignored by default because it requires a running Postgres.
-    // Run with: cargo test -p hacienda-core --features postgres connect_and_migrate -- --ignored
+    /// No `#[ignore]`/`DATABASE_URL` needed (Phase 9 Task 1 Step 5): `PostgresFixture`
+    /// spins up its own disposable container via the local Docker daemon, so this runs
+    /// under a plain `cargo test -p hacienda-core --features postgres`.
     #[tokio::test]
-    #[ignore]
     async fn connect_and_migrate() {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-        let pool = connect(&database_url).await.expect("connect failed");
+        let fixture = PostgresFixture::start().await;
+        let pool = connect(fixture.database_url()).await.expect("connect failed");
         migrate(&pool).await.expect("migrate failed");
         // If we get here, the schema is ready.
     }

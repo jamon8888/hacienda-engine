@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE audit_entries SET category = 'CreditCard' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d06fc920ed5e40ecefff0f2b8b8e956adc1d7b6b4c00557152f97c3da3d71498"
+}

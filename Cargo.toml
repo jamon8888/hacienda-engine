@@ -109,6 +109,12 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chro
 argon2 = { version = "0.5", features = ["std"] }
 # Random number generation for API key entropy.
 rand = { version = "0.8", features = ["std"] }
+# Disposable-Postgres test fixture for the `postgres` feature's integration tests (Phase 9
+# Task 1 Step 5) — spins up a real container via the local Docker daemon so
+# `connect_and_migrate` and friends don't need a human-supplied `DATABASE_URL`. Dev-only:
+# never a runtime dependency of any published crate.
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 
 # Profiles must live in the workspace root manifest. Cargo silently ignores
 # `[profile.*]` in path dependencies, so the tuning in ../xberg/Cargo.toml has never
