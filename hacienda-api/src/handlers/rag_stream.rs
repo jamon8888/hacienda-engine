@@ -40,6 +40,24 @@ use crate::{
 };
 
 /// `POST /v1/rag/collections/{name}/answer`
+#[utoipa::path(
+    post,
+    path = "/v1/rag/collections/{name}/answer",
+    tag = "rag",
+    operation_id = "answer",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "Collection name")),
+    request_body = AnswerRequest,
+    responses(
+        (
+            status = 200,
+            description = "Server-Sent Events stream: token/citation/usage/done/error events, per this module's doc comment",
+            content_type = "text/event-stream"
+        ),
+        (status = 400, description = "RAG is not enabled, or the retrieval query is invalid for this collection"),
+        (status = 404, description = "No such collection")
+    )
+)]
 pub async fn answer(
     State(state): State<ApiState>,
     Path(name): Path<String>,

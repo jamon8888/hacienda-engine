@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real OpenAPI 3.1 schema for `GET /openapi.json` (Phase 14 precondition).**
+  `hacienda-api`'s OpenAPI document was previously a hand-built stub — one
+  `{"description": "Access: ..."}` object per path, no HTTP methods, no request/response
+  schemas, no `operationId`, nothing an SDK code generator could act on. Adopted `utoipa`
+  (this crate only): `#[derive(ToSchema)]` on all 59 DTOs in `dto.rs`, `#[utoipa::path]`
+  on all 44 route-table handlers, assembled by a new `ApiDoc` in `handlers/openapi.rs`.
+  Verified end-to-end: `openapi-generator-cli generate -g python` and `-g
+  typescript-fetch` against a live instance's `/openapi.json` both produce complete,
+  syntactically valid typed clients (one API module per tag, one model per schema).
+  Foreign types from `hacienda-core`/`hacienda-rag`/`xberg` (e.g. `PiiCategory`,
+  `JobStatus`, `CollectionSpec`, `xberg::LlmConfig`) are represented via `#[schema(value_type
+  = ...)]` overrides (`String` or `serde_json::Value`) rather than adding `utoipa` to those
+  crates. New guard tests in `handlers/openapi.rs`:
+  `openapi_path_set_equals_route_table_minus_openapi_json`,
+  `every_openapi_path_has_at_least_one_typed_operation`,
+  `every_declared_schema_is_present_in_components`.
+- **`GET /v1/auth/whoami`.** Reports the *calling* principal's own granted capabilities.
+  Corrects the platform-parity design spec's §8, which proposed adapting `xberg-sdks`'
+  `_resolve_tier` into a capability probe against `GET /v1/auth/config` — that route
+  requires `Capability::AuthManage`, which a normal SDK caller does not hold, so it
+  cannot serve as a general capability probe. `whoami` is gated on
+  `Capability::DocumentsProcess` instead and returns only the presented token's own
+  grants, with no elevated privilege required to ask "what can I do."
 - **`POST /v1/pii/reveal` endpoint (Phase 8).** Reverses a pseudonym token
   (`[CATEGORY:key_id:base32_ciphertext]`) back to its normalised plaintext.
   Requires `pii:reveal` capability. Writes a `Reveal` audit entry keyed by

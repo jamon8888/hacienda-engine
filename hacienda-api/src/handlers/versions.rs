@@ -53,6 +53,18 @@ fn entities_from_json(entities_json: &Value) -> Vec<EntityDto> {
 }
 
 /// `GET /v1/documents/{id}/versions` — newest first.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}/versions",
+    tag = "versions",
+    operation_id = "listDocumentVersions",
+    security(("bearerAuth" = [])),
+    params(("id" = Uuid, Path, description = "Client-supplied document id")),
+    responses(
+        (status = 200, description = "Versions newest-first", body = DocumentVersionListResponse),
+        (status = 400, description = "Document versioning is not enabled on this server")
+    )
+)]
 pub async fn list_document_versions(
     State(state): State<ApiState>,
     Path(document_id): Path<Uuid>,
@@ -73,6 +85,19 @@ pub async fn list_document_versions(
 }
 
 /// `GET /v1/documents/{id}` — latest version's full envelope, extraction result inline.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}",
+    tag = "versions",
+    operation_id = "getDocument",
+    security(("bearerAuth" = [])),
+    params(("id" = Uuid, Path, description = "Client-supplied document id")),
+    responses(
+        (status = 200, description = "Latest version, extraction result inline", body = DocumentEnvelopeResponse),
+        (status = 400, description = "Document versioning is not enabled on this server"),
+        (status = 404, description = "No version exists for this document id")
+    )
+)]
 pub async fn get_document(
     State(state): State<ApiState>,
     Path(document_id): Path<Uuid>,
@@ -162,6 +187,24 @@ fn compute_line_diff(from: &str, to: &str) -> Vec<DiffLineDto> {
 /// it via `JobStore`, returning `202 Accepted` + `diff_job_id` for the caller to poll
 /// at `GET /v1/documents/{id}/diff/{diff_job_id}` — reusing `JobStore` rather than
 /// inventing a second async mechanism, per §4.3.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}/diff",
+    tag = "versions",
+    operation_id = "diffDocument",
+    security(("bearerAuth" = [])),
+    params(
+        ("id" = Uuid, Path, description = "Client-supplied document id"),
+        ("from" = i64, Query, description = "Source version_sequence"),
+        ("to" = i64, Query, description = "Target version_sequence")
+    ),
+    responses(
+        (status = 200, description = "Line diff, computed synchronously", body = DocumentDiffResponse),
+        (status = 202, description = "Over the 2s sync budget; poll diff_job_id", body = DiffJobAcceptedResponse),
+        (status = 400, description = "Document versioning is not enabled on this server"),
+        (status = 404, description = "Unknown from/to version")
+    )
+)]
 pub async fn diff_document(
     State(state): State<ApiState>,
     Path(document_id): Path<Uuid>,
@@ -251,6 +294,21 @@ pub async fn diff_document(
 /// present only once `succeeded`, `error` only once `failed`. The `document_id` path
 /// segment is not cross-checked against the job (`JobStore` has no notion of document
 /// identity) — the id namespace is global, same as `/v1/jobs/{id}`.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}/diff/{diff_job_id}",
+    tag = "versions",
+    operation_id = "getDiffJob",
+    security(("bearerAuth" = [])),
+    params(
+        ("id" = Uuid, Path, description = "Client-supplied document id"),
+        ("diff_job_id" = String, Path, description = "Job id returned by a 202 from diffDocument")
+    ),
+    responses(
+        (status = 200, description = "Diff job status (lines present once succeeded)", body = DiffJobResultResponse),
+        (status = 404, description = "No such diff job")
+    )
+)]
 pub async fn get_diff_job(
     State(state): State<ApiState>,
     Path((_document_id, diff_job_id)): Path<(Uuid, String)>,

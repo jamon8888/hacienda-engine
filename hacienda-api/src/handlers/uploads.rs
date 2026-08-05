@@ -52,6 +52,18 @@ fn object_key(upload_id: Uuid) -> String {
 }
 
 /// `POST /v1/uploads/presign` — issue a presigned PUT URL for a new upload.
+#[utoipa::path(
+    post,
+    path = "/v1/uploads/presign",
+    tag = "uploads",
+    operation_id = "presignUpload",
+    security(("bearerAuth" = [])),
+    request_body = PresignUploadRequest,
+    responses(
+        (status = 200, description = "Presigned PUT URL and required headers", body = PresignUploadResponse),
+        (status = 400, description = "Uploads are not enabled on this server")
+    )
+)]
 pub async fn presign_upload(
     State(state): State<ApiState>,
     SafeJson(body): SafeJson<PresignUploadRequest>,
@@ -78,6 +90,19 @@ pub async fn presign_upload(
 /// "not uploaded" (a client-triggerable condition: called before the `PUT` finished, or
 /// with a stale/wrong `upload_id`) from a genuine backend failure (500, via
 /// `ObjectStoreError`'s `From<ObjectStoreError> for ApiError` impl).
+#[utoipa::path(
+    post,
+    path = "/v1/uploads/confirm",
+    tag = "uploads",
+    operation_id = "confirmUpload",
+    security(("bearerAuth" = [])),
+    request_body = ConfirmUploadRequest,
+    responses(
+        (status = 200, description = "The uploaded object's metadata", body = ConfirmUploadResponse),
+        (status = 400, description = "Uploads are not enabled on this server"),
+        (status = 404, description = "Object not found (PUT not yet completed, or unknown upload_id)")
+    )
+)]
 pub async fn confirm_upload(
     State(state): State<ApiState>,
     SafeJson(body): SafeJson<ConfirmUploadRequest>,

@@ -477,10 +477,29 @@ parallel with an unproven device path.
    hacienda-core's stores. The 5 of 8 confirmed `/v1/rag/*` routes that map onto an existing `RagStore`
    method (create/get/delete collection, upsert document, retrieve) are now built in
    `hacienda-api` (Phase 12 Task 3 Steps 2/3/5/6), gated on `Capability::DocumentsProcess`, 400
-   when no store is configured, with 4 route tests passing. **What remains open:** the other 3
+   when no store is configured, with 4 route tests passing. ~~**What remains open:** the other 3
    confirmed routes — list-collections, list-documents, and migrate-embeddings (plus the
    RAG-specific use of the jobs-poll route) — have no `RagStore` trait primitive to serve them;
-   building them requires extending the trait first, which was out of scope for this task.
+   building them requires extending the trait first, which was out of scope for this task.~~
+   **Closed — found already shipped, 2026-08-05.** Verified directly against source while
+   preparing Phase 14: `RagStore` (`crates/hacienda-rag/src/store.rs`) now has
+   `list_collections`, `list_documents`, `set_embedding_provenance`, `get_document_chunks`,
+   and `update_chunk_embeddings`, and `hacienda-api/src/handlers/rag.rs` implements
+   `list_collections`, `list_documents`, `migrate_embeddings` (with a background job via
+   `run_migrate_embeddings_job`/`migrate_embeddings_work`), and `get_migrate_status` —
+   `ROUTE_TABLE` has all 8 confirmed `/v1/rag/*` routes plus the migrate-embeddings job-poll
+   pair, none of the previously-open 3 remain missing. This was not tracked in a checked-off
+   plan step anywhere in `2026-08-01-platform-parity-and-scale-implementation.md`'s Phase 12
+   section — the code moved ahead of both this spec and that plan's checkboxes, apparently in
+   the "Phase 12 Tracks 1-3" merge (`a0b1b84`) this spec's own tracking predates. Additionally,
+   **streaming answer synthesis now exists** —
+   `POST /v1/rag/collections/{name}/answer` (`hacienda-api/src/handlers/rag_stream.rs`,
+   Server-Sent Events over `hacienda_rag::answer_stream`) — despite §9 Gap 3's own text below
+   and the Phase 12 plan's Task 3 Step 4 recording a decision *not* to build it ("no upstream
+   route exists to build a contract against"). Whoever built it evidently revisited that
+   decision without updating either tracking document. This is a correction, not new scope:
+   Phase 14 SDK generation must cover this route (and its 3 previously-"open" RAG routes) as
+   already-shipped surface, not as future work.
 4. ~~**No auth-key issuance.**~~ **Closed by Phase 11.** `Capability::AuthManage`,
    `HaciendaFacade::{issue_key_with_auth, revoke_key_with_auth}`,
    `auth::authn::ApiKeyTokenResolver`, and `POST /v1/auth/keys` /
@@ -508,9 +527,24 @@ parallel with an unproven device path.
    Task 2 Step 5) — the routes call facade methods only, so this is expected to be a
    formality, but it is unverified and requires a live Postgres this environment does not
    have running.
-6. **hacienda-sdks repo does not exist**, and cannot productively start (§8's precondition)
-   until `/openapi.json` schema completeness is verified — this is a documentation/tooling
-   gap, not a design gap, but it blocks every downstream SDK consumer including the eventual
+6. **hacienda-sdks repo does not exist.** ~~cannot productively start (§8's precondition)
+   until `/openapi.json` schema completeness is verified~~ **Precondition closed
+   2026-08-05:** `/openapi.json` was not merely "unverified" — it was a hand-built stub
+   with no HTTP methods, no schemas, and no operations at all (`build_openapi()` emitted
+   one `{"description": "Access: ..."}` object per path). Replaced with a real OpenAPI 3.1
+   document generated via `utoipa` (`#[derive(ToSchema)]` on all 59 `hacienda-api` DTOs,
+   `#[utoipa::path]` on all 44 route-table handlers), verified end-to-end by running
+   `openapi-generator-cli generate -g python` and `-g typescript-fetch` against a live
+   instance's `/openapi.json` — both produced complete, syntactically valid typed clients
+   (see the implementation plan's Phase 14 Task 1 for the full verification record). Also
+   added `GET /v1/auth/whoami`, correcting §8's `_resolve_tier` design: `GET
+   /v1/auth/config` requires `Capability::AuthManage`, which a normal SDK caller will not
+   hold, so it cannot serve as the capability probe §8 assumed — `whoami` reports the
+   *calling* principal's own capabilities instead, gated on `Capability::DocumentsProcess`.
+   **What remains open:** the repo itself (Task 2 of Phase 14) — scaffold, codegen CI,
+   `sync-versions.py` — is deliberately not started; this pass covered only the
+   `hacienda-engine`-side precondition, by explicit scope decision, not because anything
+   further blocks it. It blocks every downstream SDK consumer including the eventual
    Cactus/device target.
 7. **Cactus device-target spike not run.** Whether `cactus convert` handles GLiNER2's
    span-classification head is still unverified (noted in the prior conversation's gap

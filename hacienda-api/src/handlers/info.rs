@@ -7,16 +7,37 @@ use crate::{
     state::ApiState,
 };
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "info",
+    operation_id = "getHealth",
+    responses((status = 200, description = "Service is healthy", body = HealthResponse))
+)]
 pub async fn health(_: State<ApiState>) -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+#[utoipa::path(
+    get,
+    path = "/version",
+    tag = "info",
+    operation_id = "getVersion",
+    responses((status = 200, description = "Server version", body = VersionResponse))
+)]
 pub async fn version(_: State<ApiState>) -> Json<VersionResponse> {
     Json(VersionResponse {
         version: env!("CARGO_PKG_VERSION"),
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/info",
+    tag = "info",
+    operation_id = "getInfo",
+    responses((status = 200, description = "Service metadata", body = InfoResponse))
+)]
 pub async fn info(_: State<ApiState>) -> Json<InfoResponse> {
     Json(InfoResponse {
         name: "hacienda-api",

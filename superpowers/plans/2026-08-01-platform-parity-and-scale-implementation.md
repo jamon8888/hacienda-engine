@@ -1423,17 +1423,68 @@ Gated on Phases 8, 10, 11, 12, 13 (needs a stable, complete `/v1/*` surface to g
 
 ### Task 1 — OpenAPI completeness spike
 
-- [ ] **Step 1.** Fetch `/openapi.json` from a running `hacienda-api` instance with every
+- [x] **Step 0 (precondition, not anticipated by the original plan text).** Verified
+      2026-08-05, against source, before attempting Step 1: `/openapi.json`
+      (`hacienda-api/src/handlers/openapi.rs`) was not "unverified for codegen-readiness"
+      as this task assumed — it was a **hand-built stub** (`build_openapi()` emitted one
+      `{"description": "Access: <enum debug>"}` object per path, no HTTP methods, no
+      `operationId`, no request/response schemas, no components) with zero
+      `utoipa`/`schemars` dependency anywhere in the workspace. Step 1 below would have
+      failed immediately, not "found gaps". Fixed by adopting `utoipa` (`hacienda-api`
+      only): `#[derive(utoipa::ToSchema)]` on all 59 DTOs in `dto.rs` (foreign types from
+      `hacienda_core`/`hacienda_rag`/`xberg` — `PiiCategory`, `EntitySource`, `JobStatus`,
+      `CollectionSpec`, `RetrieveQuery`, `xberg::LlmConfig`, etc. — represented via
+      `#[schema(value_type = ...)]` overrides as `String` or `serde_json::Value` rather
+      than adding `utoipa` to those crates, out of scope for this task), `#[utoipa::path]`
+      on all 44 route-table handlers (`GET /openapi.json` itself deliberately excluded —
+      it serves the document, it is not a member of the surface), and a central
+      `#[derive(utoipa::OpenApi)] struct ApiDoc` assembling them in
+      `handlers/openapi.rs`. Also added `GET /v1/auth/whoami`
+      (`Capability::DocumentsProcess`) — the design spec's §8 proposed adapting
+      `xberg-sdks`' `_resolve_tier` into a capability probe against `GET /v1/auth/config`,
+      but that route requires `Capability::AuthManage`, which a normal SDK caller will not
+      hold; `whoami` reports the *calling* principal's own granted capabilities instead,
+      with no elevated privilege needed. New guard tests in `handlers/openapi.rs`:
+      `openapi_path_set_equals_route_table_minus_openapi_json`,
+      `every_openapi_path_has_at_least_one_typed_operation`,
+      `every_declared_schema_is_present_in_components` — the middle one is the direct
+      regression guard against a future route landing back in the stub's failure mode.
+      `cargo test -p hacienda-api`: 58 passed, 6 ignored (live-Postgres, unrelated);
+      `cargo clippy -p hacienda-api --all-targets -- -D warnings` and
+      `cargo fmt -p hacienda-api -- --check`: both clean.
+- [x] **Step 1.** Fetch `/openapi.json` from a running `hacienda-api` instance with every
       phase above shipped. Run it through the intended codegen tool (e.g.
       `openapi-generator-cli generate -i openapi.json -g python`) and inspect the output for
       gaps — missing operationIds, untyped `additionalProperties`, missing examples. This is
       the precondition §8 names as unverified; answer it here before scaffolding a repo around
       an assumption.
-- [ ] **Step 2.** Patch `hacienda-api`'s OpenAPI generation (`handlers/openapi.rs`) for any gap
+      <!-- verified 2026-08-05: `hacienda serve --bind 127.0.0.1:8787` (loopback, auth
+      disabled), `curl /openapi.json` → 39 paths, 59 component schemas,
+      `securitySchemes.bearerAuth` present. Ran the real tool via
+      `npx @openapitools/openapi-generator-cli generate -i openapi.json -g python` and
+      `-g typescript-fetch` (no `--skip-validate-spec` issues beyond the expected
+      "no servers defined" info notice) — both generators produced a full client: one
+      `*Api.py`/`*Api.ts` module per tag (`PiiApi`, `RagApi`, `PresetsApi`, `VersionsApi`,
+      `UploadsApi`, `UsageApi`, `AuthApi`, …), one typed model per component schema
+      (`RevealTokenRequest`, `RevealTokenResponse`, …), e.g. a fully-typed
+      `reveal_token(reveal_token_request: RevealTokenRequest) -> RevealTokenResponse`
+      method. `python -m py_compile` on every generated `.py` file: clean, no syntax
+      errors. No missing-operationId or untyped-`additionalProperties` warnings from
+      either generator. This closes the actual open question — the document is
+      codegen-ready — after Step 0 fixed the precondition that made it not codegen-ready
+      at all. -->
+- [x] **Step 2.** Patch `hacienda-api`'s OpenAPI generation (`handlers/openapi.rs`) for any gap
       found, rather than hand-patching the generated SDK — the schema is the source of truth
       and a hand-patched SDK drifts from it silently on the next regeneration.
+      <!-- No further gap found in Step 1's generator run beyond Step 0's fix, which this
+      step is folded into — no separate patch was needed after Step 0 landed. -->
 
 ### Task 2 — Repository scaffold
+
+**Deliberately not started in this pass.** Scoped out by explicit user decision
+(2026-08-05): this pass covers only the `hacienda-engine`-side precondition (Task 1),
+not creation of the new `hacienda-sdks` GitHub repository. Task 1's completion makes
+this task buildable next, not blocked on anything further.
 
 - [ ] **Step 1.** New repo `hacienda-sdks`, structure mirrored from `xberg-sdks`:
       `packages/{python,typescript}`, generated-core/hand-wrapper split per §3.1's evidence

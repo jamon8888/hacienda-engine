@@ -15,6 +15,14 @@ use crate::{
 };
 
 /// `GET /v1/audit`
+#[utoipa::path(
+    get,
+    path = "/v1/audit",
+    tag = "audit",
+    operation_id = "getAudit",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Audit chain entries", body = AuditResponse))
+)]
 pub async fn get_audit(
     State(state): State<ApiState>,
     parts: Parts,
@@ -39,6 +47,14 @@ pub async fn get_audit(
 }
 
 /// `GET /v1/audit/verify`
+#[utoipa::path(
+    get,
+    path = "/v1/audit/verify",
+    tag = "audit",
+    operation_id = "verifyAudit",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Whether the audit chain verifies", body = AuditVerifyResponse))
+)]
 pub async fn verify_audit(
     State(state): State<ApiState>,
     parts: Parts,
@@ -63,6 +79,14 @@ pub async fn verify_audit(
 }
 
 /// `GET /v1/review`
+#[utoipa::path(
+    get,
+    path = "/v1/review",
+    tag = "review",
+    operation_id = "getReview",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Pending review queue items", body = ReviewResponse))
+)]
 pub async fn get_review(
     State(state): State<ApiState>,
     parts: Parts,
@@ -91,6 +115,21 @@ pub async fn get_review(
 }
 
 /// `POST /v1/review/{id}/decide`
+#[utoipa::path(
+    post,
+    path = "/v1/review/{id}/decide",
+    tag = "review",
+    operation_id = "decideReview",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Review item id")),
+    request_body = ReviewDecideRequest,
+    responses(
+        (status = 200, description = "The decided review item", body = ReviewDecideResponse),
+        (status = 400, description = "Invalid decision or review queue not configured"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks review:decide")
+    )
+)]
 pub async fn decide_review(
     State(state): State<ApiState>,
     parts: Parts,
@@ -129,6 +168,17 @@ pub async fn decide_review(
 }
 
 /// `GET /v1/compliance/dpia`
+#[utoipa::path(
+    get,
+    path = "/v1/compliance/dpia",
+    tag = "compliance",
+    operation_id = "getComplianceDpia",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "DPIA report", body = serde_json::Value),
+        (status = 400, description = "Compliance reporting not configured")
+    )
+)]
 pub async fn get_compliance_dpia(
     State(state): State<ApiState>,
     parts: Parts,
@@ -154,6 +204,17 @@ pub async fn get_compliance_dpia(
 }
 
 /// `GET /v1/compliance/report`
+#[utoipa::path(
+    get,
+    path = "/v1/compliance/report",
+    tag = "compliance",
+    operation_id = "getComplianceReport",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Full compliance report (model card, DORA, checklist)", body = serde_json::Value),
+        (status = 400, description = "Compliance reporting not configured")
+    )
+)]
 pub async fn get_compliance_report(
     State(state): State<ApiState>,
     parts: Parts,
@@ -179,6 +240,14 @@ pub async fn get_compliance_report(
 }
 
 /// `GET /v1/glossary`
+#[utoipa::path(
+    get,
+    path = "/v1/glossary",
+    tag = "glossary",
+    operation_id = "getGlossary",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Entity glossary snapshot", body = serde_json::Value))
+)]
 pub async fn get_glossary(
     State(state): State<ApiState>,
     parts: Parts,

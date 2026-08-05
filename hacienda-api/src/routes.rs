@@ -174,6 +174,14 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::AuthManage),
         make_router: || get(auth::get_auth_config),
     },
+    // Self-describing capability probe for SDK clients — see `handlers::auth::whoami`'s
+    // doc comment for why this exists separately from `/v1/auth/config` (that route
+    // needs `auth:manage`, which a normal SDK caller does not hold).
+    RouteSpec {
+        path: "/v1/auth/whoami",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(auth::whoami),
+    },
     // ── documents:process endpoints, RAG (Phase 12 Task 3) ───────────────────────
     // Reuses `DocumentsProcess`, not a dedicated capability: RAG collections carry
     // the same class of redacted document content `/v1/documents` already gates

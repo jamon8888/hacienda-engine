@@ -23,6 +23,19 @@ use crate::{
 /// second requirement is enforced by `facade.scan_text_with_auth` itself, which also
 /// writes the attributed `Reveal` audit entry. We do not re-check it here; we
 /// delegate to the facade and map `HaciendaError::Authz` to 403.
+#[utoipa::path(
+    post,
+    path = "/v1/pii/scan",
+    tag = "pii",
+    operation_id = "scanText",
+    security(("bearerAuth" = [])),
+    request_body = ScanTextRequest,
+    responses(
+        (status = 200, description = "Detected PII entities", body = ScanTextResponse),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process, or lacks pii:reveal when include_text=true")
+    )
+)]
 pub async fn scan_text(
     State(state): State<ApiState>,
     parts: Parts,
@@ -56,6 +69,19 @@ pub async fn scan_text(
 }
 
 /// `POST /v1/pii/redact`
+#[utoipa::path(
+    post,
+    path = "/v1/pii/redact",
+    tag = "pii",
+    operation_id = "redactText",
+    security(("bearerAuth" = [])),
+    request_body = RedactTextRequest,
+    responses(
+        (status = 200, description = "Redacted text", body = RedactTextResponse),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
 pub async fn redact_text(
     State(state): State<ApiState>,
     parts: Parts,
@@ -86,6 +112,14 @@ pub async fn redact_text(
 ///
 /// Returns the effective detection configuration using an explicit allowlist of
 /// fields. Key material, key IDs, and resolver configuration are deliberately absent.
+#[utoipa::path(
+    get,
+    path = "/v1/pii/config",
+    tag = "pii",
+    operation_id = "getPiiConfig",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Effective PII detection configuration", body = PiiConfigResponse))
+)]
 pub async fn pii_config(State(state): State<ApiState>) -> Json<PiiConfigResponse> {
     let config = state.facade.config();
     match &config.pii {
@@ -122,6 +156,20 @@ pub async fn pii_config(State(state): State<ApiState>) -> Json<PiiConfigResponse
 /// enforced by `facade.reveal_token_with_auth` itself, which also writes the
 /// attributed `Reveal` audit entry. We delegate to the facade and map
 /// `HaciendaError::Authz` to 403.
+#[utoipa::path(
+    post,
+    path = "/v1/pii/reveal",
+    tag = "pii",
+    operation_id = "revealToken",
+    security(("bearerAuth" = [])),
+    request_body = RevealTokenRequest,
+    responses(
+        (status = 200, description = "The plaintext behind the pseudonym token", body = RevealTokenResponse),
+        (status = 400, description = "Malformed, unreadable, or unknown-key token"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks pii:reveal")
+    )
+)]
 pub async fn reveal_token(
     State(state): State<ApiState>,
     parts: Parts,
