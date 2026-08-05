@@ -90,11 +90,34 @@ pub struct RevealTokenRequest {
     pub token: String,
 }
 
+/// The decision a reviewer may record for a queued item.
+///
+/// A closed enum, not a free `String`: the OpenAPI schema this derives lists exactly
+/// `["approve", "reject", "modify"]`, so a generated SDK client gets a compile-time-checked
+/// type here instead of an unconstrained string.
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecisionWire {
+    Approve,
+    Reject,
+    Modify,
+}
+
+impl From<ReviewDecisionWire> for hacienda_core::review::types::ReviewDecision {
+    fn from(decision: ReviewDecisionWire) -> Self {
+        match decision {
+            ReviewDecisionWire::Approve => Self::Approve,
+            ReviewDecisionWire::Reject => Self::Reject,
+            ReviewDecisionWire::Modify => Self::Modify,
+        }
+    }
+}
+
 /// Body for `POST /v1/review/{id}/decide`.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewDecideRequest {
-    pub decision: String, // "approve", "reject", "modify"
+    pub decision: ReviewDecisionWire,
     pub reviewer: String,
     pub comment: String,
 }
@@ -406,6 +429,38 @@ pub struct AuditVerifyResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ReviewResponse {
     pub items: Vec<ReviewItemDto>,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/compliance/dpia`.
+///
+/// `report` carries `ComplianceReport::dpia` (`hacienda-core`, not `utoipa`-annotated —
+/// see `dto.rs`'s module doc on foreign-type schema overrides) as an opaque object: this
+/// DTO's job is to give the stable envelope (`report` + `audit_chain_tip`) a name in the
+/// generated schema, not to expand the DPIA's own internal shape.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComplianceDpiaResponse {
+    #[schema(value_type = serde_json::Value)]
+    pub report: serde_json::Value,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/compliance/report`. Same envelope-only rationale as
+/// [`ComplianceDpiaResponse`]: `report` is the full `ComplianceReport`, kept opaque.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComplianceReportResponse {
+    #[schema(value_type = serde_json::Value)]
+    pub report: serde_json::Value,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/glossary`. Same envelope-only rationale as
+/// [`ComplianceDpiaResponse`]: each entry is kept opaque (`GlossaryEntry` is not
+/// `utoipa`-annotated), only the envelope shape is named.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GlossaryResponse {
+    #[schema(value_type = Vec<serde_json::Value>)]
+    pub entries: Vec<serde_json::Value>,
     pub audit_chain_tip: Option<String>,
 }
 

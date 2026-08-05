@@ -99,6 +99,10 @@ use crate::state::ApiState;
         crate::dto::AuditVerifyResponse,
         crate::dto::ReviewResponse,
         crate::dto::ReviewDecideResponse,
+        crate::dto::ReviewDecisionWire,
+        crate::dto::ComplianceDpiaResponse,
+        crate::dto::ComplianceReportResponse,
+        crate::dto::GlossaryResponse,
         crate::dto::IssueKeyResponse,
         crate::dto::AuthConfigResponse,
         crate::dto::WhoamiResponse,
@@ -157,8 +161,12 @@ impl utoipa::Modify for SecuritySchemeModifier {
     }
 }
 
-pub async fn openapi(_: State<ApiState>) -> Json<Value> {
-    Json(build_openapi())
+/// `GET /openapi.json` — the OpenAPI 3.1 document for the entire API surface, assembled
+/// from every handler's `#[utoipa::path]` annotation (see this module's doc comment).
+/// Public: a client must be able to fetch the schema before it has a credential to
+/// authenticate the routes the schema describes.
+pub async fn openapi(_: State<ApiState>) -> Result<Json<Value>, crate::error::ApiError> {
+    Ok(Json(build_openapi()?))
 }
 
 /// Build the OpenAPI document from the `#[utoipa::path]`-annotated handlers.
@@ -166,8 +174,19 @@ pub async fn openapi(_: State<ApiState>) -> Json<Value> {
 /// Called at request time, not cached at startup, so a future route addition (a new
 /// `#[utoipa::path]` entry added to [`ApiDoc::paths`] above) is always reflected —
 /// mirroring the previous implementation's request-time-generation rationale.
-pub fn build_openapi() -> Value {
-    serde_json::to_value(ApiDoc::openapi()).expect("ApiDoc::openapi() always serialises")
+///
+/// # Errors
+///
+/// [`crate::error::ApiError::internal`] if `ApiDoc::openapi()`'s output cannot be
+/// serialised to JSON. Not expected to happen in practice — the value is built entirely
+/// from static `#[utoipa::path]`/`#[derive(ToSchema)]` metadata, not request input — but
+/// this crate's convention is to propagate a `Result` rather than panic on a fallible
+/// call, even one this unlikely to fail.
+pub fn build_openapi() -> Result<Value, crate::error::ApiError> {
+    serde_json::to_value(ApiDoc::openapi()).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise the OpenAPI document");
+        crate::error::ApiError::internal()
+    })
 }
 
 #[cfg(test)]
@@ -183,7 +202,7 @@ mod tests {
     /// this test rather than shipping silently undocumented.
     #[test]
     fn openapi_path_set_equals_route_table_minus_openapi_json() {
-        let doc = build_openapi();
+        let doc = build_openapi().expect("static ApiDoc metadata always serialises");
         let doc_paths: std::collections::HashSet<String> = doc["paths"]
             .as_object()
             .expect("paths must be an object")
@@ -215,7 +234,7 @@ mod tests {
             "get", "post", "put", "delete", "patch", "options", "head", "trace",
         ];
 
-        let doc = build_openapi();
+        let doc = build_openapi().expect("static ApiDoc metadata always serialises");
         let paths = doc["paths"].as_object().expect("paths must be an object");
 
         for (path, path_item) in paths {
@@ -243,19 +262,106 @@ mod tests {
         }
     }
 
+    /// The exact set of DTO names declared in [`ApiDoc`]'s `components(schemas(...))`
+    /// list above — kept in sync with that list by hand, since `utoipa`'s derive macro
+    /// gives no way to enumerate it at compile time. A name added to one list and not
+    /// the other fails this test, in either direction.
+    const DECLARED_SCHEMA_NAMES: &[&str] = &[
+        "DocumentInput",
+        "ProcessDocumentsRequest",
+        "ScanTextRequest",
+        "RedactTextRequest",
+        "RevealTokenRequest",
+        "ReviewDecideRequest",
+        "IssueKeyRequest",
+        "EntityDto",
+        "ScanTextResponse",
+        "RedactTextResponse",
+        "RevealTokenResponse",
+        "DocumentResult",
+        "ProcessDocumentsResponse",
+        "AsyncJobResponse",
+        "JobResponse",
+        "JobListQuery",
+        "JobListResponse",
+        "JobResultResponse",
+        "AuditEntryDto",
+        "ReviewItemDto",
+        "AuditResponse",
+        "AuditVerifyResponse",
+        "ReviewResponse",
+        "ReviewDecideResponse",
+        "ReviewDecisionWire",
+        "ComplianceDpiaResponse",
+        "ComplianceReportResponse",
+        "GlossaryResponse",
+        "IssueKeyResponse",
+        "AuthConfigResponse",
+        "WhoamiResponse",
+        "PiiConfigResponse",
+        "HealthResponse",
+        "VersionResponse",
+        "InfoResponse",
+        "UpsertDocumentRequest",
+        "UpsertDocumentResponse",
+        "RagListQuery",
+        "ListCollectionsResponse",
+        "ListDocumentsResponse",
+        "MigrateEmbeddingsRequest",
+        "MigrateEmbeddingsResponse",
+        "MigrateProgressDto",
+        "MigrateStatusResponse",
+        "AnswerRequest",
+        "CreatePresetRequest",
+        "PresetResponse",
+        "PresetListResponse",
+        "DocumentVersionSummaryDto",
+        "DocumentVersionListResponse",
+        "DocumentEnvelopeResponse",
+        "DocumentDiffQuery",
+        "DiffLineDto",
+        "DocumentDiffResponse",
+        "DiffJobAcceptedResponse",
+        "DiffJobResultResponse",
+        "PresignUploadRequest",
+        "PresignUploadResponse",
+        "ConfirmUploadRequest",
+        "ConfirmUploadResponse",
+        "UsageQuery",
+        "UsageRecordDto",
+        "UsageResponse",
+    ];
+
     /// Every schema referenced by `components(schemas(...))` must actually appear
     /// under `components.schemas` in the built document — catches a `ToSchema` that
-    /// resolves to nothing (e.g. a bare type alias with no schema of its own).
+    /// resolves to nothing (e.g. a bare type alias with no schema of its own). Also
+    /// catches the opposite drift: a schema present in the document but absent from
+    /// [`DECLARED_SCHEMA_NAMES`], meaning this test's own list fell behind [`ApiDoc`].
     #[test]
     fn every_declared_schema_is_present_in_components() {
-        let doc = build_openapi();
+        let doc = build_openapi().expect("static ApiDoc metadata always serialises");
         let schemas = doc["components"]["schemas"]
             .as_object()
             .expect("components.schemas must be an object");
-        assert!(
-            schemas.len() >= 50,
-            "expected at least 50 named component schemas (one per DTO), found {}",
-            schemas.len()
-        );
+
+        for name in DECLARED_SCHEMA_NAMES {
+            assert!(
+                schemas.contains_key(*name),
+                "declared schema {name} is missing from components.schemas — \
+                 its ToSchema derive resolved to nothing, or it was removed from \
+                 dto.rs without being removed from ApiDoc's components(schemas(...))"
+            );
+        }
+
+        let declared: std::collections::HashSet<&str> =
+            DECLARED_SCHEMA_NAMES.iter().copied().collect();
+        for name in schemas.keys() {
+            assert!(
+                declared.contains(name.as_str()),
+                "schema {name} is present in components.schemas but missing from \
+                 this test's DECLARED_SCHEMA_NAMES — add it there to keep this test \
+                 an exact set comparison, not just a one-directional check"
+            );
+        }
     }
 }
