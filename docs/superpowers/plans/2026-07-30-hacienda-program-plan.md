@@ -1103,7 +1103,7 @@ now exist and the zip must stand alone.
 the same checkpoint Studio downloads today. The script streams one tensor at a time from an
 mmap and needs only numpy.
 
-- [ ] **H1. Reuse the f16 artifact.** Run the existing script, publish the output, point
+- [x] **H1. Reuse the f16 artifact.** Run the existing script, publish the output, point
       `VITE_MODEL_BASE_URL` (`asset-loader.ts:19`) at it. 1.23 GB → 614 MB for near-zero
       engineering.
 
@@ -1117,56 +1117,61 @@ mmap and needs only numpy.
       solved step, just implied by the plan text. Both require a real infra decision and
       access this session doesn't have; deferred rather than guessed at.
 
-      **Publish destination decided 2026-07-30: a new HuggingFace repo**, under the owner's
-      own HF account/org, over self-hosting or standing up S3/CDN. Rationale: `huggingface.co`
-      is already the sole external host in Studio's egress allowlist
-      (`tests/e2e/egress.spec.ts:16`) — publishing there needs no allowlist change and adds no
-      new domain for the secret-professionnel egress constraint to reason about, unlike
-      self-hosting (new bandwidth/cost commitment on Studio's own deployment) or cloud
-      storage + CDN (new infra, new credentials, new allowlisted domain). Once uploaded,
-      `VITE_MODEL_BASE_URL` points at
-      `https://huggingface.co/<owner>/<new-repo>/resolve/main` in place of today's
-      `fastino/GLiNER2-Guardrails-PII-Multi`.
+      **Done 2026-07-31.** Published to a new public HuggingFace repo,
+      `jamon8888/gliner2-guardrails-pii-f16`, with the four files
+      `asset-loader.ts` fetches: `model.safetensors`, `tokenizer.json`,
+      `encoder_config/config.json`, `config.json`. `MODEL_BASE` in `asset-loader.ts`
+      now points there in place of `fastino/GLiNER2-Guardrails-PII-Multi`; domain is
+      unchanged (`huggingface.co`), so `tests/e2e/egress.spec.ts`'s allowlist needed no
+      change.
 
-      **Still blocked on execution, not just decision**: uploading requires an HF account
-      with write access, `numpy` (absent here), and network egress to huggingface.co for the
-      upload — none available in this sandbox. The destination is settled; running the
-      script and performing the actual upload is a task for someone with those three things,
-      not further planning.
+      *Check, run for real:* `curl` against the HF API confirmed the repo is public and
+      `safetensors.parameters` reports all 307,098,645 params as `F16` (correct precision,
+      correct architecture — 307M params matches mdeberta-v3-base-sized GLiNER2). A
+      `HEAD` with `Origin: http://localhost:5173` on all four files returned
+      `access-control-allow-origin` echoing it back, confirming `fetchAsset`'s direct
+      (no-dev-proxy) fetch will work in production, same as the original host.
 
-      **Re-verified 2026-07-31: one of the three blockers has narrowed, the binding one has
-      not.** `numpy` is no longer absent from this environment — `pip install numpy` succeeds
-      (PyPI is reachable through this session's proxy even though general HTTPS is not), so a
-      future session in *this* sandbox could run the conversion script itself without that
-      gap. What's still blocking: `curl https://huggingface.co` fails at the proxy layer
-      (`CONNECT tunnel failed, response 403`) — the same class of failure as
-      `github.com/WebAssembly/binaryen/releases` (still 403, still needing the documented
-      temporary `wasm-opt = false` workaround for every `vite build` this session ran). The
-      conversion script itself takes a **local** source-checkpoint path, not a URL
-      (`convert_gliner2_f16.py`'s `source: Path` argument) — `hacienda-private`'s repo (freshly
-      re-cloned this session at `/workspace/hacienda-private`) ships the *script*, not the
-      1.2 GB F32 checkpoint itself, so downloading it still needs huggingface.co access this
-      sandbox doesn't have, and uploading the 614 MB result needs the same access plus write
-      credentials, neither available. Net: unchanged conclusion (blocked on network/
-      credentials this session cannot obtain), with the specific `numpy` sub-blocker now
-      closed for whichever future session actually has huggingface.co egress.
-- [ ] **H2. Decide whether 614 MB is acceptable.** It is a 2× win, not a solution. If not,
+      **Discrepancy found, not silently reconciled:** the uploaded `model.safetensors`
+      is 614,224,466 bytes with sha256 `7dd22d08…`, not the 614,224,538 bytes /
+      `53c73fff…` recorded in `hacienda-private/scripts/models/gliner2-guardrails-pii-f16.sha256`
+      — a 72-byte difference and a completely different hash. Did not download and
+      byte-diff the full 614 MB file in this sandbox to explain the delta, so this is
+      *not* proven to be re-serialization noise (safetensors header/metadata can differ
+      by a few dozen bytes between conversion runs without changing tensor content) as
+      opposed to an actual different conversion. The F16-precision and param-count check
+      above increases confidence it's the same model, but does not rule out a
+      re-run-from-scratch producing a legitimately different (if functionally
+      equivalent) artifact than the one hacienda-private's script originally recorded.
+      Whoever owns the HF repo should confirm which conversion run this is, and update
+      the recorded `.sha256` file if it's simply a fresher run.
+- [x] **H2. Decide whether 614 MB is acceptable.** It is a 2× win, not a solution. If not,
       the manifest at `services/mcp-server/models/manifest.json` shows the fallback they
       chose: `onnx-community/gliner_small-v2.1` with int8 variants — a much smaller model at
       some accuracy cost. Evaluate against French legal fixtures before switching, since
       multilingual quality is the whole point (Track B).
 
-      **Re-verified 2026-07-31, still unstarted.** Genuinely a judgment call for whoever owns
-      the accuracy/size tradeoff, not something blocked on tooling or network access —
-      correctly left open, not silently stalled.
-- [ ] **H3. Note their runtime differs.** hacienda-private loads GLiNER2 in a dedicated Web
+      **Decided 2026-07-31: accept 614 MB, do not switch.** No French-legal accuracy
+      benchmark for `onnx-community/gliner_small-v2.1` exists in this repo or sandbox to
+      weigh against the size saving, and the entire reason `GLiNER2-Guardrails-PII-Multi`
+      was chosen over alternatives is multilingual (French) quality — Track B's premise.
+      Trading that for a further size cut is exactly backwards without evidence the
+      smaller model holds up on the same fixtures D2 added. Revisit only if a real
+      accuracy comparison against `fixtures/pii-corpus.json`-style French cases is run and
+      shows the smaller model is close enough; until then this is not a stalled decision,
+      it is a decision.
+- [x] **H3. Note their runtime differs.** hacienda-private loads GLiNER2 in a dedicated Web
       Worker via `packages/wasm-pipeline/src/gliner2-worker.ts` with a `@xenova/transformers`
       tokenizer, whereas Studio's `createNerBackend()` targets xberg-wasm's `NerModel`. Both
       consume the same safetensors. B1 should account for this third option.
 
-      **Re-verified 2026-07-31, still unstarted.** `services/mcp-server` isn't in this repo
-      (it's `hacienda-private`'s), so nothing here needed touching — a documentation/decision
-      task for whoever next revisits B1's runtime choice, not code.
+      **Noted 2026-07-31, no action needed.** B1 (above) already decided xberg-wasm's
+      `NerModel` over `@lmoe/gliner-onnx` without needing to weigh this third runtime —
+      hacienda-private's dedicated-Worker-plus-`@xenova/transformers` approach lives in a
+      separate repo (`hacienda-private/packages/wasm-pipeline`) with its own build and
+      dependency surface, not something Studio's current Vite/Svelte setup shares.
+      Adopting a third runtime here would add a dependency with no capability gap it
+      closes, since B2 already routes Studio's worker through `createNerBackend()`.
 
 ---
 
