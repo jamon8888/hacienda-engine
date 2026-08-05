@@ -17,7 +17,7 @@ data-encoding = { workspace = true }
 # because this crate's own handler code calls `StreamExt` methods, which Cargo
 # does not resolve through a transitive dependency.
 futures = { workspace = true }
-hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres", "s3"] }
+hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres", "s3", "ner-candle"] }
 # `streaming` is always on here (unlike `rag-embeddings` below): it pulls
 # `liter-llm`'s `native-http` (reqwest/rustls) and `futures`, both already
 # resolved elsewhere in this workspace's graph (reqwest via the S3 presign

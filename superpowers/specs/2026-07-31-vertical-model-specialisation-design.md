@@ -326,6 +326,14 @@ below step 4 requires a trained adapter, a GPU, or an upstream xberg release.
 5. **Is mdeberta-v3-base the right base at all?** If pruning to fr/en is acceptable, a monolingual or smaller
    base may dominate it on both size and accuracy. Worth one experiment before investing in adapters for this
    specific base.
+6. **When does Tier 0 actually reach the browser?** §4.1 already corrects the record: the mechanism (extra
+   zero-shot labels on an inference call) is not native-specific, but the *plumbing* is — `hacienda-core`'s
+   `load_detector` is gated `not(target_arch = "wasm32")` on both the real arm and its stub, so it always
+   returns `ModelUnavailable` in the browser today, regardless of `[pii.vertical]`. Studio does not go through
+   `hacienda-core::pii` for NER at all; it calls `xberg-wasm`'s `NerModel` directly. Opening the native gate so
+   `hacienda-core` can hand a vertical's labels to that path (without attempting to load a 614 MB model inside
+   `hacienda-core` itself) is unscoped work — Section 6's blocker, not Task 2's. Recorded here so "Tier 0 works
+   on wasm" is never assumed without checking this note first.
 
 ---
 

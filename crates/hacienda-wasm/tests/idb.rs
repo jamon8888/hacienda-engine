@@ -36,6 +36,7 @@ fn entry(id: &str, category: &str) -> AuditEntryInput {
         pipeline_version: "test".to_string(),
         config_hash: "l5-reload-guard".to_string(),
         principal: None,
+        vertical: None,
     }
 }
 
