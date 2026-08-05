@@ -574,6 +574,186 @@ impl RagStore for PgVectorStore {
             last_ingested_at: row.last_ingested_at.map(|t| t.timestamp()),
         })
     }
+
+    async fn list_collections(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> RagResult<(Vec<CollectionSpec>, u64)> {
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM rag_collections")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(pg_err)?;
+
+        let rows = sqlx::query(
+            "SELECT name, embedding_dim, distance_metric, index_method, created_at, embedding_source, embedding_version \
+             FROM rag_collections ORDER BY created_at DESC, name DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        let specs = rows
+            .into_iter()
+            .map(|row| {
+                let name: String = row.try_get("name").map_err(pg_err)?;
+                let collection_row = CollectionRow::from_row(&row).map_err(pg_err)?;
+                collection_row_to_spec(&name, collection_row)
+            })
+            .collect::<RagResult<Vec<_>>>()?;
+        Ok((specs, total as u64))
+    }
+
+    async fn list_documents(
+        &self,
+        collection: &str,
+        limit: u32,
+        offset: u32,
+    ) -> RagResult<(Vec<DocumentSummary>, u64)> {
+        if self.get_collection(collection).await?.is_none() {
+            return Err(RagError::CollectionNotFound(collection.to_string()));
+        }
+
+        let total: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM rag_documents WHERE collection = $1")
+                .bind(collection)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(pg_err)?;
+
+        let rows = sqlx::query(
+            "SELECT id, external_id, title, mime, keywords, labels, entities, metadata, ingested_at \
+             FROM rag_documents WHERE collection = $1 \
+             ORDER BY ingested_at DESC, id DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(collection)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        let summaries = rows
+            .into_iter()
+            .map(|row| document_row_to_summary(&row))
+            .collect::<RagResult<Vec<_>>>()?;
+        Ok((summaries, total as u64))
+    }
+
+    async fn set_embedding_provenance(
+        &self,
+        collection: &str,
+        source: &str,
+        version: u32,
+    ) -> RagResult<()> {
+        let result = sqlx::query(
+            "UPDATE rag_collections SET embedding_source = $1, embedding_version = $2 WHERE name = $3",
+        )
+        .bind(source)
+        .bind(version as i32)
+        .bind(collection)
+        .execute(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(RagError::CollectionNotFound(collection.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn get_document_chunks(
+        &self,
+        collection: &str,
+        document: &DocumentId,
+    ) -> RagResult<Option<(DocumentRecord, Vec<ChunkRecord>)>> {
+        if self.get_collection(collection).await?.is_none() {
+            return Err(RagError::CollectionNotFound(collection.to_string()));
+        }
+
+        // Malformed/foreign ids simply match nothing, same tolerance as
+        // `delete_documents`'s `filter_map(Uuid::parse_str(...).ok())`.
+        let Ok(doc_uuid) = Uuid::parse_str(&document.0) else {
+            return Ok(None);
+        };
+
+        let doc_row = sqlx::query(
+            "SELECT external_id, title, mime, source_uri, full_text, keywords, entities, labels, metadata \
+             FROM rag_documents WHERE id = $1 AND collection = $2",
+        )
+        .bind(doc_uuid)
+        .bind(collection)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        let Some(doc_row) = doc_row else {
+            return Ok(None);
+        };
+
+        let document_record = document_row_to_record(&doc_row)?;
+
+        let chunk_rows = sqlx::query(
+            "SELECT external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata \
+             FROM rag_chunks WHERE document_id = $1 ORDER BY ordinal",
+        )
+        .bind(doc_uuid)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        let chunks = chunk_rows
+            .iter()
+            .map(chunk_row_to_record)
+            .collect::<RagResult<Vec<_>>>()?;
+
+        Ok(Some((document_record, chunks)))
+    }
+
+    async fn update_chunk_embeddings(
+        &self,
+        collection: &str,
+        document: &DocumentId,
+        embeddings: &[(u32, Vec<f32>)],
+    ) -> RagResult<()> {
+        let spec = self
+            .get_collection(collection)
+            .await?
+            .ok_or_else(|| RagError::CollectionNotFound(collection.to_string()))?;
+
+        for (_, vector) in embeddings {
+            if vector.len() as u32 != spec.embedding_dim {
+                return Err(RagError::EmbeddingDimMismatch {
+                    expected: spec.embedding_dim,
+                    got: vector.len() as u32,
+                });
+            }
+        }
+
+        // Malformed/foreign ids simply match nothing, same tolerance as
+        // `delete_documents`'s `filter_map(Uuid::parse_str(...).ok())`.
+        let Ok(doc_uuid) = Uuid::parse_str(&document.0) else {
+            return Ok(());
+        };
+
+        for (ordinal, vector) in embeddings {
+            let embedding = PgVector::from(vector.clone());
+            sqlx::query(
+                "UPDATE rag_chunks SET embedding = $1 \
+                 WHERE document_id = $2 AND collection = $3 AND ordinal = $4",
+            )
+            .bind(embedding)
+            .bind(doc_uuid)
+            .bind(collection)
+            .bind(*ordinal as i32)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        }
+        Ok(())
+    }
 }
 
 impl PgVectorStore {
@@ -870,6 +1050,91 @@ struct CollectionRow {
     embedding_dim: i32,
     distance_metric: String,
     index_method: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    embedding_source: Option<String>,
+    embedding_version: i32,
+}
+
+/// Build a [`CollectionSpec`] from a [`CollectionRow`] plus the name (not
+/// itself a row column in every query that selects one — `ensure_collection`'s
+/// existence check does not need it).
+fn collection_row_to_spec(name: &str, row: CollectionRow) -> RagResult<CollectionSpec> {
+    Ok(CollectionSpec {
+        name: name.to_string(),
+        embedding_dim: row.embedding_dim as u32,
+        distance_metric: metric_from_db_str(&row.distance_metric)?,
+        index_method: index_method_from_db_str(&row.index_method)?,
+        created_at: Some(row.created_at.timestamp()),
+        embedding_source: row.embedding_source,
+        embedding_version: row.embedding_version as u32,
+    })
+}
+
+/// Build a [`DocumentSummary`] from a `rag_documents` row selected by
+/// [`PgVectorStore::list_documents`]. A free function (not a `FromRow` impl)
+/// because `keywords` needs a fallible JSON decode into `Vec<String>`, which
+/// `#[derive(FromRow)]` cannot express.
+fn document_row_to_summary(row: &PgRow) -> RagResult<DocumentSummary> {
+    let id: Uuid = row.try_get("id").map_err(pg_err)?;
+    let keywords: serde_json::Value = row.try_get("keywords").map_err(pg_err)?;
+    let ingested_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("ingested_at").map_err(pg_err)?;
+    Ok(DocumentSummary {
+        id: DocumentId(id.to_string()),
+        external_id: row.try_get("external_id").map_err(pg_err)?,
+        title: row.try_get("title").map_err(pg_err)?,
+        mime: row.try_get("mime").map_err(pg_err)?,
+        keywords: serde_json::from_value(keywords).unwrap_or_default(),
+        labels: row.try_get("labels").map_err(pg_err)?,
+        entities: row.try_get("entities").map_err(pg_err)?,
+        metadata: row.try_get("metadata").map_err(pg_err)?,
+        ingested_at: ingested_at.map(|t| t.timestamp()),
+    })
+}
+
+/// Build a [`DocumentRecord`] from a `rag_documents` row selected by
+/// [`PgVectorStore::get_document_chunks`]. A free function (not a `FromRow`
+/// impl) for the same reason as [`document_row_to_summary`]: `keywords` needs
+/// a fallible JSON decode into `Vec<String>`.
+fn document_row_to_record(row: &PgRow) -> RagResult<DocumentRecord> {
+    let keywords: serde_json::Value = row.try_get("keywords").map_err(pg_err)?;
+    Ok(DocumentRecord {
+        external_id: row.try_get("external_id").map_err(pg_err)?,
+        title: row.try_get("title").map_err(pg_err)?,
+        mime: row.try_get("mime").map_err(pg_err)?,
+        source_uri: row.try_get("source_uri").map_err(pg_err)?,
+        full_text: row.try_get("full_text").map_err(pg_err)?,
+        keywords: serde_json::from_value(keywords).unwrap_or_default(),
+        entities: row.try_get("entities").map_err(pg_err)?,
+        labels: row.try_get("labels").map_err(pg_err)?,
+        metadata: row.try_get("metadata").map_err(pg_err)?,
+    })
+}
+
+/// Build a [`ChunkRecord`] from a `rag_chunks` row selected by
+/// [`PgVectorStore::get_document_chunks`]. Inverse of `upsert_document`'s
+/// JSONB serialization of `sparse_embedding`/`multi_vector`.
+fn chunk_row_to_record(row: &PgRow) -> RagResult<ChunkRecord> {
+    let embedding: PgVector = row.try_get("embedding").map_err(pg_err)?;
+    let ordinal: i32 = row.try_get("ordinal").map_err(pg_err)?;
+    let sparse_json: Option<serde_json::Value> = row.try_get("sparse_embedding").map_err(pg_err)?;
+    let multi_vector_json: Option<serde_json::Value> =
+        row.try_get("multi_vector").map_err(pg_err)?;
+    Ok(ChunkRecord {
+        external_id: row.try_get("external_id").map_err(pg_err)?,
+        ordinal: ordinal as u32,
+        content: row.try_get("content").map_err(pg_err)?,
+        embedding: embedding.to_vec(),
+        sparse_embedding: sparse_json
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(json_err)?,
+        multi_vector: multi_vector_json
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(json_err)?,
+        chunk_metadata: row.try_get("chunk_metadata").map_err(pg_err)?,
+    })
 }
 
 #[derive(sqlx::FromRow)]
@@ -1770,7 +2035,6 @@ mod live_tests {
             .unwrap_err();
         assert!(matches!(err, RagError::CollectionNotFound(_)));
     }
-
 
     /// Regression test for the `_sqlx_migrations` version-1 collision: before
     /// hacienda-rag's migrations were renumbered `0100+` (see
