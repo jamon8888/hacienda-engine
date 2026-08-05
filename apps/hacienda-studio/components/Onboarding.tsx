@@ -1,6 +1,11 @@
 import type { OnboardingState } from "../lib/types";
+import type { DownloadProgress } from "../lib/asset-loader";
 
 type AssetKey = keyof OnboardingState["assets"];
+
+function formatMB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(0)}MB`;
+}
 
 const ICONS: Record<AssetKey, string> = {
   xbergWasm: "⚙️",
@@ -22,10 +27,16 @@ function overallPercent(assets: OnboardingState["assets"]): number {
 export function Onboarding({
   assets,
   nerModelDegraded = false,
+  nerDownloadProgress = null,
   onComplete,
 }: {
   assets: OnboardingState["assets"];
   nerModelDegraded?: boolean;
+  /** Byte-level progress for the in-flight ~614MB model download, or `null` when not
+   * currently downloading (cached, not yet started, or already settled). Without this the
+   * "GLiNER2-Guardrails-PII" row (and the overall percentage) sits frozen at a single fixed
+   * value for the whole multi-minute download, indistinguishable from actually being stuck. */
+  nerDownloadProgress?: DownloadProgress | null;
   onComplete: () => void;
 }) {
   // `assets.nerModel` is true even when the neural backend failed and the app fell back
@@ -34,6 +45,22 @@ export function Onboarding({
   // instead of trusting `ready`.
   const statusFor = (key: AssetKey, ready: boolean): string => {
     if (key === "nerModel" && nerModelDegraded) return "⚠️ Unavailable — using fallback";
+    if (key === "nerModel" && !ready && nerDownloadProgress) {
+      const { receivedBytes, totalBytes } = nerDownloadProgress;
+      // The network transfer can finish well before `assets.nerModel` flips true — the
+      // ~600MB result still has to be written into IndexedDB, which on a memory-constrained
+      // machine can itself take a long time. Without this, the row (and the overall
+      // percentage) looks frozen at "100%" or 33% with no visible difference from actually
+      // being stuck.
+      if (totalBytes && receivedBytes >= totalBytes) {
+        return "⏳ Finalizing... (saving to local cache)";
+      }
+      if (totalBytes) {
+        const pct = Math.round((receivedBytes / totalBytes) * 100);
+        return `↓ Downloading... ${pct}% (${formatMB(receivedBytes)} / ${formatMB(totalBytes)})`;
+      }
+      return `↓ Downloading... ${formatMB(receivedBytes)}`;
+    }
     return ready ? "✓ Cached" : "↓ Downloading...";
   };
 

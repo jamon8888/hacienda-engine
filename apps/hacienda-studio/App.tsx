@@ -6,7 +6,14 @@ import { PiiPanel } from "./components/PiiPanel";
 import { MarkdownEditor } from "./components/MarkdownEditor";
 import { FileBrowser, buildFileRows } from "./components/FileBrowser";
 import { FileUpload } from "./components/extend/file-upload";
-import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
+import {
+  loadNerModel,
+  loadTessdata,
+  isModelCached,
+  preloadXbergWasm,
+  validateFile,
+  type DownloadProgress,
+} from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import { renderAnnotatedMarkdown } from "./lib/annotate";
 import { DEFAULT_CONFIG } from "./lib/types";
@@ -82,6 +89,10 @@ export function App() {
   // app has a legitimate regex-only fallback and onboarding must not get stuck on a
   // blocked model download. This flag is what actually records the failure.
   const [nerModelDegraded, setNerModelDegraded] = useState(false);
+  // Byte-level progress for the ~614MB model download — without this, `assets.nerModel`
+  // (a single boolean) leaves the onboarding percentage frozen at 33% for the entire
+  // multi-minute download with no way to tell "still downloading" from "actually stuck".
+  const [nerDownloadProgress, setNerDownloadProgress] = useState<DownloadProgress | null>(null);
   // The drop zone renders before the worker finishes its handshake, and the handshake is
   // slow — it compiles a 48 MB WASM module. Dropping a file into that window used to throw
   // on a null worker and silently do nothing.
@@ -106,7 +117,11 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
 
-    async function preloadAssets() {
+    // Returns whether the neural NER model ended up unavailable this session (cache miss
+    // that failed to populate, or any other preload error) — the worker uses this to skip
+    // its own `initNerBackend()` attempt instead of blindly repeating the same fetch+cache
+    // sequence (see the `skipNer` comment on `worker.postMessage({ type: "init" })` below).
+    async function preloadAssets(): Promise<boolean> {
       try {
         console.log("[App] preloadAssets started");
         setAssets((a) => ({ ...a, xbergWasm: true }));
@@ -114,22 +129,37 @@ export function App() {
         await preloadXbergWasm();
         console.log("[App] preloadXbergWasm done");
 
+        let nerFailed = false;
         if (await isModelCached()) {
           setAssets((a) => ({ ...a, nerModel: true }));
         } else {
           try {
-            await loadNerModel();
+            await loadNerModel((p) => {
+              if (!cancelled) setNerDownloadProgress(p);
+            });
             setAssets((a) => ({ ...a, nerModel: true }));
           } catch (e) {
             console.warn("[App] NER model download failed, using fallback:", e);
+            nerFailed = true;
             setNerModelDegraded(true);
             setError("Neural PII backend unavailable — falling back to regex-only detection.");
             setAssets((a) => ({ ...a, nerModel: true }));
+          } finally {
+            setNerDownloadProgress(null);
           }
         }
 
+        try {
+          await loadTessdata();
+        } catch (e) {
+          // Tesseract OCR falls back to no text extraction for scanned images/PDFs — it
+          // does not block onboarding the way a missing NER model would, since most
+          // uploads aren't scanned documents.
+          console.warn("[App] Tesseract data download failed, OCR will be unavailable:", e);
+        }
         setAssets((a) => ({ ...a, tessdata: true }));
         localStorage.setItem("xberg-studio-visited", "true");
+        return nerFailed;
       } catch (e) {
         console.error("[App] preloadAssets error:", e);
         setNerModelDegraded(true);
@@ -138,16 +168,22 @@ export function App() {
         );
         setAssets({ xbergWasm: true, nerModel: true, tessdata: true });
         localStorage.setItem("xberg-studio-visited", "true");
+        return true;
       }
     }
 
     async function init() {
       const visited = localStorage.getItem("xberg-studio-visited");
+      // Only the first-run onboarding path (below) actually attempts to populate the
+      // IndexedDB model cache this session — a returning ("visited") session skips that
+      // attempt entirely, so there's no same-session failure to report to the worker and
+      // `skipNer` stays false, letting the worker make its own (first and only) attempt.
+      let nerFailedThisSession = false;
       if (visited) {
         setOnboardingComplete(true);
         setAssets({ xbergWasm: true, nerModel: true, tessdata: true });
       } else {
-        await preloadAssets();
+        nerFailedThisSession = await preloadAssets();
       }
       if (cancelled) return;
 
@@ -159,7 +195,13 @@ export function App() {
         worker.onmessage = (e) => {
           if (e.data.type === "ready") resolve();
         };
-        worker.postMessage({ type: "init" });
+        // `skipNer`: tells the worker not to repeat `loadNerModel()` when the main thread
+        // just failed to cache it (e.g. IndexedDB QuotaExceededError on the ~614MB model) —
+        // without this, the worker blindly re-attempts the same fetch+cache-write sequence
+        // on first document processing, which is both doomed to fail the same way and, since
+        // it re-fetches the full model over the network, blocks that document behind a
+        // multi-minute download for nothing.
+        worker.postMessage({ type: "init", skipNer: nerFailedThisSession });
       });
       if (cancelled) return;
       worker.onmessage = handleWorkerMessage;
@@ -344,6 +386,7 @@ export function App() {
       <Onboarding
         assets={assets}
         nerModelDegraded={nerModelDegraded}
+        nerDownloadProgress={nerDownloadProgress}
         onComplete={() => {
           setOnboardingComplete(true);
           localStorage.setItem("xberg-studio-visited", "true");
