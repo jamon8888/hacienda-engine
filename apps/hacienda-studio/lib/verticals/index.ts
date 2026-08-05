@@ -1,6 +1,7 @@
 import { parse } from "yaml";
 import maYaml from "./m&a.yaml?raw";
 import financialServicesYaml from "./financial_services.yaml?raw";
+import businessLawYaml from "./business_law.yaml?raw";
 import sharedYaml from "./shared.yaml?raw";
 
 /**
@@ -13,6 +14,7 @@ import sharedYaml from "./shared.yaml?raw";
 const RAW_TAXONOMIES: Record<string, string> = {
   "m&a": maYaml,
   financial_services: financialServicesYaml,
+  business_law: businessLawYaml,
   shared: sharedYaml,
 };
 
