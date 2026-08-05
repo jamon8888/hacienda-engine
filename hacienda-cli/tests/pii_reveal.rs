@@ -15,10 +15,11 @@ const KNOWN_EMAIL: &str = "jane.doe@example.com";
 const KEY_ID: &str = "k1";
 // 64 bytes of hex (`KEY_BYTES` in `hacienda_core::redaction::pseudonym`), matching the
 // length that crate's own tests use — any valid hex of the right length works.
+const KEY_BYTES: usize = 64;
 const KEY_HEX: &str = "aa";
 
 fn key_hex() -> String {
-    KEY_HEX.repeat(64)
+    KEY_HEX.repeat(KEY_BYTES)
 }
 
 fn fixture() -> NamedTempFile {

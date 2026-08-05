@@ -80,6 +80,7 @@ pub struct RevealArgs {
     #[arg(value_name = "TOKEN")]
     pub token: String,
 
+    /// Output format for the revealed plaintext.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
 }
@@ -103,6 +104,7 @@ pub struct AuditVerifyArgs {
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
+    /// Output format for the verification result.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
 }
