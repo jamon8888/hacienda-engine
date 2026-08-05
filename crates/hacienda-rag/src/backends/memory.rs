@@ -38,12 +38,25 @@ struct Collection {
     documents: HashMap<DocumentId, StoredDocument>,
     external_index: HashMap<String, DocumentId>,
     chunks: Vec<StoredChunk>,
+    /// Insertion order of document ids, oldest first. This backend has no
+    /// wall-clock ingestion timestamp (see [`summarize`]'s `ingested_at:
+    /// None`), so `list_documents`'s "newest-first" ordering is approximated
+    /// by reversing this vector — a document that is re-upserted (same
+    /// `external_id`) keeps its original position, matching the pgvector
+    /// backend's behavior of never updating `ingested_at` on an update.
+    document_order: Vec<DocumentId>,
 }
 
 /// An in-memory [`RagStore`] backed by brute-force scan.
 pub struct InMemoryVectorStore {
     name: String,
     collections: RwLock<HashMap<String, Collection>>,
+    /// Insertion order of collection names, oldest first. See
+    /// [`Collection::document_order`] for why a `HashMap` alone cannot serve
+    /// `list_collections`'s "newest-first" contract. Locked independently of
+    /// `collections`, always acquired after it, to avoid changing every
+    /// existing single-lock call site.
+    collection_order: RwLock<Vec<String>>,
     doc_counter: AtomicU64,
 }
 
@@ -53,6 +66,7 @@ impl InMemoryVectorStore {
         Self {
             name: name.into(),
             collections: RwLock::new(HashMap::new()),
+            collection_order: RwLock::new(Vec::new()),
             doc_counter: AtomicU64::new(0),
         }
     }
@@ -239,6 +253,7 @@ impl RagStore for InMemoryVectorStore {
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> RagResult<()> {
         let mut collections = self.collections.write().expect("poisoned");
+        let is_new = !collections.contains_key(&spec.name);
         let entry = collections.entry(spec.name.clone()).or_default();
         match &entry.spec {
             Some(existing) if existing.embedding_dim != spec.embedding_dim => {
@@ -246,6 +261,12 @@ impl RagStore for InMemoryVectorStore {
             }
             _ => {
                 entry.spec = Some(spec.clone());
+                if is_new {
+                    self.collection_order
+                        .write()
+                        .expect("poisoned")
+                        .push(spec.name.clone());
+                }
                 Ok(())
             }
         }
@@ -255,7 +276,12 @@ impl RagStore for InMemoryVectorStore {
         let mut collections = self.collections.write().expect("poisoned");
         collections
             .remove(collection)
-            .map(|_| ())
+            .map(|_| {
+                self.collection_order
+                    .write()
+                    .expect("poisoned")
+                    .retain(|name| name != collection);
+            })
             .ok_or_else(|| RagError::CollectionNotFound(collection.to_string()))
     }
 
@@ -285,16 +311,16 @@ impl RagStore for InMemoryVectorStore {
             validate_chunk_side_vectors(chunk)?;
         }
 
-        let doc_id = match document
+        let (doc_id, is_new) = match document
             .external_id
             .as_ref()
             .and_then(|ext| coll.external_index.get(ext).cloned())
         {
             Some(existing) => {
                 coll.chunks.retain(|c| c.document_id != existing);
-                existing
+                (existing, false)
             }
-            None => DocumentId(self.next_doc_id()),
+            None => (DocumentId(self.next_doc_id()), true),
         };
 
         if let Some(ext) = &document.external_id {
@@ -306,6 +332,9 @@ impl RagStore for InMemoryVectorStore {
                 record: document.clone(),
             },
         );
+        if is_new {
+            coll.document_order.push(doc_id.clone());
+        }
         for chunk in chunks {
             coll.chunks.push(StoredChunk {
                 id: ChunkId(format!("{}:{}", doc_id.0, chunk.ordinal)),
@@ -331,6 +360,7 @@ impl RagStore for InMemoryVectorStore {
             }
         }
         coll.chunks.retain(|c| !ids.contains(&c.document_id));
+        coll.document_order.retain(|id| !ids.contains(id));
         Ok(removed)
     }
 
@@ -361,6 +391,7 @@ impl RagStore for InMemoryVectorStore {
             }
         }
         coll.chunks.retain(|c| !to_remove.contains(&c.document_id));
+        coll.document_order.retain(|id| !to_remove.contains(id));
         Ok(removed)
     }
 
@@ -481,6 +512,118 @@ impl RagStore for InMemoryVectorStore {
             chunks: coll.chunks.len() as u64,
             last_ingested_at: None,
         })
+    }
+
+    async fn list_collections(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> RagResult<(Vec<CollectionSpec>, u64)> {
+        let order = self.collection_order.read().expect("poisoned");
+        let collections = self.collections.read().expect("poisoned");
+        let total = order.len() as u64;
+        let page: Vec<CollectionSpec> = order
+            .iter()
+            .rev()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .filter_map(|name| collections.get(name).and_then(|c| c.spec.clone()))
+            .collect();
+        Ok((page, total))
+    }
+
+    async fn list_documents(
+        &self,
+        collection: &str,
+        limit: u32,
+        offset: u32,
+    ) -> RagResult<(Vec<DocumentSummary>, u64)> {
+        let collections = self.collections.read().expect("poisoned");
+        let coll = collections
+            .get(collection)
+            .ok_or_else(|| RagError::CollectionNotFound(collection.to_string()))?;
+        let total = coll.document_order.len() as u64;
+        let page: Vec<DocumentSummary> = coll
+            .document_order
+            .iter()
+            .rev()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .filter_map(|id| coll.documents.get(id).map(|d| summarize(id, &d.record)))
+            .collect();
+        Ok((page, total))
+    }
+
+    async fn set_embedding_provenance(
+        &self,
+        collection: &str,
+        source: &str,
+        version: u32,
+    ) -> RagResult<()> {
+        let mut collections = self.collections.write().expect("poisoned");
+        let coll = collections
+            .get_mut(collection)
+            .ok_or_else(|| RagError::CollectionNotFound(collection.to_string()))?;
+        let spec = coll
+            .spec
+            .as_mut()
+            .ok_or_else(|| RagError::CollectionNotFound(collection.to_string()))?;
+        spec.embedding_source = Some(source.to_string());
+        spec.embedding_version = version;
+        Ok(())
+    }
+
+    async fn get_document_chunks(
+        &self,
+        collection: &str,
+        document: &DocumentId,
+    ) -> RagResult<Option<(DocumentRecord, Vec<ChunkRecord>)>> {
+        let collections = self.collections.read().expect("poisoned");
+        let coll = collections
+            .get(collection)
+            .ok_or_else(|| RagError::CollectionNotFound(collection.to_string()))?;
+        let Some(stored) = coll.documents.get(document) else {
+            return Ok(None);
+        };
+        let mut chunks: Vec<ChunkRecord> = coll
+            .chunks
+            .iter()
+            .filter(|c| &c.document_id == document)
+            .map(|c| c.record.clone())
+            .collect();
+        chunks.sort_by_key(|c| c.ordinal);
+        Ok(Some((stored.record.clone(), chunks)))
+    }
+
+    async fn update_chunk_embeddings(
+        &self,
+        collection: &str,
+        document: &DocumentId,
+        embeddings: &[(u32, Vec<f32>)],
+    ) -> RagResult<()> {
+        let mut collections = self.collections.write().expect("poisoned");
+        let coll = collections
+            .get_mut(collection)
+            .ok_or_else(|| RagError::CollectionNotFound(collection.to_string()))?;
+        let dim = coll.spec.as_ref().map(|s| s.embedding_dim).unwrap_or(0);
+        for (_, vector) in embeddings {
+            if vector.len() as u32 != dim {
+                return Err(RagError::EmbeddingDimMismatch {
+                    expected: dim,
+                    got: vector.len() as u32,
+                });
+            }
+        }
+        for (ordinal, vector) in embeddings {
+            if let Some(chunk) = coll
+                .chunks
+                .iter_mut()
+                .find(|c| &c.document_id == document && c.record.ordinal == *ordinal)
+            {
+                chunk.record.embedding = vector.clone();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -872,5 +1015,227 @@ mod tests {
         let store = InMemoryVectorStore::new("test");
         let err = store.collection_stats("missing").await.unwrap_err();
         assert!(matches!(err, RagError::CollectionNotFound(ref name) if name == "missing"));
+    }
+
+    #[tokio::test]
+    async fn should_page_newest_first_when_listing_collections() {
+        let store = InMemoryVectorStore::new("test");
+        store
+            .ensure_collection(&CollectionSpec::new("a", 2))
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("b", 2))
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("c", 2))
+            .await
+            .unwrap();
+
+        let (page, total) = store.list_collections(2, 0).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(
+            page.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
+
+        let (page, total) = store.list_collections(2, 2).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(
+            page.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_exclude_dropped_collections_when_listing() {
+        let store = InMemoryVectorStore::new("test");
+        store
+            .ensure_collection(&CollectionSpec::new("a", 2))
+            .await
+            .unwrap();
+        store.drop_collection("a").await.unwrap();
+
+        let (page, total) = store.list_collections(10, 0).await.unwrap();
+        assert!(page.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn should_page_newest_first_when_listing_documents() {
+        let store = store_with_collection(2).await;
+        for content in ["a", "b", "c"] {
+            store
+                .upsert_document(
+                    "docs",
+                    &DocumentRecord {
+                        title: Some(content.to_string()),
+                        ..Default::default()
+                    },
+                    &[chunk(0, content, vec![1.0, 0.0])],
+                )
+                .await
+                .unwrap();
+        }
+
+        let (page, total) = store.list_documents("docs", 2, 0).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(
+            page.iter().map(|d| d.title.as_deref()).collect::<Vec<_>>(),
+            vec![Some("c"), Some("b")]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_reject_list_documents_when_collection_is_unknown() {
+        let store = InMemoryVectorStore::new("test");
+        let err = store.list_documents("missing", 10, 0).await.unwrap_err();
+        assert!(matches!(err, RagError::CollectionNotFound(ref name) if name == "missing"));
+    }
+
+    #[tokio::test]
+    async fn should_persist_provenance_when_set_embedding_provenance_succeeds() {
+        let store = store_with_collection(2).await;
+        store
+            .set_embedding_provenance("docs", "balanced", 2)
+            .await
+            .unwrap();
+
+        let spec = store.get_collection("docs").await.unwrap().unwrap();
+        assert_eq!(spec.embedding_source.as_deref(), Some("balanced"));
+        assert_eq!(spec.embedding_version, 2);
+    }
+
+    #[tokio::test]
+    async fn should_reject_set_embedding_provenance_when_collection_is_unknown() {
+        let store = InMemoryVectorStore::new("test");
+        let err = store
+            .set_embedding_provenance("missing", "balanced", 2)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RagError::CollectionNotFound(ref name) if name == "missing"));
+    }
+
+    #[tokio::test]
+    async fn should_return_ordinal_sorted_chunks_when_get_document_chunks_succeeds() {
+        let store = store_with_collection(2).await;
+        let doc = DocumentRecord {
+            full_text: "hello world".to_string(),
+            ..Default::default()
+        };
+        let id = store
+            .upsert_document(
+                "docs",
+                &doc,
+                &[
+                    chunk(1, "second", vec![0.0, 1.0]),
+                    chunk(0, "first", vec![1.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let (fetched_doc, chunks) = store
+            .get_document_chunks("docs", &id)
+            .await
+            .unwrap()
+            .expect("document should exist");
+        assert_eq!(fetched_doc.full_text, "hello world");
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| c.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(chunks[0].ordinal, 0);
+        assert_eq!(chunks[1].ordinal, 1);
+    }
+
+    #[tokio::test]
+    async fn should_return_none_when_get_document_chunks_document_is_unknown() {
+        let store = store_with_collection(2).await;
+        let result = store
+            .get_document_chunks("docs", &DocumentId("does-not-exist".to_string()))
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn should_reject_get_document_chunks_when_collection_is_unknown() {
+        let store = InMemoryVectorStore::new("test");
+        let err = store
+            .get_document_chunks("missing", &DocumentId("any".to_string()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RagError::CollectionNotFound(ref name) if name == "missing"));
+    }
+
+    #[tokio::test]
+    async fn should_overwrite_embedding_when_update_chunk_embeddings_succeeds() {
+        let store = store_with_collection(2).await;
+        let doc = DocumentRecord::default();
+        let id = store
+            .upsert_document("docs", &doc, &[chunk(0, "a", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+
+        store
+            .update_chunk_embeddings("docs", &id, &[(0, vec![0.5, 0.5])])
+            .await
+            .unwrap();
+
+        let (_, chunks) = store
+            .get_document_chunks("docs", &id)
+            .await
+            .unwrap()
+            .expect("document should exist");
+        assert_eq!(chunks[0].embedding, vec![0.5, 0.5]);
+    }
+
+    #[tokio::test]
+    async fn should_reject_update_chunk_embeddings_when_dimension_mismatches() {
+        let store = store_with_collection(2).await;
+        let doc = DocumentRecord::default();
+        let id = store
+            .upsert_document("docs", &doc, &[chunk(0, "a", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+
+        let err = store
+            .update_chunk_embeddings("docs", &id, &[(0, vec![1.0, 0.0, 0.0])])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RagError::EmbeddingDimMismatch {
+                expected: 2,
+                got: 3
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_noop_when_update_chunk_embeddings_ordinal_is_unknown() {
+        let store = store_with_collection(2).await;
+        let doc = DocumentRecord::default();
+        let id = store
+            .upsert_document("docs", &doc, &[chunk(0, "a", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+
+        store
+            .update_chunk_embeddings("docs", &id, &[(99, vec![0.5, 0.5])])
+            .await
+            .unwrap();
+
+        let (_, chunks) = store
+            .get_document_chunks("docs", &id)
+            .await
+            .unwrap()
+            .expect("document should exist");
+        assert_eq!(chunks[0].embedding, vec![1.0, 0.0]);
     }
 }

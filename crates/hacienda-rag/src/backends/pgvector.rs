@@ -294,7 +294,8 @@ impl RagStore for PgVectorStore {
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> RagResult<()> {
         let existing: Option<CollectionRow> = sqlx::query_as(
-            "SELECT embedding_dim, distance_metric, index_method FROM rag_collections WHERE name = $1",
+            "SELECT embedding_dim, distance_metric, index_method, created_at, embedding_source, embedding_version \
+             FROM rag_collections WHERE name = $1",
         )
         .bind(&spec.name)
         .fetch_optional(&self.pool)
@@ -350,22 +351,16 @@ impl RagStore for PgVectorStore {
 
     async fn get_collection(&self, collection: &str) -> RagResult<Option<CollectionSpec>> {
         let row: Option<CollectionRow> = sqlx::query_as(
-            "SELECT embedding_dim, distance_metric, index_method FROM rag_collections WHERE name = $1",
+            "SELECT embedding_dim, distance_metric, index_method, created_at, embedding_source, embedding_version \
+             FROM rag_collections WHERE name = $1",
         )
         .bind(collection)
         .fetch_optional(&self.pool)
         .await
         .map_err(pg_err)?;
 
-        row.map(|r| {
-            Ok(CollectionSpec {
-                name: collection.to_string(),
-                embedding_dim: r.embedding_dim as u32,
-                distance_metric: metric_from_db_str(&r.distance_metric)?,
-                index_method: index_method_from_db_str(&r.index_method)?,
-            })
-        })
-        .transpose()
+        row.map(|r| collection_row_to_spec(collection, r))
+            .transpose()
     }
 
     async fn upsert_document(

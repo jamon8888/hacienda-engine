@@ -48,13 +48,21 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
 /// Call this explicitly from the process entry point (CLI `serve` or test harness)
 /// behind a `--migrate` flag — never from a library constructor.
 ///
+/// `set_ignore_missing(true)`: sqlx's `_sqlx_migrations` table is one per physical
+/// database, not one per crate (see `hacienda-core/migrations/README.md`). Without
+/// this, `Migrator::run` rejects the whole shared table as soon as it contains any
+/// applied-migration row outside this crate's own resolved list (`VersionMissing`) —
+/// which every `crates/hacienda-rag` migration row is, from this migrator's point of
+/// view. `ignore_missing` relaxes that check to "every version *this* migrator knows
+/// about must match its checksum", which is what the shared-database deployment
+/// actually needs.
+///
 /// # Errors
 /// Returns `StoreError::Migrate` if any migration fails.
 pub async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
-    sqlx::migrate!("./migrations")
-        .run(pool)
-        .await
-        .map_err(StoreError::Migrate)
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_ignore_missing(true);
+    migrator.run(pool).await.map_err(StoreError::Migrate)
 }
 
 /// Run migrations from an embedded source (for testcontainers where the
@@ -65,10 +73,10 @@ pub async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
 pub async fn migrate_from_embedded(pool: &PgPool) -> Result<(), StoreError> {
     // sqlx::migrate! macro embeds the migrations at compile time.
     // This is the same as `migrate()` but makes the intent explicit for tests.
-    sqlx::migrate!("./migrations")
-        .run(pool)
-        .await
-        .map_err(StoreError::Migrate)
+    // See `migrate()`'s doc comment for why `set_ignore_missing(true)` is required.
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_ignore_missing(true);
+    migrator.run(pool).await.map_err(StoreError::Migrate)
 }
 
 #[cfg(test)]
@@ -82,7 +90,9 @@ mod tests {
     #[tokio::test]
     async fn connect_and_migrate() {
         let fixture = PostgresFixture::start().await;
-        let pool = connect(fixture.database_url()).await.expect("connect failed");
+        let pool = connect(fixture.database_url())
+            .await
+            .expect("connect failed");
         migrate(&pool).await.expect("migrate failed");
         // If we get here, the schema is ready.
     }

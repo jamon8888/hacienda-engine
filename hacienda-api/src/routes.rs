@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, uploads, usage,
-        versions,
+        audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, rag_stream, uploads,
+        usage, versions,
     },
     state::ApiState,
 };
@@ -177,14 +177,13 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
     // ── documents:process endpoints, RAG (Phase 12 Task 3) ───────────────────────
     // Reuses `DocumentsProcess`, not a dedicated capability: RAG collections carry
     // the same class of redacted document content `/v1/documents` already gates
-    // under it — see Task 3 Step 2's verification note in the plan file. Only the
-    // routes `RagStore` can actually serve today are registered; list-
-    // collections/list-documents/reindex/migrate-embeddings need trait extensions
-    // first (same note).
+    // under it — see Task 3 Step 2's verification note in the plan file. Every
+    // method `RagStore` exposes now has a route, including the async
+    // migrate-embeddings job pair added in Task 3 Step 3.
     RouteSpec {
         path: "/v1/rag/collections",
         access: Access::Capability(Capability::DocumentsProcess),
-        make_router: || post(rag::create_collection),
+        make_router: || get(rag::list_collections).post(rag::create_collection),
     },
     RouteSpec {
         path: "/v1/rag/collections/{name}",
@@ -194,12 +193,30 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
     RouteSpec {
         path: "/v1/rag/collections/{name}/documents",
         access: Access::Capability(Capability::DocumentsProcess),
-        make_router: || post(rag::upsert_document),
+        make_router: || get(rag::list_documents).post(rag::upsert_document),
     },
     RouteSpec {
         path: "/v1/rag/collections/{name}/retrieve",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || post(rag::retrieve),
+    },
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/migrate-embeddings",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(rag::migrate_embeddings),
+    },
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/migrate-embeddings/{job_id}",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(rag::get_migrate_status),
+    },
+    // Streaming answer synthesis (Phase 12 Track 3) — see
+    // `handlers/rag_stream.rs`'s module doc for the mandatory PII redaction gate
+    // this route applies before any retrieved content reaches an LLM.
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/answer",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(rag_stream::answer),
     },
     // ── documents:process endpoints, presets (Phase 13 Task 2) ──────────────────
     // Presets are inert config (a saved pipeline configuration), not part of the
@@ -377,6 +394,29 @@ pub(crate) mod tests {
         use hacienda_rag::{InMemoryVectorStore, RagStore};
         let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
         test_state_no_auth().with_rag_store(store)
+    }
+
+    /// A state with auth disabled, PII detection enabled (mask mode — no key
+    /// resolver needed), and an in-memory RAG store attached. Used by the
+    /// streaming-answer tests: `handlers::rag_stream::answer` calls
+    /// `redact_text_with_auth` unconditionally, which fails closed with
+    /// `PiiDisabled` against the plain `state_with_rag()` facade.
+    fn state_with_rag_and_pii() -> ApiState {
+        use hacienda_rag::{InMemoryVectorStore, RagStore};
+
+        let pii_config = PipelineConfig {
+            redaction: RedactionConfig {
+                mode: RedactionMode::Mask,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config = HaciendaConfig::default().with_pii(pii_config);
+        let facade = Arc::new(HaciendaFacade::new(config).unwrap());
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
+        let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
+        ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(store)
     }
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
@@ -924,6 +964,115 @@ pub(crate) mod tests {
         assert_eq!(response.status().as_u16(), 404);
     }
 
+    /// End to end over the real router: create a collection, upsert a chunk, then
+    /// `POST .../answer` with a model string no provider can route (mirrors
+    /// `hacienda_rag::stream`'s own `answer_stream_emits_citations_before_llm_error`
+    /// test, which already proves this fails fast with no live network call). The
+    /// SSE body must still carry a `citation` event for the upserted chunk before
+    /// the `error` event — proving retrieval, the redaction gate, and the SSE
+    /// encoding all ran, even though the LLM call itself was never reachable.
+    #[tokio::test]
+    async fn rag_answer_streams_citation_then_error_without_a_routable_model() {
+        let app = build_router(state_with_rag_and_pii());
+
+        assert_eq!(create_collection(&app, "c1", 3).await, 201);
+
+        let upsert_body = r#"{
+            "document": {"external_id": "doc-1", "full_text": "hello world"},
+            "chunks": [
+                {"ordinal": 0, "content": "hello world", "embedding": [1.0, 0.0, 0.0]}
+            ]
+        }"#;
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upsert.status().as_u16(), 201);
+
+        let answer_body = r#"{
+            "prompt": "what is this?",
+            "retrieve": {"mode":"vector","query_vector":[1.0,0.0,0.0],"top_k":5},
+            "llm": {"model": "not-a-real-provider/does-not-exist"}
+        }"#;
+        let answer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/answer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(answer_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.status().as_u16(), 200);
+        let content_type = answer
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "expected an SSE response, got content-type {content_type}"
+        );
+
+        let bytes = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let citation_pos = body
+            .find("event: citation")
+            .expect("expected a citation event in the SSE body");
+        let error_pos = body
+            .find("event: error")
+            .expect("expected an error event in the SSE body");
+        assert!(
+            citation_pos < error_pos,
+            "citation event must precede the error event, got: {body}"
+        );
+        assert!(
+            body.contains("doc-1") || body.contains("\"document_id\""),
+            "citation event should carry the chunk's document id, got: {body}"
+        );
+        // Never let the internal liter-llm error message reach the wire.
+        assert!(
+            !body.contains("not-a-real-provider"),
+            "error event must not echo the internal LLM error, got: {body}"
+        );
+    }
+
+    /// `POST .../answer` on a collection that was never created must be 404.
+    #[tokio::test]
+    async fn rag_answer_missing_collection_is_404() {
+        let app = build_router(state_with_rag());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/missing/answer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"prompt":"hi","retrieve":{"top_k":5},"llm":{"model":"x/y"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 404);
+    }
+
     /// Without a configured RAG store, every `/v1/rag/*` route must fail cleanly
     /// (400), not panic or 500 — RAG is opt-in per `ApiState::rag_store`.
     #[tokio::test]
@@ -975,6 +1124,271 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(response.status().as_u16(), 403);
+    }
+
+    async fn create_collection(app: &axum::Router, name: &str, embedding_dim: u32) -> u16 {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"name":"{name}","embedding_dim":{embedding_dim}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// `GET /v1/rag/collections` must page over the backend (not in-process) and
+    /// report `total` before `limit`/`offset` slicing, same contract as
+    /// `GET /v1/jobs`.
+    #[tokio::test]
+    async fn rag_list_collections_paginates() {
+        let app = build_router(state_with_rag());
+        for name in ["c1", "c2", "c3"] {
+            assert_eq!(create_collection(&app, name, 3).await, 201);
+        }
+
+        let first_page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections?limit=2&offset=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_page.status().as_u16(), 200);
+        let first_page = json_body(first_page).await;
+        assert_eq!(first_page["total"], 3);
+        assert_eq!(first_page["collections"].as_array().unwrap().len(), 2);
+
+        let second_page = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections?limit=2&offset=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_page.status().as_u16(), 200);
+        let second_page = json_body(second_page).await;
+        assert_eq!(second_page["total"], 3);
+        assert_eq!(second_page["collections"].as_array().unwrap().len(), 1);
+    }
+
+    /// `GET /v1/rag/collections/{name}/documents` must page like
+    /// `list_collections` above, and 404 for a collection that does not exist —
+    /// same not-found contract as `GET /v1/rag/collections/{name}` itself.
+    #[tokio::test]
+    async fn rag_list_documents_paginates_and_404s_on_unknown_collection() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 3).await, 201);
+
+        for i in 0..3 {
+            let upsert_body = format!(
+                r#"{{"document":{{"external_id":"doc-{i}","full_text":"text {i}"}},
+                     "chunks":[{{"ordinal":0,"content":"text {i}","embedding":[1.0,0.0,0.0]}}]}}"#
+            );
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/rag/collections/c1/documents")
+                        .header("content-type", "application/json")
+                        .body(Body::from(upsert_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 201);
+        }
+
+        let page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections/c1/documents?limit=2&offset=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status().as_u16(), 200);
+        let page = json_body(page).await;
+        assert_eq!(page["total"], 3);
+        assert_eq!(page["documents"].as_array().unwrap().len(), 2);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections/missing/documents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status().as_u16(), 404);
+    }
+
+    /// `to_source` must name a preset whose `dimensions` matches the collection's
+    /// `embedding_dim` — a mismatch is a client-supplied-body fault (400), not a
+    /// job that gets created only to fail once it starts running. The "fast"
+    /// preset is 384-dimensional; the collection here is 3-dimensional.
+    #[tokio::test]
+    async fn rag_migrate_embeddings_dimension_mismatch_is_400() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 3).await, 201);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/migrate-embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"to_source":"fast","to_version":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// `to_version` must be strictly greater than the collection's current
+    /// `embedding_version` (which starts at 1) — requesting the same version is
+    /// a 400, not a job that races another migration to the same version number.
+    #[tokio::test]
+    async fn rag_migrate_embeddings_non_increasing_version_is_400() {
+        let app = build_router(state_with_rag());
+        // "fast" is 384-dimensional — match it so the dimension check passes and
+        // only the version check is under test.
+        assert_eq!(create_collection(&app, "c1", 384).await, 201);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/migrate-embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"to_source":"fast","to_version":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// Full migrate-embeddings lifecycle: create a collection, upsert a document,
+    /// kick off a migration, poll until it succeeds, and confirm the collection's
+    /// provenance was updated.
+    ///
+    /// Ignored: `xberg::embed_texts_async` requires downloading real ONNX model
+    /// weights over the network and running them through ONNX Runtime, neither of
+    /// which is available in this sandbox. The validation-only paths above
+    /// (dimension mismatch, non-increasing version) exercise everything that
+    /// runs before the background job touches the embedding backend, and run
+    /// unconditionally.
+    #[tokio::test]
+    #[ignore = "requires network access to download ONNX model weights and a working ONNX Runtime install"]
+    async fn rag_migrate_embeddings_full_round_trip() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 384).await, 201);
+
+        let upsert_body = r#"{
+            "document": {"external_id": "doc-1", "full_text": "hello world"},
+            "chunks": [{"ordinal": 0, "content": "hello world", "embedding": [0.0]}]
+        }"#;
+        // Deliberately wrong embedding length: this route only exercises the
+        // migrate-embeddings job, not upsert's dimension validation, so any
+        // upsert body accepted at collection creation time is enough — adjust
+        // if `embedding_dim` validation ever tightens to reject this at upsert.
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let migrate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/migrate-embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"to_source":"fast","to_version":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(migrate.status().as_u16(), 202);
+        let migrate = json_body(migrate).await;
+        let job_id = migrate["job_id"].as_str().unwrap().to_string();
+
+        let mut status = String::new();
+        for _ in 0..50 {
+            let poll = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!(
+                            "/v1/rag/collections/c1/migrate-embeddings/{job_id}"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = json_body(poll).await;
+            status = body["status"].as_str().unwrap().to_string();
+            if status == "succeeded" || status == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        assert_eq!(status, "succeeded");
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections/c1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let spec = json_body(get).await;
+        assert_eq!(spec["embedding_source"], "fast");
+        assert_eq!(spec["embedding_version"], 2);
     }
 
     /// Without a configured preset store, every `/v1/presets*` route must fail

@@ -80,6 +80,14 @@ pub enum IndexMethod {
     Diskann,
 }
 
+/// Default `embedding_version` for a collection that never migrated its
+/// embeddings: every collection has *a* version starting at `1`, so this is a
+/// plain default rather than an `Option` (unlike `embedding_source`, which is
+/// genuinely absent until the first migration names a source).
+fn default_embedding_version() -> u32 {
+    1
+}
+
 /// Collection configuration specification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionSpec {
@@ -93,6 +101,24 @@ pub struct CollectionSpec {
     /// Requested index method (hint; see [`IndexMethod`]).
     #[serde(default)]
     pub index_method: IndexMethod,
+    /// Creation time as Unix seconds, if the backend tracks it.
+    ///
+    /// Mirrors [`DocumentSummary::ingested_at`]'s optionality convention:
+    /// `None` when the backend does not (yet) record it, `skip_serializing_if`
+    /// so existing request bodies that predate this field keep parsing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+    /// The embedding source (preset name or model identifier) currently
+    /// backing this collection's vectors, if a migration has ever set one.
+    /// `None` for a collection whose vectors were written directly (BYOV)
+    /// with no recorded provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_source: Option<String>,
+    /// Monotonically increasing version of the embedding source. Starts at
+    /// `1` for every collection (not optional — every collection has *some*
+    /// version) and is bumped by a successful `migrate-embeddings` job.
+    #[serde(default = "default_embedding_version")]
+    pub embedding_version: u32,
 }
 
 impl CollectionSpec {
@@ -103,6 +129,9 @@ impl CollectionSpec {
             embedding_dim,
             distance_metric: DistanceMetric::Cosine,
             index_method: IndexMethod::Flat,
+            created_at: None,
+            embedding_source: None,
+            embedding_version: 1,
         }
     }
 }

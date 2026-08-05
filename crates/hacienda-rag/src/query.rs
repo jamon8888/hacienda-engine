@@ -228,10 +228,9 @@ mod tests {
 
     fn collection(dim: u32) -> CollectionSpec {
         CollectionSpec {
-            name: "c".to_string(),
-            embedding_dim: dim,
             distance_metric: DistanceMetric::Cosine,
             index_method: crate::types::IndexMethod::Flat,
+            ..CollectionSpec::new("c", dim)
         }
     }
 

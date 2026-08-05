@@ -18,17 +18,21 @@
 //! file into this workspace (notably: `VectorStore` renamed to [`RagStore`]
 //! to read alongside `AuditStore`/`ReviewStore`/`JobStore`, the process-
 //! global registry dropped in favor of this codebase's constructor-injection
-//! convention, and the `pipeline`/`stream`/`sqlite` modules left
-//! unrecovered — see
-//! `superpowers/plans/2026-08-01-hacienda-rag-vector-store-layer.md`).
+//! convention, and the `pipeline`/`stream`/`sqlite` modules initially left
+//! unrecovered pending a design pass — see
+//! `superpowers/plans/2026-08-01-hacienda-rag-vector-store-layer.md`.
+//! `stream` was recovered in Phase 12 Track 3 (behind the `streaming`
+//! feature); `pipeline`/`sqlite` remain unrecovered.
 //! Original xberg license: MIT.
 //!
 //! ## Scope
 //!
 //! This crate ships the trait, the neutral types, the filter/query IR, an
 //! in-memory reference backend, and (behind the `postgres` feature) a durable
-//! `pgvector`-backed `PgVectorStore` (`backends::pgvector`). Any HTTP surface
-//! (`/v1/rag/*` routes) lives outside this crate — see
+//! `pgvector`-backed `PgVectorStore` (`backends::pgvector`), plus (behind the
+//! `streaming` feature) streaming answer synthesis over `liter-llm`
+//! (`stream::answer_stream`). Any HTTP surface (`/v1/rag/*` routes) lives
+//! outside this crate — see
 //! `superpowers/plans/2026-08-01-platform-parity-and-scale-implementation.md`
 //! Phase 12 Task 3.
 
@@ -39,6 +43,8 @@ pub mod filter;
 pub mod query;
 mod scoring;
 pub mod store;
+#[cfg(feature = "streaming")]
+pub mod stream;
 pub mod types;
 
 pub use backends::memory::InMemoryVectorStore;
@@ -47,6 +53,10 @@ pub use error::{ComplexityKind, RagError, RagResult};
 pub use filter::{Filter, FilterField, FilterNamespace};
 pub use query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 pub use store::RagStore;
+#[cfg(feature = "streaming")]
+pub use stream::{
+    answer_stream, AnswerEvent, Citation, LlmAnswerConfig, RetrievedContext, TokenUsage,
+};
 pub use types::{
     ChunkId, ChunkRecord, CollectionSpec, CollectionStats, DistanceMetric, DocumentId,
     DocumentRecord, DocumentSummary, IndexMethod, MultiVector, PrimaryScore, RetrievedChunk,

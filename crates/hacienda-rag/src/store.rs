@@ -20,7 +20,9 @@ use crate::capability::Capabilities;
 use crate::error::RagResult;
 use crate::filter::Filter;
 use crate::query::{RetrieveOutput, RetrieveQuery};
-use crate::types::{ChunkRecord, CollectionSpec, CollectionStats, DocumentId, DocumentRecord};
+use crate::types::{
+    ChunkRecord, CollectionSpec, CollectionStats, DocumentId, DocumentRecord, DocumentSummary,
+};
 use async_trait::async_trait;
 
 /// A vector store: collections of documents and their embedded chunks, queried
@@ -117,4 +119,95 @@ pub trait RagStore: Send + Sync + 'static {
     /// [`RagError::CollectionNotFound`](crate::RagError::CollectionNotFound) if
     /// it does not exist.
     async fn collection_stats(&self, collection: &str) -> RagResult<CollectionStats>;
+
+    /// List collections, paginated, newest-first.
+    ///
+    /// Returns the page of specs together with the total count of collections
+    /// *before* `limit`/`offset` are applied, so a caller can tell whether more
+    /// pages remain without a second round trip. `limit`/`offset` are honored
+    /// by the backend (not the caller) so a store that can push pagination into
+    /// its query (e.g. `LIMIT`/`OFFSET` in SQL) never materializes the full set.
+    ///
+    /// # Errors
+    ///
+    /// Backend errors only.
+    async fn list_collections(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> RagResult<(Vec<CollectionSpec>, u64)>;
+
+    /// List a collection's documents, paginated, newest-first.
+    ///
+    /// Same total-before-pagination contract as [`Self::list_collections`].
+    ///
+    /// # Errors
+    ///
+    /// [`RagError::CollectionNotFound`](crate::RagError::CollectionNotFound) if
+    /// the collection does not exist.
+    async fn list_documents(
+        &self,
+        collection: &str,
+        limit: u32,
+        offset: u32,
+    ) -> RagResult<(Vec<DocumentSummary>, u64)>;
+
+    /// Persist a collection's embedding provenance after a successful
+    /// `migrate-embeddings` job.
+    ///
+    /// A narrow, single-purpose method rather than a general
+    /// `update_collection`: the only field of [`CollectionSpec`] any caller
+    /// mutates post-creation is embedding provenance (`embedding_source`/
+    /// `embedding_version`), and giving that its own verb keeps the trait from
+    /// growing an arbitrary partial-update surface whose semantics (which
+    /// fields are patchable? what happens to `embedding_dim`?) would need to be
+    /// designed and documented for cases that don't exist yet.
+    ///
+    /// # Errors
+    ///
+    /// [`RagError::CollectionNotFound`](crate::RagError::CollectionNotFound) if
+    /// the collection does not exist.
+    async fn set_embedding_provenance(
+        &self,
+        collection: &str,
+        source: &str,
+        version: u32,
+    ) -> RagResult<()>;
+
+    /// Fetch a document's full record and its chunks (ordinal order), for
+    /// pipelines that need to re-derive chunk content/embeddings without going
+    /// through `retrieve`'s query path (e.g. `migrate-embeddings`).
+    ///
+    /// # Errors
+    ///
+    /// [`RagError::CollectionNotFound`](crate::RagError::CollectionNotFound) if
+    /// the collection does not exist. Returns `Ok(None)` if the document itself
+    /// does not exist in the collection — not an error, mirrors
+    /// [`Self::get_collection`]'s `Option` convention.
+    async fn get_document_chunks(
+        &self,
+        collection: &str,
+        document: &DocumentId,
+    ) -> RagResult<Option<(DocumentRecord, Vec<ChunkRecord>)>>;
+
+    /// Overwrite the dense embedding vector of specific chunks in place, keyed
+    /// by ordinal. Content, metadata, sparse/multi-vector fields, and document
+    /// identity are untouched — this is deliberately narrower than
+    /// `upsert_document` (see this method's own module context) so a
+    /// `migrate-embeddings` job cannot accidentally duplicate a document that
+    /// has no `external_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`RagError::CollectionNotFound`](crate::RagError::CollectionNotFound) if
+    /// the collection does not exist. [`RagError::EmbeddingDimMismatch`](crate::RagError::EmbeddingDimMismatch)
+    /// if any vector's length does not match the collection's `embedding_dim`.
+    /// Unknown `(document, ordinal)` pairs are silently ignored, mirroring
+    /// `delete_documents`'s unknown-id tolerance.
+    async fn update_chunk_embeddings(
+        &self,
+        collection: &str,
+        document: &DocumentId,
+        embeddings: &[(u32, Vec<f32>)],
+    ) -> RagResult<()>;
 }
