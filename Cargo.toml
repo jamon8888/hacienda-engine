@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
+members = ["crates/hacienda-rag", "crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
 exclude = ["packages/*"]
 
 [workspace.package]

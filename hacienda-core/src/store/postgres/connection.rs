@@ -14,7 +14,7 @@ pub enum StoreError {
     Connect(#[source] sqlx::Error),
 
     #[error("failed to run migrations: {0}")]
-    Migrate(#[source] sqlx::Error),
+    Migrate(#[source] sqlx::migrate::MigrateError),
 
     #[error("migration source not found: {0}")]
     MigrationSource(String),
@@ -51,7 +51,7 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
 /// # Errors
 /// Returns `StoreError::Migrate` if any migration fails.
 pub async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
-    sqlx::migrate!("./hacienda-core/migrations")
+    sqlx::migrate!("./migrations")
         .run(pool)
         .await
         .map_err(StoreError::Migrate)
@@ -65,7 +65,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
 pub async fn migrate_from_embedded(pool: &PgPool) -> Result<(), StoreError> {
     // sqlx::migrate! macro embeds the migrations at compile time.
     // This is the same as `migrate()` but makes the intent explicit for tests.
-    sqlx::migrate!("./hacienda-core/migrations")
+    sqlx::migrate!("./migrations")
         .run(pool)
         .await
         .map_err(StoreError::Migrate)
@@ -80,8 +80,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn connect_and_migrate() {
-        let database_url = std::env::var("DATABASE_URL")
-            .expect("DATABASE_URL must be set for integration tests");
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
         let pool = connect(&database_url).await.expect("connect failed");
         migrate(&pool).await.expect("migrate failed");
         // If we get here, the schema is ready.

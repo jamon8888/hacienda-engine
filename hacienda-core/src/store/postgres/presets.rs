@@ -122,3 +122,57 @@ impl PresetStore for PostgresPresetStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::postgres::connection::{connect, migrate};
+    use serde_json::json;
+
+    // Ignored by default — requires a running Postgres. Run with:
+    //   DATABASE_URL=postgres://... cargo test -p hacienda-core --features postgres \
+    //     --lib store::postgres::presets -- --ignored --test-threads=1
+
+    async fn test_store() -> PostgresPresetStore {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+        PostgresPresetStore::new(pool)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn should_round_trip_create_get_list_and_delete() {
+        let store = test_store().await;
+        let name = format!("preset-{}", Uuid::new_v4());
+        let config = json!({ "mode": "mask", "categories": ["email", "phone"] });
+
+        let created = store
+            .create(&name, config.clone())
+            .await
+            .expect("create failed");
+        assert_eq!(created.name, name);
+        assert_eq!(created.config, config);
+
+        let by_id = store
+            .get(created.id)
+            .await
+            .expect("get failed")
+            .expect("preset must exist");
+        assert_eq!(by_id.id, created.id);
+
+        let by_name = store
+            .get_by_name(&name)
+            .await
+            .expect("get_by_name failed")
+            .expect("preset must exist");
+        assert_eq!(by_name.id, created.id);
+
+        let all = store.list().await.expect("list failed");
+        assert!(all.iter().any(|p| p.id == created.id));
+
+        store.delete(created.id).await.expect("delete failed");
+        assert!(store.get(created.id).await.expect("get failed").is_none());
+    }
+}

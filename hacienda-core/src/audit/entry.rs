@@ -26,6 +26,43 @@ pub enum RedactionAction {
     Custom(String),
 }
 
+/// String form used by persistence backends (e.g. the Postgres `action` TEXT column).
+///
+/// Unit variants render as their `snake_case` name, matching the `Serialize` convention
+/// used everywhere else this type crosses a boundary. `Custom` is prefixed so the
+/// template it carries round-trips exactly, including templates containing `:` — only
+/// the first `:` is treated as the delimiter on parse.
+impl std::fmt::Display for RedactionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RedactionAction::Mask => write!(f, "mask"),
+            RedactionAction::Hash => write!(f, "hash"),
+            RedactionAction::Pseudonymize => write!(f, "pseudonymize"),
+            RedactionAction::Remove => write!(f, "remove"),
+            RedactionAction::Reveal => write!(f, "reveal"),
+            RedactionAction::Custom(template) => write!(f, "custom:{template}"),
+        }
+    }
+}
+
+impl std::str::FromStr for RedactionAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "mask" => Ok(RedactionAction::Mask),
+            "hash" => Ok(RedactionAction::Hash),
+            "pseudonymize" => Ok(RedactionAction::Pseudonymize),
+            "remove" => Ok(RedactionAction::Remove),
+            "reveal" => Ok(RedactionAction::Reveal),
+            other => match other.strip_prefix("custom:") {
+                Some(template) => Ok(RedactionAction::Custom(template.to_owned())),
+                None => Err(format!("unknown redaction action '{other}'")),
+            },
+        }
+    }
+}
+
 // There is deliberately no `From<RedactionMode> for RedactionAction`.
 //
 // The conversion cannot be total: `Custom` carries the template that was applied, and a
@@ -48,6 +85,18 @@ impl std::fmt::Display for EntitySource {
         match self {
             EntitySource::Regex => write!(f, "regex"),
             EntitySource::Model => write!(f, "model"),
+        }
+    }
+}
+
+impl std::str::FromStr for EntitySource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "regex" => Ok(EntitySource::Regex),
+            "model" => Ok(EntitySource::Model),
+            other => Err(format!("unknown entity source '{other}'")),
         }
     }
 }

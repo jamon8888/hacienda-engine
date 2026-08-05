@@ -14,7 +14,10 @@ fn should_return_err_not_panic_for_a_nonexistent_model_dir() {
 
     let result = NerDetector::from_candle_local(model_dir, None);
 
-    assert!(result.is_err(), "a missing model_dir must fail to load, not panic");
+    assert!(
+        result.is_err(),
+        "a missing model_dir must fail to load, not panic"
+    );
 }
 
 #[test]
@@ -27,7 +30,10 @@ fn should_return_err_not_panic_for_a_nonexistent_adapter_dir() {
 
     let result = NerDetector::from_candle_local(model_dir, Some(adapter_dir));
 
-    assert!(result.is_err(), "a missing adapter_dir must fail to load, not panic");
+    assert!(
+        result.is_err(),
+        "a missing adapter_dir must fail to load, not panic"
+    );
 }
 
 #[test]
@@ -38,5 +44,8 @@ fn should_return_err_for_an_empty_model_dir() {
 
     let result = NerDetector::from_candle_local(dir.path(), None);
 
-    assert!(result.is_err(), "an empty directory must fail to load, not panic");
+    assert!(
+        result.is_err(),
+        "an empty directory must fail to load, not panic"
+    );
 }

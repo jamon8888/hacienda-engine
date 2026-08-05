@@ -38,6 +38,20 @@ impl std::fmt::Display for JobStatus {
     }
 }
 
+impl std::str::FromStr for JobStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "queued" => Ok(JobStatus::Queued),
+            "running" => Ok(JobStatus::Running),
+            "succeeded" => Ok(JobStatus::Succeeded),
+            "failed" => Ok(JobStatus::Failed),
+            other => Err(format!("unknown job status '{other}'")),
+        }
+    }
+}
+
 /// An async document-processing job.
 ///
 /// Created by [`super::store::JobStore::create`] and updated atomically via
