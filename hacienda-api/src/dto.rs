@@ -73,6 +73,24 @@ pub struct RedactTextRequest {
     pub text: String,
 }
 
+/// Body for `POST /v1/pii/reveal`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevealTokenRequest {
+    /// A pseudonym token previously returned by a redaction operation.
+    /// Format: `[CATEGORY:key_id:base32_ciphertext]`
+    pub token: String,
+}
+
+/// Body for `POST /v1/review/{id}/decide`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewDecideRequest {
+    pub decision: String, // "approve", "reject", "modify"
+    pub reviewer: String,
+    pub comment: String,
+}
+
 // ── Response DTOs ─────────────────────────────────────────────────────────────
 
 /// A detected entity in a scan response.
@@ -128,6 +146,15 @@ pub struct RedactTextResponse {
     pub redacted_text: String,
     pub entity_count: usize,
     pub processing_time_ms: u64,
+    /// Current audit chain tip. `null` when auditing is disabled.
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `POST /v1/pii/reveal`.
+#[derive(Debug, Serialize)]
+pub struct RevealTokenResponse {
+    /// The normalised plaintext value behind the token.
+    pub plaintext: String,
     /// Current audit chain tip. `null` when auditing is disabled.
     pub audit_chain_tip: Option<String>,
 }
@@ -194,21 +221,127 @@ impl From<hacienda_core::jobs::Job> for JobResponse {
     }
 }
 
-/// Request body for `POST /v1/pii/reveal`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RevealTokenRequest {
-    /// A pseudonym token previously returned by a redaction operation.
-    /// Format: `[CATEGORY:key_id:base32_ciphertext]`
-    pub token: String,
+/// Audit entry DTO for wire serialization.
+#[derive(Debug, Serialize)]
+pub struct AuditEntryDto {
+    pub id: String,
+    pub category: String,
+    pub action: String,
+    pub span_hash: String,
+    pub span_length: u64,
+    pub confidence: Option<f64>,
+    pub source: String,
+    pub pipeline_version: String,
+    pub config_hash: String,
+    pub principal: Option<String>,
+    pub chain_hash: String,
+    pub created_at: String,
 }
 
-/// Response from `POST /v1/pii/reveal`.
+impl From<hacienda_core::audit::entry::AuditEntry> for AuditEntryDto {
+    fn from(e: hacienda_core::audit::entry::AuditEntry) -> Self {
+        let action = match e.action {
+            hacienda_core::audit::entry::RedactionAction::Mask => "mask".to_string(),
+            hacienda_core::audit::entry::RedactionAction::Hash => "hash".to_string(),
+            hacienda_core::audit::entry::RedactionAction::Pseudonymize => {
+                "pseudonymize".to_string()
+            }
+            hacienda_core::audit::entry::RedactionAction::Remove => "remove".to_string(),
+            hacienda_core::audit::entry::RedactionAction::Reveal => "reveal".to_string(),
+            hacienda_core::audit::entry::RedactionAction::Custom(s) => s,
+        };
+        Self {
+            id: e.id,
+            category: e.category,
+            action,
+            span_hash: e.span_hash,
+            span_length: e.span_length as u64,
+            confidence: e.confidence.map(|c| c as f64),
+            source: e.source.to_string(),
+            pipeline_version: e.pipeline_version,
+            config_hash: e.config_hash,
+            principal: e.principal,
+            chain_hash: e.chain_hash,
+            created_at: e.timestamp,
+        }
+    }
+}
+
+/// Review item DTO for wire serialization.
 #[derive(Debug, Serialize)]
-pub struct RevealTokenResponse {
-    /// The normalised plaintext value behind the token.
-    pub plaintext: String,
-    /// Current audit chain tip. `null` when auditing is disabled.
+pub struct ReviewItemDto {
+    pub id: String,
+    pub text_snippet: String,
+    pub category: String,
+    pub start: u32,
+    pub end: u32,
+    pub confidence: f32,
+    pub source: String,
+    pub status: String,
+    pub assigned_reviewer: Option<String>,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<String>,
+    pub decision: Option<String>,
+    pub comment: Option<String>,
+    pub deadline: Option<String>,
+    pub created_at: String,
+}
+
+impl From<hacienda_core::review::types::ReviewQueueItem> for ReviewItemDto {
+    fn from(item: hacienda_core::review::types::ReviewQueueItem) -> Self {
+        let decision = item.decision.map(|d| {
+            match d {
+                hacienda_core::review::types::ReviewDecision::Approve => "approve",
+                hacienda_core::review::types::ReviewDecision::Reject => "reject",
+                hacienda_core::review::types::ReviewDecision::Modify => "modify",
+            }
+            .to_string()
+        });
+        Self {
+            id: item.id,
+            text_snippet: item.text_snippet,
+            category: item.category,
+            start: item.start,
+            end: item.end,
+            confidence: item.confidence,
+            source: item.source,
+            status: item.status.to_string(),
+            assigned_reviewer: item.assigned_reviewer,
+            decided_by: item.decided_by,
+            decided_at: item.decided_at,
+            decision,
+            comment: item.comment,
+            deadline: item.deadline,
+            created_at: item.created_at,
+        }
+    }
+}
+
+/// Response from `GET /v1/audit`.
+#[derive(Debug, Serialize)]
+pub struct AuditResponse {
+    pub entries: Vec<AuditEntryDto>,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/audit/verify`.
+#[derive(Debug, Serialize)]
+pub struct AuditVerifyResponse {
+    pub valid: bool,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/review`.
+#[derive(Debug, Serialize)]
+pub struct ReviewResponse {
+    pub items: Vec<ReviewItemDto>,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `POST /v1/review/{id}/decide`.
+#[derive(Debug, Serialize)]
+pub struct ReviewDecideResponse {
+    pub item: ReviewItemDto,
     pub audit_chain_tip: Option<String>,
 }
 

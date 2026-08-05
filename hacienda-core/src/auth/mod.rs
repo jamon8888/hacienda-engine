@@ -5,10 +5,15 @@
 //! - `pii:reveal` — `include_text=true` on scan; raw span access
 //! - `audit:read` / `audit:export` — audit trail access
 //! - `review:decide` — approving or rejecting detections
+//! - `auth:manage` — API key issuance and revocation
 //! - `raw:extract` — `/xberg/v1/*` when passthrough is compiled in
 
 pub mod authn;
 pub mod authz;
+pub mod keys;
+
+use async_trait::async_trait;
+use crate::auth::keys::{ApiKey, ApiKeyError};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -27,6 +32,8 @@ pub enum Capability {
     AuditExport,
     /// Decide review items (approve/reject/modify).
     ReviewDecide,
+    /// Manage API keys (issue, revoke, list).
+    AuthManage,
     /// Raw xberg passthrough (unredacted). Only available with `xberg-passthrough` feature.
     RawExtract,
 }
@@ -40,6 +47,7 @@ impl Capability {
             Self::AuditRead,
             Self::AuditExport,
             Self::ReviewDecide,
+            Self::AuthManage,
             Self::RawExtract,
         ]
     }
@@ -53,6 +61,7 @@ impl std::fmt::Display for Capability {
             Self::AuditRead => write!(f, "audit:read"),
             Self::AuditExport => write!(f, "audit:export"),
             Self::ReviewDecide => write!(f, "review:decide"),
+            Self::AuthManage => write!(f, "auth:manage"),
             Self::RawExtract => write!(f, "raw:extract"),
         }
     }
@@ -68,6 +77,7 @@ impl std::str::FromStr for Capability {
             "audit:read" => Ok(Self::AuditRead),
             "audit:export" => Ok(Self::AuditExport),
             "review:decide" => Ok(Self::ReviewDecide),
+            "auth:manage" => Ok(Self::AuthManage),
             "raw:extract" => Ok(Self::RawExtract),
             _ => Err(format!("unknown capability: {s}")),
         }
@@ -237,6 +247,97 @@ pub enum AuthzError {
     TokenExpired,
     #[error("issuer not trusted: {0}")]
     UntrustedIssuer(String),
+}
+
+/// Trait for resolving a bearer token to a capability set.
+///
+/// Used by the auth middleware to authenticate requests. Implementations
+/// must hash the incoming token and look up the stored hash — never store
+/// or compare raw keys.
+#[async_trait]
+pub trait TokenResolver: Send + Sync {
+    /// Resolve a bearer token to its capability set.
+    ///
+    /// Returns `None` if the token is not found, revoked, or malformed.
+    async fn resolve(&self, bearer_token: &str) -> Option<CapabilitySet>;
+}
+
+/// Trait for API key storage.
+///
+/// All methods are async so that database backends can perform I/O without
+/// blocking the async runtime. The in-memory backend does no I/O but uses
+/// the same signatures, so callers never need to know which backend is present.
+///
+/// Implementations must be `Send + Sync` because the store lives behind an `Arc`
+/// shared across tasks.
+#[async_trait]
+pub trait ApiKeyStore: Send + Sync {
+    /// Create a new API key record (stores hash only).
+    async fn create(&self, key_hash: &str, owner: &str, capabilities: Vec<Capability>)
+        -> Result<ApiKey, crate::auth::keys::ApiKeyError>;
+
+    /// Look up an API key by its hash.
+    async fn get_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError>;
+
+    /// Revoke an API key by ID.
+    async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError>;
+
+    /// List API keys for an owner.
+    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError>;
+}
+
+/// In-memory implementation of [`ApiKeyStore`] for testing.
+#[derive(Debug, Default)]
+pub struct InMemoryApiKeyStore {
+    keys: std::sync::Mutex<std::collections::HashMap<String, ApiKey>>,
+}
+
+impl InMemoryApiKeyStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl ApiKeyStore for InMemoryApiKeyStore {
+    async fn create(
+        &self,
+        key_hash: &str,
+        owner: &str,
+        capabilities: Vec<Capability>,
+    ) -> Result<ApiKey, crate::auth::keys::ApiKeyError> {
+        let id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let key = ApiKey {
+            id,
+            key_hash: key_hash.to_string(),
+            owner: owner.to_string(),
+            capabilities: serde_json::to_value(capabilities).unwrap(),
+            created_at: now,
+            revoked_at: None,
+        };
+        self.keys.lock().unwrap().insert(key_hash.to_string(), key.clone());
+        Ok(key)
+    }
+
+    async fn get_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError> {
+        Ok(self.keys.lock().unwrap().get(key_hash).cloned())
+    }
+
+    async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError> {
+        let mut keys = self.keys.lock().unwrap();
+        if let Some(key) = keys.values_mut().find(|k| k.id == id) {
+            key.revoked_at = Some(chrono::Utc::now());
+        }
+        Ok(())
+    }
+
+    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError> {
+        Ok(self.keys.lock().unwrap().values()
+            .filter(|k| k.owner == owner)
+            .cloned()
+            .collect())
+    }
 }
 
 // Re-export authz types
