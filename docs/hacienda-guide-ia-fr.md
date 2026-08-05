@@ -15,14 +15,14 @@ d'extraction Rust `xberg`.
 
 ```text
 détection PII → fusion de spans → rédaction → chaîne d'audit
-```
+```text
 
 Cet ordre de pipeline est fixe et ne doit jamais être inversé (rédiger avant fusion
 corrompt les offsets de caractères des entités qui se chevauchent).
 
 ## 2. Layout des crates (workspace Cargo)
 
-```
+```text
 Cargo.toml → members = [
   "hacienda-core",        # logique métier privée : PII, rédaction, conformité, audit
   "hacienda",              # façade de distribution publique : re-exporte hacienda-core + xberg
@@ -31,7 +31,7 @@ Cargo.toml → members = [
   "crates/hacienda-wasm",  # même moteur compilé wasm32, consommé par Studio
   "crates/hacienda-rag",   # couche RAG (collections, retrieval, scoring)
 ]
-```
+```text
 
 Règle de dépendance stricte : **la logique de pipeline vit dans `hacienda-core`**, jamais
 dans `hacienda` (façade) ni dans `hacienda-api`/`hacienda-cli`. Si vous devez ajouter un
@@ -78,13 +78,13 @@ et leurs variantes `_with_auth` pour l'application des capacités).
 
 Sous-commandes réelles (voir `hacienda-cli/src/cli.rs`) :
 
-```
+```text
 hacienda extract <INPUT...> [--mode mask|hash|pseudonymize] [--no-redact --i-accept-unredacted-pii]
                  [--vault DIR] [--audit-out PATH] [--concurrency N] [--format text|json]
 hacienda scan <INPUT...> [--threshold F32] [--format text|json]   # détection seule, jamais de texte de document
 hacienda config show [--format text|json]
 hacienda serve [--bind ADDR]   # défaut 127.0.0.1:8787, loopback only
-```
+```text
 
 - `extract` n'a **pas** de mode de rédaction par défaut — `--mode` doit être choisi
   explicitement, jamais silencieusement décidé pour l'utilisateur.
@@ -108,7 +108,7 @@ hacienda serve [--bind ADDR]   # défaut 127.0.0.1:8787, loopback only
 Toutes les routes sauf `/health`, `/version`, `/info`, `/openapi.json` exigent la
 capacité `Capability::DocumentsProcess`. Familles de routes actuelles :
 
-```
+```text
 /v1/documents, /v1/documents/async, /v1/documents/{id}, /v1/documents/{id}/versions,
   /v1/documents/{id}/diff, /v1/documents/{id}/diff/{diff_job_id}
 /v1/jobs, /v1/jobs/{id}, /v1/jobs/{id}/result
@@ -121,7 +121,7 @@ capacité `Capability::DocumentsProcess`. Familles de routes actuelles :
 /v1/rag/collections, /v1/rag/collections/{name},
   /v1/rag/collections/{name}/documents, /v1/rag/collections/{name}/retrieve
 /v1/presets, /v1/presets/{id}
-```
+```text
 
 Toute nouvelle route doit être ajoutée au test de réflexion "guarded-routes", pas
 seulement à la table de routes — sinon rien ne garantit qu'elle exige la bonne capacité.

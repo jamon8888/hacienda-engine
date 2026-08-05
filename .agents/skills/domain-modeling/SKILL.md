@@ -11,7 +11,7 @@ Actively build and sharpen the project's domain model as you design. This is the
 
 Most repos have a single context:
 
-```
+```text
 /
 ├── CONTEXT.md
 ├── docs/
@@ -19,11 +19,12 @@ Most repos have a single context:
 │       ├── 0001-event-sourced-orders.md
 │       └── 0002-postgres-for-write-model.md
 └── src/
-```
+
+```text
 
 If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The map points to where each one lives:
 
-```
+```text
 /
 ├── CONTEXT-MAP.md
 ├── docs/
@@ -35,7 +36,8 @@ If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The ma
 │   └── billing/
 │       ├── CONTEXT.md
 │       └── docs/adr/
-```
+
+```text
 
 Create files lazily — only when you have something to write. If no `CONTEXT.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
 

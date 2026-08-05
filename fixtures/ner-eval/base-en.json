@@ -1,0 +1,558 @@
+{
+  "cases": [
+    {
+      "id": "en-001",
+      "lang": "en",
+      "text": "Please forward the file to Margaret O'Sullivan before Friday.",
+      "entities": [
+        {
+          "start": 27,
+          "end": 46,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-002",
+      "lang": "en",
+      "text": "The contract was signed by Jonathan Whitfield-Harris on behalf of the client.",
+      "entities": [
+        {
+          "start": 27,
+          "end": 52,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-003",
+      "lang": "en",
+      "text": "You can reach Alexandra Pemberton at 415-555-0192.",
+      "entities": [
+        {
+          "start": 14,
+          "end": 33,
+          "label": "person"
+        },
+        {
+          "start": 37,
+          "end": 49,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "en-004",
+      "lang": "en",
+      "text": "Smith & Partners LLC filed the motion this morning.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 20,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-005",
+      "lang": "en",
+      "text": "The Johnson Group represents the opposing party in this matter.",
+      "entities": [
+        {
+          "start": 4,
+          "end": 17,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-006",
+      "lang": "en",
+      "text": "The Carnegie Foundation supports several charitable programs.",
+      "entities": [
+        {
+          "start": 4,
+          "end": 23,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-007",
+      "lang": "en",
+      "text": "Global Ventures Holdings released its annual results yesterday.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 24,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-008",
+      "lang": "en",
+      "text": "Blackstone Capital Partners Inc. primarily exports to Asia.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 32,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-009",
+      "lang": "en",
+      "text": "Harrison International opened a new office in Chicago.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 22,
+          "label": "organization"
+        },
+        {
+          "start": 46,
+          "end": 53,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-010",
+      "lang": "en",
+      "text": "The headquarters is located at 220 Bishopsgate, London EC2M 4QP.",
+      "entities": [
+        {
+          "start": 31,
+          "end": 63,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-011",
+      "lang": "en",
+      "text": "Our New York office is at 405 Lexington Avenue, New York, NY 10174.",
+      "entities": [
+        {
+          "start": 26,
+          "end": 66,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-012",
+      "lang": "en",
+      "text": "Send the signed form to contact@smithpartners.com before the deadline.",
+      "entities": [
+        {
+          "start": 24,
+          "end": 49,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "en-013",
+      "lang": "en",
+      "text": "For any questions, write to info@carnegiefoundation.org.",
+      "entities": [
+        {
+          "start": 28,
+          "end": 55,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "en-014",
+      "lang": "en",
+      "text": "The legal department's phone number is 212-555-0143.",
+      "entities": [
+        {
+          "start": 39,
+          "end": 51,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "en-015",
+      "lang": "en",
+      "text": "You can reach us at +1 650-555-0199 in case of emergency.",
+      "entities": [
+        {
+          "start": 20,
+          "end": 35,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "en-016",
+      "lang": "en",
+      "text": "Mrs. Eleanor Whitmore-Blake confirmed her attendance at the hearing.",
+      "entities": [
+        {
+          "start": 5,
+          "end": 27,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-017",
+      "lang": "en",
+      "text": "Mr. Frederick Ashworth requested an extension.",
+      "entities": [
+        {
+          "start": 4,
+          "end": 22,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-018",
+      "lang": "en",
+      "text": "Dr. Patricia Kensington issued the medical certificate.",
+      "entities": [
+        {
+          "start": 4,
+          "end": 23,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-019",
+      "lang": "en",
+      "text": "The client, Samantha Cole-Whitfield, resides in Austin.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 35,
+          "label": "person"
+        },
+        {
+          "start": 48,
+          "end": 54,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-020",
+      "lang": "en",
+      "text": "The witness is named Nathaniel Bexley, residing in Denver.",
+      "entities": [
+        {
+          "start": 21,
+          "end": 37,
+          "label": "person"
+        },
+        {
+          "start": 51,
+          "end": 57,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-021",
+      "lang": "en",
+      "text": "Contact Priscilla Hargreaves at 617-555-0176 for more information.",
+      "entities": [
+        {
+          "start": 8,
+          "end": 28,
+          "label": "person"
+        },
+        {
+          "start": 32,
+          "end": 44,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "en-022",
+      "lang": "en",
+      "text": "The accountant, Benjamin Wycliffe, validated the financial statements.",
+      "entities": [
+        {
+          "start": 16,
+          "end": 33,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-023",
+      "lang": "en",
+      "text": "Renfield Consulting LLP advises institutional investors.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 23,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-024",
+      "lang": "en",
+      "text": "The billing address is 88 Wall Street, New York, NY 10005.",
+      "entities": [
+        {
+          "start": 23,
+          "end": 57,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-025",
+      "lang": "en",
+      "text": "Please send a copy to legal@blackstonecapital.com.",
+      "entities": [
+        {
+          "start": 22,
+          "end": 49,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "en-026",
+      "lang": "en",
+      "text": "The law firm Bennett, Cole & Associates has been retained.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 39,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-027",
+      "lang": "en",
+      "text": "Georgina Fairweather signed the agreement on behalf of the family.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 20,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-028",
+      "lang": "en",
+      "text": "Thackeray Brothers occupies the third floor of the building.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 18,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-029",
+      "lang": "en",
+      "text": "Please call 305-555-0128 to confirm the appointment.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 24,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "en-030",
+      "lang": "en",
+      "text": "The Alumni Association office is located at 12 College Green, Boston, MA 02115.",
+      "entities": [
+        {
+          "start": 4,
+          "end": 22,
+          "label": "organization"
+        },
+        {
+          "start": 44,
+          "end": 78,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-031",
+      "lang": "en",
+      "text": "Reginald Castleworth-Hale heads the finance department.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 25,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-032",
+      "lang": "en",
+      "text": "Email careers@thackeraybrothers.com to apply.",
+      "entities": [
+        {
+          "start": 6,
+          "end": 35,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "en-033",
+      "lang": "en",
+      "text": "Southwestern Community Bank approved the loan.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 27,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-034",
+      "lang": "en",
+      "text": "Prudence Fitzgerald-Moore lives at 14 Elm Street, Seattle, WA 98101.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 25,
+          "label": "person"
+        },
+        {
+          "start": 35,
+          "end": 67,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-035",
+      "lang": "en",
+      "text": "Direct line for Mrs. Vivian Ashcombe: 312-555-0165.",
+      "entities": [
+        {
+          "start": 21,
+          "end": 36,
+          "label": "person"
+        },
+        {
+          "start": 38,
+          "end": 50,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "en-036",
+      "lang": "en",
+      "text": "The Robert Kennedy Foundation is hosting a conference in Philadelphia.",
+      "entities": [
+        {
+          "start": 4,
+          "end": 29,
+          "label": "organization"
+        },
+        {
+          "start": 57,
+          "end": 69,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-037",
+      "lang": "en",
+      "text": "Send the supporting documents to records@southwesternbank.com.",
+      "entities": [
+        {
+          "start": 33,
+          "end": 61,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "en-038",
+      "lang": "en",
+      "text": "William Ashbourne-Grey represents the minority shareholders.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 22,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-039",
+      "lang": "en",
+      "text": "Dupuis & Sons has been restoring antique furniture since 1920.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 13,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "en-040",
+      "lang": "en",
+      "text": "The meeting is scheduled at the office, 9 Maple Avenue, Portland, OR 97205.",
+      "entities": [
+        {
+          "start": 40,
+          "end": 74,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "en-041",
+      "lang": "en",
+      "text": "Marjorie Blackwood-Stanhope was summoned as a witness.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 27,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "en-042",
+      "lang": "en",
+      "text": "Please contact Theodore Winslow at 646-555-0134 before noon.",
+      "entities": [
+        {
+          "start": 15,
+          "end": 31,
+          "label": "person"
+        },
+        {
+          "start": 35,
+          "end": 47,
+          "label": "phone_number"
+        }
+      ]
+    }
+  ]
+}

@@ -21,7 +21,8 @@ Problems with `as` in tests:
 
 ```bash
 npm i @total-typescript/shoehorn
-```
+
+```text
 
 ## Migration patterns
 
@@ -46,7 +47,8 @@ it("gets user by id", () => {
     // ...fake all 20 properties
   });
 });
-```
+
+```text
 
 After:
 
@@ -60,7 +62,8 @@ it("gets user by id", () => {
     }),
   );
 });
-```
+
+```text
 
 ### `as Type` → `fromPartial()`
 
@@ -68,7 +71,8 @@ Before:
 
 ```ts
 getUser({ body: { id: "123" } } as Request);
-```
+
+```text
 
 After:
 
@@ -76,7 +80,8 @@ After:
 import { fromPartial } from "@total-typescript/shoehorn";
 
 getUser(fromPartial({ body: { id: "123" } }));
-```
+
+```text
 
 ### `as unknown as Type` → `fromAny()`
 
@@ -84,7 +89,8 @@ Before:
 
 ```ts
 getUser({ body: { id: 123 } } as unknown as Request); // wrong type on purpose
-```
+
+```text
 
 After:
 
@@ -92,7 +98,8 @@ After:
 import { fromAny } from "@total-typescript/shoehorn";
 
 getUser(fromAny({ body: { id: 123 } }));
-```
+
+```text
 
 ## When to use each
 

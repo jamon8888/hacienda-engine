@@ -3,6 +3,8 @@ name: to-spec
 description: Turn the current conversation into a spec and publish it to the project issue tracker — no interview, just synthesis of what you've already discussed.
 disable-model-invocation: true
 ---
+# To Spec
+
 
 This skill takes the current conversation context and codebase understanding and produces a spec (you may know this document as a PRD). Do NOT interview the user — just synthesize what you already know.
 
@@ -18,7 +20,7 @@ Check with the user that these seams match their expectations.
 
 3. Write the spec using the template below, then publish it to the project issue tracker. Apply the `ready-for-agent` triage label - no need for additional triage.
 
-<spec-template>
+
 
 ## Problem Statement
 
@@ -34,9 +36,9 @@ A LONG, numbered list of user stories. Each user story should be in the format o
 
 1. As an <actor>, I want a <feature>, so that <benefit>
 
-<user-story-example>
+
 1. As a mobile bank customer, I want to see balance on my accounts, so that I can make better informed decisions about my spending
-</user-story-example>
+
 
 This list of user stories should be extremely extensive and cover all aspects of the feature.
 
@@ -72,4 +74,4 @@ A description of the things that are out of scope for this spec.
 
 Any further notes about the feature.
 
-</spec-template>
+

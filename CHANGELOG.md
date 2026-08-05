@@ -98,7 +98,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HaciendaFacade::compliance_report_with_auth` — new facade accessors
   exposing existing core logic (previously write-only from the route layer).
 - `ApiError::from` now maps `ReviewError` variants to appropriate HTTP codes.
-
 - **API key generation and Argon2id hashing (Phase 11 Task 1).** `hacienda_core::auth::keys`
   gains `generate_key()` and `ApiKeyPair { raw_key, key_hash }`. Keys are 256 bits of
   `OsRng` entropy, base62-encoded and prefixed (`hcd_live_<43 chars>`) for identification

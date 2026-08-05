@@ -1,5 +1,6 @@
 # Good and Bad Tests
 
+
 ## Good Tests
 
 **Integration-style**: Test through real interfaces, not mocks of internal parts.
@@ -12,7 +13,8 @@ test("user can checkout with valid cart", async () => {
   const result = await checkout(cart, paymentMethod);
   expect(result.status).toBe("confirmed");
 });
-```
+
+```text
 
 Characteristics:
 
@@ -33,7 +35,8 @@ test("checkout calls paymentService.process", async () => {
   await checkout(cart, payment);
   expect(mockPayment.process).toHaveBeenCalledWith(cart.total);
 });
-```
+
+```text
 
 Red flags:
 
@@ -58,7 +61,8 @@ test("createUser makes user retrievable", async () => {
   const retrieved = await getUser(user.id);
   expect(retrieved.name).toBe("Alice");
 });
-```
+
+```text
 
 **Tautological tests**: Expected value restates the implementation, so the test passes by construction.
 
@@ -74,4 +78,5 @@ test("calculateTotal sums line items", () => {
 test("calculateTotal sums line items", () => {
   expect(calculateTotal([{ price: 10 }, { price: 5 }])).toBe(15);
 });
-```
+
+```text

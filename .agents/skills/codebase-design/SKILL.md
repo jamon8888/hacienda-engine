@@ -31,7 +31,7 @@ Use these terms exactly — don't substitute "component," "service," "API," or "
 
 **Deep module** = small interface + lots of implementation:
 
-```
+```text
 ┌─────────────────────┐
 │   Small Interface   │  ← Few methods, simple params
 ├─────────────────────┤
@@ -39,17 +39,19 @@ Use these terms exactly — don't substitute "component," "service," "API," or "
 │  Deep Implementation│  ← Complex logic hidden
 │                     │
 └─────────────────────┘
-```
+
+```text
 
 **Shallow module** = large interface + little implementation (avoid):
 
-```
+```text
 ┌─────────────────────────────────┐
 │       Large Interface           │  ← Many methods, complex params
 ├─────────────────────────────────┤
 │  Thin Implementation            │  ← Just passes through
 └─────────────────────────────────┘
-```
+
+```text
 
 When designing an interface, ask:
 

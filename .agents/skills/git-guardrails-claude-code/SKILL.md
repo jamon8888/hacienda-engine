@@ -56,7 +56,8 @@ Add to the appropriate settings file:
     ]
   }
 }
-```
+
+```text
 
 **Global** (`~/.claude/settings.json`):
 
@@ -76,7 +77,8 @@ Add to the appropriate settings file:
     ]
   }
 }
-```
+
+```text
 
 If the settings file already exists, merge the hook into existing `hooks.PreToolUse` array — don't overwrite other settings.
 
@@ -90,6 +92,7 @@ Run a quick test:
 
 ```bash
 echo '{"tool_input":{"command":"git push origin main"}}' | <path-to-script>
-```
+
+```text
 
 Should exit with code 2 and print a BLOCKED message to stderr.

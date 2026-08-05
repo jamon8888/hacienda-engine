@@ -486,6 +486,7 @@ mod tests {
             pipeline_version: "1.0".into(),
             config_hash: config().into(),
             principal: None,
+            vertical: None,
         }
     }
 

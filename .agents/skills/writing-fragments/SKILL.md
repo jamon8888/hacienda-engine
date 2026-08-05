@@ -4,7 +4,7 @@ description: Writing, explore — mine raw fragments, no structure yet.
 disable-model-invocation: true
 ---
 
-<what-to-do>
+
 
 This is pure **explore**: widen the space of what could be written without committing to structure — committing is _exploit_, a separate skill's job. Run a grilling session that produces fragments, interviewing the user relentlessly about whatever they want to write about. Imposing phases, outlines, or article structure is out of scope here.
 
@@ -16,9 +16,9 @@ Capture fragments from the very first thing the user says, including the initial
 
 On first write, put a single H1 at the top with a working title (it can change later) and nothing else — no metadata, no TOC, no date.
 
-</what-to-do>
 
-<supporting-info>
+
+
 
 ## What is a fragment
 
@@ -64,7 +64,8 @@ A reaction to it.
 - A cluster of related observations
 - That hang together by feel
 - And want to be near each other
-```
+
+```text
 
 Fragments are separated by a horizontal rule (`\n---\n`). No headings inside the body. No tags. No order beyond the order they were added.
 
@@ -76,4 +77,4 @@ Before every write: re-read the file from disk. The user may have edited, reorde
 
 The user can say "cut the last one", "rewrite that one sharper", "merge those two" at any time. Treat those as first-class instructions.
 
-</supporting-info>
+

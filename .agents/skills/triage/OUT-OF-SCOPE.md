@@ -7,12 +7,13 @@ The `.out-of-scope/` directory in a repo stores persistent records of rejected f
 
 ## Directory structure
 
-```
+```text
 .out-of-scope/
 ├── dark-mode.md
 ├── plugin-system.md
 └── graphql-api.md
-```
+
+```text
 
 One file per **concept**, not per issue. Multiple issues requesting the same thing are grouped under one file.
 
@@ -21,7 +22,6 @@ One file per **concept**, not per issue. Multiple issues requesting the same thi
 The file should be written in a relaxed, readable style — more like a short design document than a database entry. Use paragraphs, code samples, and examples to make the reasoning clear and useful to someone encountering it for the first time.
 
 ```markdown
-# Dark Mode
 
 This project does not support dark mode or user-facing theming.
 
@@ -44,14 +44,16 @@ interface ThemeConfig {
   colors: ColorPalette; // single palette, resolved at build time
   fonts: FontStack;
 }
-```
+
+```text
 
 ## Prior requests
 
 - #42 — "Add dark mode support"
 - #87 — "Night theme for accessibility"
 - #134 — "Dark theme option"
-```
+
+```text
 
 ### Naming the file
 

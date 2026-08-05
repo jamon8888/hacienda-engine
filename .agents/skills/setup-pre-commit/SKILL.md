@@ -22,15 +22,17 @@ Check for `package-lock.json` (npm), `pnpm-lock.yaml` (pnpm), `yarn.lock` (yarn)
 
 Install as devDependencies:
 
-```
+```text
 husky lint-staged prettier
-```
+
+```text
 
 ### 3. Initialize Husky
 
 ```bash
 npx husky init
-```
+
+```text
 
 This creates `.husky/` dir and adds `prepare: "husky"` to package.json.
 
@@ -38,11 +40,12 @@ This creates `.husky/` dir and adds `prepare: "husky"` to package.json.
 
 Write this file (no shebang needed for Husky v9+):
 
-```
+```text
 npx lint-staged
 npm run typecheck
 npm run test
-```
+
+```text
 
 **Adapt**: Replace `npm` with detected package manager. If repo has no `typecheck` or `test` script in package.json, omit those lines and tell the user.
 
@@ -52,7 +55,8 @@ npm run test
 {
   "*": "prettier --ignore-unknown --write"
 }
-```
+
+```text
 
 ### 6. Create `.prettierrc` (if missing)
 
@@ -68,14 +72,19 @@ Only create if no Prettier config exists. Use these defaults:
   "semi": true,
   "arrowParens": "always"
 }
-```
+
+```text
 
 ### 7. Verify
 
 - [ ] `.husky/pre-commit` exists and is executable
+
 - [ ] `.lintstagedrc` exists
+
 - [ ] `prepare` script in package.json is `"husky"`
+
 - [ ] `prettier` config exists
+
 - [ ] Run `npx lint-staged` to verify it works
 
 ### 8. Commit

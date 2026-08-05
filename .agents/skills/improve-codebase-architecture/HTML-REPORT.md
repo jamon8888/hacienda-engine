@@ -31,7 +31,8 @@ The architectural review is rendered as a single self-contained HTML file in the
     </main>
   </body>
 </html>
-```
+
+```text
 
 ## Header
 
@@ -73,7 +74,8 @@ Use a Mermaid `flowchart` or `graph` when the point is "X calls Y calls Z, and l
       class C,D leak
   </pre>
 </div>
-```
+
+```text
 
 ### Hand-built boxes-and-arrows (when Mermaid's layout fights you)
 

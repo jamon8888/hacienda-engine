@@ -24,7 +24,6 @@ Extract and formalize domain terminology from the current conversation into a co
 Write a `UBIQUITOUS_LANGUAGE.md` file with this structure:
 
 ```md
-# Ubiquitous Language
 
 ## Order lifecycle
 
@@ -55,7 +54,8 @@ Write a `UBIQUITOUS_LANGUAGE.md` file with this structure:
 ## Flagged ambiguities
 
 - "account" was used to mean both **Customer** and **User** — these are distinct concepts: a **Customer** places orders, while a **User** is an authentication identity that may or may not represent a **Customer**.
-```
+
+```text
 
 ## Rules
 
@@ -68,7 +68,7 @@ Write a `UBIQUITOUS_LANGUAGE.md` file with this structure:
 - **Group terms into multiple tables** when natural clusters emerge (e.g. by subdomain, lifecycle, or actor). Each group gets its own heading and table. If all terms belong to a single cohesive domain, one table is fine — don't force groupings.
 - **Write an example dialogue.** A short conversation (3-5 exchanges) between a dev and a domain expert that demonstrates how the terms interact naturally. The dialogue should clarify boundaries between related concepts and show terms being used precisely.
 
-<example>
+
 
 ## Example dialogue
 
@@ -80,7 +80,7 @@ Write a `UBIQUITOUS_LANGUAGE.md` file with this structure:
 
 > **Domain expert:** "Exactly. The **sync service** doesn't know which layer it's talking to. It calls `exec` and `copyIn` — the **filesystem layer** just runs those as local shell commands."
 
-</example>
+
 
 ## Re-running
 

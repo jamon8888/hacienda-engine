@@ -1,0 +1,26 @@
+- dialog [ref=e3]:
+  - generic [ref=e4]:
+    - banner [ref=e5]:
+      - heading "Hacienda Studio — 100% Local AI in Your Browser" [level=1] [ref=e6]: 🔒Hacienda Studio — 100% Local AI in Your Browser
+      - paragraph [ref=e7]:
+        - text: Your files
+        - strong [ref=e8]: NEVER leave this tab
+        - text: . All processing runs locally via WebAssembly.
+    - generic [ref=e9]:
+      - progressbar [ref=e10]
+      - generic [ref=e12]: 33% — Preparing local models...
+    - list [ref=e13]:
+      - listitem [ref=e14]:
+        - generic [ref=e15]: ⚙️
+        - generic [ref=e16]: xberg WASM Engine
+        - generic [ref=e17]: ✓ Cached
+      - listitem [ref=e18]:
+        - generic [ref=e19]: 🧠
+        - generic [ref=e20]: GLiNER2-Guardrails-PII
+        - generic [ref=e21]: ↓ Downloading...
+      - listitem [ref=e22]:
+        - generic [ref=e23]: 👁️
+        - generic [ref=e24]: Tesseract OCR Data
+        - generic [ref=e25]: ↓ Downloading...
+    - contentinfo [ref=e26]:
+      - button "Continue" [disabled] [ref=e27] [cursor=pointer]

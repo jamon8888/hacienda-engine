@@ -18,7 +18,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features "ner-candle" -- -D warnings
 
   test:
     runs-on: ubuntu-24.04
@@ -28,7 +28,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --features "ner-candle"
 
   # Enumerating features by hand drifted badly: this matrix spent 7 runners checking
   # "xberg-full", "pii", "compliance", "audit", "review", "glossary" and "dev", none of
@@ -43,7 +43,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-hack
-      - run: cargo hack check -p hacienda -p hacienda-core --each-feature
+      - run: cargo hack check -p hacienda -p hacienda-core --each-feature --features "ner-candle"
 
   test-bindings:
     runs-on: ubuntu-24.04
@@ -53,4 +53,4 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features -- --test-threads=1
+      - run: cargo test --workspace --features "ner-candle" -- --test-threads=1

@@ -8,7 +8,7 @@ dans `.ai-rulez/`, et les fichiers consommés par les harnais (`CLAUDE.md`, `AGE
 
 ## 1. Vue d'ensemble
 
-```
+```text
 .ai-rulez/config.toml   ← source de vérité (règles, agents, skills, MCP, presets)
 .ai-rulez/rules/        ← règles locales (overrides du projet)
 .ai-rulez/agents/       ← agents locaux
@@ -18,7 +18,7 @@ dans `.ai-rulez/`, et les fichiers consommés par les harnais (`CLAUDE.md`, `AGE
         ▼
 CLAUDE.md, .claude/      ← consommé par Claude Code
 AGENTS.md, .codex/       ← consommé par Codex CLI et par OpenCode (norme agents.md)
-```
+```text
 
 `config.toml` déclare `presets = ["claude", "codex"]` : ai-rulez matérialise donc deux
 harnais à partir de la même source :
@@ -56,7 +56,7 @@ uv tool install ai-rulez
 
 # Vérifier
 ai-rulez version
-```
+```text
 
 D'autres méthodes d'installation existent (pip, brew, binaire précompilé) — se référer à
 la documentation officielle du projet si `uv` n'est pas disponible sur votre poste. Il n'y
@@ -73,7 +73,7 @@ ai-rulez generate --dry-run
 
 # Génération réelle (écrit CLAUDE.md, AGENTS.md, .claude/, .codex/)
 ai-rulez generate
-```
+```text
 
 Points de vigilance :
 
@@ -124,7 +124,7 @@ marketplace = "basemind"
 name = "basemind"
 scope = "project"
 enabled = true
-```
+```text
 
 `ai-rulez generate` matérialise cette déclaration dans `.claude/plugins.json` (et son
 équivalent `.codex/plugins.json`), mais **ce fichier n'est pas lu nativement par Claude
@@ -148,7 +148,7 @@ Installation (une fois, dans une session Claude Code ouverte à la racine du dé
 ```shell
 /plugin marketplace add Goldziher/basemind
 /plugin install basemind@basemind
-```
+```text
 
 Au moment de l'installation, choisir le **scope `project`** pour rester cohérent avec
 `scope = "project"` déclaré dans `.ai-rulez/config.toml` (partagé avec l'équipe, pas
@@ -156,7 +156,7 @@ seulement pour vous). Puis activer :
 
 ```shell
 /reload-plugins
-```
+```text
 
 Vérifier ensuite que les outils basemind apparaissent (`/plugin list --enabled`) et que
 le skill `basemind-tools` est bien chargé.
@@ -166,7 +166,7 @@ Alternative non interactive (scriptable, par ex. dans un script d'onboarding) :
 ```bash
 claude plugin marketplace add Goldziher/basemind
 claude plugin install basemind@basemind --scope project
-```
+```text
 
 ### 6.2 Les agents et skills spécifiques à xberg
 
@@ -211,7 +211,7 @@ ai-rulez validate
 ai-rulez generate --dry-run   # relire le diff attendu
 ai-rulez generate
 git status                    # CLAUDE.md, AGENTS.md, .claude/, .codex/ doivent apparaître modifiés
-```
+```text
 
 Committer les fichiers générés avec le changement de source dans le même commit — ils
 doivent toujours être synchronisés avec `.ai-rulez/config.toml` dans l'historique Git.
@@ -233,14 +233,14 @@ ai-rulez version                 # outil installé
 ai-rulez validate                # config.toml valide
 ai-rulez generate --dry-run      # prévisualise sans écrire
 head -5 CLAUDE.md AGENTS.md      # bandeau "GENERATED FILE" présent = setup correct
-```
+```text
 
 Dans une session Claude Code, vérifier aussi que le plugin basemind est bien installé et
 actif (§6.1) :
 
 ```shell
 /plugin list --enabled
-```
+```text
 
 `basemind` doit apparaître dans la liste, sans quoi les outils MCP/CLI décrits dans
 `.claude/skills/basemind-tools/SKILL.md` ne sont pas disponibles pour l'agent.

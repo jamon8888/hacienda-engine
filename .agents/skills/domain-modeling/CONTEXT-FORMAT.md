@@ -3,7 +3,6 @@
 ## Structure
 
 ```md
-# {Context Name}
 
 {One or two sentence description of what this context is and why it exists.}
 
@@ -20,7 +19,8 @@ _Avoid_: Bill, payment request
 **Customer**:
 A person or organization that places orders.
 _Avoid_: Client, buyer, account
-```
+
+```text
 
 ## Rules
 
@@ -36,7 +36,6 @@ _Avoid_: Client, buyer, account
 **Multiple contexts:** A `CONTEXT-MAP.md` at the repo root lists the contexts, where they live, and how they relate to each other:
 
 ```md
-# Context Map
 
 ## Contexts
 
@@ -49,7 +48,8 @@ _Avoid_: Client, buyer, account
 - **Ordering → Fulfillment**: Ordering emits `OrderPlaced` events; Fulfillment consumes them to start picking
 - **Fulfillment → Billing**: Fulfillment emits `ShipmentDispatched` events; Billing consumes them to generate invoices
 - **Ordering ↔ Billing**: Shared types for `CustomerId` and `Money`
-```
+
+```text
 
 The skill infers which structure applies:
 

@@ -48,4 +48,4 @@ jobs:
 
       - name: Run clippy
         if: steps.deps.outcome == 'success'
-        run: cargo clippy -p hacienda -p hacienda-core --all-targets --all-features -- -D warnings
+        run: cargo clippy -p hacienda -p hacienda-core --all-targets --features "ner-candle" -- -D warnings

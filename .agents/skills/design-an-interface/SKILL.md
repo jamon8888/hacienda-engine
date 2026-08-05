@@ -14,9 +14,13 @@ Based on "Design It Twice" from "A Philosophy of Software Design": your first id
 Before designing, understand:
 
 - [ ] What problem does this module solve?
+
 - [ ] Who are the callers? (other modules, external users, tests)
+
 - [ ] What are the key operations?
+
 - [ ] Any constraints? (performance, compatibility, existing patterns)
+
 - [ ] What should be hidden inside vs exposed?
 
 Ask: "What does this module need to do? Who will use it?"
@@ -25,7 +29,7 @@ Ask: "What does this module need to do? Who will use it?"
 
 Spawn 3+ sub-agents simultaneously using Task tool. Each must produce a **radically different** approach.
 
-```
+```text
 Prompt template for each sub-agent:
 
 Design an interface for: [module description]
@@ -43,7 +47,8 @@ Output format:
 2. Usage example (how caller uses it)
 3. What this design hides internally
 4. Trade-offs of this approach
-```
+
+```text
 
 ### 3. Present Designs
 
