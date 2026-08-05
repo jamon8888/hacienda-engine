@@ -26,14 +26,14 @@ Look for opportunities to prefactor the code to make the implementation easier. 
 
 Break the work into **tracer bullet** tickets.
 
-<vertical-slice-rules>
+
 
 - Each slice cuts a narrow but COMPLETE path through every layer (schema, API, UI, tests) — vertical, NOT a horizontal slice of one layer
 - A completed slice is demoable or verifiable on its own
 - Each slice is sized to fit in a single fresh context window
 - Any prefactoring should be done first
 
-</vertical-slice-rules>
+
 
 Give each ticket its **blocking edges** — the other tickets that must complete before it can start. A ticket with no blockers can start immediately.
 
@@ -66,9 +66,8 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 Do NOT close or modify any parent issue.
 
-<local-ticket-template>
 
-# <NN> — <Ticket title>
+
 
 **What to build:** the end-to-end behaviour this ticket makes work, from the user's perspective — not a layer-by-layer implementation list.
 
@@ -77,11 +76,12 @@ Do NOT close or modify any parent issue.
 **Status:** ready-for-agent
 
 - [ ] Acceptance criterion 1
+
 - [ ] Acceptance criterion 2
 
-</local-ticket-template>
 
-<issue-template>
+
+
 
 ## Parent
 
@@ -94,12 +94,13 @@ The end-to-end behaviour this ticket makes work, from the user's perspective —
 ## Acceptance criteria
 
 - [ ] Criterion 1
+
 - [ ] Criterion 2
 
 ## Blocked by
 
 - A reference to each blocking ticket, or "None — can start immediately".
 
-</issue-template>
+
 
 In either form, avoid specific file paths or code snippets — they go stale fast. Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it and note briefly that it came from a prototype. Trim to the decision-rich parts — not a working demo, just the important bits.

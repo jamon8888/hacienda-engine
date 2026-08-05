@@ -12,14 +12,15 @@ For the vocabulary (deep module, interface, seam, depth), run the `/codebase-des
 
 ## The shape this enforces
 
-```
+```text
 src/packages/
   <name>/
     index.ts        ← an entry point (public). Import this from outside.
     client.ts       ← another entry point. Packages may expose SEVERAL.
     lib/            ← implementation: hidden from outside, free to import each other.
     tests/          ← co-located tests + fixtures (a subfolder, so private).
-```
+
+```text
 
 The public surface is the package's **root files** — not one designated `index.ts`. By convention implementation lives in `lib/` and tests in `tests/`, giving every package the same two-folder shape. The rule itself is general, though: *anything* in *any* subfolder is private, so you never extend the config to add a folder.
 

@@ -68,7 +68,8 @@ return (
     <PrototypeSwitcher variants={['A','B','C']} current={variant} />
   </>
 );
-```
+
+```text
 
 For sub-shape A (existing page): keep all the existing data fetching above the switcher; only the rendered subtree changes per variant.
 

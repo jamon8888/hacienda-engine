@@ -3,8 +3,10 @@ name: writing-beats
 description: Writing, exploit — assemble raw material into a journey of beats, grounding each term before a beat leans on it.
 disable-model-invocation: true
 ---
+# Writing Beats
 
-<what-to-do>
+
+
 
 The user has passed (or will pass) a markdown file of raw material. This is **exploit**: the exploring is done, the pile is fixed — commit to a path through it and mine the pile to fill each beat.
 
@@ -18,9 +20,9 @@ Then run a beat-by-beat journey, choose-your-own-adventure style:
 4. Re-read the article file from disk. Then offer 2–3 candidate **next beats** — different directions the journey could pivot to from where the article now stands. Each must be reachable from the current grounded set; note what each one grounds.
 5. Loop steps 3–5 until the article reaches a natural end.
 
-</what-to-do>
 
-<supporting-info>
+
+
 
 ## Grounding
 
@@ -64,4 +66,4 @@ The article ends when the journey is complete — not when the pile is empty. Mo
 - If the user edits a previous beat substantially, let it change what comes next.
 - If the user says "rewrite that beat" or "go back and try a different beat 3", do it — edit in place, leave the rest alone.
 
-</supporting-info>
+

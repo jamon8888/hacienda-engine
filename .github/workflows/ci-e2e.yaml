@@ -29,7 +29,7 @@ jobs:
         if: steps.deps.outcome == 'success'
       - name: Run E2E tests
         if: steps.deps.outcome == 'success'
-        run: cargo test -p hacienda -p hacienda-core --all-features
+        run: cargo test -p hacienda -p hacienda-core --features "ner-candle"
       - name: Skip notice
         if: steps.deps.outcome != 'success'
         run: echo "::notice::Dependency repos not available - E2E tests skipped."

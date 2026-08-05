@@ -54,7 +54,8 @@ Issues must be **durable** — they should still make sense after major refactor
 
 Use this template:
 
-```
+```text
+
 ## What happened
 
 [Describe the actual behavior the user experienced, in plain language]
@@ -72,7 +73,8 @@ Use this template:
 ## Additional context
 
 [Any extra observations from the user or from codebase exploration that help frame the issue — e.g. "this only happens when using the Docker layer, not the filesystem layer" — use domain language but don't cite files]
-```
+
+```text
 
 #### For a breakdown (multiple issues)
 
@@ -80,7 +82,8 @@ Create issues in dependency order (blockers first) so you can reference real iss
 
 Use this template for each sub-issue:
 
-```
+```text
+
 ## Parent issue
 
 #<parent-issue-number> (if you created a tracking issue) or "Reported during QA session"
@@ -106,7 +109,8 @@ Or "None — can start immediately" if no blockers.
 ## Additional context
 
 [Any extra observations relevant to this slice]
-```
+
+```text
 
 When creating a breakdown:
 

@@ -32,7 +32,8 @@ function processPayment(order) {
   const client = new StripeClient(process.env.STRIPE_KEY);
   return client.charge(order.total);
 }
-```
+
+```text
 
 **2. Prefer SDK-style interfaces over generic fetchers**
 
@@ -50,7 +51,8 @@ const api = {
 const api = {
   fetch: (endpoint, options) => fetch(endpoint, options),
 };
-```
+
+```text
 
 The SDK approach means:
 - Each mock returns one specific shape

@@ -3,8 +3,10 @@ name: writing-shape
 description: Writing, exploit — shape raw material into an article, paragraph by paragraph.
 disable-model-invocation: true
 ---
+# Writing Shape
 
-<what-to-do>
+
+
 
 The user has passed (or will pass) a markdown file of raw material. Treat it as the input pile — anything from a tidy list of fragments to a wall of unstructured prose to a transcript. The format does not matter. Read it end-to-end before doing anything else.
 
@@ -12,9 +14,9 @@ Then run a shaping session that produces a separate article document. This is **
 
 If the user did not say where to save the article, ask once and remember the path.
 
-</what-to-do>
 
-<supporting-info>
+
+
 
 ## The loop
 
@@ -76,4 +78,4 @@ Append to the article file as each block is agreed. Re-read the file from disk b
 - Editing the raw material file.
 - Publishing, formatting for a specific platform, or adding frontmatter the user didn't ask for.
 
-</supporting-info>
+

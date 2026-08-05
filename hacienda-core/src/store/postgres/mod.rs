@@ -17,7 +17,7 @@ pub mod audit;
 #[cfg(feature = "postgres")]
 pub mod review;
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", feature = "jobs"))]
 pub mod jobs;
 
 #[cfg(feature = "postgres")]

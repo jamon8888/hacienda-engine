@@ -34,10 +34,10 @@ Each subfolder (`problem/`, `solution/`, `explainer/`) needs a `readme.md` that:
 When stubbing, create a minimal readme with a title and a description:
 
 ```md
-# Exercise Title
 
 Description here
-```
+
+```text
 
 If the subfolder has code, it also needs a `main.ts` (>1 line). But for stubs, a readme-only exercise is fine.
 
@@ -74,18 +74,20 @@ Example:
 
 ```bash
 git mv exercises/01-retrieval/01.03-embeddings exercises/01-retrieval/01.04-embeddings
-```
+
+```text
 
 ## Example: stubbing from a plan
 
 Given a plan like:
 
-```
+```text
 Section 05: Memory Skill Building
 - 05.01 Introduction to Memory
 - 05.02 Short-term Memory (explainer + problem + solution)
 - 05.03 Long-term Memory
-```
+
+```text
 
 Create:
 
@@ -93,14 +95,16 @@ Create:
 mkdir -p exercises/05-memory-skill-building/05.01-introduction-to-memory/explainer
 mkdir -p exercises/05-memory-skill-building/05.02-short-term-memory/{explainer,problem,solution}
 mkdir -p exercises/05-memory-skill-building/05.03-long-term-memory/explainer
-```
+
+```text
 
 Then create readme stubs:
 
-```
+```text
 exercises/05-memory-skill-building/05.01-introduction-to-memory/explainer/readme.md -> "# Introduction to Memory"
 exercises/05-memory-skill-building/05.02-short-term-memory/explainer/readme.md -> "# Short-term Memory"
 exercises/05-memory-skill-building/05.02-short-term-memory/problem/readme.md -> "# Short-term Memory"
 exercises/05-memory-skill-building/05.02-short-term-memory/solution/readme.md -> "# Short-term Memory"
 exercises/05-memory-skill-building/05.03-long-term-memory/explainer/readme.md -> "# Long-term Memory"
-```
+
+```text

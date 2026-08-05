@@ -28,12 +28,11 @@ Mostly flat at root level.
 ### Search for notes
 
 ```bash
-# Search by filename
 find "/mnt/d/Obsidian Vault/AI Research/" -name "*.md" | grep -i "keyword"
 
-# Search by content
 grep -rl "keyword" "/mnt/d/Obsidian Vault/AI Research/" --include="*.md"
-```
+
+```text
 
 Or use Grep/Glob tools directly on the vault path.
 
@@ -50,10 +49,12 @@ Search for `[[Note Title]]` across the vault to find backlinks:
 
 ```bash
 grep -rl "\\[\\[Note Title\\]\\]" "/mnt/d/Obsidian Vault/AI Research/"
-```
+
+```text
 
 ### Find index notes
 
 ```bash
 find "/mnt/d/Obsidian Vault/AI Research/" -name "*Index*"
-```
+
+```text

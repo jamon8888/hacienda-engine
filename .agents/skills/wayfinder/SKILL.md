@@ -3,6 +3,8 @@ name: wayfinder
 description: Plan a huge chunk of work — more than one agent session can hold — as a shared map of decision tickets on your issue tracker, and resolve them one at a time until the way to the destination is clear.
 disable-model-invocation: true
 ---
+# Wayfinder
+
 
 A loose idea has arrived — too big for one agent session, and wrapped in fog: the way from here to the **destination** isn't visible yet. Wayfinding is about finding that way, not charging at the destination. This skill charts the way as a **shared map** on the repo's issue tracker, then works its **decision tickets** — questions whose resolution is a decision, not slices of a build to execute — one at a time until the route is clear.
 
@@ -29,6 +31,7 @@ The map is an **index**, not a store. It lists the decisions made and points at 
 The whole map at low resolution, loaded once per session. Open tickets are **not** listed — they are open child issues, found by query.
 
 ```markdown
+
 ## Destination
 
 <what reaching the end of this map looks like — the spec, decision, or change this effort is finding its way to. One or two lines; every session orients to it before choosing a ticket.>
@@ -50,17 +53,20 @@ The whole map at low resolution, loaded once per session. Open tickets are **not
 ## Out of scope
 
 <!-- see "Out of scope": work ruled beyond the destination; closed, never graduates -->
-```
+
+```text
 
 ### Tickets
 
 Each ticket is a **child issue** of the map; the tracker's issue id is its identity. Its body is the question, sized to one 100K token agent session:
 
 ```markdown
+
 ## Question
 
 <the decision or investigation this ticket resolves>
-```
+
+```text
 
 Each ticket carries a `wayfinder:<type>` label — one of `research`, `prototype`, `grilling`, `task` (see [Ticket Types](#ticket-types)).
 
