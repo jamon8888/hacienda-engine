@@ -23,7 +23,10 @@ use hacienda_core::{
 };
 
 use crate::{
-    handlers::{audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, versions},
+    handlers::{
+        audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, uploads, usage,
+        versions,
+    },
     state::ApiState,
 };
 
@@ -238,6 +241,35 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/documents/{id}/diff/{diff_job_id}",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(versions::get_diff_job),
+    },
+    // ── documents:process endpoints, presigned uploads (Phase 13 Task 4) ────────
+    // A presigned upload is a precursor step to `/v1/documents` — the bytes never
+    // transit this server — so it is gated under the same `DocumentsProcess`
+    // capability as the route it feeds, matching presets/RAG/versions above.
+    // `ObjectStore` has no in-memory backend (S3-compatible only), same opt-in
+    // shape as `PresetStore`/`DocumentVersionStore`: these routes 400 when
+    // `ApiState::object_store` is `None`.
+    RouteSpec {
+        path: "/v1/uploads/presign",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(uploads::presign_upload),
+    },
+    RouteSpec {
+        path: "/v1/uploads/confirm",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(uploads::confirm_upload),
+    },
+    // ── audit:read endpoints, usage/metering (Phase 13 Task 5) ──────────────────
+    // A read-model over the audit chain (Decision 3, platform-parity spec §10) —
+    // gated under the same `AuditRead` capability as `/v1/audit`, `/v1/audit/verify`,
+    // and `/v1/compliance/*` above, since usage is derived from that same data, not
+    // a separate source of truth. `UsageStore` has no in-memory backend
+    // (Postgres-only), same opt-in shape as presets/versions/uploads: this route
+    // 400s when `ApiState::usage_store` is `None`.
+    RouteSpec {
+        path: "/v1/usage",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(usage::get_usage),
     },
 ];
 
@@ -510,6 +542,59 @@ pub(crate) mod tests {
             response.status().as_u16(),
             403,
             "documents:process alone must authorise a scan with include_text absent"
+        );
+    }
+
+    /// `GET /v1/review` and `POST /v1/review/{id}/decide` are declared under two
+    /// different capabilities in the route table (`audit:read` and `review:decide`
+    /// respectively) — reading the queue and deciding on an item are different
+    /// privileges. Before `HaciendaFacade::review_queue_read_with_auth` existed,
+    /// `get_review` called the same `review_queue_with_auth` as `decide_review`, which
+    /// unconditionally required `review:decide` — so a caller with only `audit:read`
+    /// passed the route-level guard and was then rejected by the facade. This test pins
+    /// the fixed, distinct behaviour at the HTTP layer (Phase 10 Task 2 Step 3).
+    #[tokio::test]
+    async fn review_read_and_decide_require_distinct_capabilities() {
+        let app = build_router(test_state());
+
+        // audit:read alone must be authorised to list the queue.
+        let list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/review")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            list_response.status().as_u16(),
+            403,
+            "audit:read alone must authorise GET /v1/review"
+        );
+
+        // audit:read alone must NOT be authorised to decide on an item.
+        let decide_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/review/some-id/decide")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"decision":"approve","reviewer":"r","comment":"c"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            decide_response.status().as_u16(),
+            403,
+            "audit:read alone must not authorise POST /v1/review/{{id}}/decide"
         );
     }
 
@@ -1312,5 +1397,452 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(response.status().as_u16(), 404);
+    }
+
+    /// Without a configured object store, both `/v1/uploads/*` routes must fail
+    /// cleanly (400), not panic or 500 — uploads are opt-in per
+    /// `ApiState::object_store`, same as presets/RAG/versions.
+    #[tokio::test]
+    async fn upload_routes_without_a_configured_store_yield_400() {
+        let app = build_router(test_state_no_auth());
+
+        let presign = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/uploads/presign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"filename":"a.txt","mime_type":"text/plain"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(presign.status().as_u16(), 400);
+
+        let confirm = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/uploads/confirm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"upload_id":"{}"}}"#,
+                        uuid::Uuid::new_v4()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirm.status().as_u16(), 400);
+    }
+
+    /// Upload routes require `documents:process`, same as every other
+    /// content-bearing route — a token without it must be 403. Auth enforcement
+    /// happens before the handler runs, so this does not need a live store.
+    #[tokio::test]
+    async fn upload_routes_require_documents_process_capability() {
+        let facade = std::sync::Arc::new(
+            hacienda_core::HaciendaFacade::new(hacienda_core::HaciendaConfig::default()).unwrap(),
+        );
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/uploads/presign")
+                    .header("authorization", "Bearer hcd_pii:reveal_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"filename":"a.txt","mime_type":"text/plain"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// Without a configured usage store, `GET /v1/usage` must fail cleanly (400),
+    /// not panic or 500 — usage is opt-in per `ApiState::usage_store`, same as
+    /// presets/versions/uploads.
+    #[tokio::test]
+    async fn usage_route_without_a_configured_store_yields_400() {
+        let app = build_router(test_state_no_auth());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// The usage route requires `audit:read`, same as `/v1/audit` and
+    /// `/v1/compliance/*` — a token without it must be 403. Auth enforcement
+    /// happens before the handler runs, so this does not need a live store.
+    #[tokio::test]
+    async fn usage_route_requires_audit_read_capability() {
+        let facade = std::sync::Arc::new(
+            hacienda_core::HaciendaFacade::new(hacienda_core::HaciendaConfig::default()).unwrap(),
+        );
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/usage")
+                    .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// Full round trip against a real `PostgresUsageStore`: append audit entries for
+    /// a principal via `PostgresAuditStore`, then confirm `GET /v1/usage` aggregates
+    /// them into the expected entity/byte counts. Requires a live Postgres — ignored
+    /// by default, same convention as the preset/version lifecycle tests above. Run
+    /// with:
+    ///   DATABASE_URL=postgres://... cargo test -p hacienda-api --lib \
+    ///     routes::tests::usage_route_aggregates_audit_entries -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn usage_route_aggregates_audit_entries() {
+        use hacienda_core::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
+        use hacienda_core::store::postgres::audit::PostgresAuditStore;
+        use hacienda_core::store::postgres::connection::{connect, migrate};
+        use hacienda_core::store::postgres::usage::{PostgresUsageStore, UsageStore};
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+
+        let audit_store = PostgresAuditStore::new(pool.clone());
+        let principal = format!("avocat-{}", uuid::Uuid::new_v4());
+        audit_store
+            .append(vec![AuditEntryInput {
+                id: uuid::Uuid::new_v4().to_string(),
+                category: "Email".to_string(),
+                action: RedactionAction::Mask,
+                span_hash: "hash".to_string(),
+                span_length: 42,
+                confidence: Some(1.0),
+                source: EntitySource::Regex,
+                pipeline_version: "1.0".to_string(),
+                config_hash: "cfg".to_string(),
+                principal: Some(principal.clone()),
+            }])
+            .await
+            .expect("append failed");
+
+        let store: Arc<dyn UsageStore> = Arc::new(PostgresUsageStore::new(pool));
+        let app = build_router(test_state_no_auth().with_usage_store(store));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let record = json["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["principal"].as_str() == Some(principal.as_str()))
+            .expect("principal missing from usage response");
+        assert_eq!(record["entity_count"].as_i64().unwrap(), 1);
+        assert_eq!(record["byte_count"].as_i64().unwrap(), 42);
+    }
+
+    /// Phase 10 Task 2 Step 5: proves the seven audit/review/compliance/glossary routes
+    /// are backend-agnostic by re-running them against real `PostgresAuditStore` and
+    /// `PostgresReviewStore` backends instead of the default in-memory stores. The
+    /// handlers in `handlers/audit_review.rs` call only `HaciendaFacade` methods, never a
+    /// store directly, so this is expected to pass without any handler changes — this
+    /// test is what proves that expectation rather than assuming it.
+    ///
+    /// Requires a live Postgres — ignored by default, same convention as
+    /// `usage_route_aggregates_audit_entries` above. Run with:
+    ///   DATABASE_URL=postgres://... cargo test -p hacienda-api --lib \
+    ///     routes::tests::audit_review_compliance_glossary_routes_work_against_postgres \
+    ///     -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn audit_review_compliance_glossary_routes_work_against_postgres() {
+        use hacienda_core::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
+        use hacienda_core::compliance::ComplianceConfig;
+        use hacienda_core::glossary::GlossaryConfig;
+        use hacienda_core::review::{
+            Priority, ReviewConfig, ReviewQueueItem, ReviewStatus, ReviewStore,
+        };
+        use hacienda_core::store::postgres::audit::PostgresAuditStore;
+        use hacienda_core::store::postgres::connection::{connect, migrate};
+        use hacienda_core::store::postgres::review::PostgresReviewStore;
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = connect(&database_url).await.expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+
+        let audit_store = Arc::new(PostgresAuditStore::new(pool.clone()));
+        let review_store = Arc::new(PostgresReviewStore::new(pool.clone()));
+
+        // Seed one audit entry so GET /v1/audit has content to return. `entries()`
+        // returns the whole open segment, which is shared with every other test that
+        // appends to this database — the principal is unique per run so the seeded
+        // entry can be found by identity rather than assuming an empty table.
+        let principal = format!("avocat-postgres-route-test-{}", uuid::Uuid::new_v4());
+        audit_store
+            .append(vec![AuditEntryInput {
+                id: uuid::Uuid::new_v4().to_string(),
+                category: "Email".to_string(),
+                action: RedactionAction::Mask,
+                span_hash: "hash".to_string(),
+                span_length: 42,
+                confidence: Some(1.0),
+                source: EntitySource::Regex,
+                pipeline_version: "1.0".to_string(),
+                config_hash: "cfg".to_string(),
+                principal: Some(principal.clone()),
+            }])
+            .await
+            .expect("append failed");
+
+        // Seed one pending review item so GET /v1/review and POST /v1/review/{id}/decide
+        // have something to act on.
+        let review_id = uuid::Uuid::new_v4().to_string();
+        review_store
+            .submit(ReviewQueueItem {
+                id: review_id.clone(),
+                text_snippet: "jane@example.com".to_string(),
+                category: "email".to_string(),
+                start: 0,
+                end: 16,
+                confidence: 0.4,
+                source: "regex".to_string(),
+                status: ReviewStatus::Pending,
+                priority: Priority::High,
+                assigned_reviewer: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                deadline: None,
+                decision: None,
+                decided_by: None,
+                decided_at: None,
+                comment: None,
+            })
+            .await
+            .expect("submit failed");
+
+        let config = HaciendaConfig {
+            pii: Some(PipelineConfig::default()),
+            compliance: Some(ComplianceConfig::default()),
+            review: Some(ReviewConfig::default()),
+            glossary: Some(GlossaryConfig::default()),
+            ..Default::default()
+        };
+
+        let facade = Arc::new(
+            HaciendaFacade::with_stores(
+                config,
+                Some(audit_store.clone() as Arc<dyn AuditStore>),
+                Some(review_store.clone() as Arc<dyn ReviewStore>),
+                None,
+            )
+            .expect("facade construction failed"),
+        );
+
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        let app = build_router(state);
+
+        // GET /v1/audit — the seeded entry comes back.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = json["entries"].as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["principal"].as_str() == Some(principal.as_str())),
+            "seeded principal missing from audit response"
+        );
+        assert!(json["audit_chain_tip"].is_string());
+
+        // GET /v1/audit/verify — the chain built from the seeded entry verifies clean.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/audit/verify")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["valid"], serde_json::Value::Bool(true));
+
+        // GET /v1/review — the seeded item comes back pending. `list(None)` returns the
+        // whole table, shared with every other test that submits to this database, so
+        // the seeded item is found by its (uuid, so unique) id rather than assuming an
+        // otherwise-empty queue.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/review")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let items = json["items"].as_array().unwrap();
+        let seeded_item = items
+            .iter()
+            .find(|i| i["id"].as_str() == Some(review_id.as_str()))
+            .expect("seeded review item missing from queue response");
+        assert_eq!(seeded_item["status"].as_str(), Some("pending"));
+
+        // POST /v1/review/{id}/decide — approve the seeded item.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/review/{review_id}/decide"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"decision":"approve","reviewer":"r","comment":"looks fine"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["item"]["status"].as_str(), Some("approved"));
+        assert_eq!(json["item"]["decision"].as_str(), Some("approve"));
+
+        // GET /v1/compliance/dpia
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/compliance/dpia")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["report"]["processing_description"]
+            .as_str()
+            .unwrap()
+            .contains("hacienda-pii"));
+
+        // GET /v1/compliance/report
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/compliance/report")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["report"]["model_card"]["model_details"]["name"].as_str(),
+            Some("hacienda-pii")
+        );
+
+        // GET /v1/glossary — no document has been processed, so the glossary is empty.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/glossary")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["entries"].as_array().unwrap().len(), 0);
     }
 }

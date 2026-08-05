@@ -1,10 +1,12 @@
 //! [`JobStore`] trait and the in-memory backend.
 //!
-//! **Provisional until Phase 4.** The trait is established now so that
-//! `POST /v1/documents/async` and `GET /v1/jobs/{id}` have a concrete seam to build
-//! against rather than retrofitting one onto a finished API surface. No file backend is
-//! provided: a durability path with no caller is untested code in a compliance-adjacent
-//! crate. Phase 4 picks the backend once a real producer exists.
+//! The trait was established in Phase 4 so that `POST /v1/documents/async` and
+//! `GET /v1/jobs/{id}` had a concrete seam to build against rather than retrofitting one
+//! onto a finished API surface. `/v1/documents/async` now exists as the real producer,
+//! and [`crate::store::postgres::PostgresJobStore`] (Phase 9, gated behind the `postgres`
+//! feature) is the real durable backend — this in-memory implementation remains for tests
+//! and for deployments that accept losing queued jobs on restart (see the crate-level
+//! `postgres` feature docs for the durability trade-off).
 
 use super::{
     error::JobError,
@@ -26,8 +28,9 @@ use uuid::Uuid;
 /// `transition(id, Queued, Running)` and exactly one will win. A store that exposed
 /// only `set_status` would need external coordination to achieve the same property.
 ///
-/// **This trait is provisional until Phase 4's `/v1/jobs/{id}` exercises it.**
-/// The method surface may change once a real consumer exists.
+/// Exercised by `/v1/jobs/{id}` and implemented by both [`InMemoryJobStore`] and
+/// [`crate::store::postgres::PostgresJobStore`] (Phase 9) — the trait surface is the real,
+/// stable seam between the async job API and its storage backend, not a placeholder.
 #[async_trait]
 pub trait JobStore: Send + Sync {
     /// Create a new job in the `Queued` state.

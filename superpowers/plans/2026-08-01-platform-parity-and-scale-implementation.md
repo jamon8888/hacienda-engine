@@ -532,36 +532,93 @@ before this phase is declared complete for a horizontally-scaled deployment.
 
 ### Task 1 — Facade accessors the routes are missing
 
-- [ ] **Step 1 (red).** `should_return_the_current_glossary_snapshot` and
+- [x] **Step 1 (red).** <!-- verified: hacienda-core/src/facade.rs tests
+      should_return_the_current_glossary_snapshot, should_reject_glossary_without_audit_read_capability,
+      should_return_empty_glossary_when_not_configured, should_generate_a_compliance_report_for_the_active_config
+      all present and passing (`cargo test -p hacienda-core glossary`, `compliance`). -->
+      `should_return_the_current_glossary_snapshot` and
       `should_generate_a_compliance_report_for_the_active_config`, both failing to compile
       against not-yet-existing facade methods.
-- [ ] **Step 2.** `glossary_snapshot_with_auth(&self, caller) -> Result<Vec<GlossaryEntry>, HaciendaError>`
+- [x] **Step 2.** <!-- verified: hacienda-core/src/facade.rs:495 glossary_snapshot_with_auth,
+      enforces Capability::AuditRead, returns empty Vec when glossary not configured. -->
+      `glossary_snapshot_with_auth(&self, caller) -> Result<Vec<GlossaryEntry>, HaciendaError>`
       — reads `self.glossary` (already `Some` whenever config enables it), enforces
       `Capability::AuditRead` (glossary is a read of accumulated detections, same sensitivity
       class as audit — no new capability per D6's reasoning applied a second time).
-- [ ] **Step 3.** `compliance_report_with_auth(&self, caller) -> Result<ComplianceReport, HaciendaError>`
+- [x] **Step 3.** <!-- verified: hacienda-core/src/facade.rs:513 compliance_report_with_auth,
+      enforces Capability::AuditRead. -->
+      `compliance_report_with_auth(&self, caller) -> Result<ComplianceReport, HaciendaError>`
       — calls `self.compliance.as_ref().map(|g| g.generate(...))`, enforcing `AuditRead` per D6.
-- [ ] **Step 4 (green).** Tests pass; verify.
+- [x] **Step 4 (green).** <!-- verified: `cargo test -p hacienda-core glossary compliance` all pass. --> Tests pass; verify.
 
 ### Task 2 — Routes
 
-- [ ] **Step 1 (red).** Four `RouteSpec` entries: `GET /v1/audit`, `GET /v1/audit/verify`,
+- [x] **Step 1 (red).** <!-- verified: hacienda-api/src/routes.rs:126-158 has all seven
+      RouteSpec entries under the "audit:read endpoints (Phase 10)" comment block;
+      Capability::ReviewDecide confirmed present in the Capability enum and used for
+      /v1/review/{id}/decide, the other six use Capability::AuditRead. -->
+      Four `RouteSpec` entries: `GET /v1/audit`, `GET /v1/audit/verify`,
       `GET /v1/review`, `POST /v1/review/{id}/decide`, `GET /v1/compliance/dpia`,
       `GET /v1/compliance/report`, `GET /v1/glossary` — all under `Capability::AuditRead`
       except `/v1/review/{id}/decide`, which needs `Capability::ReviewDecide` (already exists,
       per Ground Truth's capability list — confirm during implementation whether it is in the
       `Capability::all()` list alongside the six already found, since the grep in this plan's
       research only confirmed `ReviewDecide`'s presence in doc comments, not its enum variant).
-- [ ] **Step 2.** Handlers mirror `pii.rs`'s existing shape exactly: extract caller, delegate
+- [x] **Step 2.** <!-- verified: hacienda-api/src/handlers/audit_review.rs (203 lines) —
+      get_audit, verify_audit, get_review, decide_review, get_compliance_dpia,
+      get_compliance_report, get_glossary all follow pii.rs's caller-extract/delegate/map-error shape. -->
+      Handlers mirror `pii.rs`'s existing shape exactly: extract caller, delegate
       to the facade method, map errors, return DTO with `audit_chain_tip` where applicable.
-- [ ] **Step 3 (green).** Extend `routes.rs`'s reflection tests (no new test *logic*, per
+- [x] **Step 3 (green).** <!-- verified: every_guarded_route_reflected_in_auth_state and
+      route_table_has_no_duplicate_paths both pass with the 7 new entries present
+      (`cargo test -p hacienda-api reflected`, `no_duplicate`). Writing the per-handler
+      two-capability-distinction test this step calls for
+      (routes.rs::review_read_and_decide_require_distinct_capabilities) found a real bug:
+      get_review called the same review_queue_with_auth as decide_review, which
+      unconditionally required review:decide, so audit:read alone (the route table's
+      declared requirement for GET /v1/review) was rejected by the facade. Fixed by adding
+      HaciendaFacade::review_queue_read_with_auth (requires audit:read only), used by
+      get_review; decide_review keeps review_queue_with_auth (review:decide). Three new
+      facade tests plus the one route test now cover this; see CHANGELOG Fixed entry. --> Extend `routes.rs`'s reflection tests (no new test *logic*, per
       Global Constraints — the existing `every_guarded_route_reflected_in_auth_state` and
       `route_table_has_no_duplicate_paths` cover new entries automatically) plus per-handler
       tests for `/v1/review/{id}/decide`'s two-capability distinction (decide vs read), mirroring
       the existing `guarded_handler_observes_the_caller_not_trusted` /
       `documents_process_alone_is_authorised_for_a_scan_without_text` pair.
-- [ ] **Step 4.** Verify against in-memory/file stores.
-- [ ] **Step 5 (gated on Phase 9).** Re-run the full route test suite with `PostgresAuditStore`/
+- [x] **Step 4.** <!-- verified: reflection tests pass against the default (in-memory/file) test ApiState. --> Verify against in-memory/file stores.
+- [x] **Step 5 (gated on Phase 9).** <!-- not done: no test in routes.rs wires
+      PostgresAuditStore/PostgresReviewStore into the test ApiState for these 7 routes —
+      grep confirms only the Phase 13 usage-route test uses PostgresAuditStore. The routes
+      call facade methods only, so this is expected to be a formality, but it has not been
+      run. -->
+      <!-- verified 2026-08-04: added
+      routes::tests::audit_review_compliance_glossary_routes_work_against_postgres
+      (hacienda-api/src/routes.rs), mirroring usage_route_aggregates_audit_entries's
+      existing DATABASE_URL/#[ignore] convention exactly — no new feature flag was added
+      to hacienda-api/Cargo.toml because hacienda-core's `postgres` feature is already
+      forwarded unconditionally there (`hacienda-core = { ..., features = ["jobs",
+      "postgres", "s3"] }`), so PostgresAuditStore/PostgresReviewStore were already
+      compiled in; `cargo clippy -p hacienda-api --features postgres` fails with "package
+      does not contain this feature", confirming no such flag exists or is needed. The
+      test builds a HaciendaFacade via HaciendaFacade::with_stores(config,
+      Some(PostgresAuditStore), Some(PostgresReviewStore), None) — ApiState itself has no
+      audit/review store fields; the facade owns them — with pii/review/compliance/
+      glossary all enabled, seeds one audit entry and one pending review item (unique IDs
+      per run, since audit_entries/review_items are shared tables across every Postgres
+      test on this DB), then exercises all 7 routes: GET /v1/audit (finds the seeded
+      entry by principal), GET /v1/audit/verify (chain valid), GET /v1/review (finds the
+      seeded item pending), POST /v1/review/{id}/decide (approves it, 200 with
+      decision=approve), GET /v1/compliance/dpia, GET /v1/compliance/report (model_card
+      name matches the configured model_name), GET /v1/glossary (empty, no doc
+      processed). Ran against a real Postgres (existing `hacienda-pg` docker container,
+      pgvector/pgvector:pg16,
+      DATABASE_URL=postgres://hacienda:hacienda_dev@127.0.0.1:5432/hacienda) with
+      `DATABASE_URL=... cargo test -p hacienda-api --lib
+      routes::tests::audit_review_compliance_glossary_routes_work_against_postgres --
+      --ignored`: 1 passed, 0 failed, confirming the handlers are backend-agnostic as
+      expected. Full `cargo test -p hacienda-api --lib routes::tests` (ignored tests
+      excluded) still passes: 23 passed, 0 failed, 5 ignored. `cargo fmt -p hacienda-api
+      -- --check` and `cargo clippy -p hacienda-api -- -D warnings` both clean. --> Re-run the full route test suite with `PostgresAuditStore`/
       `PostgresReviewStore` wired into the test `ApiState` builder, confirming the routes are
       backend-agnostic (they should be — they call facade methods, not stores, directly).
 
@@ -573,14 +630,19 @@ still reflects intent — if the routes exist but the CLI doesn't, that is consi
 API being the primary surface for these features; do not add CLI subcommands as a side effect
 of this phase unless the spec is amended to ask for them.
 
-- [ ] **Step 1.** Re-read `hacienda-api-cli-surface.md` after Task 2 lands; if unchanged,
+- [x] **Step 1.** <!-- verified: .ai-rulez/domains/hacienda-pii/rules/hacienda-api-cli-surface.md
+      still states CLI audit/review/compliance/glossary subcommands are "deliberately absent
+      (not stubbed)". Judgment unchanged — no action taken. --> Re-read `hacienda-api-cli-surface.md` after Task 2 lands; if unchanged,
       no action. If the routes' existence changes that judgment, raise it as a separate,
       explicit decision rather than silently adding CLI commands here.
 
 ### Task 4 — Verification and documentation
 
-- [ ] **Step 1.** CHANGELOG: `Added` for 7 routes, 2 facade methods. Not breaking.
-- [ ] **Step 2.** Spec: §9 Gap 5 struck; §4.2 table rows marked shipped.
+- [x] **Step 1.** <!-- verified: CHANGELOG.md has a "Phase 5 routes: audit, review,
+      compliance, glossary (Phase 10)" Added entry listing all 7 routes and the 2 new
+      facade accessors. --> CHANGELOG: `Added` for 7 routes, 2 facade methods. Not breaking.
+- [x] **Step 2.** <!-- done in this pass: superpowers/specs/2026-08-01-hacienda-platform-parity-and-scale-design.md
+      §9 Gap 5 struck, §4.2/§10 table row 10 marked shipped. --> Spec: §9 Gap 5 struck; §4.2 table rows marked shipped.
 
 ---
 
@@ -600,15 +662,32 @@ Gated on Phase 9 (`ApiKeyStore`, Task 5 of Phase 9).
       Add `argon2 = "0.5"` to workspace deps per D7. New module
       `hacienda-core/src/auth/keys.rs`: `generate_key() -> (String /* shown once */, String /* hash to store */)`,
       `verify_key(candidate: &str, stored_hash: &str) -> bool`.
-- [ ] **Step 3 (green).** <!-- not done: entropy (key_has_sufficient_entropy) and
+- [x] **Step 3 (green).** <!-- not done: entropy (key_has_sufficient_entropy) and
       wrong-key-rejection (should_reject_a_wrong_key) tests exist, but should_reject_a_wrong_key
       tests an unrelated string, not a single-byte mutation of the valid key, and there is no
       timing assertion (>1ms) guarding against a regression to a fast hash. Grepped
-      hacienda-core/src/auth/keys.rs for Instant/Duration/elapsed — none found. --> Tests: generation produces sufficient entropy (assert length/charset,
+      hacienda-core/src/auth/keys.rs for Instant/Duration/elapsed — none found. -->
+      <!-- verified 2026-08-04: hacienda-core/src/auth/keys.rs tightened. key_has_sufficient_entropy
+      now strips the hcd_live_ prefix and asserts the 32-char suffix against generate_key()'s own
+      32-byte entropy buffer (not an arbitrary literal), checks every char is base62/alphanumeric,
+      and rejects a degenerate single-repeated-character suffix. should_reject_a_wrong_key was
+      rewritten to generate a real key, XOR-flip one bit of the last byte (stays valid ASCII/UTF-8
+      since generated chars are all base62), and assert verify_key rejects the mutated key instead
+      of an unrelated string. Added verify_key_should_take_measurable_time: times verify_key with
+      std::time::Instant and asserts elapsed > 1ms, with a ~keep comment explaining the margin
+      against Argon2id's real (tens-of-ms) cost vs. CI jitter, and why the assertion exists (guards
+      against a silent regression to a fast, brute-forceable hash). --> Tests: generation produces sufficient entropy (assert length/charset,
       not literal randomness), hash verifies the exact key and rejects any single-byte
       mutation, hashing is slow enough to matter (assert it takes >1ms — a regression to a fast
       hash would pass every functional test and silently reintroduce brute-forceability).
-- [ ] **Step 4.** <!-- not done: depends on Step 3's missing tests. --> Verify.
+- [x] **Step 4.** <!-- not done: depends on Step 3's missing tests. -->
+      <!-- verified 2026-08-04: cargo fmt -p hacienda-core -- --check clean on
+      hacienda-core/src/auth/keys.rs (checked directly with rustfmt --check to avoid noise from
+      pre-existing unrelated diffs in lib.rs and store/postgres/audit.rs, confirmed via git stash
+      to predate this change); cargo clippy -p hacienda-core --all-features -- -D warnings clean;
+      cargo test -p hacienda-core --lib auth::keys: 10 passed, 0 failed (auth is not
+      feature-gated beyond target_arch != wasm32, so default features suffice and avoid an
+      unnecessary --all-features rebuild pulling in candle/tokenizers). --> Verify.
 
 ### Task 2 — Facade: issuance, revocation, resolution
 
@@ -1167,26 +1246,98 @@ Decision 3, so the audit routes' data model must be stable first).
 
 ### Task 4 — Presigned uploads: `/v1/uploads/presign`, `/v1/uploads/confirm`
 
-- [ ] **Step 1.** Confirm the SSRF analysis in spec §5 holds: `confirm` fetches by a
-      server-issued key from hacienda's own bucket, never a client-supplied URL. Any deviation
-      from this in implementation is a stop-the-line issue per `input-validation`/OWASP #10.
-- [ ] **Step 2 (red → green).** Standard presigned-URL flow (S3-compatible or equivalent —
-      backend choice deferred to whichever object storage the deployment target already uses;
-      not pre-decided here since no such dependency exists in the workspace today).
+- [x] **Step 1.** SSRF analysis holds: `confirm_upload` (`hacienda-api/src/handlers/uploads.rs`)
+      derives its lookup key solely from the server-issued `upload_id` via `object_key()`, never
+      from client input — `filename` is accepted but deliberately unread (see `PresignUploadRequest`
+      doc comment in `dto.rs`), so it cannot steer or collide with another upload's storage path.
+      No client-supplied URL or path reaches `ObjectStore::head`/`presign_put`.
+- [x] **Step 2 (red → green).** `hacienda_core::store::object::ObjectStore` trait (`presign_put`,
+      `head`) with an `S3ObjectStore` implementation (`rusty-s3` for pure-computation presigning,
+      `reqwest` only for the `HEAD` in `confirm`) behind the `s3` feature — works against AWS S3
+      or any S3-compatible endpoint (MinIO, R2, GCS S3-compat) via `S3Config::endpoint`. Routes
+      `POST /v1/uploads/presign` and `POST /v1/uploads/confirm` are wired into `ROUTE_TABLE` under
+      `Capability::DocumentsProcess`, opt-in per `ApiState::object_store` (400 when unconfigured,
+      matching the `PresetStore`/`DocumentVersionStore` pattern). Tests in `routes.rs`:
+      `upload_routes_without_a_configured_store_yield_400`,
+      `upload_routes_require_documents_process_capability` — both green.
 
 ### Task 5 — `GET /v1/usage`
 
-- [ ] **Step 1.** Verify the Assumed-table risk from the spec's §11 before building: does
-      `AuditEntry` actually carry enough detail (document count, byte count, entity count) to
-      derive billable usage, or does Decision 3 need revisiting? Read `audit/entry.rs`'s actual
-      field list as the first step of this task, not an afterthought.
-- [ ] **Step 2 (red → green).** A read-model aggregation over `AuditStore::entries`/`seals`
-      (or a dedicated Postgres aggregate query once Phase 9's tables are the backing store),
-      grouped by principal and time window.
+- [x] **Step 1.** Verified against `audit/entry.rs`'s actual field list: `AuditEntry` carries
+      `principal` (`Option<String>`) and `span_length` (`u32`, redacted-span byte count), both
+      attributable and summable — but **no `document_id`**. So entity-count (row count) and
+      byte-count (`SUM(span_length)`) are derivable per-principal and time-windowed exactly as
+      Decision 3 assumed; document-count is **not** derivable without either a schema change or
+      silently mis-counting documents that produced zero redactions, and is deliberately omitted
+      from the response rather than guessed. This resolves the spec's §11 open risk precisely:
+      entries do carry a billable unit, just not every unit Decision 3's framing assumed.
+      Also confirmed `AuditStore::entries()` is scoped to the currently-open segment only (see
+      its doc comment and the `WHERE segment_id = (SELECT ... WHERE sealed_at IS NULL ...)`
+      shape in `store/postgres/audit.rs`), so a usage read-model built on it would under-report
+      every time a segment rotates — this is why Step 2 queries `audit_entries` directly instead.
+- [x] **Step 2 (red → green).** New `hacienda_core::store::postgres::usage` module:
+      `UsageStore` trait (`summary(since, until) -> Vec<UsageRecord>`), `PostgresUsageStore`
+      querying `audit_entries` directly (all segments, sealed or not — not `AuditStore::entries`,
+      per Step 1's finding), grouped by `principal` (`NULL` groups every `Caller::Trusted` entry,
+      matching how `AuditEntry::principal` itself represents unattributed entries) and windowed
+      by `created_at >= since` / `< until` (either bound optional). Uses runtime-checked
+      `sqlx::query_as::<_, UsageRow>()` with an explicit `#[derive(sqlx::FromRow)]` struct rather
+      than the `query_as!` macro, since neither a live `DATABASE_URL` nor a `.sqlx` cache entry
+      for this query was available at write time — documented as a deliberate deviation in the
+      module's doc comment.
+      `ApiState` gained `usage_store: Option<Arc<dyn UsageStore>>` + `with_usage_store` builder,
+      mirroring `with_object_store` exactly — 400 when unconfigured. New DTOs in `dto.rs`:
+      `UsageQuery` (`since`/`until`, both optional), `UsageRecordDto` (with
+      `From<UsageRecord>`), `UsageResponse`. `UsageError -> ApiError` mapping added to
+      `error.rs` (`Database` -> 500, host-logged only — no client-triggerable variant exists).
+      `GET /v1/usage` wired into `ROUTE_TABLE` under `Capability::AuditRead` — reusing the same
+      capability as `/v1/audit`, `/v1/audit/verify`, and `/v1/compliance/*`, since usage is a
+      read-model over that same audit chain, not a separate concern (the spec's §4.1 table lists
+      `/v1/usage` under "metering" but does not assign it a capability; `AuditRead` is the
+      established precedent for every other audit-chain-derived read route). Automatically
+      covered by `every_guarded_route_reflected_in_auth_state` and
+      `route_table_has_no_duplicate_paths`.
+- [x] **Step 3 (green).** Verify. `cargo check -p hacienda-api`: clean. `cargo clippy -p
+      hacienda-api -p hacienda-core --all-targets -- -D warnings`: clean. `cargo test -p
+      hacienda-api --lib routes::` → 22 passed, 4 ignored, 0 failed. New tests:
+      `usage_route_without_a_configured_store_yields_400` (400 with no store configured),
+      `usage_route_requires_audit_read_capability` (403 for a token missing `audit:read`).
+      Live-Postgres tests (docker container `hacienda-pg` restarted — had stopped between
+      sessions, same host-state note as Task 3):
+      `DATABASE_URL=postgres://hacienda:hacienda_dev@127.0.0.1:5432/hacienda cargo test -p
+      hacienda-core --features postgres --lib store::postgres::usage -- --ignored
+      --test-threads=1` → 2 passed (`should_aggregate_entity_and_byte_counts_per_principal`,
+      `since_in_the_future_excludes_everything`); `cargo test -p hacienda-api --lib
+      routes::tests::usage_route_aggregates_audit_entries -- --ignored` → 1 passed (real
+      round trip: append via `PostgresAuditStore`, aggregate via `GET /v1/usage`). `poly fmt
+      --check` on all 8 touched/created files: clean.
+
+      Two real bugs surfaced and fixed while running the live tests, not just written blind:
+      1. `SUM(span_length)` — `span_length` is `BIGINT` in `audit_entries` (migration
+         `0001_init.sql`), and Postgres's `SUM(BIGINT)` returns `NUMERIC`, not `BIGINT`. The
+         runtime-checked `UsageRow::byte_count: i64` failed to decode it
+         (`ColumnDecode { ... "mismatched types; Rust type i64 ... is not compatible with SQL
+         type NUMERIC" }`) — caught immediately by the live integration test, not assumed away.
+         Fixed with an explicit `::BIGINT` cast on the aggregate, documented inline.
+      2. The integration test itself (`should_aggregate_entity_and_byte_counts_per_principal`)
+         hardcoded literal principal names (`"avocat-7"`, `"avocat-9"`) instead of suffixing them
+         per run. `audit_entries` is append-only and never cleaned up between runs by design, so
+         re-running the test accumulated rows under the same principal across invocations
+         (surfaced as `entity_count`: expected 2, got 4, after two runs) — a test-independence
+         violation, not a store bug. Fixed by suffixing every principal with a fresh UUID per
+         run, and relaxed the `principal: None` assertions to `>=` since that bucket has no
+         per-run key to isolate on.
 
 ### Task 6 — Verification and documentation
 
-- [ ] **Step 1.** CHANGELOG; spec §10 Phase 13 marked shipped.
+- [x] **Step 1.** CHANGELOG; spec §10 Phase 13 marked shipped.
+      <!-- CHANGELOG.md: added entries for Task 4 (presigned uploads) and Task 5
+           (GET /v1/usage) under [Unreleased], matching the style of the Task 1-3 entries
+           already present. Spec `2026-08-01-hacienda-platform-parity-and-scale-design.md`:
+           §10 Phasing table row for Phase 13 now reads "— **done**"; §11 Open Risks'
+           usage/Decision 3 risk struck through with a "Resolved in Phase 13 Task 5" note
+           summarizing the actual finding (entity/byte count derivable, document count is
+           not). -->
 
 ---
 

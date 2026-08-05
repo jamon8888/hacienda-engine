@@ -22,3 +22,6 @@ pub mod presets;
 
 #[cfg(feature = "postgres")]
 pub mod api_keys;
+
+#[cfg(feature = "postgres")]
+pub mod usage;

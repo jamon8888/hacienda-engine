@@ -627,3 +627,96 @@ pub struct DiffJobResultResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+// ── Presigned uploads (`/v1/uploads/presign`, `/v1/uploads/confirm`) ─────────
+
+/// Request body for `POST /v1/uploads/presign`.
+///
+/// `filename` is metadata only (echoed nowhere yet — no route returns it back), never
+/// the storage key: the key is `upload_id`, generated server-side, so a client can't
+/// steer or collide with another upload's storage path via a crafted filename.
+#[derive(Debug, Deserialize)]
+pub struct PresignUploadRequest {
+    // Accepted so the request shape documents client intent, but deliberately unread by
+    // the handler: see the struct doc above.
+    #[allow(dead_code)]
+    pub filename: String,
+    pub mime_type: String,
+}
+
+/// Response from `POST /v1/uploads/presign`.
+///
+/// `required_headers` must be sent verbatim by the client's `PUT` to `upload_url` — they
+/// are signed into the URL, so an omitted or different header value makes the object
+/// store reject the upload with a signature mismatch, not silently accept it.
+#[derive(Debug, Serialize)]
+pub struct PresignUploadResponse {
+    pub upload_id: uuid::Uuid,
+    pub upload_url: String,
+    pub method: String,
+    pub required_headers: std::collections::BTreeMap<String, String>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Request body for `POST /v1/uploads/confirm`.
+#[derive(Debug, Deserialize)]
+pub struct ConfirmUploadRequest {
+    pub upload_id: uuid::Uuid,
+}
+
+/// Response from `POST /v1/uploads/confirm`.
+///
+/// Only returned once the object store confirms the object exists — see
+/// `handlers/uploads.rs::confirm_upload`, which 404s (not 500s) when it doesn't, since an
+/// unconfirmed upload is a client-triggerable condition (called before the `PUT`
+/// finished, or with a stale/wrong `upload_id`), not a backend failure.
+#[derive(Debug, Serialize)]
+pub struct ConfirmUploadResponse {
+    pub upload_id: uuid::Uuid,
+    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+// ── Usage / metering (`GET /v1/usage`) ────────────────────────────────────────
+
+/// Query parameters for `GET /v1/usage`. Both bounds are optional; an absent bound
+/// leaves that side of the window open (matches `UsageStore::summary`).
+#[derive(Debug, Deserialize)]
+pub struct UsageQuery {
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One principal's aggregate usage within the queried window.
+///
+/// `entity_count` and `byte_count` are the only billable units the audit chain actually
+/// carries — see `hacienda_core::store::postgres::usage`'s module doc for why document
+/// count is not reported here.
+#[derive(Debug, Serialize)]
+pub struct UsageRecordDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+    pub entity_count: i64,
+    pub byte_count: i64,
+}
+
+impl From<hacienda_core::store::postgres::usage::UsageRecord> for UsageRecordDto {
+    fn from(record: hacienda_core::store::postgres::usage::UsageRecord) -> Self {
+        Self {
+            principal: record.principal,
+            entity_count: record.entity_count,
+            byte_count: record.byte_count,
+        }
+    }
+}
+
+/// Response body for `GET /v1/usage`.
+#[derive(Debug, Serialize)]
+pub struct UsageResponse {
+    pub records: Vec<UsageRecordDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+}
