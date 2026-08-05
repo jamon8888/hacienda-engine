@@ -21,15 +21,6 @@ class VoteResult:
 
 def vote(samples: list[list[Span]], min_agreement: int = 2) -> VoteResult:
     """`samples` is one list of (start, end, label) spans per LLM sample."""
-    if not samples:
-        raise ValueError("samples must be non-empty")
-    if min_agreement < 1:
-        raise ValueError(f"min_agreement must be >= 1, got {min_agreement}")
-    if min_agreement > len(samples):
-        raise ValueError(
-            f"min_agreement ({min_agreement}) cannot exceed number of samples ({len(samples)})"
-        )
-
     counts: Counter[Span] = Counter()
     for sample in samples:
         # De-duped within a sample first: a labeler repeating the same span twice

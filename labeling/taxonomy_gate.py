@@ -22,39 +22,9 @@ _TAXONOMY_PATH = (
 
 
 def _load_entity_types(path: pathlib.Path) -> frozenset[str]:
-    """Load and validate the set of entity types from a taxonomy YAML file.
-
-    The YAML is expected to be a mapping with an "entityTypes" key whose value is
-    a list of strings. Any deviation from this schema raises a ValueError with a
-    clear message so schema drift or corruption in the single source of truth is
-    caught explicitly at startup rather than surfacing as a confusing KeyError or
-    silently gating every label.
-    """
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
-
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"Taxonomy file {path} must contain a mapping at the top level; "
-            f"got {type(data).__name__!r}"
-        )
-
-    if "entityTypes" not in data:
-        raise ValueError(f"Taxonomy file {path} is missing required 'entityTypes' field")
-
-    entity_types = data["entityTypes"]
-
-    if not isinstance(entity_types, list):
-        raise ValueError(
-            f"'entityTypes' in {path} must be a list; got {type(entity_types).__name__!r}"
-        )
-
-    if not all(isinstance(t, str) for t in entity_types):
-        raise ValueError(
-            f"All entries in 'entityTypes' in {path} must be strings; got {entity_types!r}"
-        )
-
-    return frozenset(entity_types)
+    return frozenset(data["entityTypes"])
 
 
 _ENTITY_TYPES = _load_entity_types(_TAXONOMY_PATH)

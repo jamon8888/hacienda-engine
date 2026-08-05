@@ -15,7 +15,6 @@ import random
 import re
 
 _WORD_RE = re.compile(r"\S+")
-_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _words_with_offsets(text: str) -> list[tuple[str, int, int]]:
@@ -51,12 +50,7 @@ def to_word_span_record(
         # assembly time rather than assumed correct by construction.
         rendered = " ".join(tokenized_text[start_word : end_word + 1])
         original = chunk_text[start_char:end_char]
-        # Whitespace-normalize before comparing: `rendered` always joins words with a
-        # single space, but `original` is a raw chunk substring that may carry
-        # justified spacing, tabs, or newlines. Without normalizing, legitimately
-        # aligned spans in such text would raise here on whitespace alone.
-        normalized_original = _WHITESPACE_RE.sub(" ", original.strip())
-        if rendered.strip() != normalized_original:
+        if rendered.strip() != original.strip():
             raise ValueError(
                 f"word-span assembly drift: rendered {rendered!r} != original {original!r}"
             )
@@ -85,16 +79,7 @@ def train_val_test_split(
     document only qualifies if every record from it is human-reviewed, so a
     partially-reviewed document's auto-labeled chunks can't leak into training while
     its reviewed chunks sit in test.
-
-    Raises `ValueError` if `train_frac + val_frac > 1`, since that leaves no room
-    for a remainder and would silently make one of the fractions a lie.
     """
-    if train_frac + val_frac > 1:
-        raise ValueError(
-            f"train_frac + val_frac must be <= 1, got {train_frac} + {val_frac} = "
-            f"{train_frac + val_frac}"
-        )
-
     by_doc: dict[str, list[dict]] = {}
     for record in records:
         by_doc.setdefault(record["doc_id"], []).append(record)
@@ -111,13 +96,10 @@ def train_val_test_split(
     n_train = int(len(remaining_doc_ids) * train_frac)
     n_val = int(len(remaining_doc_ids) * val_frac)
 
-    # Lists, not sets: str hashing (and therefore set iteration order) is randomized
-    # per-process unless PYTHONHASHSEED is fixed, so routing doc IDs through a set
-    # would make record order within a split non-deterministic across runs even
-    # though the seeded shuffle picked the same documents every time.
-    val_docs = remaining_doc_ids[n_train : n_train + n_val]
+    train_docs = set(remaining_doc_ids[:n_train])
+    val_docs = set(remaining_doc_ids[n_train : n_train + n_val])
     # Rounding leftovers join train rather than being silently dropped.
-    train_docs = remaining_doc_ids[:n_train] + remaining_doc_ids[n_train + n_val :]
+    train_docs |= set(remaining_doc_ids[n_train + n_val :])
 
     return {
         "train": [r for d in train_docs for r in by_doc[d]],

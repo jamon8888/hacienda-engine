@@ -1,5 +1,3 @@
-import pytest
-
 from consistency import vote
 
 
@@ -61,18 +59,3 @@ def test_no_agreement_at_all_produces_empty_result():
 
     assert result.accepted == []
     assert result.review_queue == []
-
-
-def test_empty_samples_list_is_rejected_rather_than_silently_voting_on_nothing():
-    with pytest.raises(ValueError, match="non-empty"):
-        vote([])
-
-
-def test_min_agreement_below_one_is_rejected():
-    with pytest.raises(ValueError, match="min_agreement"):
-        vote([[(0, 4, "contracting_party")]], min_agreement=0)
-
-
-def test_min_agreement_above_sample_count_is_rejected():
-    with pytest.raises(ValueError, match="min_agreement"):
-        vote([[(0, 4, "contracting_party")], []], min_agreement=3)

@@ -158,6 +158,53 @@ impl From<HaciendaError> for ApiError {
             HaciendaError::PiiDisabled => {
                 ApiError::invalid_request("PII detection is not enabled on this server.")
             }
+            HaciendaError::Pseudonym(pseudonym_err) => {
+                // Direct PseudonymError → HaciendaError::Pseudonym conversion.
+                // All token errors are client faults → 400.
+                use hacienda_core::redaction::PseudonymError;
+                match pseudonym_err {
+                    PseudonymError::MalformedToken
+                    | PseudonymError::MalformedPadding
+                    | PseudonymError::InvalidKeyId { .. }
+                    | PseudonymError::KeyNotFound { .. }
+                    | PseudonymError::NoActiveKey
+                    | PseudonymError::MalformedKeyMaterial { .. }
+                    | PseudonymError::WrongKeyLength { .. }
+                    | PseudonymError::UnreadableToken
+                    | PseudonymError::UnsupportedCategory { .. } => {
+                        ApiError::invalid_request("Invalid pseudonym token.")
+                    }
+                }
+            }
+            HaciendaError::Pii(pii_err) => {
+                // Map PII errors to appropriate client-visible codes.
+                // Pseudonym errors (malformed token, unreadable, key not found) are
+                // client faults → 400. Other PII errors are internal → 500.
+                use hacienda_core::pii::PiiError;
+                use hacienda_core::redaction::RedactionError;
+                match pii_err {
+                    PiiError::Redaction(RedactionError::Pseudonym(pseudonym_err)) => {
+                        use hacienda_core::redaction::PseudonymError;
+                        match pseudonym_err {
+                            PseudonymError::MalformedToken
+                            | PseudonymError::MalformedPadding
+                            | PseudonymError::InvalidKeyId { .. }
+                            | PseudonymError::KeyNotFound { .. }
+                            | PseudonymError::NoActiveKey
+                            | PseudonymError::MalformedKeyMaterial { .. }
+                            | PseudonymError::WrongKeyLength { .. }
+                            | PseudonymError::UnreadableToken
+                            | PseudonymError::UnsupportedCategory { .. } => {
+                                ApiError::invalid_request("Invalid pseudonym token.")
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::error!(error = %source, "pii error processing request");
+                        ApiError::internal()
+                    }
+                }
+            }
             HaciendaError::Extraction(inner) => {
                 // Split extraction failures by fault. A corrupt PDF is the *client's*
                 // input, and answering 500 both misleads the caller into retrying and
@@ -352,5 +399,16 @@ mod tests {
         let source = HaciendaError::Authz(AuthzError::Unauthenticated);
         let api_err = ApiError::from(source);
         assert_eq!(api_err.code, ApiErrorCode::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn hacienda_pii_pseudonym_maps_to_400() {
+        use hacienda_core::pii::PiiError;
+        use hacienda_core::redaction::{PseudonymError, RedactionError};
+        let source = HaciendaError::Pii(PiiError::Redaction(RedactionError::Pseudonym(
+            PseudonymError::MalformedToken,
+        )));
+        let api_err = ApiError::from(source);
+        assert_eq!(api_err.code, ApiErrorCode::InvalidRequest);
     }
 }
