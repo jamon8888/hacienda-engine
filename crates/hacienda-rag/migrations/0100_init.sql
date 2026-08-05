@@ -3,6 +3,12 @@
 -- backend (`src/backends/pgvector.rs`). Mirrors hacienda-core's
 -- `store/postgres` migration convention: one embedded `sqlx::migrate!`
 -- directory per crate, run explicitly (never implicitly from a constructor).
+--
+-- Numbered 0100+ (not 0001+): sqlx's `_sqlx_migrations` tracking table is one
+-- per physical database, not per crate. hacienda-core reserves 0001-0099 for
+-- its own migrations; hacienda-rag reserves 0100-0199 so both crates' migrators
+-- can run against one shared database without a version collision. See
+-- `hacienda-core/migrations/README.md` for the full convention and rationale.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 

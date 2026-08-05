@@ -67,7 +67,7 @@ use crate::types::{
 use async_trait::async_trait;
 use pgvector::Vector as PgVector;
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Row};
 use std::collections::HashSet;
 use std::time::Instant;
 use uuid::Uuid;
@@ -126,14 +126,27 @@ impl PgVectorStore {
     /// from the process entry point or test harness — never implicitly from
     /// [`Self::new`], matching `hacienda-core`'s Design Decision D4 (Phase 9).
     ///
+    /// This crate's migrations are numbered `0100+` specifically so this can
+    /// run against the same database as `hacienda_core::store::postgres`'s own
+    /// migrations without a `_sqlx_migrations` version collision — see
+    /// `hacienda-core/migrations/README.md`.
+    ///
+    /// `set_ignore_missing(true)`: the numbering split alone isn't sufficient.
+    /// sqlx's `_sqlx_migrations` table is one per physical database, and
+    /// `Migrator::run` rejects the whole table as soon as it contains any
+    /// applied-migration row outside *this* migrator's own resolved list
+    /// (`VersionMissing`) — which every `hacienda-core` migration row is, from
+    /// this migrator's point of view. `ignore_missing` relaxes that check to
+    /// "every version this migrator knows about must match its checksum",
+    /// which is what the shared-database deployment actually needs.
+    ///
     /// # Errors
     ///
     /// [`RagError::Backend`] if any migration fails.
     pub async fn migrate(pool: &PgPool) -> RagResult<()> {
-        sqlx::migrate!("./migrations")
-            .run(pool)
-            .await
-            .map_err(pg_migrate_err)
+        let mut migrator = sqlx::migrate!("./migrations");
+        migrator.set_ignore_missing(true);
+        migrator.run(pool).await.map_err(pg_migrate_err)
     }
 }
 
@@ -1761,5 +1774,46 @@ mod live_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RagError::CollectionNotFound(_)));
+    }
+
+
+    /// Regression test for the `_sqlx_migrations` version-1 collision: before
+    /// hacienda-rag's migrations were renumbered `0100+` (see
+    /// `hacienda-core/migrations/README.md`), both this crate and
+    /// hacienda-core shipped a migration numbered `1`, and running both
+    /// crates' migrators against one shared database produced
+    /// `VersionMismatch(1)` because sqlx's `_sqlx_migrations` table is one
+    /// per physical database, not one per crate. This proves both migrators
+    /// now coexist on one database.
+    #[tokio::test]
+    #[ignore]
+    async fn should_run_both_crates_migrations_against_one_shared_database() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let pool = PgVectorStore::connect(&database_url)
+            .await
+            .expect("connect failed");
+
+        PgVectorStore::migrate(&pool)
+            .await
+            .expect("hacienda-rag migrate failed");
+        hacienda_core::store::postgres::connection::migrate(&pool)
+            .await
+            .expect("hacienda-core migrate failed");
+
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("failed to read _sqlx_migrations");
+
+        assert!(
+            versions.iter().any(|v| *v < 100),
+            "expected at least one hacienda-core migration (<100) in _sqlx_migrations, got {versions:?}"
+        );
+        assert!(
+            versions.iter().any(|v| *v >= 100),
+            "expected at least one hacienda-rag migration (>=100) in _sqlx_migrations, got {versions:?}"
+        );
     }
 }
