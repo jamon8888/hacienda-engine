@@ -1,0 +1,594 @@
+{
+  "cases": [
+    {
+      "id": "fr-001",
+      "lang": "fr",
+      "text": "Merci de transmettre le dossier à Éléonore de La Fontaine avant vendredi.",
+      "entities": [
+        {
+          "start": 35,
+          "end": 60,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-002",
+      "lang": "fr",
+      "text": "Le contrat a été signé par Jean-Baptiste d'Aubigné pour le compte du client.",
+      "entities": [
+        {
+          "start": 30,
+          "end": 54,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-003",
+      "lang": "fr",
+      "text": "Vous pouvez joindre François-Xavier Béranger au 04 78 22 91 45.",
+      "entities": [
+        {
+          "start": 20,
+          "end": 46,
+          "label": "person"
+        },
+        {
+          "start": 50,
+          "end": 64,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "fr-004",
+      "lang": "fr",
+      "text": "La société Dupont & Associés a déposé son dossier ce matin.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 31,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-005",
+      "lang": "fr",
+      "text": "Le Cabinet Lefèvre représente la partie adverse dans cette affaire.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 19,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-006",
+      "lang": "fr",
+      "text": "La Fondation Jean Moulin soutient plusieurs associations caritatives.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 24,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-007",
+      "lang": "fr",
+      "text": "Groupe Bernard Arnault a publié ses résultats annuels hier.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 22,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-008",
+      "lang": "fr",
+      "text": "Château Margaux SA exporte principalement vers l'Asie.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 19,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-009",
+      "lang": "fr",
+      "text": "Maison Hermès International a ouvert une nouvelle boutique à Lyon.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 28,
+          "label": "organization"
+        },
+        {
+          "start": 63,
+          "end": 67,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-010",
+      "lang": "fr",
+      "text": "Le siège social est situé au 12 rue de la République, 69002 Lyon.",
+      "entities": [
+        {
+          "start": 31,
+          "end": 67,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-011",
+      "lang": "fr",
+      "text": "Notre bureau parisien se trouve 45 avenue des Champs-Élysées, 75008 Paris.",
+      "entities": [
+        {
+          "start": 32,
+          "end": 75,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-012",
+      "lang": "fr",
+      "text": "Envoyez le formulaire signé à contact@dupont-associes.fr avant la clôture.",
+      "entities": [
+        {
+          "start": 32,
+          "end": 58,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "fr-013",
+      "lang": "fr",
+      "text": "Pour toute question, écrivez à service.client@fondation-jeanmoulin.org.",
+      "entities": [
+        {
+          "start": 33,
+          "end": 72,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "fr-014",
+      "lang": "fr",
+      "text": "Le numéro de téléphone du service juridique est le 01 45 67 89 10.",
+      "entities": [
+        {
+          "start": 54,
+          "end": 68,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "fr-015",
+      "lang": "fr",
+      "text": "Vous pouvez nous joindre au +33 6 12 34 56 78 en cas d'urgence.",
+      "entities": [
+        {
+          "start": 28,
+          "end": 45,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "fr-016",
+      "lang": "fr",
+      "text": "Madame Isabelle de Montmorency a confirmé sa présence à l'audience.",
+      "entities": [
+        {
+          "start": 7,
+          "end": 30,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-017",
+      "lang": "fr",
+      "text": "M. Étienne du Pont a demandé un délai supplémentaire.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 19,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-018",
+      "lang": "fr",
+      "text": "Me Sophie Vasseur plaide pour la défense.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 17,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-019",
+      "lang": "fr",
+      "text": "Dr Antoine Lévêque a établi le certificat médical.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 20,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-020",
+      "lang": "fr",
+      "text": "La cliente, Amélie Desrosiers-Fontaine, réside à Bordeaux.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 39,
+          "label": "person"
+        },
+        {
+          "start": 52,
+          "end": 60,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-021",
+      "lang": "fr",
+      "text": "Le témoin s'appelle Rémi Château, domicilié à Nantes.",
+      "entities": [
+        {
+          "start": 21,
+          "end": 35,
+          "label": "person"
+        },
+        {
+          "start": 51,
+          "end": 57,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-022",
+      "lang": "fr",
+      "text": "Contactez Noëlle Fabre-Lartigue au 02 40 12 33 45 pour plus d'informations.",
+      "entities": [
+        {
+          "start": 10,
+          "end": 32,
+          "label": "person"
+        },
+        {
+          "start": 36,
+          "end": 50,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "fr-023",
+      "lang": "fr",
+      "text": "L'expert-comptable, Grégoire de la Tour, a validé les comptes.",
+      "entities": [
+        {
+          "start": 20,
+          "end": 40,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-024",
+      "lang": "fr",
+      "text": "La société Renault-Peugeot Consulting SARL conseille les investisseurs.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 44,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-025",
+      "lang": "fr",
+      "text": "L'adresse de facturation est 8 boulevard Haussmann, 75009 Paris.",
+      "entities": [
+        {
+          "start": 29,
+          "end": 63,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-026",
+      "lang": "fr",
+      "text": "Merci d'envoyer une copie à direction@chateaumargaux-sa.fr.",
+      "entities": [
+        {
+          "start": 29,
+          "end": 59,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "fr-027",
+      "lang": "fr",
+      "text": "Le cabinet d'avocats Perrin, Roche et Associés a été mandaté.",
+      "entities": [
+        {
+          "start": 21,
+          "end": 47,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-028",
+      "lang": "fr",
+      "text": "Béatrice d'Estaing a signé l'accord au nom de la famille.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 19,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-029",
+      "lang": "fr",
+      "text": "L'entreprise Leclerc Frères occupe le troisième étage de l'immeuble.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 28,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-030",
+      "lang": "fr",
+      "text": "Veuillez appeler le 03 88 24 17 60 pour confirmer le rendez-vous.",
+      "entities": [
+        {
+          "start": 20,
+          "end": 34,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "fr-031",
+      "lang": "fr",
+      "text": "Le siège de l'Association des Anciens Élèves se trouve 3 place Bellecour, 69002 Lyon.",
+      "entities": [
+        {
+          "start": 15,
+          "end": 47,
+          "label": "organization"
+        },
+        {
+          "start": 58,
+          "end": 87,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-032",
+      "lang": "fr",
+      "text": "Xavier de Rochambeau-Villiers dirige le service financier.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 29,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-033",
+      "lang": "fr",
+      "text": "Écrivez à recrutement@leclercfreres.fr pour postuler.",
+      "entities": [
+        {
+          "start": 12,
+          "end": 40,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "fr-034",
+      "lang": "fr",
+      "text": "La Banque Populaire du Sud-Ouest a approuvé le prêt.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 32,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-035",
+      "lang": "fr",
+      "text": "Odette Le Gall-Kerviel habite au 27 rue Victor Hugo, 44000 Nantes.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 22,
+          "label": "person"
+        },
+        {
+          "start": 33,
+          "end": 65,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-036",
+      "lang": "fr",
+      "text": "Numéro direct de Mme Chantal Aubry : 01 53 24 88 07.",
+      "entities": [
+        {
+          "start": 22,
+          "end": 35,
+          "label": "person"
+        },
+        {
+          "start": 38,
+          "end": 52,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "fr-037",
+      "lang": "fr",
+      "text": "La Fondation Robert Schuman organise un colloque à Strasbourg.",
+      "entities": [
+        {
+          "start": 3,
+          "end": 27,
+          "label": "organization"
+        },
+        {
+          "start": 52,
+          "end": 62,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-038",
+      "lang": "fr",
+      "text": "Envoyer les pièces justificatives à archives@banquepopulaire-so.fr.",
+      "entities": [
+        {
+          "start": 38,
+          "end": 68,
+          "label": "email"
+        }
+      ]
+    },
+    {
+      "id": "fr-039",
+      "lang": "fr",
+      "text": "Guillaume d'Harcourt-Lambert représente les actionnaires minoritaires.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 28,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-040",
+      "lang": "fr",
+      "text": "L'atelier Dupuis & Fils restaure des meubles anciens depuis 1920.",
+      "entities": [
+        {
+          "start": 10,
+          "end": 23,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-041",
+      "lang": "fr",
+      "text": "Le rendez-vous est fixé au cabinet, 5 rue des Lilas, 33000 Bordeaux.",
+      "entities": [
+        {
+          "start": 37,
+          "end": 68,
+          "label": "address"
+        }
+      ]
+    },
+    {
+      "id": "fr-042",
+      "lang": "fr",
+      "text": "Marguerite de Beaumont-Chalusse a été convoquée comme témoin.",
+      "entities": [
+        {
+          "start": 0,
+          "end": 31,
+          "label": "person"
+        }
+      ]
+    },
+    {
+      "id": "fr-043",
+      "lang": "fr",
+      "text": "Merci de joindre Thibault Vasseur au 06 71 45 32 08 avant midi.",
+      "entities": [
+        {
+          "start": 17,
+          "end": 33,
+          "label": "person"
+        },
+        {
+          "start": 37,
+          "end": 51,
+          "label": "phone_number"
+        }
+      ]
+    },
+    {
+      "id": "fr-044",
+      "lang": "fr",
+      "text": "La société Éditions Gallimard-Larousse publie l'ouvrage ce mois-ci.",
+      "entities": [
+        {
+          "start": 13,
+          "end": 41,
+          "label": "organization"
+        }
+      ]
+    },
+    {
+      "id": "fr-045",
+      "lang": "fr",
+      "text": "Envoyez votre réponse à isabelle.dumontier@cabinet-perrin.fr avant vendredi.",
+      "entities": [
+        {
+          "start": 26,
+          "end": 62,
+          "label": "email"
+        }
+      ]
+    }
+  ]
+}

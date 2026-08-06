@@ -10,6 +10,7 @@ use hacienda_core::auth::AuthState;
 use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::RedactionMode;
+use hacienda_rag::InMemoryVectorStore;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -183,6 +184,16 @@ fn print_config_text(config: &HaciendaConfig) {
                 .map(|_| "config")
                 .unwrap_or("default")
         );
+        println!();
+
+        println!("  [pii.vertical]");
+        match &pii.vertical {
+            Some(vertical) => {
+                println!("    id = {:?}  (from: config)", vertical.id);
+                println!("    labels = {:?}  (from: config)", vertical.labels);
+            }
+            None => println!("    (not configured — no vertical is active)"),
+        }
         println!();
     } else {
         println!("[pii]");
@@ -598,7 +609,11 @@ async fn write_vault(
 }
 
 fn build_vault_readme(file_count: usize, audit_included: bool) -> String {
-    let documents = if file_count == 1 { "document" } else { "documents" };
+    let documents = if file_count == 1 {
+        "document"
+    } else {
+        "documents"
+    };
     let audit_note = if audit_included {
         "This vault includes an audit chain at `audit/audit.json` (`--audit-out` was given \
          alongside `--vault`)."
@@ -711,7 +726,10 @@ pub async fn run_serve(
 
     let facade = Arc::new(HaciendaFacade::new(config).context("building the facade")?);
     let jobs = InMemoryJobStore::new().into_arc();
-    let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+    // In-memory by default, same precedent as `jobs` above: durable is a caller
+    // decision (embed a `PgVectorStore` instead), not this command's to make.
+    let rag_store: Arc<dyn hacienda_rag::RagStore> = Arc::new(InMemoryVectorStore::new("default"));
+    let state = ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(rag_store);
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await

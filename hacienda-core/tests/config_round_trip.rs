@@ -102,6 +102,54 @@ fn should_reject_a_key_that_was_removed_rather_than_ignoring_it() {
     assert!(error.to_string().contains("log_path"), "{error}");
 }
 
+// ── Task 2: [pii.vertical] ───────────────────────────────────────────────────
+
+#[test]
+fn should_round_trip_a_configured_vertical_through_toml() {
+    use hacienda_core::pii::{PipelineConfig, VerticalConfig};
+
+    let mut config = HaciendaConfig::default();
+    let pii = PipelineConfig {
+        vertical: Some(VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "account_number".to_string()],
+        }),
+        ..Default::default()
+    };
+    config.pii = Some(pii);
+
+    let text = round_trip(&config);
+    assert!(
+        text.contains("[pii.vertical]"),
+        "missing [pii.vertical] in:\n{text}"
+    );
+    assert!(text.contains("id = \"finance\""), "{text}");
+
+    let back: HaciendaConfig = toml::from_str(&text).expect("deserialize");
+    let vertical = back
+        .pii
+        .expect("pii section")
+        .vertical
+        .expect("vertical section");
+    assert_eq!(vertical.id, "finance");
+    assert_eq!(vertical.labels, vec!["swift_code", "account_number"]);
+}
+
+#[test]
+fn should_parse_a_pii_section_with_no_vertical_key_at_all() {
+    // `PipelineConfig` is `deny_unknown_fields`, so this is the direction that matters:
+    // a config file written before `vertical` existed must still parse. Absence, not
+    // presence, is the risk here.
+    let config: HaciendaConfig = toml::from_str("[pii]\nregex_first = false\n")
+        .expect("a [pii] section without `vertical` must still parse");
+    let pii = config.pii.expect("pii section");
+    assert!(
+        pii.vertical.is_none(),
+        "vertical must default to None when the key is absent"
+    );
+    assert!(!pii.regex_first);
+}
+
 #[test]
 fn should_already_reject_an_unknown_key_under_extraction() {
     // Not a change of ours — xberg's `ExtractionConfig` declares `deny_unknown_fields`.

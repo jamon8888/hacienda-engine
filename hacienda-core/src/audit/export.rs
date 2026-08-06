@@ -42,8 +42,12 @@ pub fn export_json(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
 pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
     let mut output = Vec::new();
 
+    // `vertical` is appended last, not interleaved with the existing columns, so a
+    // reader who already has a fixed column-index parser only has to append one field
+    // instead of reindexing every column after this one. This is still a breaking
+    // change to an unversioned format — see CHANGELOG.md.
     output.extend_from_slice(
-        b"id,timestamp,category,action,span_hash,span_length,confidence,source,pipeline_version,config_hash,chain_hash\n",
+        b"id,timestamp,category,action,span_hash,span_length,confidence,source,pipeline_version,config_hash,chain_hash,vertical\n",
     );
 
     for entry in chain.entries() {
@@ -51,6 +55,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
         let confidence = entry.confidence.map(|c| c.to_string()).unwrap_or_default();
         let span_length = entry.span_length.to_string();
         let source = entry.source.to_string();
+        let vertical = entry.vertical.clone().unwrap_or_default();
 
         write_csv_row(
             &mut output,
@@ -66,6 +71,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
                 &entry.pipeline_version,
                 &entry.config_hash,
                 &entry.chain_hash,
+                &vertical,
             ],
         );
     }
@@ -113,6 +119,7 @@ mod tests {
                 pipeline_version: "1.0".into(),
                 config_hash: String::new(),
                 principal: None,
+                vertical: None,
             });
         }
         chain
@@ -160,5 +167,53 @@ mod tests {
     fn should_export_an_empty_chain_as_a_header_only_csv() {
         let bytes = export_csv(&chain_with(0)).unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn should_append_the_vertical_column_last_in_the_csv_header() {
+        let bytes = export_csv(&chain_with(0)).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let header = text.lines().next().unwrap();
+        assert!(
+            header.ends_with(",vertical"),
+            "vertical must be the last CSV column, got header {header:?}"
+        );
+    }
+
+    #[test]
+    fn should_round_trip_an_entry_with_a_vertical_through_csv() {
+        let mut chain = AuditChain::new("cfg");
+        chain.push(AuditEntryInput {
+            id: "id-0".into(),
+            category: "Email".into(),
+            action: RedactionAction::Mask,
+            span_hash: "abc".into(),
+            span_length: 10,
+            confidence: Some(0.9),
+            source: EntitySource::Regex,
+            pipeline_version: "1.0".into(),
+            config_hash: String::new(),
+            principal: None,
+            vertical: Some("finance@3f9a1c02".into()),
+        });
+
+        let bytes = export_csv(&chain).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let row = text.lines().nth(1).unwrap();
+        assert!(
+            row.ends_with(",finance@3f9a1c02"),
+            "expected the vertical value as the last CSV field, got row {row:?}"
+        );
+    }
+
+    #[test]
+    fn should_export_an_absent_vertical_as_an_empty_csv_field() {
+        let bytes = export_csv(&chain_with(1)).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let row = text.lines().nth(1).unwrap();
+        assert!(
+            row.ends_with(','),
+            "an absent vertical must export as an empty trailing field, got row {row:?}"
+        );
     }
 }

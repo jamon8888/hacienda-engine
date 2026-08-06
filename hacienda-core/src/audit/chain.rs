@@ -135,6 +135,7 @@ mod tests {
             pipeline_version: "1.0".into(),
             config_hash: String::new(),
             principal: None,
+            vertical: None,
         }
     }
 
@@ -175,6 +176,25 @@ mod tests {
         match chain.verify() {
             Err(AuditError::ChainIntegrity { index, .. }) => assert_eq!(index, 1),
             other => panic!("expected a chain integrity error at index 1, got {other:?}"),
+        }
+    }
+
+    /// Vertical provenance is inside the chain hash exactly like `principal` and
+    /// `category` — rewriting it at rest must invalidate the entry, or the audit trail
+    /// would answer "which vertical detected this" with a field an operator could edit
+    /// after the fact.
+    #[test]
+    fn should_reject_a_tampered_vertical_id() {
+        let mut chain = AuditChain::new("cfg");
+        chain.push(AuditEntryInput {
+            vertical: Some("finance@3f9a1c02".into()),
+            ..input("a")
+        });
+        chain.entries[0].vertical = Some("finance@ffffffff".into());
+
+        match chain.verify() {
+            Err(AuditError::ChainIntegrity { index, .. }) => assert_eq!(index, 0),
+            other => panic!("expected a chain integrity error at index 0, got {other:?}"),
         }
     }
 

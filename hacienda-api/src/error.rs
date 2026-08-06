@@ -158,6 +158,53 @@ impl From<HaciendaError> for ApiError {
             HaciendaError::PiiDisabled => {
                 ApiError::invalid_request("PII detection is not enabled on this server.")
             }
+            HaciendaError::Pseudonym(pseudonym_err) => {
+                // Direct PseudonymError → HaciendaError::Pseudonym conversion.
+                // All token errors are client faults → 400.
+                use hacienda_core::redaction::PseudonymError;
+                match pseudonym_err {
+                    PseudonymError::MalformedToken
+                    | PseudonymError::MalformedPadding
+                    | PseudonymError::InvalidKeyId { .. }
+                    | PseudonymError::KeyNotFound { .. }
+                    | PseudonymError::NoActiveKey
+                    | PseudonymError::MalformedKeyMaterial { .. }
+                    | PseudonymError::WrongKeyLength { .. }
+                    | PseudonymError::UnreadableToken
+                    | PseudonymError::UnsupportedCategory { .. } => {
+                        ApiError::invalid_request("Invalid pseudonym token.")
+                    }
+                }
+            }
+            HaciendaError::Pii(pii_err) => {
+                // Map PII errors to appropriate client-visible codes.
+                // Pseudonym errors (malformed token, unreadable, key not found) are
+                // client faults → 400. Other PII errors are internal → 500.
+                use hacienda_core::pii::PiiError;
+                use hacienda_core::redaction::RedactionError;
+                match pii_err {
+                    PiiError::Redaction(RedactionError::Pseudonym(pseudonym_err)) => {
+                        use hacienda_core::redaction::PseudonymError;
+                        match pseudonym_err {
+                            PseudonymError::MalformedToken
+                            | PseudonymError::MalformedPadding
+                            | PseudonymError::InvalidKeyId { .. }
+                            | PseudonymError::KeyNotFound { .. }
+                            | PseudonymError::NoActiveKey
+                            | PseudonymError::MalformedKeyMaterial { .. }
+                            | PseudonymError::WrongKeyLength { .. }
+                            | PseudonymError::UnreadableToken
+                            | PseudonymError::UnsupportedCategory { .. } => {
+                                ApiError::invalid_request("Invalid pseudonym token.")
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::error!(error = %source, "pii error processing request");
+                        ApiError::internal()
+                    }
+                }
+            }
             HaciendaError::Extraction(inner) => {
                 // Split extraction failures by fault. A corrupt PDF is the *client's*
                 // input, and answering 500 both misleads the caller into retrying and
@@ -190,6 +237,125 @@ impl From<HaciendaError> for ApiError {
             _ => {
                 // Log the full error on the host; the client gets a generic sentence.
                 tracing::error!(error = %source, "internal error processing request");
+                ApiError::internal()
+            }
+        }
+    }
+}
+
+/// Convert a [`hacienda_core::review::ReviewError`] into an [`ApiError`].
+impl From<hacienda_core::review::ReviewError> for ApiError {
+    fn from(err: hacienda_core::review::ReviewError) -> Self {
+        use hacienda_core::review::ReviewError;
+        match err {
+            ReviewError::NotFound(_) => ApiError::not_found(),
+            ReviewError::AlreadyDecided(_) => {
+                ApiError::invalid_request("review item already decided")
+            }
+            ReviewError::InvalidTransition { .. } => {
+                ApiError::invalid_request("invalid review status transition")
+            }
+            ReviewError::Io { .. } => ApiError::internal(),
+            ReviewError::Json(_) => ApiError::internal(),
+            ReviewError::Internal(_) => ApiError::internal(),
+        }
+    }
+}
+
+/// Convert a [`hacienda_core::store::postgres::presets::PresetError`] into an [`ApiError`].
+///
+/// `NotFound` is the only client-triggerable variant (naming an absent preset id) — 404.
+/// `Database` is host-shaped (connection loss, constraint violation) — 500, logged on the
+/// host side only, since `sqlx::Error`'s `Display` can include table/column names that
+/// should not reach the wire.
+impl From<hacienda_core::store::postgres::presets::PresetError> for ApiError {
+    fn from(err: hacienda_core::store::postgres::presets::PresetError) -> Self {
+        use hacienda_core::store::postgres::presets::PresetError;
+        match &err {
+            PresetError::NotFound => ApiError::not_found(),
+            PresetError::Database(_) => {
+                tracing::error!(error = %err, "preset store error processing request");
+                ApiError::internal()
+            }
+        }
+    }
+}
+
+/// Convert a [`hacienda_core::store::postgres::versions::VersionError`] into an [`ApiError`].
+///
+/// `NotFound` is the only client-triggerable variant (naming an absent document id or
+/// version sequence) — 404. `Database` is host-shaped — 500, logged on the host side
+/// only, matching the `PresetError` mapping above.
+impl From<hacienda_core::store::postgres::versions::VersionError> for ApiError {
+    fn from(err: hacienda_core::store::postgres::versions::VersionError) -> Self {
+        use hacienda_core::store::postgres::versions::VersionError;
+        match &err {
+            VersionError::NotFound => ApiError::not_found(),
+            VersionError::Database(_) => {
+                tracing::error!(error = %err, "version store error processing request");
+                ApiError::internal()
+            }
+        }
+    }
+}
+
+/// Convert a [`hacienda_core::store::object::ObjectStoreError`] into an [`ApiError`].
+///
+/// The only variant, `Request`, is always host/backend-shaped (a network failure or an
+/// unexpected status from the object store) — 500, logged on the host side only, since
+/// the wrapped message can include the presigned URL, which carries `X-Amz-Signature`.
+/// "Object not yet uploaded" is not represented here: `ObjectStore::head` returns
+/// `Ok(None)` for that, a normal value the `confirm_upload` handler maps to 404 itself,
+/// not an error variant.
+impl From<hacienda_core::store::object::ObjectStoreError> for ApiError {
+    fn from(err: hacienda_core::store::object::ObjectStoreError) -> Self {
+        tracing::error!(error = %err, "object store error processing request");
+        ApiError::internal()
+    }
+}
+
+/// Convert a [`hacienda_core::store::postgres::usage::UsageError`] into an [`ApiError`].
+///
+/// Its only variant, `Database`, is always host-shaped — 500, logged on the host side
+/// only, matching the `PresetError`/`VersionError` mapping above (`sqlx::Error`'s
+/// `Display` can include table/column names that should not reach the wire).
+impl From<hacienda_core::store::postgres::usage::UsageError> for ApiError {
+    fn from(err: hacienda_core::store::postgres::usage::UsageError) -> Self {
+        tracing::error!(error = %err, "usage store error processing request");
+        ApiError::internal()
+    }
+}
+
+/// Convert a [`hacienda_rag::RagError`] into an [`ApiError`].
+///
+/// `CollectionNotFound` is the only variant a caller can trigger by naming an
+/// absent collection — 404. Every validation-shaped variant (bad query, filter,
+/// embedding dimension/count mismatch) is a client-supplied-body fault — 400, and
+/// the message is safe to forward verbatim: `RagError`'s `Display` never includes
+/// document/chunk content, only field names, counts, and dimensions (see
+/// `crates/hacienda-rag/src/error.rs`). `CollectionAlreadyExists`,
+/// `UnsupportedMode`, `Core`, and `Backend` are host/backend-shaped — 500, logged
+/// on the host side only, matching every other internal-error mapping in this file.
+impl From<hacienda_rag::RagError> for ApiError {
+    fn from(err: hacienda_rag::RagError) -> Self {
+        use hacienda_rag::RagError;
+        match &err {
+            RagError::CollectionNotFound(_) => ApiError::not_found(),
+            RagError::EmbeddingDimMismatch { .. }
+            | RagError::EmbeddingCountMismatch { .. }
+            | RagError::FilterUnknownField { .. }
+            | RagError::FilterTypeMismatch { .. }
+            | RagError::FilterComplexityExceeded { .. }
+            | RagError::InvalidQuery(_) => ApiError::invalid_request(err.to_string()),
+            RagError::CollectionAlreadyExists(_)
+            | RagError::UnsupportedMode { .. }
+            | RagError::Core(_)
+            | RagError::Backend(_) => {
+                tracing::error!(error = %err, "rag store error processing request");
+                ApiError::internal()
+            }
+            _ => {
+                tracing::error!(error = %err, "unhandled rag store error variant");
                 ApiError::internal()
             }
         }
@@ -352,5 +518,16 @@ mod tests {
         let source = HaciendaError::Authz(AuthzError::Unauthenticated);
         let api_err = ApiError::from(source);
         assert_eq!(api_err.code, ApiErrorCode::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn hacienda_pii_pseudonym_maps_to_400() {
+        use hacienda_core::pii::PiiError;
+        use hacienda_core::redaction::{PseudonymError, RedactionError};
+        let source = HaciendaError::Pii(PiiError::Redaction(RedactionError::Pseudonym(
+            PseudonymError::MalformedToken,
+        )));
+        let api_err = ApiError::from(source);
+        assert_eq!(api_err.code, ApiErrorCode::InvalidRequest);
     }
 }

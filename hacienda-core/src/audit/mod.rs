@@ -25,9 +25,7 @@ pub mod store_file;
 pub mod store_idb;
 
 pub use chain::{AuditChain, GENESIS_HASH};
-pub use entry::{
-    compute_chain_hash, AuditEntry, AuditEntryInput, ChainHashFields, EntitySource, RedactionAction,
-};
+pub use entry::{AuditEntry, AuditEntryInput, EntitySource, RedactionAction};
 pub use error::AuditError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use export::{export, export_csv, export_json, export_json_lines, ExportFormat};

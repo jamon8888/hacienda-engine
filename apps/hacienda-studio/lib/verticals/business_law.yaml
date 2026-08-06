@@ -1,0 +1,44 @@
+vertical: "business_law"
+sectors:
+  - commercial_contracts
+  - employment
+  - intellectual_property
+  - real_estate
+  - regulatory_compliance
+  - dispute_resolution
+
+entityTypes:
+  - contract_type
+  - contracting_party
+  - counterparty_role
+  - effective_date
+  - term_length
+  - renewal_clause
+  - termination_clause
+  - termination_for_cause
+  - dispute_resolution_mechanism
+  - arbitration_clause
+  - venue
+  - confidentiality_obligation
+  - non_compete
+  - non_solicitation
+  - ip_assignment
+  - license_grant
+  - license_scope
+  - liability_cap
+  - indemnification_clause
+  - force_majeure
+  - assignment_clause
+  - notice_provision
+  - payment_terms
+  - penalty_clause
+  - compliance_obligation
+
+relationships:
+  - party_to
+  - counterparty_of
+  - governed_by
+  - indemnifies
+  - licenses_to
+  - assigns_rights_to
+  - subject_to_regulation_by

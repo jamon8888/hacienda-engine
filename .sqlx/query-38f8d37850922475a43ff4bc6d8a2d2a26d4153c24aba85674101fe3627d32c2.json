@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT version_sequence, content_hash FROM document_versions\n            WHERE document_id = $1\n            ORDER BY version_sequence DESC\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version_sequence",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "content_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "38f8d37850922475a43ff4bc6d8a2d2a26d4153c24aba85674101fe3627d32c2"
+}

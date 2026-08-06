@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash)\n            VALUES ($1, $2, $3)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9cf467676cd9b93bc0d4ff9fdebe8aad805086e35bdd80e074cfa3f9710eb53a"
+}

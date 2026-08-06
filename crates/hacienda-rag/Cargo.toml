@@ -1,0 +1,53 @@
+[package]
+name = "hacienda-rag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vector-store contract and retrieval IR for hacienda RAG, recovered from xberg's MIT-licensed xberg-rag crate (removed pre-1.0; see git history at 77e2fd3d71^)"
+
+[features]
+# Postgres `pgvector` store backend (Phase 12). Off by default so consumers
+# that only need the in-memory backend don't pull sqlx — mirrors
+# `hacienda-core`'s own `postgres` feature (see `hacienda-core/Cargo.toml`).
+postgres = ["dep:sqlx", "dep:pgvector", "dep:uuid", "dep:chrono"]
+# Real re-embedding for `migrate-embeddings` jobs (Phase 12). `xberg` is
+# already a mandatory dependency (for its error type only, see error.rs), so
+# this just turns on its ONNX-gated `embeddings` feature — off by default so
+# consumers that never migrate embeddings don't pull in ONNX Runtime.
+embeddings = ["xberg/embeddings"]
+# Streaming RAG answer synthesis over `liter-llm` (Phase 12 Track 3) — recovers
+# `stream.rs`, deliberately left unrecovered when this crate was first ported (see
+# `lib.rs`'s provenance doc comment). Off by default so consumers that only need
+# retrieval don't pull in `liter-llm`/`futures`. Does NOT enable xberg's own
+# `liter-llm` feature — see the `liter-llm` dependency's doc comment in the workspace
+# root `Cargo.toml` for why that would be the wrong lever here.
+streaming = ["dep:liter-llm", "dep:futures"]
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+xberg = { workspace = true }
+
+# Postgres backend (Phase 12). Gated behind the `postgres` feature.
+sqlx = { workspace = true, optional = true }
+# pgvector's `sqlx` feature registers `pgvector::Vector` as a sqlx-encodable
+# Postgres `vector` column type. Not a workspace dependency yet (this is its
+# first consumer in the workspace).
+pgvector = { version = "0.4", features = ["sqlx"], optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+# Streaming answer synthesis (Phase 12 Track 3). Gated behind the `streaming` feature.
+liter-llm = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+# Proof, in the live-Postgres test suite, that this crate's 0100+ migrations
+# and hacienda-core's own 0001-0099 migrations can run against one shared
+# database without a `_sqlx_migrations` version collision (see
+# `hacienda-core/migrations/README.md`). Dev-only: hacienda-core does not
+# depend on hacienda-rag, so this is a one-way, test-only edge.
+hacienda-core = { path = "../../hacienda-core", features = ["postgres"] }

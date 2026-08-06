@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO document_versions\n                (document_id, version_sequence, content_hash, content, entities_json)\n            VALUES ($1, $2, $3, $4, $5)\n            RETURNING version_sequence\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version_sequence",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "78f25ef987b2df095346db170dace3c1b2b1a1c6bc3527b5b9d9d26abd4845db"
+}

@@ -8,15 +8,54 @@ license.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
 data-encoding = { workspace = true }
-hacienda-core = { path = "../hacienda-core", features = ["jobs"] }
+# `StreamExt::map` over `hacienda_rag::answer_stream`'s output (Phase 12 Track 3,
+# `handlers/rag_stream.rs`) — already resolved transitively via axum's own SSE
+# support and `hacienda-rag`'s `streaming` feature above; declared directly
+# because this crate's own handler code calls `StreamExt` methods, which Cargo
+# does not resolve through a transitive dependency.
+futures = { workspace = true }
+hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres", "s3", "ner-candle"] }
+# `streaming` is always on here (unlike `rag-embeddings` below): it pulls
+# `liter-llm`'s `native-http` (reqwest/rustls) and `futures`, both already
+# resolved elsewhere in this workspace's graph (reqwest via the S3 presign
+# feature, futures via no extra native toolchain requirement) — no ONNX-style
+# portability risk, so `POST .../answer` (Phase 12 Track 3) needs no opt-in
+# feature the way real re-embedding does.
+hacienda-rag = { path = "../crates/hacienda-rag", features = ["streaming"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-xberg = { workspace = true }
+# `embedding-presets` is xberg's lightweight, ORT-free feature (`= []`, just
+# unlocks `get_embedding_preset`/`list_embedding_presets`/the real
+# `EmbeddingPreset` type — no ONNX Runtime, no extra deps). Always on so
+# `POST /v1/rag/collections/{name}/migrate-embeddings` can validate a target
+# preset name/dimension without requiring the `rag-embeddings` build below.
+# It also makes xberg's `embed_texts_async` *stub* available (the stub is
+# cfg-gated on `embedding-presets` being on and `embeddings`/`static-embeddings`
+# being off) — see `[features] rag-embeddings` for the real implementation.
+xberg = { workspace = true, features = ["embedding-presets"] }
+
+[features]
+# Off by default: turns `POST .../migrate-embeddings` from "validates the
+# request, then fails every job with a clear error" into "actually
+# re-embeds", by pulling in hacienda-rag's `embeddings` feature, which pulls
+# in xberg's ONNX-Runtime-gated `embeddings` feature (`ort`, `ndarray`, the
+# ICU segmenter family). This is a real, justified call site (unlike the
+# workspace root xberg feature list, whose comment explains why other ONNX
+# features stay off) — see `handlers/rag.rs`'s `migrate_embeddings` module
+# doc. Left opt-in rather than default-on because `ort`'s accelerator feature
+# selection (see `xberg`'s own `Cargo.toml`) is not portable to every build
+# host: enabling it unconditionally here broke `cargo test -p hacienda-api`
+# on a host with no prebuilt ONNX Runtime binary for the requested
+# accelerator combination. Build with `--features rag-embeddings` to enable
+# real re-embedding.
+rag-embeddings = ["hacienda-rag/embeddings"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
