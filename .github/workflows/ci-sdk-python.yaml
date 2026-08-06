@@ -1,0 +1,72 @@
+name: CI - SDK Python
+
+# hacienda-api/** is in the path filter, not just sdks/python/**: a schema
+# change (a new/changed route or DTO) must re-run this even if no file under
+# sdks/ changed, since the generated client depends on the live /openapi.json
+# this workflow fetches from a server it builds from the same commit — see
+# sdks/README.md for why there is no vendored spec to diff against instead.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/python/**"
+      - "sdks/scripts/**"
+      - "hacienda-api/**"
+      - "hacienda-core/**"
+      - ".github/workflows/ci-sdk-python.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/python/**"
+      - "sdks/scripts/**"
+      - "hacienda-api/**"
+      - "hacienda-core/**"
+      - ".github/workflows/ci-sdk-python.yaml"
+
+concurrency:
+  group: ci-sdk-python-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (python 3.10)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Matches ci-rust.yaml/ci-lint.yaml's toolchain choice — this workflow
+      # builds the same hacienda-cli/hacienda-api those validate against.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Pin Python
+        run: uv python install 3.10
+
+      - name: Install deps
+        working-directory: sdks/python
+        run: uv sync
+
+      - name: Generate client (builds hacienda-cli, fetches /openapi.json)
+        working-directory: sdks/python
+        run: bash scripts/generate.sh
+
+      - name: Lint
+        working-directory: sdks/python
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+          uv run mypy src
+
+      - name: Test
+        working-directory: sdks/python
+        run: uv run pytest -v
+
+      - name: Build wheel + sdist
+        working-directory: sdks/python
+        run: uv build

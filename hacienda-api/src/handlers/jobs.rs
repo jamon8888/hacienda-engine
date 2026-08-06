@@ -31,6 +31,18 @@ const DEFAULT_JOB_LIST_LIMIT: usize = 50;
 const MAX_JOB_LIST_LIMIT: usize = 200;
 
 /// `GET /v1/jobs/{id}`
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}",
+    tag = "jobs",
+    operation_id = "getJob",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Job status (and result/error once terminal)", body = JobResponse),
+        (status = 404, description = "No such job, or not owned by the caller")
+    )
+)]
 pub async fn get_job(
     State(state): State<ApiState>,
     parts: Parts,
@@ -74,6 +86,19 @@ pub async fn get_job(
 /// store query: [`hacienda_core::jobs::JobStore::list`] has no `limit`/`offset` parameters,
 /// and extending it is a bigger change than this route needs. `total` is reported before
 /// `limit`/`offset` slicing so a client can tell whether more pages remain.
+#[utoipa::path(
+    get,
+    path = "/v1/jobs",
+    tag = "jobs",
+    operation_id = "listJobs",
+    security(("bearerAuth" = [])),
+    params(
+        ("status" = Option<String>, Query, description = "Filter to this job status"),
+        ("limit" = Option<usize>, Query, description = "Max jobs to return (default 50, capped at 200)"),
+        ("offset" = Option<usize>, Query, description = "Jobs to skip before the returned page")
+    ),
+    responses((status = 200, description = "Page of jobs owned by the caller", body = JobListResponse))
+)]
 pub async fn list_jobs(
     State(state): State<ApiState>,
     parts: Parts,
@@ -123,6 +148,18 @@ pub async fn list_jobs(
 ///
 /// Ownership check mirrors [`get_job`]: 404, never 403, for the same membership-oracle
 /// reason documented at the top of this module.
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}/result",
+    tag = "jobs",
+    operation_id = "getJobResult",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Job result payload (present once succeeded)", body = JobResultResponse),
+        (status = 404, description = "No such job, or not owned by the caller")
+    )
+)]
 pub async fn get_job_result(
     State(state): State<ApiState>,
     parts: Parts,

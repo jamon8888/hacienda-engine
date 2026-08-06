@@ -65,6 +65,18 @@ pub(crate) fn require_store(
 }
 
 /// `POST /v1/rag/collections` — create a collection if it does not already exist.
+#[utoipa::path(
+    post,
+    path = "/v1/rag/collections",
+    tag = "rag",
+    operation_id = "createCollection",
+    security(("bearerAuth" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "Collection created (idempotent if it already exists)", body = serde_json::Value),
+        (status = 400, description = "RAG is not enabled on this server")
+    )
+)]
 pub async fn create_collection(
     State(state): State<ApiState>,
     SafeJson(spec): SafeJson<CollectionSpec>,
@@ -78,6 +90,19 @@ pub async fn create_collection(
 }
 
 /// `GET /v1/rag/collections/{name}`.
+#[utoipa::path(
+    get,
+    path = "/v1/rag/collections/{name}",
+    tag = "rag",
+    operation_id = "getCollection",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "Collection name")),
+    responses(
+        (status = 200, description = "The collection spec", body = serde_json::Value),
+        (status = 400, description = "RAG is not enabled on this server"),
+        (status = 404, description = "No such collection")
+    )
+)]
 pub async fn get_collection(
     State(state): State<ApiState>,
     Path(name): Path<String>,
@@ -92,6 +117,18 @@ pub async fn get_collection(
 }
 
 /// `DELETE /v1/rag/collections/{name}`.
+#[utoipa::path(
+    delete,
+    path = "/v1/rag/collections/{name}",
+    tag = "rag",
+    operation_id = "deleteCollection",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "Collection name")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 400, description = "RAG is not enabled on this server")
+    )
+)]
 pub async fn delete_collection(
     State(state): State<ApiState>,
     Path(name): Path<String>,
@@ -102,6 +139,19 @@ pub async fn delete_collection(
 }
 
 /// `POST /v1/rag/collections/{name}/documents` — upsert one document with its chunks.
+#[utoipa::path(
+    post,
+    path = "/v1/rag/collections/{name}/documents",
+    tag = "rag",
+    operation_id = "upsertDocument",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "Collection name")),
+    request_body = UpsertDocumentRequest,
+    responses(
+        (status = 201, description = "Document upserted", body = UpsertDocumentResponse),
+        (status = 400, description = "RAG is not enabled on this server")
+    )
+)]
 pub async fn upsert_document(
     State(state): State<ApiState>,
     Path(name): Path<String>,
@@ -124,6 +174,20 @@ pub async fn upsert_document(
 /// `top_k`, filter complexity, and query-vector dimension against it before the
 /// query reaches the store — the same validate-then-call shape
 /// `RetrieveQuery::validate`'s own doc comment describes.
+#[utoipa::path(
+    post,
+    path = "/v1/rag/collections/{name}/retrieve",
+    tag = "rag",
+    operation_id = "retrieve",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "Collection name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Retrieved chunks", body = serde_json::Value),
+        (status = 400, description = "RAG is not enabled, or the query is invalid for this collection"),
+        (status = 404, description = "No such collection")
+    )
+)]
 pub async fn retrieve(
     State(state): State<ApiState>,
     Path(name): Path<String>,
@@ -149,6 +213,21 @@ pub async fn retrieve(
 /// `ListCollectionsResponse` contract. Pagination is pushed into the backend
 /// (`RagStore::list_collections`), not sliced in-process — see that method's
 /// doc comment for why.
+#[utoipa::path(
+    get,
+    path = "/v1/rag/collections",
+    tag = "rag",
+    operation_id = "listCollections",
+    security(("bearerAuth" = [])),
+    params(
+        ("limit" = Option<u32>, Query, description = "Max collections to return (default 50, capped at 100)"),
+        ("offset" = Option<u32>, Query, description = "Collections to skip before the returned page")
+    ),
+    responses(
+        (status = 200, description = "Page of collections", body = ListCollectionsResponse),
+        (status = 400, description = "RAG is not enabled on this server")
+    )
+)]
 pub async fn list_collections(
     State(state): State<ApiState>,
     Query(query): Query<RagListQuery>,
@@ -172,6 +251,22 @@ pub async fn list_collections(
 /// No upstream contract: the real xberg-sdks OpenAPI spec has no equivalent
 /// route, so `limit`'s default/cap here are a hacienda-only judgment call
 /// (see [`DEFAULT_RAG_DOCUMENT_LIST_LIMIT`]).
+#[utoipa::path(
+    get,
+    path = "/v1/rag/collections/{name}/documents",
+    tag = "rag",
+    operation_id = "listDocuments",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "Collection name"),
+        ("limit" = Option<u32>, Query, description = "Max documents to return (default 50, capped at 200)"),
+        ("offset" = Option<u32>, Query, description = "Documents to skip before the returned page")
+    ),
+    responses(
+        (status = 200, description = "Page of a collection's documents", body = ListDocumentsResponse),
+        (status = 400, description = "RAG is not enabled on this server")
+    )
+)]
 pub async fn list_documents(
     State(state): State<ApiState>,
     Path(name): Path<String>,
@@ -221,6 +316,20 @@ pub async fn list_documents(
 /// feature), the job is created and transitions to `Running`, and then fails
 /// with a clear "requires the `embeddings` ... feature" error from
 /// `xberg::embed_texts_async`'s stub — never a silent no-op.
+#[utoipa::path(
+    post,
+    path = "/v1/rag/collections/{name}/migrate-embeddings",
+    tag = "rag",
+    operation_id = "migrateEmbeddings",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "Collection name")),
+    request_body = MigrateEmbeddingsRequest,
+    responses(
+        (status = 202, description = "Migration job accepted; poll the returned path", body = MigrateEmbeddingsResponse),
+        (status = 400, description = "RAG not enabled, unknown preset, dimension mismatch, or to_version not greater than current"),
+        (status = 404, description = "No such collection")
+    )
+)]
 pub async fn migrate_embeddings(
     State(state): State<ApiState>,
     parts: Parts,
@@ -478,6 +587,21 @@ async fn migrate_embeddings_work(
 /// The `name` path segment is not cross-checked against the job (`JobStore`
 /// has no notion of collection identity) — same as `get_diff_job`'s
 /// `document_id`.
+#[utoipa::path(
+    get,
+    path = "/v1/rag/collections/{name}/migrate-embeddings/{job_id}",
+    tag = "rag",
+    operation_id = "getMigrateStatus",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "Collection name"),
+        ("job_id" = String, Path, description = "Job id returned by migrateEmbeddings")
+    ),
+    responses(
+        (status = 200, description = "Migration job status and progress", body = MigrateStatusResponse),
+        (status = 404, description = "No such job, or not owned by the caller")
+    )
+)]
 pub async fn get_migrate_status(
     State(state): State<ApiState>,
     parts: Parts,

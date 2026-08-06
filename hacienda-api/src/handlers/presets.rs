@@ -34,6 +34,18 @@ fn require_store(
 }
 
 /// `POST /v1/presets` — create a preset.
+#[utoipa::path(
+    post,
+    path = "/v1/presets",
+    tag = "presets",
+    operation_id = "createPreset",
+    security(("bearerAuth" = [])),
+    request_body = CreatePresetRequest,
+    responses(
+        (status = 201, description = "Created preset", body = PresetResponse),
+        (status = 400, description = "Presets are not enabled on this server")
+    )
+)]
 pub async fn create_preset(
     State(state): State<ApiState>,
     SafeJson(body): SafeJson<CreatePresetRequest>,
@@ -47,6 +59,17 @@ pub async fn create_preset(
 }
 
 /// `GET /v1/presets` — list all presets.
+#[utoipa::path(
+    get,
+    path = "/v1/presets",
+    tag = "presets",
+    operation_id = "listPresets",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "All saved presets", body = PresetListResponse),
+        (status = 400, description = "Presets are not enabled on this server")
+    )
+)]
 pub async fn list_presets(
     State(state): State<ApiState>,
 ) -> Result<Json<PresetListResponse>, ApiError> {
@@ -58,6 +81,19 @@ pub async fn list_presets(
 }
 
 /// `GET /v1/presets/{id}` — fetch one preset by id.
+#[utoipa::path(
+    get,
+    path = "/v1/presets/{id}",
+    tag = "presets",
+    operation_id = "getPreset",
+    security(("bearerAuth" = [])),
+    params(("id" = Uuid, Path, description = "Preset id")),
+    responses(
+        (status = 200, description = "The preset", body = PresetResponse),
+        (status = 400, description = "Presets are not enabled on this server"),
+        (status = 404, description = "No such preset")
+    )
+)]
 pub async fn get_preset(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
@@ -72,6 +108,18 @@ pub async fn get_preset(
 }
 
 /// `DELETE /v1/presets/{id}`.
+#[utoipa::path(
+    delete,
+    path = "/v1/presets/{id}",
+    tag = "presets",
+    operation_id = "deletePreset",
+    security(("bearerAuth" = [])),
+    params(("id" = Uuid, Path, description = "Preset id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 400, description = "Presets are not enabled on this server")
+    )
+)]
 pub async fn delete_preset(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,

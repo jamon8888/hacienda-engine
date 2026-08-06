@@ -1,0 +1,51 @@
+{
+  "name": "@hacienda-engine/sdk",
+  "version": "0.1.0",
+  "description": "Official TypeScript client for the hacienda-engine PII redaction and compliance API.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "generate": "bash scripts/generate.sh",
+    "prebuild": "npm run generate",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "lint": "eslint . && tsc --noEmit",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "tsc --noEmit",
+    "pretest:unit": "npm run generate",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.13.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.10.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.10.0",
+    "openapi-typescript": "^7.4.0",
+    "prettier": "^3.3.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.8.0",
+    "vitest": "^2.1.0"
+  }
+}

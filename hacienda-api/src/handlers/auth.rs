@@ -15,7 +15,7 @@ use hacienda_core::auth::{Caller, Capability};
 use uuid::Uuid;
 
 use crate::{
-    dto::{AuthConfigResponse, IssueKeyRequest, IssueKeyResponse},
+    dto::{AuthConfigResponse, IssueKeyRequest, IssueKeyResponse, WhoamiResponse},
     error::ApiError,
     extract::Json as SafeJson,
     handlers::{caller_from_arc, extract_auth_context},
@@ -44,6 +44,20 @@ fn require_auth_manage(caller: Caller<'_>) -> Result<(), ApiError> {
 /// Requires `auth:manage`, enforced inside `HaciendaFacade::issue_key_with_auth`. The
 /// raw key is returned once in the response body and is never logged or echoed by any
 /// other endpoint.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/keys",
+    tag = "auth",
+    operation_id = "issueKey",
+    security(("bearerAuth" = [])),
+    request_body = IssueKeyRequest,
+    responses(
+        (status = 200, description = "The issued key; raw_key is shown exactly once", body = IssueKeyResponse),
+        (status = 400, description = "One or more requested capabilities are not recognised"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks auth:manage")
+    )
+)]
 pub async fn issue_key(
     State(state): State<ApiState>,
     parts: Parts,
@@ -92,6 +106,19 @@ pub async fn issue_key(
 /// the in-memory and Postgres `ApiKeyStore` implementations treat revocation as
 /// idempotent, so this always answers 204 rather than leaking whether an id exists —
 /// the same membership-oracle concern `GET /v1/jobs/{id}` documents for job ids.
+#[utoipa::path(
+    delete,
+    path = "/v1/auth/keys/{id}",
+    tag = "auth",
+    operation_id = "revokeKey",
+    security(("bearerAuth" = [])),
+    params(("id" = Uuid, Path, description = "Key id")),
+    responses(
+        (status = 204, description = "Revoked (idempotent — also returned for an unknown id)"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks auth:manage")
+    )
+)]
 pub async fn revoke_key(
     State(state): State<ApiState>,
     parts: Parts,
@@ -125,6 +152,18 @@ pub async fn revoke_key(
 /// `hacienda-core` change, which is out of scope for this endpoint — see the test
 /// `auth_config_resolver_reflects_declared_config_not_the_live_resolver` below, which
 /// demonstrates the gap rather than hiding it.
+#[utoipa::path(
+    get,
+    path = "/v1/auth/config",
+    tag = "auth",
+    operation_id = "getAuthConfig",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Declared auth configuration (no secrets)", body = AuthConfigResponse),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks auth:manage")
+    )
+)]
 pub async fn get_auth_config(
     State(state): State<ApiState>,
     parts: Parts,
@@ -143,6 +182,51 @@ pub async fn get_auth_config(
         enabled: auth_config.enabled,
         resolver: resolver.to_string(),
     }))
+}
+
+/// `GET /v1/auth/whoami` — report the *calling* principal's own granted capabilities.
+///
+/// Unlike `GET /v1/auth/config` (server-wide declared configuration, gated on
+/// `auth:manage`, which most callers do not hold), this reports only what the
+/// presented token itself grants — the self-describing probe a client SDK needs to
+/// adapt its method surface to the tenant, without requiring an elevated capability
+/// just to ask "what can I do." Gated on `documents:process` for now (the capability
+/// nearly every issued key holds, same precedent as presets/RAG/versions/uploads)
+/// rather than left open to any authenticated token with zero capabilities — see the
+/// design-spec correction this addresses: `_resolve_tier`-style capability probing
+/// against `/v1/auth/config` does not work for a normal SDK caller.
+#[utoipa::path(
+    get,
+    path = "/v1/auth/whoami",
+    tag = "auth",
+    operation_id = "getWhoami",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "The calling principal's own granted capabilities", body = WhoamiResponse),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
+pub async fn whoami(parts: Parts) -> Json<WhoamiResponse> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let (principal_id, capabilities) = match caller {
+        Caller::Trusted => (None, Capability::all()),
+        Caller::Principal(auth_ctx) => (
+            Some(auth_ctx.principal_id.clone()),
+            auth_ctx.capabilities.iter().collect(),
+        ),
+    };
+
+    let mut capability_strings: Vec<String> =
+        capabilities.iter().map(ToString::to_string).collect();
+    capability_strings.sort();
+
+    Json(WhoamiResponse {
+        principal_id,
+        capabilities: capability_strings,
+    })
 }
 
 #[cfg(test)]

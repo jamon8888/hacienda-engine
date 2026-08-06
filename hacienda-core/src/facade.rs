@@ -822,6 +822,10 @@ impl HaciendaFacade {
 
         let principal = caller.principal_id().map(str::to_owned);
         let span_hash = blake3::hash(plaintext.as_bytes()).to_hex().to_string();
+        let vertical = self
+            .pii_pipeline
+            .as_ref()
+            .and_then(|p| p.vertical_provenance_id());
 
         let input = AuditEntryInput {
             id: uuid::Uuid::new_v4().to_string(),
@@ -834,6 +838,7 @@ impl HaciendaFacade {
             pipeline_version: PIPELINE_VERSION.to_string(),
             config_hash: String::new(),
             principal,
+            vertical,
         };
 
         Ok(store.append(vec![input]).await?)

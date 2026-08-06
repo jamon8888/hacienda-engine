@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Python and TypeScript SDKs (`sdks/python`, `sdks/typescript`, Phase 14).** Client
+  libraries for the hacienda-engine API, living in this repo (`sdks/`) rather than a
+  separate `hacienda-sdks` repo — the session's GitHub App cannot create repositories, and
+  the monorepo shape turned out simpler regardless: no cross-repo `spec-sync` workflow,
+  since CI builds `hacienda-cli`, starts it, and fetches `/openapi.json` in the same job
+  that generates and tests the client (`sdks/scripts/fetch-openapi.sh`), always against the
+  exact commit under test. Neither package commits generated code (`_generated/` gitignored
+  in both). Python: `HaciendaClient`/`AsyncHaciendaClient` (`openapi-python-client` +
+  `httpx`, `uv`/`ruff`/`mypy`/`pytest`). TypeScript: `HaciendaClient`
+  (`openapi-typescript` types + `openapi-fetch`, joined the existing npm/turbo workspace).
+  Both cover all 44 operations across 14 OpenAPI tags via one namespace per tag
+  (`client.pii.scan_text(...)` / `client.pii.scanText(...)`), a `target: "cloud"` axis
+  (single-variant union, ready for Phase 15's `"device"`), retry-with-backoff on
+  429/502/503/504, and a `.whoami()` shortcut. Every wrapper method routes through the
+  `*_detailed` generated calls and raises a `HaciendaApiError` on any non-2xx response —
+  the plain `sync`/`asyncio` (Python) and openapi-fetch's own `{data, error}` (TypeScript)
+  both collapse errors, including documented 401/403/404/400, into an empty-looking
+  result, which would make an API error indistinguishable from success. 12 pytest + 7
+  vitest tests, all against a live `hacienda serve`, never a mock. New CI:
+  `ci-sdk-python.yaml`, `ci-sdk-typescript.yaml` (triggered on `hacienda-api`/`hacienda-core`
+  changes too, not just `sdks/`, since a schema change must re-run them). `publish-sdk.yaml`
+  scaffolded (PyPI + npm, both OIDC trusted publishing) but not activated — needs
+  org-level trusted-publishing configuration this session cannot provision.
+- **`ReviewDecideRequest.decision` is now a closed enum** (`ReviewDecisionWire`:
+  `approve`/`reject`/`modify`), not a free `String` — the generated OpenAPI schema lists
+  the three valid values instead of an unconstrained string. Found during PR review while
+  building the SDK's generated types.
+- **Compliance/glossary responses use typed envelope DTOs**
+  (`ComplianceDpiaResponse`, `ComplianceReportResponse`, `GlossaryResponse`) instead of
+  bare `serde_json::Value`, so the OpenAPI schema names the stable `report`/`entries` +
+  `audit_chain_tip` shape — the variable report/entry content itself stays opaque
+  (`hacienda-core`'s `ComplianceReport`/`GlossaryEntry` are not `utoipa`-annotated).
+- **Real OpenAPI 3.1 schema for `GET /openapi.json` (Phase 14 precondition).**
+  `hacienda-api`'s OpenAPI document was previously a hand-built stub — one
+  `{"description": "Access: ..."}` object per path, no HTTP methods, no request/response
+  schemas, no `operationId`, nothing an SDK code generator could act on. Adopted `utoipa`
+  (this crate only): `#[derive(ToSchema)]` on all 59 DTOs in `dto.rs`, `#[utoipa::path]`
+  on all 44 route-table handlers, assembled by a new `ApiDoc` in `handlers/openapi.rs`.
+  Verified end-to-end: `openapi-generator-cli generate -g python` and `-g
+  typescript-fetch` against a live instance's `/openapi.json` both produce complete,
+  syntactically valid typed clients (one API module per tag, one model per schema).
+  Foreign types from `hacienda-core`/`hacienda-rag`/`xberg` (e.g. `PiiCategory`,
+  `JobStatus`, `CollectionSpec`, `xberg::LlmConfig`) are represented via `#[schema(value_type
+  = ...)]` overrides (`String` or `serde_json::Value`) rather than adding `utoipa` to those
+  crates. New guard tests in `handlers/openapi.rs`:
+  `openapi_path_set_equals_route_table_minus_openapi_json`,
+  `every_openapi_path_has_at_least_one_typed_operation`,
+  `every_declared_schema_is_present_in_components`.
+- **`GET /v1/auth/whoami`.** Reports the *calling* principal's own granted capabilities.
+  Corrects the platform-parity design spec's §8, which proposed adapting `xberg-sdks`'
+  `_resolve_tier` into a capability probe against `GET /v1/auth/config` — that route
+  requires `Capability::AuthManage`, which a normal SDK caller does not hold, so it
+  cannot serve as a general capability probe. `whoami` is gated on
+  `Capability::DocumentsProcess` instead and returns only the presented token's own
+  grants, with no elevated privilege required to ask "what can I do."
 - **`POST /v1/pii/reveal` endpoint (Phase 8).** Reverses a pseudonym token
   (`[CATEGORY:key_id:base32_ciphertext]`) back to its normalised plaintext.
   Requires `pii:reveal` capability. Writes a `Reveal` audit entry keyed by

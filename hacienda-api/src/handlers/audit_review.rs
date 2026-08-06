@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use crate::{
     dto::{
-        AuditResponse, AuditVerifyResponse, ReviewDecideRequest, ReviewDecideResponse,
-        ReviewResponse,
+        AuditResponse, AuditVerifyResponse, ComplianceDpiaResponse, ComplianceReportResponse,
+        GlossaryResponse, ReviewDecideRequest, ReviewDecideResponse, ReviewResponse,
     },
     error::ApiError,
     extract::Json as SafeJson,
@@ -15,6 +15,14 @@ use crate::{
 };
 
 /// `GET /v1/audit`
+#[utoipa::path(
+    get,
+    path = "/v1/audit",
+    tag = "audit",
+    operation_id = "getAudit",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Audit chain entries", body = AuditResponse))
+)]
 pub async fn get_audit(
     State(state): State<ApiState>,
     parts: Parts,
@@ -39,6 +47,14 @@ pub async fn get_audit(
 }
 
 /// `GET /v1/audit/verify`
+#[utoipa::path(
+    get,
+    path = "/v1/audit/verify",
+    tag = "audit",
+    operation_id = "verifyAudit",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Whether the audit chain verifies", body = AuditVerifyResponse))
+)]
 pub async fn verify_audit(
     State(state): State<ApiState>,
     parts: Parts,
@@ -63,6 +79,14 @@ pub async fn verify_audit(
 }
 
 /// `GET /v1/review`
+#[utoipa::path(
+    get,
+    path = "/v1/review",
+    tag = "review",
+    operation_id = "getReview",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Pending review queue items", body = ReviewResponse))
+)]
 pub async fn get_review(
     State(state): State<ApiState>,
     parts: Parts,
@@ -91,6 +115,21 @@ pub async fn get_review(
 }
 
 /// `POST /v1/review/{id}/decide`
+#[utoipa::path(
+    post,
+    path = "/v1/review/{id}/decide",
+    tag = "review",
+    operation_id = "decideReview",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Review item id")),
+    request_body = ReviewDecideRequest,
+    responses(
+        (status = 200, description = "The decided review item", body = ReviewDecideResponse),
+        (status = 400, description = "Invalid decision or review queue not configured"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks review:decide")
+    )
+)]
 pub async fn decide_review(
     State(state): State<ApiState>,
     parts: Parts,
@@ -108,15 +147,8 @@ pub async fn decide_review(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::invalid_request("review queue not configured"))?;
 
-    let decision = match body.decision.as_str() {
-        "approve" => hacienda_core::review::types::ReviewDecision::Approve,
-        "reject" => hacienda_core::review::types::ReviewDecision::Reject,
-        "modify" => hacienda_core::review::types::ReviewDecision::Modify,
-        _ => return Err(ApiError::invalid_request("invalid decision")),
-    };
-
     let item = queue
-        .decide(&id, decision, &body.reviewer, &body.comment)
+        .decide(&id, body.decision.into(), &body.reviewer, &body.comment)
         .await
         .map_err(ApiError::from)?;
 
@@ -129,10 +161,21 @@ pub async fn decide_review(
 }
 
 /// `GET /v1/compliance/dpia`
+#[utoipa::path(
+    get,
+    path = "/v1/compliance/dpia",
+    tag = "compliance",
+    operation_id = "getComplianceDpia",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "DPIA report", body = ComplianceDpiaResponse),
+        (status = 400, description = "Compliance reporting not configured")
+    )
+)]
 pub async fn get_compliance_dpia(
     State(state): State<ApiState>,
     parts: Parts,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ComplianceDpiaResponse>, ApiError> {
     let _start = Instant::now();
 
     let ctx = extract_auth_context(&parts);
@@ -147,17 +190,33 @@ pub async fn get_compliance_dpia(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
-    Ok(Json(serde_json::json!({
-        "report": report.dpia,
-        "audit_chain_tip": audit_chain_tip,
-    })))
+    let report = serde_json::to_value(report.dpia).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise DPIA report");
+        ApiError::internal()
+    })?;
+
+    Ok(Json(ComplianceDpiaResponse {
+        report,
+        audit_chain_tip,
+    }))
 }
 
 /// `GET /v1/compliance/report`
+#[utoipa::path(
+    get,
+    path = "/v1/compliance/report",
+    tag = "compliance",
+    operation_id = "getComplianceReport",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Full compliance report (model card, DORA, checklist)", body = ComplianceReportResponse),
+        (status = 400, description = "Compliance reporting not configured")
+    )
+)]
 pub async fn get_compliance_report(
     State(state): State<ApiState>,
     parts: Parts,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ComplianceReportResponse>, ApiError> {
     let _start = Instant::now();
 
     let ctx = extract_auth_context(&parts);
@@ -172,17 +231,30 @@ pub async fn get_compliance_report(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
-    Ok(Json(serde_json::json!({
-        "report": report,
-        "audit_chain_tip": audit_chain_tip,
-    })))
+    let report = serde_json::to_value(report).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise compliance report");
+        ApiError::internal()
+    })?;
+
+    Ok(Json(ComplianceReportResponse {
+        report,
+        audit_chain_tip,
+    }))
 }
 
 /// `GET /v1/glossary`
+#[utoipa::path(
+    get,
+    path = "/v1/glossary",
+    tag = "glossary",
+    operation_id = "getGlossary",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Entity glossary snapshot", body = GlossaryResponse))
+)]
 pub async fn get_glossary(
     State(state): State<ApiState>,
     parts: Parts,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<GlossaryResponse>, ApiError> {
     let _start = Instant::now();
 
     let ctx = extract_auth_context(&parts);
@@ -196,8 +268,18 @@ pub async fn get_glossary(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
-    Ok(Json(serde_json::json!({
-        "entries": entries,
-        "audit_chain_tip": audit_chain_tip,
-    })))
+    let entries = entries
+        .into_iter()
+        .map(|e| {
+            serde_json::to_value(e).map_err(|err| {
+                tracing::error!(error = %err, "failed to serialise glossary entry");
+                ApiError::internal()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Json(GlossaryResponse {
+        entries,
+        audit_chain_tip,
+    }))
 }

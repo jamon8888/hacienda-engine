@@ -43,6 +43,20 @@ fn check_batch_size(count: usize, max: usize) -> Result<(), ApiError> {
 }
 
 /// `POST /v1/documents` — synchronous redacted extraction.
+#[utoipa::path(
+    post,
+    path = "/v1/documents",
+    tag = "documents",
+    operation_id = "processDocuments",
+    security(("bearerAuth" = [])),
+    request_body = ProcessDocumentsRequest,
+    responses(
+        (status = 200, description = "Redacted extraction result for each document", body = ProcessDocumentsResponse),
+        (status = 400, description = "Invalid request (bad base64, too many documents, unconfigured versioning)"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
 pub async fn process_documents(
     State(state): State<ApiState>,
     parts: Parts,
@@ -122,6 +136,20 @@ pub async fn process_documents(
 ///
 /// The job runs in a detached tokio task. Jobs die with the process because the
 /// store is in-memory only. A durable backend is Phase 6.
+#[utoipa::path(
+    post,
+    path = "/v1/documents/async",
+    tag = "documents",
+    operation_id = "processDocumentsAsync",
+    security(("bearerAuth" = [])),
+    request_body = ProcessDocumentsRequest,
+    responses(
+        (status = 202, description = "Job accepted; poll GET /v1/jobs/{id}", body = AsyncJobResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
 pub async fn process_documents_async(
     State(state): State<ApiState>,
     parts: Parts,

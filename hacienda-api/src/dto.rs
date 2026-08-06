@@ -13,6 +13,7 @@
 use data_encoding::BASE64;
 use hacienda_core::pii::{EntitySource, MergedEntity, PiiCategory};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 // ── Requests ─────────────────────────────────────────────────────────────────
 
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// "accepted" and invites a follow-up. Rejecting the field says the surface does not
 /// exist, and — more usefully for legitimate clients — a misspelled field becomes an
 /// error rather than a silently ignored setting.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentInput {
     /// Original filename for display purposes only. Never used to open a file.
@@ -54,14 +55,14 @@ impl DocumentInput {
 }
 
 /// Body for `POST /v1/documents` and `POST /v1/documents/async`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessDocumentsRequest {
     pub documents: Vec<DocumentInput>,
 }
 
 /// Body for `POST /v1/pii/scan`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScanTextRequest {
     pub text: String,
@@ -74,14 +75,14 @@ pub struct ScanTextRequest {
 }
 
 /// Body for `POST /v1/pii/redact`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedactTextRequest {
     pub text: String,
 }
 
 /// Body for `POST /v1/pii/reveal`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RevealTokenRequest {
     /// A pseudonym token previously returned by a redaction operation.
@@ -89,17 +90,40 @@ pub struct RevealTokenRequest {
     pub token: String,
 }
 
+/// The decision a reviewer may record for a queued item.
+///
+/// A closed enum, not a free `String`: the OpenAPI schema this derives lists exactly
+/// `["approve", "reject", "modify"]`, so a generated SDK client gets a compile-time-checked
+/// type here instead of an unconstrained string.
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecisionWire {
+    Approve,
+    Reject,
+    Modify,
+}
+
+impl From<ReviewDecisionWire> for hacienda_core::review::types::ReviewDecision {
+    fn from(decision: ReviewDecisionWire) -> Self {
+        match decision {
+            ReviewDecisionWire::Approve => Self::Approve,
+            ReviewDecisionWire::Reject => Self::Reject,
+            ReviewDecisionWire::Modify => Self::Modify,
+        }
+    }
+}
+
 /// Body for `POST /v1/review/{id}/decide`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewDecideRequest {
-    pub decision: String, // "approve", "reject", "modify"
+    pub decision: ReviewDecisionWire,
     pub reviewer: String,
     pub comment: String,
 }
 
 /// Body for `POST /v1/auth/keys`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IssueKeyRequest {
     /// The owning principal for the new key (a service name or user id).
@@ -117,12 +141,14 @@ pub struct IssueKeyRequest {
 /// `text` is `None` unless `include_text` was set to `true` **and** the caller
 /// held `pii:reveal`. The clear-in-core guarantee means this DTO carries whatever
 /// the facade returned — suppression happened upstream.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EntityDto {
+    #[schema(value_type = String)]
     pub category: PiiCategory,
     pub start: u32,
     pub end: u32,
     pub confidence: f32,
+    #[schema(value_type = String)]
     pub source: EntitySource,
     /// Present only when `include_text=true` was granted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,7 +176,7 @@ impl From<MergedEntity> for EntityDto {
 }
 
 /// Response from `POST /v1/pii/scan`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ScanTextResponse {
     pub entities: Vec<EntityDto>,
     pub document_count: u32,
@@ -160,7 +186,7 @@ pub struct ScanTextResponse {
 }
 
 /// Response from `POST /v1/pii/redact`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RedactTextResponse {
     pub redacted_text: String,
     pub entity_count: usize,
@@ -170,7 +196,7 @@ pub struct RedactTextResponse {
 }
 
 /// Response from `POST /v1/pii/reveal`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RevealTokenResponse {
     /// The normalised plaintext value behind the token.
     pub plaintext: String,
@@ -179,7 +205,7 @@ pub struct RevealTokenResponse {
 }
 
 /// A single document's result within a `POST /v1/documents` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentResult {
     /// Redacted content.
     pub content: String,
@@ -195,7 +221,7 @@ pub struct DocumentResult {
 }
 
 /// Response from `POST /v1/documents`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProcessDocumentsResponse {
     pub documents: Vec<DocumentResult>,
     pub processing_time_ms: u64,
@@ -204,15 +230,16 @@ pub struct ProcessDocumentsResponse {
 }
 
 /// Response from `POST /v1/documents/async` (202 Accepted).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AsyncJobResponse {
     pub job_id: String,
 }
 
 /// Response from `GET /v1/jobs/{id}`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct JobResponse {
     pub id: String,
+    #[schema(value_type = String)]
     pub status: hacienda_core::jobs::JobStatus,
     pub created_at: String,
     pub updated_at: String,
@@ -247,10 +274,11 @@ impl From<hacienda_core::jobs::Job> for JobResponse {
 }
 
 /// Query parameters for `GET /v1/jobs`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct JobListQuery {
     /// Filter to jobs in this status. Omit to list all statuses.
     #[serde(default)]
+    #[schema(value_type = Option<String>)]
     pub status: Option<hacienda_core::jobs::JobStatus>,
     /// Maximum jobs to return. Defaults to 50, capped at 200.
     #[serde(default)]
@@ -264,7 +292,7 @@ pub struct JobListQuery {
 ///
 /// `total` is the count of jobs matching `status` (and visible to the caller) before
 /// `limit`/`offset` are applied, so a client can tell whether more pages remain.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct JobListResponse {
     pub jobs: Vec<JobResponse>,
     pub total: usize,
@@ -277,8 +305,9 @@ pub struct JobListResponse {
 /// payload on every poll. This endpoint is for the caller that already knows the job is
 /// (or might be) finished and wants the payload; `GET /v1/jobs/{id}` remains the
 /// lightweight status-only poll.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct JobResultResponse {
+    #[schema(value_type = String)]
     pub status: hacienda_core::jobs::JobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
@@ -287,7 +316,7 @@ pub struct JobResultResponse {
 }
 
 /// Audit entry DTO for wire serialization.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuditEntryDto {
     pub id: String,
     pub category: String,
@@ -333,7 +362,7 @@ impl From<hacienda_core::audit::entry::AuditEntry> for AuditEntryDto {
 }
 
 /// Review item DTO for wire serialization.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ReviewItemDto {
     pub id: String,
     pub text_snippet: String,
@@ -383,28 +412,60 @@ impl From<hacienda_core::review::types::ReviewQueueItem> for ReviewItemDto {
 }
 
 /// Response from `GET /v1/audit`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuditResponse {
     pub entries: Vec<AuditEntryDto>,
     pub audit_chain_tip: Option<String>,
 }
 
 /// Response from `GET /v1/audit/verify`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuditVerifyResponse {
     pub valid: bool,
     pub audit_chain_tip: Option<String>,
 }
 
 /// Response from `GET /v1/review`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ReviewResponse {
     pub items: Vec<ReviewItemDto>,
     pub audit_chain_tip: Option<String>,
 }
 
+/// Response from `GET /v1/compliance/dpia`.
+///
+/// `report` carries `ComplianceReport::dpia` (`hacienda-core`, not `utoipa`-annotated —
+/// see `dto.rs`'s module doc on foreign-type schema overrides) as an opaque object: this
+/// DTO's job is to give the stable envelope (`report` + `audit_chain_tip`) a name in the
+/// generated schema, not to expand the DPIA's own internal shape.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComplianceDpiaResponse {
+    #[schema(value_type = serde_json::Value)]
+    pub report: serde_json::Value,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/compliance/report`. Same envelope-only rationale as
+/// [`ComplianceDpiaResponse`]: `report` is the full `ComplianceReport`, kept opaque.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComplianceReportResponse {
+    #[schema(value_type = serde_json::Value)]
+    pub report: serde_json::Value,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/glossary`. Same envelope-only rationale as
+/// [`ComplianceDpiaResponse`]: each entry is kept opaque (`GlossaryEntry` is not
+/// `utoipa`-annotated), only the envelope shape is named.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GlossaryResponse {
+    #[schema(value_type = Vec<serde_json::Value>)]
+    pub entries: Vec<serde_json::Value>,
+    pub audit_chain_tip: Option<String>,
+}
+
 /// Response from `POST /v1/review/{id}/decide`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ReviewDecideResponse {
     pub item: ReviewItemDto,
     pub audit_chain_tip: Option<String>,
@@ -415,7 +476,7 @@ pub struct ReviewDecideResponse {
 /// `raw_key` appears here exactly once, on issuance. It is never stored (only its
 /// Argon2id hash and BLAKE3 lookup digest are), never logged, and never returned by
 /// any other endpoint — a caller that loses it must revoke and re-issue.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct IssueKeyResponse {
     pub id: uuid::Uuid,
     /// The plaintext key. Shown once; do not log this response.
@@ -429,10 +490,22 @@ pub struct IssueKeyResponse {
 ///
 /// Reports only what is genuinely available today: whether auth is enforced and the
 /// resolver type declared in configuration. Never key material, never issued tokens.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuthConfigResponse {
     pub enabled: bool,
     pub resolver: String,
+}
+
+/// Response from `GET /v1/auth/whoami`.
+///
+/// Reports the *calling* principal's own granted capabilities in wire form
+/// (`Capability::Display`, e.g. `"documents:process"`), sorted for a stable diff.
+/// `principal_id` is `None` for an in-process (`Caller::Trusted`) caller — never
+/// reachable over HTTP, but represented honestly here rather than assumed away.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WhoamiResponse {
+    pub principal_id: Option<String>,
+    pub capabilities: Vec<String>,
 }
 
 /// Response from `GET /v1/pii/config`.
@@ -440,7 +513,7 @@ pub struct AuthConfigResponse {
 /// An explicit allowlist of fields rather than a derived `Serialize` on `PipelineConfig`.
 /// This prevents a newly added field — in particular key material — from being exposed
 /// unintentionally.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PiiConfigResponse {
     pub enabled: bool,
     pub regex_first: bool,
@@ -466,19 +539,19 @@ pub struct PiiConfigResponse {
 }
 
 /// Response from `GET /health`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: &'static str,
 }
 
 /// Response from `GET /version`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct VersionResponse {
     pub version: &'static str,
 }
 
 /// Response from `GET /info`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct InfoResponse {
     pub name: &'static str,
     pub version: &'static str,
@@ -494,24 +567,27 @@ pub struct InfoResponse {
 /// `Serialize`/`Deserialize` and wire-shaped, and hacienda-api adds no
 /// transformation on top of them (unlike `DocumentInput`, which must base64-decode
 /// and construct an `ExtractInput`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpsertDocumentRequest {
+    #[schema(value_type = serde_json::Value)]
     pub document: hacienda_rag::DocumentRecord,
     #[serde(default)]
+    #[schema(value_type = Vec<serde_json::Value>)]
     pub chunks: Vec<hacienda_rag::ChunkRecord>,
 }
 
 /// Response from `POST /v1/rag/collections/{name}/documents`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UpsertDocumentResponse {
+    #[schema(value_type = String)]
     pub document_id: hacienda_rag::DocumentId,
 }
 
 /// Query parameters shared by `GET /v1/rag/collections` and
 /// `GET /v1/rag/collections/{name}/documents`. Each route applies its own
 /// default/cap to `limit` — see `handlers/rag.rs`'s constants.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RagListQuery {
     #[serde(default)]
     pub limit: Option<u32>,
@@ -526,8 +602,9 @@ pub struct RagListQuery {
 /// pushed into the backend (`RagStore::list_collections`) rather than sliced
 /// in-process, since a store that can push `LIMIT`/`OFFSET` into its own
 /// query never has to materialize the full set.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ListCollectionsResponse {
+    #[schema(value_type = Vec<serde_json::Value>)]
     pub collections: Vec<hacienda_rag::CollectionSpec>,
     pub total: u64,
 }
@@ -538,14 +615,15 @@ pub struct ListCollectionsResponse {
 /// equivalent route. `DocumentSummary` is already wire-shaped and this crate
 /// adds no transformation on top of it, same rationale as
 /// `UpsertDocumentRequest` reusing `DocumentRecord`/`ChunkRecord` directly.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ListDocumentsResponse {
+    #[schema(value_type = Vec<serde_json::Value>)]
     pub documents: Vec<hacienda_rag::DocumentSummary>,
     pub total: u64,
 }
 
 /// Body for `POST /v1/rag/collections/{name}/migrate-embeddings`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MigrateEmbeddingsRequest {
     /// Target embedding preset name (e.g. `"balanced"`, `"quality"`).
@@ -559,7 +637,7 @@ pub struct MigrateEmbeddingsRequest {
 }
 
 /// Response from `POST /v1/rag/collections/{name}/migrate-embeddings` (202 Accepted).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MigrateEmbeddingsResponse {
     pub job_id: String,
     /// The collection's `name`, reused as the "collection id". `RagStore` has
@@ -572,6 +650,7 @@ pub struct MigrateEmbeddingsResponse {
     pub to_source: String,
     pub from_version: u32,
     pub to_version: u32,
+    #[schema(value_type = String)]
     pub status: hacienda_core::jobs::JobStatus,
     /// Path the caller should poll for status.
     pub poll: String,
@@ -584,7 +663,7 @@ pub struct MigrateEmbeddingsResponse {
 /// Deserialize is needed alongside Serialize for the same reason as
 /// `DiffLineDto`: this type round-trips through the job store's opaque JSON
 /// field rather than being serialized once for a response body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MigrateProgressDto {
     pub documents_dual_written: u64,
     pub documents_total: u64,
@@ -596,8 +675,9 @@ pub struct MigrateProgressDto {
 }
 
 /// Response from `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MigrateStatusResponse {
+    #[schema(value_type = String)]
     pub status: hacienda_core::jobs::JobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<MigrateProgressDto>,
@@ -617,7 +697,7 @@ pub struct MigrateStatusResponse {
 /// `llm` is `xberg::LlmConfig` reused verbatim (same pattern as
 /// `UpsertDocumentRequest` reusing `DocumentRecord`): it already derives
 /// `Deserialize` and carries no fields this crate needs to hide or transform.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AnswerRequest {
     /// The question sent to the LLM. Redacted for PII before it leaves this
@@ -626,8 +706,10 @@ pub struct AnswerRequest {
     /// Retrieval knobs. `include_content` is forced to `true` by the handler
     /// regardless of what the caller sends: answer synthesis has nothing to
     /// ground on without chunk text.
+    #[schema(value_type = serde_json::Value)]
     pub retrieve: hacienda_rag::RetrieveQuery,
     /// LLM provider/model configuration, passed to `liter-llm` verbatim.
+    #[schema(value_type = serde_json::Value)]
     pub llm: xberg::LlmConfig,
     /// Optional system-prompt override — see
     /// `hacienda_rag::LlmAnswerConfig::system_prompt`.
@@ -638,7 +720,7 @@ pub struct AnswerRequest {
 // ── Presets (`/v1/presets/*`) ────────────────────────────────────────────────
 
 /// Body for `POST /v1/presets`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePresetRequest {
     pub name: String,
@@ -646,7 +728,7 @@ pub struct CreatePresetRequest {
 }
 
 /// Wire shape for a preset, shared by create/get/list responses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PresetResponse {
     pub id: uuid::Uuid,
     pub name: String,
@@ -666,7 +748,7 @@ impl From<hacienda_core::store::postgres::presets::Preset> for PresetResponse {
 }
 
 /// Response from `GET /v1/presets`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PresetListResponse {
     pub presets: Vec<PresetResponse>,
 }
@@ -679,7 +761,7 @@ pub struct PresetListResponse {
 /// `GET /v1/documents/{id}` (latest version), not a bulk listing. A document with many
 /// versions should not force a client to download every redacted body just to see
 /// how many versions exist and when they were created.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentVersionSummaryDto {
     pub version_sequence: i64,
     pub content_hash: String,
@@ -698,7 +780,7 @@ impl From<hacienda_core::store::postgres::versions::DocumentVersion> for Documen
 
 /// Response from `GET /v1/documents/{id}/versions`. Newest first, matching
 /// `DocumentVersionStore::list_versions`'s documented ordering.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentVersionListResponse {
     pub document_id: uuid::Uuid,
     pub versions: Vec<DocumentVersionSummaryDto>,
@@ -706,7 +788,7 @@ pub struct DocumentVersionListResponse {
 
 /// Response from `GET /v1/documents/{id}` — the latest version's full envelope,
 /// extraction result inline (per §4.3 of the platform-parity spec).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentEnvelopeResponse {
     pub document_id: uuid::Uuid,
     pub version_sequence: i64,
@@ -716,7 +798,7 @@ pub struct DocumentEnvelopeResponse {
 }
 
 /// Query parameters for `GET /v1/documents/{id}/diff`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct DocumentDiffQuery {
     pub from: i64,
     pub to: i64,
@@ -727,7 +809,7 @@ pub struct DocumentDiffQuery {
 /// Deserialize is needed alongside Serialize: the async diff fallback round-trips
 /// this through `JobStore`'s `result_json` (`GET /v1/documents/{id}/diff/{diff_job_id}`
 /// parses it back out), not just serializes it once for the response body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DiffLineDto {
     /// `"equal"`, `"insert"`, or `"delete"`.
     pub op: String,
@@ -736,7 +818,7 @@ pub struct DiffLineDto {
 
 /// Response from `GET /v1/documents/{id}/diff` when computed synchronously (the
 /// common case — most diffs are small, per §4.3).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentDiffResponse {
     pub document_id: uuid::Uuid,
     pub from: i64,
@@ -747,7 +829,7 @@ pub struct DocumentDiffResponse {
 /// Response from `GET /v1/documents/{id}/diff` when the 2-second synchronous budget
 /// is exceeded (`202 Accepted`), and from `GET /v1/documents/{id}/diff/{diff_job_id}`
 /// while that job is still running.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DiffJobAcceptedResponse {
     pub diff_job_id: String,
 }
@@ -756,8 +838,9 @@ pub struct DiffJobAcceptedResponse {
 ///
 /// Always `200` while the job exists, mirroring `GET /v1/jobs/{id}/result`: `lines` is
 /// present only once `succeeded`, `error` only once `failed`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DiffJobResultResponse {
+    #[schema(value_type = String)]
     pub status: hacienda_core::jobs::JobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<Vec<DiffLineDto>>,
@@ -772,7 +855,7 @@ pub struct DiffJobResultResponse {
 /// `filename` is metadata only (echoed nowhere yet — no route returns it back), never
 /// the storage key: the key is `upload_id`, generated server-side, so a client can't
 /// steer or collide with another upload's storage path via a crafted filename.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PresignUploadRequest {
     // Accepted so the request shape documents client intent, but deliberately unread by
     // the handler: see the struct doc above.
@@ -786,7 +869,7 @@ pub struct PresignUploadRequest {
 /// `required_headers` must be sent verbatim by the client's `PUT` to `upload_url` — they
 /// are signed into the URL, so an omitted or different header value makes the object
 /// store reject the upload with a signature mismatch, not silently accept it.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PresignUploadResponse {
     pub upload_id: uuid::Uuid,
     pub upload_url: String,
@@ -796,7 +879,7 @@ pub struct PresignUploadResponse {
 }
 
 /// Request body for `POST /v1/uploads/confirm`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ConfirmUploadRequest {
     pub upload_id: uuid::Uuid,
 }
@@ -807,7 +890,7 @@ pub struct ConfirmUploadRequest {
 /// `handlers/uploads.rs::confirm_upload`, which 404s (not 500s) when it doesn't, since an
 /// unconfirmed upload is a client-triggerable condition (called before the `PUT`
 /// finished, or with a stale/wrong `upload_id`), not a backend failure.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ConfirmUploadResponse {
     pub upload_id: uuid::Uuid,
     pub size_bytes: u64,
@@ -819,7 +902,7 @@ pub struct ConfirmUploadResponse {
 
 /// Query parameters for `GET /v1/usage`. Both bounds are optional; an absent bound
 /// leaves that side of the window open (matches `UsageStore::summary`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UsageQuery {
     pub since: Option<chrono::DateTime<chrono::Utc>>,
     pub until: Option<chrono::DateTime<chrono::Utc>>,
@@ -830,7 +913,7 @@ pub struct UsageQuery {
 /// `entity_count` and `byte_count` are the only billable units the audit chain actually
 /// carries — see `hacienda_core::store::postgres::usage`'s module doc for why document
 /// count is not reported here.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UsageRecordDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
@@ -849,7 +932,7 @@ impl From<hacienda_core::store::postgres::usage::UsageRecord> for UsageRecordDto
 }
 
 /// Response body for `GET /v1/usage`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UsageResponse {
     pub records: Vec<UsageRecordDto>,
     #[serde(skip_serializing_if = "Option::is_none")]

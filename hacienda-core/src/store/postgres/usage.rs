@@ -145,6 +145,7 @@ mod tests {
             pipeline_version: "1.0".to_string(),
             config_hash: "cfg".to_string(),
             principal: principal.map(str::to_string),
+            vertical: None,
         }
     }
 

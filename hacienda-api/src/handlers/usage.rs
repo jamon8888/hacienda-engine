@@ -20,6 +20,21 @@ fn require_store(state: &ApiState) -> Result<&Arc<dyn UsageStore>, ApiError> {
 
 /// `GET /v1/usage?since=&until=` — per-principal entity/byte counts over the audit
 /// chain, optionally windowed by `created_at`. Both bounds are optional and independent.
+#[utoipa::path(
+    get,
+    path = "/v1/usage",
+    tag = "usage",
+    operation_id = "getUsage",
+    security(("bearerAuth" = [])),
+    params(
+        ("since" = Option<String>, Query, description = "Window start (RFC 3339), inclusive"),
+        ("until" = Option<String>, Query, description = "Window end (RFC 3339), exclusive")
+    ),
+    responses(
+        (status = 200, description = "Per-principal entity/byte counts", body = UsageResponse),
+        (status = 400, description = "Usage metering is not enabled on this server")
+    )
+)]
 pub async fn get_usage(
     State(state): State<ApiState>,
     Query(query): Query<crate::dto::UsageQuery>,

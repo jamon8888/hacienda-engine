@@ -30,6 +30,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+utoipa = { version = "5.5.0", features = ["axum_extras", "uuid", "chrono"] }
 uuid = { workspace = true }
 # `embedding-presets` is xberg's lightweight, ORT-free feature (`= []`, just
 # unlocks `get_embedding_preset`/`list_embedding_presets`/the real
