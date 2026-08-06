@@ -20,7 +20,7 @@ fn run(args: &[&str]) -> (bool, String) {
 fn should_list_this_phase_s_commands_in_help() {
     let (ok, text) = run(&["--help"]);
     assert!(ok, "`hacienda --help` did not exit 0:\n{text}");
-    for command in ["extract", "scan", "config"] {
+    for command in ["extract", "scan", "config", "audit", "pii"] {
         assert!(
             text.contains(command),
             "--help does not name `{command}`:\n{text}"

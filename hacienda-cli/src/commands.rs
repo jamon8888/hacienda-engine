@@ -1,15 +1,17 @@
 //! Command implementations for the hacienda CLI.
 
-use crate::cli::{ConcurrencyArgs, ExtractArgs, Format, ScanArgs, ServeArgs};
+use crate::cli::{
+    AuditVerifyArgs, ConcurrencyArgs, ExtractArgs, Format, RevealArgs, ScanArgs, ServeArgs,
+};
 use crate::config::load_config;
 use anyhow::{Context, Result};
-use hacienda::audit::{export_json, AuditChain};
-use hacienda::{HaciendaConfig, HaciendaFacade, HaciendaResult};
+use hacienda::audit::{export_json, verify_entries, AuditChain, AuditEntry, GENESIS_HASH};
+use hacienda::{HaciendaConfig, HaciendaError, HaciendaFacade, HaciendaResult};
 use hacienda_api::{ApiLimits, ApiState};
-use hacienda_core::auth::AuthState;
+use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
-use hacienda_core::redaction::RedactionMode;
+use hacienda_core::redaction::{EnvKeyResolver, RedactionMode};
 use hacienda_rag::InMemoryVectorStore;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -19,6 +21,26 @@ use xberg::ExtractInput;
 
 fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
     args.concurrency.unwrap_or_else(num_cpus::get)
+}
+
+/// Build a facade, wiring a pseudonym key resolver only when the effective redaction mode
+/// needs one.
+///
+/// `Pseudonymiser::new` resolves the active key eagerly, so calling `with_key_resolver`
+/// unconditionally would fail every run on a host with no `HACIENDA_PSEUDONYM_ACTIVE_KEY`
+/// set — not just pseudonymize runs. Conditioning on the mode keeps every other mode exactly
+/// as tolerant of a missing key as it already was. There is no CLI/config surface for
+/// retired keys today, so `retired` is always empty.
+fn build_facade(config: HaciendaConfig) -> Result<HaciendaFacade, hacienda::HaciendaError> {
+    let needs_pseudonymiser = config
+        .pii
+        .as_ref()
+        .is_some_and(|p| p.redaction.mode == RedactionMode::Pseudonymize);
+    if needs_pseudonymiser {
+        HaciendaFacade::with_key_resolver(config, &EnvKeyResolver::new(), &[])
+    } else {
+        HaciendaFacade::new(config)
+    }
 }
 
 /// Close `facade`'s stores after `result`, regardless of whether `result` is `Ok`.
@@ -44,6 +66,90 @@ async fn close_after<T>(facade: &HaciendaFacade, result: Result<T>) -> Result<T>
             result
         }
     }
+}
+
+/// Run `hacienda pii reveal <token>`.
+pub async fn run_pii_reveal(
+    args: RevealArgs,
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let config = load_config(config_path, config_json, None, None)?;
+    let facade = Arc::new(
+        HaciendaFacade::with_key_resolver(config, &EnvKeyResolver::new(), &[])
+            .context("no pseudonym key is configured for this process")?,
+    );
+
+    let result = run_pii_reveal_inner(&args, &facade).await;
+    close_after(&facade, result).await
+}
+
+async fn run_pii_reveal_inner(args: &RevealArgs, facade: &HaciendaFacade) -> Result<()> {
+    // Collapsed, mirroring `hacienda-api/src/error.rs`'s `PseudonymError` mapping: never
+    // let the specific variant (malformed token vs. wrong key vs. unknown key id) reach
+    // stderr — a caller probing a token must not learn which guess was closer.
+    let plaintext = match facade
+        .reveal_token_with_auth(Caller::Trusted, &args.token)
+        .await
+    {
+        Ok(text) => text,
+        Err(HaciendaError::Pseudonym(_) | HaciendaError::PiiDisabled) => {
+            anyhow::bail!("invalid pseudonym token");
+        }
+        Err(other) => return Err(other.into()),
+    };
+    let tip = facade.audit_tip().await?;
+
+    match args.format {
+        Format::Json => {
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "plaintext": plaintext,
+                "audit_chain_tip": tip,
+            }))?;
+            println!("{json}");
+        }
+        Format::Text => {
+            println!("{plaintext}");
+            if let Some(tip) = tip {
+                println!("audit_chain_tip: {tip}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run `hacienda audit verify <dir>`.
+///
+/// Pure file I/O — no facade, key resolver, or store involved, so there is nothing for
+/// `close_after` to close. Verifies the flat `audit.json` export `--audit-out` writes; see
+/// `AuditCommand::Verify`'s doc comment for why this is not the segmented `FileAuditStore`
+/// format.
+pub async fn run_audit_verify(args: AuditVerifyArgs) -> Result<()> {
+    let path = args.dir.join("audit.json");
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let entries: Vec<AuditEntry> = serde_json::from_slice(&bytes)
+        .with_context(|| format!("{} is not a valid audit entry array", path.display()))?;
+
+    verify_entries(&entries).context("the audit chain does not verify")?;
+
+    let tip = entries
+        .last()
+        .map(|e| e.chain_hash.clone())
+        .unwrap_or_else(|| GENESIS_HASH.to_string());
+
+    match args.format {
+        Format::Json => {
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "valid": true,
+                "audit_chain_tip": tip,
+            }))?;
+            println!("{json}");
+        }
+        Format::Text => {
+            println!("audit chain OK ({} entries), tip: {tip}", entries.len());
+        }
+    }
+    Ok(())
 }
 
 /// Run `hacienda config show`
@@ -313,7 +419,7 @@ pub async fn run_scan(
     // still decompose into several documents (e.g. a multi-page PDF).
     pii_config.concurrency = parse_concurrency(&args.concurrency);
 
-    let facade = Arc::new(HaciendaFacade::new(HaciendaConfig {
+    let facade = Arc::new(build_facade(HaciendaConfig {
         extraction: config.extraction,
         pii: Some(pii_config),
         compliance: config.compliance,
@@ -367,6 +473,11 @@ async fn run_scan_inputs(args: &ScanArgs, facade: &HaciendaFacade) -> Result<()>
             }
         }
     }
+
+    if let Some(glossary_out) = &args.glossary_out {
+        write_glossary(facade, glossary_out).await?;
+    }
+
     Ok(())
 }
 
@@ -432,7 +543,7 @@ pub async fn run_extract(
         }
     }
 
-    let facade = Arc::new(HaciendaFacade::new(HaciendaConfig {
+    let facade = Arc::new(build_facade(HaciendaConfig {
         extraction: config.extraction,
         pii: pii_config,
         compliance: config.compliance,
@@ -511,6 +622,10 @@ async fn run_extract_inputs(
     if let Some(vault_dir) = &args.vault {
         write_vault(args, facade, &args.inputs, &all_results, vault_dir).await?;
         eprintln!("hacienda: wrote vault to {}", vault_dir.display());
+    }
+
+    if let Some(glossary_out) = &args.glossary_out {
+        write_glossary(facade, glossary_out).await?;
     }
 
     Ok(())
@@ -672,6 +787,27 @@ async fn write_audit_chain(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
     let out_path = dir.join("audit.json");
     std::fs::write(&out_path, bytes)
         .with_context(|| format!("writing audit chain to {}", out_path.display()))?;
+
+    Ok(())
+}
+
+/// Write this run's entity glossary to `<dir>/glossary.json`.
+///
+/// `EntityGlossary` lives only inside the facade that processed these inputs — there is
+/// nothing durable to reread later, which is why `--glossary-out` is a flag on
+/// `extract`/`scan` rather than a standalone command. Entries are
+/// `{category, term, count, mean_confidence}`, never document text.
+async fn write_glossary(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
+    let entries = facade
+        .glossary_snapshot_with_auth(Caller::Trusted)
+        .await
+        .context("reading this run's glossary snapshot")?;
+
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating glossary output directory {}", dir.display()))?;
+    let out_path = dir.join("glossary.json");
+    std::fs::write(&out_path, serde_json::to_vec_pretty(&entries)?)
+        .with_context(|| format!("writing glossary to {}", out_path.display()))?;
 
     Ok(())
 }
