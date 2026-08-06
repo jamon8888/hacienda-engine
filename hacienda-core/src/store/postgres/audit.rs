@@ -108,7 +108,14 @@ impl AuditStore for PostgresAuditStore {
         limit: usize,
     ) -> Result<AuditPage, AuditError> {
         // Build extents: sealed segments (oldest first), then the open segment
-        let sealed_extents = sqlx::query!(
+        #[derive(sqlx::FromRow)]
+        struct ExtentRow {
+            segment_id: Uuid,
+            entry_count: i64,
+        }
+
+        let sealed_extents: Vec<ExtentRow> = sqlx::query_as!(
+            ExtentRow,
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
@@ -120,12 +127,13 @@ impl AuditStore for PostgresAuditStore {
         .await?;
 
         let mut extents = Vec::with_capacity(sealed_extents.len() + 1);
-        for row in sealed_extents {
+        for row in &sealed_extents {
             extents.push((row.segment_id.to_string(), row.entry_count as u64));
         }
 
         // Add open segment
-        let open_row = sqlx::query!(
+        let open_row: Option<ExtentRow> = sqlx::query_as!(
+            ExtentRow,
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
