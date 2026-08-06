@@ -86,3 +86,13 @@ pub enum AuditError {
     #[error("audit backend error: {0}")]
     Backend(String),
 }
+
+/// Lets Postgres backend code use `?` directly on `sqlx::Error` instead of a
+/// `.map_err(...)` at every call site. Gated behind the `postgres` feature so this
+/// crate's non-Postgres consumers never pull in `sqlx` just for this impl.
+#[cfg(feature = "postgres")]
+impl From<sqlx::Error> for AuditError {
+    fn from(e: sqlx::Error) -> Self {
+        AuditError::Backend(e.to_string())
+    }
+}

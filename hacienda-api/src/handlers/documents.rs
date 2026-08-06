@@ -43,6 +43,20 @@ fn check_batch_size(count: usize, max: usize) -> Result<(), ApiError> {
 }
 
 /// `POST /v1/documents` — synchronous redacted extraction.
+#[utoipa::path(
+    post,
+    path = "/v1/documents",
+    tag = "documents",
+    operation_id = "processDocuments",
+    security(("bearerAuth" = [])),
+    request_body = ProcessDocumentsRequest,
+    responses(
+        (status = 200, description = "Redacted extraction result for each document", body = ProcessDocumentsResponse),
+        (status = 400, description = "Invalid request (bad base64, too many documents, unconfigured versioning)"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
 pub async fn process_documents(
     State(state): State<ApiState>,
     parts: Parts,
@@ -52,6 +66,14 @@ pub async fn process_documents(
 
     // Enforce document count limit before decoding content.
     check_batch_size(body.documents.len(), state.limits.max_documents)?;
+
+    // Fail fast: a `document_id` on any input requires a configured version store,
+    // checked before any extraction work runs rather than partway through the batch.
+    if body.documents.iter().any(|d| d.document_id.is_some()) && state.version_store.is_none() {
+        return Err(ApiError::invalid_request(
+            "Document versioning is not enabled on this server.",
+        ));
+    }
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -70,16 +92,38 @@ pub async fn process_documents(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
-    let documents: Vec<DocumentResult> = result
-        .extraction
-        .results
-        .into_iter()
+    let mut documents: Vec<DocumentResult> = Vec::with_capacity(result.extraction.results.len());
+    for ((input, doc), pii) in body
+        .documents
+        .iter()
+        .zip(result.extraction.results)
         .zip(result.pii)
-        .map(|(doc, pii)| DocumentResult {
+    {
+        let (document_id, version_sequence) = if let Some(document_id) = input.document_id {
+            // Checked above: version_store is Some whenever any document_id is set.
+            let store = state
+                .version_store
+                .as_ref()
+                .expect("version_store checked present above");
+            let content_hash = blake3::hash(doc.content.as_bytes()).to_hex().to_string();
+            let entities_json =
+                serde_json::to_value(&pii.entities).unwrap_or_else(|_| serde_json::json!([]));
+            let version_sequence = store
+                .create_version(document_id, &content_hash, &doc.content, entities_json)
+                .await
+                .map_err(ApiError::from)?;
+            (Some(document_id), Some(version_sequence))
+        } else {
+            (None, None)
+        };
+
+        documents.push(DocumentResult {
             content: doc.content,
             entities: pii.entities.into_iter().map(EntityDto::from).collect(),
-        })
-        .collect();
+            document_id,
+            version_sequence,
+        });
+    }
 
     Ok(Json(ProcessDocumentsResponse {
         documents,
@@ -92,6 +136,20 @@ pub async fn process_documents(
 ///
 /// The job runs in a detached tokio task. Jobs die with the process because the
 /// store is in-memory only. A durable backend is Phase 6.
+#[utoipa::path(
+    post,
+    path = "/v1/documents/async",
+    tag = "documents",
+    operation_id = "processDocumentsAsync",
+    security(("bearerAuth" = [])),
+    request_body = ProcessDocumentsRequest,
+    responses(
+        (status = 202, description = "Job accepted; poll GET /v1/jobs/{id}", body = AsyncJobResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
 pub async fn process_documents_async(
     State(state): State<ApiState>,
     parts: Parts,

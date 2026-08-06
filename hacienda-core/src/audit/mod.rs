@@ -11,7 +11,6 @@
 // `Cargo.toml`), and neither `chain` nor `store` ever needed anything wasm32-incompatible
 // in the first place.
 pub mod chain;
-pub mod cursor;
 pub mod entry;
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,18 +24,13 @@ pub mod store_file;
 #[cfg(target_arch = "wasm32")]
 pub mod store_idb;
 
-pub use chain::{AuditChain, GENESIS_HASH};
-pub use cursor::{AuditCursor, AuditPage};
+pub use chain::{verify_entries, AuditChain, GENESIS_HASH};
 pub use entry::{
     compute_chain_hash, AuditEntry, AuditEntryInput, ChainHashFields, EntitySource, RedactionAction,
 };
 pub use error::AuditError;
 #[cfg(not(target_arch = "wasm32"))]
-pub use export::{
-    evidence_envelope, export, export_csv, export_json, export_json_lines, export_store,
-    export_store_csv, write_evidence_json_lines, EvidenceEnvelope, EvidenceHeader, EvidenceSegment,
-    ExportFormat, EVIDENCE_ENVELOPE_VERSION,
-};
+pub use export::{export, export_csv, export_json, export_json_lines, ExportFormat};
 pub use segment::{compute_seal_hash, verify_seal_chain, NodeId, Segment, SegmentSeal};
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(deprecated)]

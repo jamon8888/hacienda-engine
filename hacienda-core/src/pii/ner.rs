@@ -11,13 +11,42 @@ use xberg::text::ner::NerBackend;
 use xberg::types::entity::{Entity, EntityCategory};
 
 /// Categories requested from the backend when a caller does not narrow the set.
-const DEFAULT_CATEGORIES: &[EntityCategory] = &[
+///
+/// `pub(crate)` rather than private: `pipeline::load_detector`'s `ner-candle` arm needs
+/// to *extend* this set with a configured vertical's labels rather than replace it —
+/// see [`categories_with_vertical`].
+pub(crate) const DEFAULT_CATEGORIES: &[EntityCategory] = &[
     EntityCategory::Person,
     EntityCategory::Organization,
     EntityCategory::Location,
     EntityCategory::Email,
     EntityCategory::Phone,
 ];
+
+/// [`DEFAULT_CATEGORIES`], extended with `vertical`'s labels as `EntityCategory::Custom`
+/// entries when one is configured.
+///
+/// The base five are always kept: a vertical only adds detectable labels, it never
+/// narrows what the base pipeline finds — a finance vertical must still find people.
+/// This is a free function rather than inline in `pipeline::load_detector` so the
+/// "extend, don't replace" behaviour can be unit-tested directly, without a real model
+/// directory: `load_detector`'s `ner-candle` arm is gated on `not(target_arch =
+/// "wasm32")` and needs real weights on disk to run at all, which this workspace's test
+/// sandbox does not have.
+///
+/// `cfg`-gated to match its only callers (`load_detector`'s `ner-candle` arm, and
+/// tests) — without this, a default-feature (`ner-candle` off) non-test build of
+/// `hacienda-core` sees no caller at all and emits a `dead_code` warning.
+#[cfg(any(test, all(feature = "ner-candle", not(target_arch = "wasm32"))))]
+pub(crate) fn categories_with_vertical(
+    vertical: Option<&crate::pii::config::VerticalConfig>,
+) -> Vec<EntityCategory> {
+    let mut categories = DEFAULT_CATEGORIES.to_vec();
+    if let Some(vertical) = vertical {
+        categories.extend(vertical.labels.iter().cloned().map(EntityCategory::Custom));
+    }
+    categories
+}
 
 /// Runs an xberg NER backend and maps its entities into pipeline spans.
 pub struct NerDetector {
@@ -252,5 +281,78 @@ mod tests {
             to_pii_category(&EntityCategory::Custom("EmployeeId".into())),
             PiiCategory::Custom("EmployeeId".into())
         );
+    }
+
+    #[test]
+    fn should_extend_base_categories_with_vertical_labels() {
+        let vertical = crate::pii::config::VerticalConfig {
+            id: "finance".into(),
+            labels: vec!["swift_code".into(), "account_number".into()],
+        };
+        let categories = categories_with_vertical(Some(&vertical));
+
+        for base in DEFAULT_CATEGORIES {
+            assert!(
+                categories.contains(base),
+                "extending must keep base category {base:?}"
+            );
+        }
+        for label in &vertical.labels {
+            assert!(
+                categories.contains(&EntityCategory::Custom(label.clone())),
+                "missing vertical label {label}"
+            );
+        }
+        assert_eq!(
+            categories.len(),
+            DEFAULT_CATEGORIES.len() + vertical.labels.len(),
+            "vertical labels must be additive, not a replacement"
+        );
+    }
+
+    #[test]
+    fn should_return_the_base_categories_unchanged_when_no_vertical_is_configured() {
+        assert_eq!(categories_with_vertical(None), DEFAULT_CATEGORIES.to_vec());
+    }
+
+    #[tokio::test]
+    async fn should_map_a_vertical_label_to_a_custom_pii_category() {
+        let detected = detector(vec![entity(
+            EntityCategory::Custom("swift_code".into()),
+            "BOFAUS3N",
+            0,
+            Some(0.9),
+        )])
+        .with_categories(vec![EntityCategory::Custom("swift_code".into())])
+        .detect("BOFAUS3N")
+        .await
+        .unwrap();
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(
+            detected[0].category,
+            PiiCategory::Custom("swift_code".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn should_map_an_aliased_vertical_label_to_its_taxonomy_category() {
+        // A vertical author who names a label "iban" collides with `to_pii_category`'s
+        // alias table and gets `PiiCategory::Iban`, not `Custom("iban")`. Documented as
+        // a footgun on `VerticalConfig`.
+        let detected = detector(vec![entity(
+            EntityCategory::Custom("iban".into()),
+            "FR7630006000011234567890189",
+            0,
+            Some(0.9),
+        )])
+        .with_categories(vec![EntityCategory::Custom("iban".into())])
+        .detect("FR7630006000011234567890189")
+        .await
+        .unwrap();
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].category, PiiCategory::Iban);
+        assert_ne!(detected[0].category, PiiCategory::Custom("iban".into()));
     }
 }

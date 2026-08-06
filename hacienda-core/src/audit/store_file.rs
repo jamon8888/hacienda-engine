@@ -1109,6 +1109,7 @@ mod tests {
             pipeline_version: "1.0".into(),
             config_hash: CONFIG.into(),
             principal: None,
+            vertical: None,
         }
     }
 

@@ -5,6 +5,7 @@ import { ProgressBar } from "./components/ProgressBar";
 import { PiiPanel } from "./components/PiiPanel";
 import { MarkdownEditor } from "./components/MarkdownEditor";
 import { FileBrowser, buildFileRows } from "./components/FileBrowser";
+import { FileUpload } from "./components/extend/file-upload";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import { renderAnnotatedMarkdown } from "./lib/annotate";
@@ -101,7 +102,6 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -180,9 +180,16 @@ export function App() {
           break;
         case "batch-complete":
           downloadZip(data.zip);
+          // Clears the per-file progress bars (`progress` empty ⇒ `update` is undefined ⇒
+          // each renders null) once the batch settles. Deliberately does NOT clear `files`
+          // too: `files` also drives `FileBrowser`'s per-file row list (Track I3), which is
+          // meant to persist — same as `results`, which is never cleared — so a user can
+          // still see and edit a file's findings (Track I4) after this 1s delay. Clearing
+          // `files` here used to make the FileBrowser row (and its `.file-edited-badge`)
+          // disappear ~1s after upload, even while the "Processed this batch" edit UI below
+          // stayed mounted and functional — a real bug, not a test-timing issue.
           setTimeout(() => {
             setProgress(new Map());
-            setFiles([]);
           }, 1000);
           break;
         case "error":
@@ -265,16 +272,6 @@ export function App() {
     });
   }
 
-  function onDrop(event: React.DragEvent): void {
-    event.preventDefault();
-    if (!workerReady) return;
-    if (event.dataTransfer?.files) handleFiles(event.dataTransfer.files);
-  }
-
-  function onDragOver(event: React.DragEvent): void {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-  }
 
   function toggleFolderMode(event: React.MouseEvent): void {
     event.preventDefault();
@@ -397,45 +394,28 @@ export function App() {
       )}
 
       <main className="mx-auto w-full max-w-[800px] flex-1 px-6 py-12">
-        <section
-          className="drop-zone cursor-pointer rounded-xl border-2 border-dashed border-border bg-card p-16 text-center transition-colors hover:border-primary"
-          role="group"
-          aria-label="Upload documents"
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
+        <section aria-label="Upload documents">
+          <FileUpload
+            className="drop-zone"
             id="file-input"
-            multiple
             disabled={!workerReady}
+            multiple
+            filterAccept={false}
+            showFileList={false}
+            showBorderBeam={workerReady}
+            webkitdirectory={folderMode}
             accept={folderMode ? undefined : UPLOAD_ACCEPT}
-            className="absolute h-px w-px overflow-hidden opacity-0"
-            style={{ zIndex: -1 }}
-            aria-label={folderMode ? "Choose a folder" : "Choose files"}
-            onChange={(e) => {
-              const list = e.target.files;
-              if (list) handleFiles(list);
-              e.target.value = "";
-            }}
-            {...(folderMode ? { webkitdirectory: "" } : {})}
-          />
-          <label htmlFor="file-input" className="block cursor-pointer">
-            <span aria-hidden="true" className="mb-2 block text-5xl">
-              {folderMode ? "📁" : "📄"}
-            </span>
-            <p className="mb-1 text-muted-foreground">
-              {workerReady
+            inputAriaLabel={folderMode ? "Choose a folder" : "Choose files"}
+            title={
+              workerReady
                 ? folderMode
                   ? "Drop a folder here or click to browse"
                   : "Drop files here or click to browse"
-                : "Starting the local engine…"}
-            </p>
-            <p className="text-sm text-muted-foreground">
-              PDF, Office, Email, Images, Audio/Video, Subtitles, Code — up to 50MB each
-            </p>
-          </label>
+                : "Starting the local engine…"
+            }
+            description="PDF, Office, Email, Images, Audio/Video, Subtitles, Code — up to 50MB each"
+            onFilesAccepted={(accepted) => handleFiles(accepted)}
+          />
           <button
             type="button"
             className="mode-toggle mx-auto mt-4 block bg-transparent text-xs text-muted-foreground underline hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"

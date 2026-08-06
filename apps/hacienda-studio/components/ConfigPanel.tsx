@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import type { AppConfig, NerCategory } from "../lib/types";
 
 // Only categories the engine's vocabulary accepts and the worker's NER bridge actually
@@ -81,6 +82,19 @@ export function ConfigPanel({
   onChange: (config: AppConfig) => void;
   onDone: () => void;
 }) {
+  // Plain `role="dialog"` div (see components/ui/README.md — this app hasn't adopted the
+  // @base-ui/react Dialog hacienda-private now uses), so it gets none of a real Dialog
+  // primitive's behavior for free: nothing was listening for Escape at all, so the panel
+  // stayed open and covering the right side of the screen for the rest of a session (this
+  // is what tests/e2e's `page.keyboard.press("Escape")` calls were quietly relying on).
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") onDone();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onDone]);
+
   const toggleCategory = (key: NerCategory) => {
     const has = config.nerCategories.includes(key);
     onChange({

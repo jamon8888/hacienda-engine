@@ -52,6 +52,8 @@ pub mod pii;
 pub mod redaction;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod review;
+#[cfg(all(any(feature = "postgres", feature = "s3"), not(target_arch = "wasm32")))]
+pub mod store;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use auth::{AuthContext, AuthzError, Caller, Capability, CapabilitySet};

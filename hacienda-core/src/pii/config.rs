@@ -4,7 +4,17 @@ use crate::audit::AuditConfig;
 use crate::pii::PiiError;
 use crate::redaction::{RedactionConfig, RedactionMode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+/// Length, in hex characters, of the digest suffix in [`VerticalConfig::provenance_id`].
+const PROVENANCE_DIGEST_LEN: usize = 8;
+
+/// Base NER categories every pipeline already requests, regardless of vertical —
+/// see [`crate::pii::ner::DEFAULT_CATEGORIES`]. A vertical label that
+/// case-insensitively duplicates one of these asks the model for the same concept
+/// twice under two different category representations.
+const BASE_CATEGORY_NAMES: [&str; 5] = ["person", "organization", "location", "email", "phone"];
 
 /// Effective configuration for one [`crate::pii::PiiPipeline`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +38,17 @@ pub struct PipelineConfig {
     /// `HaciendaResult::pii`) and every document is still audited and reviewed exactly
     /// once, regardless of completion order.
     pub concurrency: usize,
+    /// The Tier 0 schema vertical bound to this pipeline, if any.
+    ///
+    /// `None` (the default) is a strict no-op: nothing about detection changes unless
+    /// an operator explicitly writes a `[pii.vertical]` section. See
+    /// `superpowers/specs/2026-07-31-vertical-model-specialisation-design.md` §4.1 and
+    /// [`VerticalConfig`].
+    ///
+    /// There is deliberately no `verticals` array or selector — one optional vertical,
+    /// bound at pipeline construction. A registry is premature abstraction at N=1; see
+    /// the implementation plan's "Explicit Non-Goals".
+    pub vertical: Option<VerticalConfig>,
 }
 
 impl Default for PipelineConfig {
@@ -40,7 +61,136 @@ impl Default for PipelineConfig {
             audit: AuditConfig::default(),
             model: ModelConfig::default(),
             concurrency: 1,
+            vertical: None,
         }
+    }
+}
+
+/// A Tier 0 "schema vertical": a named set of zero-shot labels handed to the NER
+/// backend *in addition to* the base categories (`Person`, `Organization`, `Location`,
+/// `Email`, `Phone`). No weights are loaded and no model is reloaded — a vertical is
+/// arguments to an inference call, nothing more. See
+/// `superpowers/specs/2026-07-31-vertical-model-specialisation-design.md` §4.1.
+///
+/// # Footgun: the alias-table collision
+///
+/// [`crate::pii::ner::to_pii_category`] maps some `Custom` label strings onto existing
+/// [`crate::pii::PiiCategory`] variants *before* they would otherwise become
+/// `PiiCategory::Custom(label)` — for example the label `"iban"` (case-insensitively)
+/// becomes [`crate::pii::PiiCategory::Iban`], not `Custom("iban")`. A vertical author
+/// who picks a label that happens to collide with that alias table gets the aliased
+/// category's downstream behaviour (its pseudonym token name, its place in exports,
+/// its interaction with other detectors) instead of a bespoke `Custom` category. This
+/// is deliberate for the *known* aliases (a vertical calling something `"iban"` should
+/// get real IBAN handling) but is easy to trip over by accident with a near-miss label
+/// (`"iban_number"` does *not* alias and stays `Custom("iban_number")`). Check
+/// `to_pii_category`'s alias table before choosing a label if the distinction matters
+/// to you.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerticalConfig {
+    /// Stable identifier recorded in the audit chain.
+    pub id: String,
+    /// Zero-shot labels handed to the NER backend in addition to the base categories.
+    pub labels: Vec<String>,
+}
+
+impl VerticalConfig {
+    /// Validate this vertical's shape.
+    ///
+    /// Checks, independent of redaction mode and of whether a model is actually
+    /// loaded: `id` is non-empty, has no leading/trailing whitespace, and does not
+    /// contain `@` (reserved as [`Self::provenance_id`]'s separator); `labels` is
+    /// non-empty; every label is non-empty after trimming and has no leading/trailing
+    /// whitespace of its own (an untrimmed label would otherwise pass this check but
+    /// flow untrimmed into detection and `provenance_id`'s hash input); no label
+    /// contains `[`, `:`, or `]` (mirroring
+    /// [`crate::redaction::pseudonym::category_label`], since a vertical label that
+    /// cannot be pseudonymised is a configuration error regardless of the configured
+    /// redaction mode); no label case-insensitively duplicates a base NER category
+    /// name (`person`, `organization`, `location`, `email`, `phone` — already
+    /// requested by default, see [`crate::pii::ner::DEFAULT_CATEGORIES`]); and no two
+    /// labels are equal after case-folding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiiError::InvalidVertical`] naming this vertical's `id` and the first
+    /// reason it failed.
+    pub fn validate(&self) -> Result<(), PiiError> {
+        let fail = |reason: String| {
+            Err(PiiError::InvalidVertical {
+                id: self.id.clone(),
+                reason,
+            })
+        };
+
+        if self.id.trim().is_empty() {
+            return fail("id must not be empty".to_string());
+        }
+        if self.id.trim() != self.id {
+            return fail("id must not have leading or trailing whitespace".to_string());
+        }
+        if self.id.contains('@') {
+            return fail(
+                "id must not contain '@' (reserved as the provenance id separator)".to_string(),
+            );
+        }
+        if self.labels.is_empty() {
+            return fail("labels must not be empty".to_string());
+        }
+
+        let mut seen = HashSet::new();
+        for label in &self.labels {
+            let trimmed = label.trim();
+            if trimmed.is_empty() {
+                return fail(format!("label {label:?} is empty after trimming"));
+            }
+            if trimmed.contains('[') || trimmed.contains(':') || trimmed.contains(']') {
+                return fail(format!(
+                    "label {trimmed:?} contains a token delimiter ('[', ':' or ']')"
+                ));
+            }
+            if trimmed != label {
+                return fail(format!(
+                    "label {label:?} has leading or trailing whitespace; trim it before configuring"
+                ));
+            }
+            if BASE_CATEGORY_NAMES.contains(&trimmed.to_ascii_lowercase().as_str()) {
+                return fail(format!(
+                    "label {trimmed:?} duplicates a base NER category name ({BASE_CATEGORY_NAMES:?}); \
+                     it is already requested by default and does not need a vertical label"
+                ));
+            }
+            if !seen.insert(trimmed.to_ascii_lowercase()) {
+                return fail(format!(
+                    "label {trimmed:?} duplicates another label (case-insensitively)"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The value recorded in the audit chain for detections this vertical produced.
+    ///
+    /// `"<id>@<first 8 hex of blake3 over the sorted, case-folded label set>"`, e.g.
+    /// `finance@3f9a1c02`. An id alone would be a false provenance claim: the same id
+    /// with a different label set detects different things, and the audit record's job
+    /// is to say what *was* detectable at the time. Sorting and case-folding the labels
+    /// before hashing makes the digest stable under reordering or a stray case change
+    /// in config, while still changing whenever the actual label *set* changes — see
+    /// [`AuditEntry::vertical`](crate::audit::AuditEntry::vertical).
+    pub fn provenance_id(&self) -> String {
+        let mut labels: Vec<String> = self.labels.iter().map(|l| l.to_ascii_lowercase()).collect();
+        labels.sort();
+        let mut hasher = blake3::Hasher::new();
+        for label in &labels {
+            hasher.update(label.as_bytes());
+            // A separator so ["ab", "c"] and ["a", "bc"] hash differently.
+            hasher.update(b"\0");
+        }
+        let digest = hasher.finalize().to_hex();
+        format!("{}@{}", self.id, &digest[..PROVENANCE_DIGEST_LEN])
     }
 }
 
@@ -137,6 +287,185 @@ mod tests {
             config.concurrency, 1,
             "default concurrency must preserve the original sequential behaviour"
         );
+        assert!(
+            config.vertical.is_none(),
+            "no vertical is active until an operator opts in"
+        );
+    }
+
+    fn finance_vertical() -> VerticalConfig {
+        VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "account_number".to_string()],
+        }
+    }
+
+    #[test]
+    fn should_accept_a_well_formed_vertical() {
+        finance_vertical().validate().unwrap();
+    }
+
+    #[test]
+    fn should_reject_a_vertical_with_an_empty_id() {
+        let vertical = VerticalConfig {
+            id: String::new(),
+            ..finance_vertical()
+        };
+        let error = vertical.validate().unwrap_err();
+        assert!(matches!(error, PiiError::InvalidVertical { .. }));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_with_no_labels() {
+        let vertical = VerticalConfig {
+            labels: Vec::new(),
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_with_a_blank_label() {
+        let vertical = VerticalConfig {
+            labels: vec!["   ".to_string()],
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_label_containing_a_token_delimiter() {
+        for bad in ["swift[code", "swift:code", "swift]code"] {
+            let vertical = VerticalConfig {
+                labels: vec![bad.to_string()],
+                ..finance_vertical()
+            };
+            let error = vertical.validate().unwrap_err();
+            assert!(
+                matches!(error, PiiError::InvalidVertical { .. }),
+                "label {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_a_vertical_label_with_leading_or_trailing_whitespace() {
+        let vertical = VerticalConfig {
+            labels: vec![" swift_code ".to_string()],
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_label_that_duplicates_a_base_category_name() {
+        for base in ["person", "Organization", "LOCATION", "email", "Phone"] {
+            let vertical = VerticalConfig {
+                labels: vec![base.to_string()],
+                ..finance_vertical()
+            };
+            let error = vertical.validate().unwrap_err();
+            assert!(
+                matches!(error, PiiError::InvalidVertical { .. }),
+                "label {base:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_a_vertical_id_with_leading_or_trailing_whitespace() {
+        let vertical = VerticalConfig {
+            id: " finance ".to_string(),
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_a_vertical_id_containing_at_sign() {
+        let vertical = VerticalConfig {
+            id: "finance@prod".to_string(),
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_reject_duplicate_labels_after_case_folding() {
+        let vertical = VerticalConfig {
+            labels: vec!["Swift_Code".to_string(), "swift_code".to_string()],
+            ..finance_vertical()
+        };
+        assert!(matches!(
+            vertical.validate(),
+            Err(PiiError::InvalidVertical { .. })
+        ));
+    }
+
+    #[test]
+    fn should_produce_a_stable_provenance_id_regardless_of_label_order() {
+        let a = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "account_number".to_string()],
+        };
+        let b = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["account_number".to_string(), "swift_code".to_string()],
+        };
+        assert_eq!(a.provenance_id(), b.provenance_id());
+    }
+
+    #[test]
+    fn should_produce_a_stable_provenance_id_regardless_of_label_case() {
+        let a = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["Swift_Code".to_string(), "Account_Number".to_string()],
+        };
+        let b = VerticalConfig {
+            id: "finance".to_string(),
+            labels: vec!["swift_code".to_string(), "account_number".to_string()],
+        };
+        assert_eq!(a.provenance_id(), b.provenance_id());
+    }
+
+    #[test]
+    fn should_change_the_provenance_id_when_a_label_is_added() {
+        let base = finance_vertical();
+        let mut extended = base.clone();
+        extended.labels.push("routing_number".to_string());
+        assert_ne!(base.provenance_id(), extended.provenance_id());
+    }
+
+    #[test]
+    fn should_prefix_the_provenance_id_with_the_vertical_id() {
+        let vertical = finance_vertical();
+        let provenance = vertical.provenance_id();
+        assert!(
+            provenance.starts_with("finance@"),
+            "expected a `finance@<digest>` provenance id, got {provenance:?}"
+        );
+        let digest = provenance.strip_prefix("finance@").unwrap();
+        assert_eq!(
+            digest.len(),
+            PROVENANCE_DIGEST_LEN,
+            "digest must be the first PROVENANCE_DIGEST_LEN hex chars"
+        );
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

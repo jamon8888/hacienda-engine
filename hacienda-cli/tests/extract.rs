@@ -195,7 +195,10 @@ fn should_write_a_vault_with_a_redacted_document_and_pii_registry() {
     assert!(ok, "`extract --vault` did not exit 0:\n{text}");
     eprintln!("stderr/stdout was: {text}");
 
-    let doc_path = vault_dir.path().join("documents").join(format!("{stem}.md"));
+    let doc_path = vault_dir
+        .path()
+        .join("documents")
+        .join(format!("{stem}.md"));
     let markdown = std::fs::read_to_string(&doc_path)
         .unwrap_or_else(|e| panic!("vault document was not written at {doc_path:?}: {e}"));
     assert!(

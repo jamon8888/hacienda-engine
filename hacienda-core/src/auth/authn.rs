@@ -1,6 +1,7 @@
 //! Authentication (authn) — token validation and principal resolution.
 
-use crate::auth::{AuthContext, AuthzError, Capability, CapabilitySet};
+use crate::auth::keys;
+use crate::auth::{ApiKeyStore, AuthContext, AuthzError, Capability, CapabilitySet};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -191,6 +192,89 @@ impl TokenResolver for DevTokenResolver {
             Token::new(token.to_string(), "dev-user", capabilities).with_name("Development User");
 
         Ok(Some(token_obj))
+    }
+}
+
+/// A [`TokenResolver`] backed by an [`ApiKeyStore`] — resolves bearer tokens presented as
+/// issued API keys (`hacienda-core/src/auth/keys.rs`) against any `ApiKeyStore`
+/// implementation (Postgres, in-memory, or any future backend).
+///
+/// # Why not `TokenResolverType`/`build_token_resolver`
+///
+/// Every other resolver in this module is fully described by [`AuthConfig`] alone —
+/// `Memory` embeds its tokens, `Dev` needs nothing. This resolver instead needs a live
+/// `Arc<dyn ApiKeyStore>` handle (a database pool, an in-memory store shared with the
+/// rest of the process, etc.), which is not something `AuthConfig`'s serializable fields
+/// can carry. Forcing it through `TokenResolverType` would mean either serializing a
+/// connection string into `AuthConfig` (duplicating the store's own config) or making
+/// `build_token_resolver` async and fallible in a new way just for this one variant. So
+/// this follows the same pattern as `HaciendaFacade::with_stores`: the embedder
+/// constructs the store, then wires it in explicitly with [`Self::new`].
+///
+/// # Verification
+///
+/// A presented token is matched by its deterministic lookup digest
+/// ([`keys::lookup_key`]) — Argon2id's salted hash cannot serve as a lookup key, see the
+/// `keys` module docs — and then the match is confirmed with a full Argon2id
+/// [`keys::verify_key`] check against the stored hash before any capability is granted.
+/// A revoked key never resolves, even if both hash checks pass.
+pub struct ApiKeyTokenResolver {
+    store: Arc<dyn ApiKeyStore>,
+}
+
+impl ApiKeyTokenResolver {
+    /// Build a resolver over the given API key store.
+    pub fn new(store: Arc<dyn ApiKeyStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl std::fmt::Debug for ApiKeyTokenResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyTokenResolver")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl TokenResolver for ApiKeyTokenResolver {
+    async fn resolve(&self, token: &str) -> Result<Option<Token>, AuthzError> {
+        let lookup_hash = keys::lookup_key(token);
+        let Some(api_key) = self
+            .store
+            .get_by_lookup_hash(&lookup_hash)
+            .await
+            .map_err(|e| AuthzError::InvalidToken(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        if api_key.revoked_at.is_some() {
+            return Ok(None);
+        }
+
+        let verified = keys::verify_key(token, &api_key.key_hash)
+            .map_err(|e| AuthzError::InvalidToken(e.to_string()))?;
+        if !verified {
+            return Ok(None);
+        }
+
+        // `ApiKeyStore::create` stores capabilities via `serde_json::to_value(&Vec<Capability>)`,
+        // which uses `Capability`'s `#[serde(rename_all = "snake_case")]` form (e.g.
+        // `"documents_process"`) — not the colon-separated `Display`/`FromStr` form
+        // (`"documents:process"`) that config-file capability lists use elsewhere in this
+        // module. Deserializing straight into `CapabilitySet` keeps both sides on serde's
+        // representation instead of routing through the other one.
+        let capabilities: CapabilitySet =
+            serde_json::from_value(api_key.capabilities).map_err(|e| {
+                AuthzError::InvalidToken(format!("stored capabilities are malformed: {e}"))
+            })?;
+
+        Ok(Some(Token::new(
+            api_key.id.to_string(),
+            api_key.owner,
+            capabilities,
+        )))
     }
 }
 

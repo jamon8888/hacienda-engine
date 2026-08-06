@@ -14,7 +14,7 @@ pub mod patterns;
 pub mod pipeline;
 pub mod types;
 
-pub use config::{CliOverrides, ModelConfig, PipelineConfig};
+pub use config::{CliOverrides, ModelConfig, PipelineConfig, VerticalConfig};
 pub use engine::RegexEngine;
 pub use merge::{merge_entities, MergedEntity};
 pub use ner::NerDetector;
@@ -85,4 +85,16 @@ pub enum PiiError {
          (labels must not contain '[', ':', or ']')"
     )]
     InvalidEntityLabel { label: String, reason: String },
+
+    /// A configured [`config::VerticalConfig`] is malformed: an empty id, an empty
+    /// label set, an empty or delimiter-containing label, or a duplicate label.
+    ///
+    /// Checked unconditionally in [`pipeline::PiiPipeline::assemble`] — in every build
+    /// profile, including regex-only and wasm — rather than only when a model is
+    /// actually loaded. See
+    /// `superpowers/plans/2026-07-31-vertical-model-specialisation-implementation.md`
+    /// Task 2.2 for why: validating inside `load_detector` would silently accept a
+    /// malformed vertical everywhere that function is not reached.
+    #[error("vertical '{id}' is invalid: {reason}")]
+    InvalidVertical { id: String, reason: String },
 }
