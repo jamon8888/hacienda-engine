@@ -26,7 +26,7 @@ pub mod store_file;
 pub mod store_idb;
 
 pub use chain::{verify_entries, AuditChain, GENESIS_HASH};
-pub use cursor::{page_from, AuditCursor, AuditPage};
+pub use cursor::{AuditCursor, AuditPage};
 pub use entry::{
     compute_chain_hash, AuditEntry, AuditEntryInput, ChainHashFields, EntitySource, RedactionAction,
 };

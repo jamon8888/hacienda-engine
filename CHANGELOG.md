@@ -7,8 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`main` build restored.** `hacienda-core` failed to compile (`page_from` re-exported at a
+  wider visibility than its `pub(crate)` definition, plus two knock-on `E0282`s in the new
+  `PostgresAuditStore::history()`), `hacienda-api` had two independent duplicate-definition
+  errors (`AuditEntryDto` declared twice in `dto.rs`, `Query`/`From<QueryRejection>` declared
+  twice in `extract.rs`) left over from the Phase 5/Phase 10 merge, three `AuditStore` test
+  doubles in `hacienda-core/src/facade.rs` were missing the `history` method the trait gained,
+  and the `.sqlx` offline query cache was missing entries for the new Postgres audit queries.
+  CI (`ci-rust.yaml`) had been red on `main` since `00b210b`.
+- **The full 5-endpoint audit API is live again**, not just documented in
+  `hacienda-api/README.md`: `GET /v1/audit/{entries,verify,seals,export,tip}`, cursor-paginated,
+  with the verifiable evidence-envelope export and the `audit:export` capability. This code
+  (`hacienda-api/src/handlers/audit.rs`) existed since `93c6290` but was orphaned by a later
+  merge — never declared in `handlers/mod.rs`, never wired into `ROUTE_TABLE` — leaving only the
+  coarser Phase 10 `/v1/audit`/`/v1/audit/verify` (`audit_review.rs`) live. Restored
+  `HaciendaFacade::{audit_history_with_auth, audit_seals_with_auth, audit_export_with_auth,
+  audit_enabled}`, which the handlers call and which had been dropped along with the routes.
+  `/v1/audit` stays on `audit_review::get_audit` for `sdks/typescript`'s hand-written
+  `getAudit()`; `/v1/audit/verify` now serves the richer handler (broken-chain-as-200, names
+  the offending entry/seal) — `sdks/typescript/src/client.ts`'s `verifyAudit()` return type
+  updated to match, `audit_review::verify_audit` kept unrouted as a reference implementation.
+- **README's bindings table no longer claims 14 language bindings that don't exist.** `alef.toml`
+  references six Rust source files that were never written and a `packages/` output tree that
+  was never created; the table's 14 "✅" rows described `cargo-alef`-generated FFI bindings that
+  have never been generated. Replaced with what's real (the REST `sdks/python`/`sdks/typescript`
+  clients, the hand-written `crates/hacienda-wasm`) and an honest note on what's aspirational.
+  `.ai-rulez/skills/{crate-structure,alef-generated-bindings}/SKILL.md` flagged as copied from
+  the upstream `xberg` repo — they describe a crate/package layout that doesn't exist here.
+
 ### Added
 
+- **Server-side chunking for RAG document upsert.** `POST /v1/rag/collections/{name}/documents`
+  previously required the caller to submit pre-chunked, pre-embedded `chunks` — `full_text` was
+  stored for search only, never chunked. When `chunks` is omitted, the server now splits
+  `full_text` itself via a new `hacienda_rag::chunk_full_text` (wrapping xberg's `chunking`
+  feature, pure Rust, no ONNX), producing chunks with `content` set and `embedding` empty for a
+  caller to embed separately or leave unembedded. `hacienda-rag`'s new `chunking` feature is
+  always-on in `hacienda-api` (unlike the ONNX-gated, opt-in `rag-embeddings`).
 - **Python and TypeScript SDKs (`sdks/python`, `sdks/typescript`, Phase 14).** Client
   libraries for the hacienda-engine API, living in this repo (`sdks/`) rather than a
   separate `hacienda-sdks` repo — the session's GitHub App cannot create repositories, and

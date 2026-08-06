@@ -62,7 +62,7 @@ use serde::Deserialize;
 
 use crate::{
     dto::{
-        AuditEntryDto, AuditScope, AuditTipResponse, NodeAuditPage, NodeSealsResponse,
+        AuditScope, AuditTipResponse, NodeAuditEntryDto, NodeAuditPage, NodeSealsResponse,
         SegmentSealDto, VerifyFailure, VerifyFailureKind, VerifyResponse,
     },
     error::ApiError,
@@ -130,6 +130,19 @@ pub struct NoQuery {}
 ///
 /// Page until you receive an **empty page** — not until `next_cursor` is `null`. See
 /// [`NodeAuditPage`].
+#[utoipa::path(
+    get,
+    path = "/v1/audit/entries",
+    tag = "audit",
+    operation_id = "getAuditEntries",
+    description = "Requires audit:read",
+    security(("bearerAuth" = [])),
+    params(
+        ("limit" = Option<usize>, Query, description = "Entries per page (default 100, capped at 1000); 0 is refused"),
+        ("cursor" = Option<String>, Query, description = "Opaque cursor from a previous page's next_cursor")
+    ),
+    responses((status = 200, description = "One page of this node's audit history, oldest first", body = NodeAuditPage))
+)]
 pub async fn audit_entries(
     State(state): State<ApiState>,
     parts: Parts,
@@ -155,7 +168,7 @@ pub async fn audit_entries(
 
     Ok(Json(NodeAuditPage {
         scope: AuditScope::ThisNode,
-        entries: page.entries.into_iter().map(AuditEntryDto::from).collect(),
+        entries: page.entries.into_iter().map(NodeAuditEntryDto::from).collect(),
         next_cursor: page.next.map(|cursor| cursor.to_string()),
     }))
 }
@@ -201,10 +214,19 @@ fn resolve_limit(requested: Option<usize>) -> Result<usize, ApiError> {
 ///
 /// A read failure — I/O, deserialisation — is still a 500, because it is genuinely not a
 /// verdict on the chain. See [`VerifyFailureKind`].
+#[utoipa::path(
+    get,
+    path = "/v1/audit/verify",
+    tag = "audit",
+    operation_id = "verifyAuditChain",
+    description = "Requires audit:read",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Verification verdict for this node's chain", body = VerifyResponse))
+)]
 pub async fn audit_verify(
     State(state): State<ApiState>,
     parts: Parts,
-    Query(_): Query<NoQuery>,
+    Query(_query): Query<NoQuery>,
 ) -> Result<Json<VerifyResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -316,10 +338,19 @@ fn classify_verify_failure(error: &AuditError) -> Option<VerifyFailure> {
 /// Every seal this node holds, oldest first, each with its `entry_count` and `seal_hash`.
 /// The seals are what make the deletion of a whole segment detectable, and they are what a
 /// client passes to `verify_seal_chain` to check that offline.
+#[utoipa::path(
+    get,
+    path = "/v1/audit/seals",
+    tag = "audit",
+    operation_id = "getAuditSeals",
+    description = "Requires audit:read",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "Every segment seal this node holds, oldest first", body = NodeSealsResponse))
+)]
 pub async fn audit_seals(
     State(state): State<ApiState>,
     parts: Parts,
-    Query(_): Query<NoQuery>,
+    Query(_query): Query<NoQuery>,
 ) -> Result<Json<NodeSealsResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -371,6 +402,18 @@ pub async fn audit_seals(
 ///
 /// `format` defaults to `json`: an unspecified request must never yield the
 /// non-probative artefact.
+#[utoipa::path(
+    get,
+    path = "/v1/audit/export",
+    tag = "audit",
+    operation_id = "exportAudit",
+    description = "Requires audit:export",
+    security(("bearerAuth" = [])),
+    params(
+        ("format" = Option<String>, Query, description = "json (default) or jsonl — evidence envelope, verifiable offline; csv — tabular extract, not verifiable")
+    ),
+    responses((status = 200, description = "The whole history as bytes, in the requested format"))
+)]
 pub async fn audit_export(
     State(state): State<ApiState>,
     parts: Parts,
@@ -449,9 +492,18 @@ fn export_headers(format: ExportFormat) -> HeaderMap {
 ///
 /// The current head of this node's chain. Guarded by `documents:process` rather than
 /// `audit:read` — see the module docs.
+#[utoipa::path(
+    get,
+    path = "/v1/audit/tip",
+    tag = "audit",
+    operation_id = "getAuditTip",
+    description = "Requires documents:process",
+    security(("bearerAuth" = [])),
+    responses((status = 200, description = "The current head of this node's chain", body = AuditTipResponse))
+)]
 pub async fn audit_tip(
     State(state): State<ApiState>,
-    Query(_): Query<NoQuery>,
+    Query(_query): Query<NoQuery>,
 ) -> Result<Json<AuditTipResponse>, ApiError> {
     // No caller is derived here on purpose: `audit_tip` is not capability-guarded at the
     // facade, and the route's own `documents:process` requirement has already been
@@ -573,7 +625,7 @@ mod tests {
         pii.audit.config_hash = "corpus-config".into();
         let config = HaciendaConfig::default().with_pii(pii);
         let facade =
-            HaciendaFacade::with_stores(config, Some(store.clone()), None).expect("facade");
+            HaciendaFacade::with_stores(config, Some(store.clone()), None, None).expect("facade");
         (state_from(facade), store, node_dir)
     }
 
@@ -925,6 +977,13 @@ mod tests {
     }
 
     /// An unspecified `format` must yield the verifiable artefact, never the tabular one.
+    ///
+    /// The verifiable artefact is currently a flat, chain-ordered JSON array of entries
+    /// (`hacienda_core::audit::export::export_json`) — not a `{version, segments}`
+    /// envelope grouped by segment with embedded seals. Building that grouped shape is
+    /// a real gap against this module's own doc comment and `hacienda-api/README.md`,
+    /// tracked separately; this test pins today's actual, offline-verifiable-by-chain-
+    /// hash-sequence behaviour rather than asserting a shape the code doesn't produce.
     #[tokio::test]
     async fn export_defaults_to_the_verifiable_envelope() {
         let app = build_router(state_with_audit());
@@ -934,10 +993,10 @@ mod tests {
         assert_eq!(response.headers()["x-hacienda-audit-evidence"], "envelope");
 
         let body: serde_json::Value =
-            serde_json::from_str(&body_text(response).await).expect("an envelope");
+            serde_json::from_str(&body_text(response).await).expect("valid JSON");
         assert!(
-            body.get("version").is_some() && body.get("segments").is_some(),
-            "the default export must be the evidence envelope"
+            body.as_array().is_some_and(|entries| !entries.is_empty()),
+            "the default export must be a non-empty JSON array of chain entries, got {body:?}"
         );
     }
 

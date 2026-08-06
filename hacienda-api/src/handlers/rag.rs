@@ -139,6 +139,13 @@ pub async fn delete_collection(
 }
 
 /// `POST /v1/rag/collections/{name}/documents` — upsert one document with its chunks.
+///
+/// `chunks` may be omitted (or empty): the server then splits `document.full_text`
+/// itself via `hacienda_rag::chunk_full_text`, producing chunks with `content` set and
+/// `embedding` empty — a collection used for full-text/keyword retrieval alone has no
+/// need of one. A caller that wants embedded chunks either submits pre-embedded
+/// `chunks` itself, or re-embeds after upsert (the same `xberg::embed_texts_async` path
+/// `migrate_embeddings` already uses, behind the `rag-embeddings` build feature).
 #[utoipa::path(
     post,
     path = "/v1/rag/collections/{name}/documents",
@@ -158,8 +165,17 @@ pub async fn upsert_document(
     SafeJson(body): SafeJson<UpsertDocumentRequest>,
 ) -> Result<(StatusCode, Json<UpsertDocumentResponse>), ApiError> {
     let store = require_store(&state)?;
+
+    let chunks = if body.chunks.is_empty() {
+        let config = hacienda_rag::ChunkingConfig::default();
+        hacienda_rag::chunk_full_text(&body.document.full_text, &config)
+            .map_err(ApiError::from)?
+    } else {
+        body.chunks
+    };
+
     let document_id = store
-        .upsert_document(&name, &body.document, &body.chunks)
+        .upsert_document(&name, &body.document, &chunks)
         .await
         .map_err(ApiError::from)?;
     Ok((

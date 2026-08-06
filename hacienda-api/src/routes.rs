@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, rag_stream, uploads,
-        usage, versions,
+        audit, audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, rag_stream,
+        uploads, usage, versions,
     },
     state::ApiState,
 };
@@ -123,6 +123,17 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         make_router: || get(pii::pii_config),
     },
     // ── audit:read endpoints (Phase 10) ─────────────────────────────────────────
+    // `/v1/audit` is the coarse Phase 10 shape (`AuditResponse`, open segment only) —
+    // kept as-is because `sdks/typescript/src/client.ts`'s hand-written
+    // `audit.getAudit()` is typed against it, and `/v1/audit/entries` below covers the
+    // same ground with cursor pagination for anyone who wants the fuller surface.
+    // `/v1/audit/verify` now uses the richer `handlers::audit::audit_verify`
+    // (broken-chain-as-200, names the offending entry/seal) instead of Phase 10's
+    // `audit_review::verify_audit` (valid: bool only) — restoring the behaviour
+    // documented in `hacienda-api/README.md` and covered by `handlers::audit`'s own
+    // test suite. `sdks/typescript/src/client.ts`'s `audit.verifyAudit()` return type
+    // was updated to match (`Schemas["VerifyResponse"]`); `audit_review::verify_audit`
+    // itself is kept, `#[allow(dead_code)]`, as a smaller reference implementation.
     RouteSpec {
         path: "/v1/audit",
         access: Access::Capability(Capability::AuditRead),
@@ -131,7 +142,27 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
     RouteSpec {
         path: "/v1/audit/verify",
         access: Access::Capability(Capability::AuditRead),
-        make_router: || get(audit_review::verify_audit),
+        make_router: || get(audit::audit_verify),
+    },
+    RouteSpec {
+        path: "/v1/audit/entries",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit::audit_entries),
+    },
+    RouteSpec {
+        path: "/v1/audit/seals",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit::audit_seals),
+    },
+    RouteSpec {
+        path: "/v1/audit/export",
+        access: Access::Capability(Capability::AuditExport),
+        make_router: || get(audit::audit_export),
+    },
+    RouteSpec {
+        path: "/v1/audit/tip",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(audit::audit_tip),
     },
     RouteSpec {
         path: "/v1/review",
@@ -429,7 +460,7 @@ pub(crate) mod tests {
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
     /// `{param}` segment with a placeholder.
-    fn substitute_path_parameters(pattern: &str) -> String {
+    pub(crate) fn substitute_path_parameters(pattern: &str) -> String {
         pattern
             .split('/')
             .map(|segment| {
@@ -950,6 +981,55 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(get_after_delete.status().as_u16(), 404);
+    }
+
+    /// Upserting a document with `full_text` set and no `chunks` field must succeed by
+    /// chunking server-side (`hacienda_rag::chunk_full_text`), not by rejecting the
+    /// request or silently storing zero chunks. Uses an `embedding_dim: 0` collection
+    /// (full-text/keyword only) because the server-side chunker leaves `embedding`
+    /// empty — a caller wanting embedded chunks still submits `chunks` itself or
+    /// re-embeds afterward, per `handlers::rag::upsert_document`'s doc comment.
+    #[tokio::test]
+    async fn upsert_document_without_chunks_is_chunked_server_side() {
+        let app = build_router(state_with_rag());
+
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let long_text = "Sentence one. ".repeat(50);
+        let upsert_body = serde_json::json!({
+            "document": {"external_id": "doc-1", "full_text": long_text},
+        });
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            upsert.status().as_u16(),
+            201,
+            "upsert without chunks must succeed by chunking full_text server-side"
+        );
+
+        let list = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status().as_u16(), 200);
+        let list = json_body(list).await;
+        assert_eq!(list["total"], 1);
     }
 
     /// `GET` on a collection that was never created must be 404, not 500 or 200

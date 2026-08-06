@@ -149,9 +149,12 @@ impl AuditStore for PostgresAuditStore {
             extents.push((row.segment_id.to_string(), row.entry_count as u64));
         }
 
-        // Fetch all entries for all segments upfront since page_from uses a sync closure
-        let mut all_segment_entries = Vec::with_capacity(extents.len());
-        
+        // Fetch all entries for all segments upfront since page_from uses a sync closure.
+        // Decoded eagerly (`?` per segment, not stored as `Result`) so the closure below
+        // can hand out owned `Vec<AuditEntry>` via `mem::take` without needing `Clone` on
+        // `AuditEntry`/`AuditError`.
+        let mut all_segment_entries: Vec<Vec<AuditEntry>> = Vec::with_capacity(extents.len());
+
         for row in &sealed_extents {
             let segment_id = row.segment_id.to_string();
             let rows = sqlx::query_as!(
@@ -167,7 +170,11 @@ impl AuditStore for PostgresAuditStore {
             )
             .fetch_all(&self.pool)
             .await?;
-            all_segment_entries.push(rows.into_iter().map(row_to_entry).collect::<Vec<_>>());
+            all_segment_entries.push(
+                rows.into_iter()
+                    .map(row_to_entry)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
         }
 
         // Open segment
@@ -188,13 +195,21 @@ impl AuditStore for PostgresAuditStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        all_segment_entries.push(open_rows.into_iter().map(row_to_entry).collect::<Vec<_>>());
+        all_segment_entries.push(
+            open_rows
+                .into_iter()
+                .map(row_to_entry)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
 
         // Build extents slice for page_from
         let extent_refs: Vec<(&str, u64)> = extents.iter().map(|(s, c)| (s.as_str(), *c)).collect();
 
+        // `page_from` only ever calls `fetch` once per position (it advances
+        // monotonically and never revisits a segment), so `mem::take` safely hands out
+        // each segment's entries exactly once.
         page_from(&extent_refs, after, limit, |position| {
-            Ok(all_segment_entries[position].clone())
+            Ok(std::mem::take(&mut all_segment_entries[position]))
         })
     }
 

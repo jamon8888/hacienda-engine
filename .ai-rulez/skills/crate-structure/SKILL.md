@@ -5,6 +5,14 @@ description: The Xberg workspace layout — the version source of truth (root Ca
 
 # Crate Structure
 
+> **Stale — describes the upstream `xberg` repo, not `hacienda-engine`.** None of
+> `xberg-cli`/`xberg-ffi`/`xberg-node`/`xberg-py`/`xberg-php`/`xberg-wasm`/`xberg-paddle-ocr`/
+> `xberg-tesseract` or the `packages/*` bindings below exist in this repo. This repo's actual
+> workspace members are `hacienda-core`, `hacienda-api`, `hacienda-cli`, `hacienda` (the
+> distribution facade), `crates/hacienda-rag`, and `crates/hacienda-wasm` — see the root
+> `Cargo.toml` `[workspace.members]` for the current, authoritative list. Do not use this file
+> to decide where code belongs until it is rewritten to match this repo.
+
 Version source of truth: root `Cargo.toml` `[workspace.package] version`.
 
 ## Workspace crates (`crates/`)
