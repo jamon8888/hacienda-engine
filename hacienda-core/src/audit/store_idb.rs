@@ -37,6 +37,7 @@ use send_wrapper::SendWrapper;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
+use super::cursor::{page_from, AuditCursor, AuditPage};
 use super::entry::{AuditEntry, AuditEntryInput};
 use super::error::AuditError;
 use super::segment::{verify_seal_chain, NodeId, Segment, SegmentSeal};
@@ -245,6 +246,40 @@ impl super::AuditStore for IndexedDbAuditStore {
             .as_ref()
             .map(|segment| segment.entries().to_vec())
             .unwrap_or_default())
+    }
+
+    /// Identical to [`InMemoryAuditStore`](super::InMemoryAuditStore)'s, and for the same
+    /// reason: this backend shares [`State`], so the whole history — sealed entries
+    /// included — is already in memory. IndexedDB is the durability step behind the
+    /// mutating methods, not a store this one has to page through; reading it here would
+    /// re-fetch a snapshot of exactly what the guard is already holding.
+    async fn history(
+        &self,
+        after: Option<&AuditCursor>,
+        limit: usize,
+    ) -> Result<AuditPage, AuditError> {
+        let state = self.state();
+
+        let mut extents: Vec<(&str, u64)> = state
+            .sealed
+            .iter()
+            .map(|(seal, _)| (seal.segment_id.as_str(), seal.entry_count))
+            .collect();
+        if let Some(segment) = state.open.as_ref() {
+            extents.push((segment.id(), segment.len() as u64));
+        }
+
+        page_from(&extents, after, limit, |position| {
+            Ok(match state.sealed.get(position) {
+                Some((_, entries)) => entries.clone(),
+                // Past the sealed run, so this is the open segment.
+                None => state
+                    .open
+                    .as_ref()
+                    .map(|segment| segment.entries().to_vec())
+                    .unwrap_or_default(),
+            })
+        })
     }
 
     async fn tip(&self) -> Result<String, AuditError> {
