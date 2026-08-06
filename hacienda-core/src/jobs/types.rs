@@ -38,6 +38,20 @@ impl std::fmt::Display for JobStatus {
     }
 }
 
+impl std::str::FromStr for JobStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "queued" => Ok(JobStatus::Queued),
+            "running" => Ok(JobStatus::Running),
+            "succeeded" => Ok(JobStatus::Succeeded),
+            "failed" => Ok(JobStatus::Failed),
+            other => Err(format!("unknown job status '{other}'")),
+        }
+    }
+}
+
 /// An async document-processing job.
 ///
 /// Created by [`super::store::JobStore::create`] and updated atomically via
@@ -62,6 +76,15 @@ pub struct Job {
     pub result_json: Option<String>,
     /// Human-readable failure reason, populated on `Failed`.
     pub error: Option<String>,
+    /// Serialised, pipeline-defined progress payload, updated in place by
+    /// `JobStore::update_progress` while the job is `Running`.
+    ///
+    /// Opaque JSON for the same reason as `result_json`: the store layer must
+    /// not depend on any one pipeline's progress shape. `None` until the
+    /// pipeline reports its first progress update; a job that never reports
+    /// progress (e.g. `/v1/documents/async`) simply never sets this field.
+    #[serde(default)]
+    pub progress_json: Option<String>,
     /// Principal that created the job.
     ///
     /// `None` means the job was submitted by a trusted in-process caller (CLI,

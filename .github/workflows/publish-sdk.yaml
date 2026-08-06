@@ -1,0 +1,60 @@
+name: Publish SDKs
+
+# Scaffolded, not yet exercised: fires only on a `sdk-vX.Y.Z` tag, which
+# nothing pushes today (hacienda-engine's own releases use a different tag
+# shape — see publish.yaml). Both jobs use trusted publishing (OIDC), which
+# must be configured on the PyPI project and npm package respectively before
+# either job can succeed — an organization-level precondition, not something
+# this workflow file can set up on its own. Until that's done, pushing an
+# `sdk-v*` tag will fail here rather than silently publish something wrong.
+on:
+  push:
+    tags:
+      - "sdk-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish-python:
+    name: Publish Python (PyPI)
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write # OIDC trusted publishing — no API token stored here
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.10
+      - name: Build
+        working-directory: sdks/python
+        run: uv build
+      - name: Publish
+        working-directory: sdks/python
+        run: uv publish
+
+  publish-typescript:
+    name: Publish TypeScript (npm)
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write # npm provenance
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - name: Build
+        run: npm run build --workspace=sdks/typescript
+      - name: Publish
+        working-directory: sdks/typescript
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

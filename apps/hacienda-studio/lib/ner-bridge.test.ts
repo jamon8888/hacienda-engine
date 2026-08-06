@@ -28,13 +28,19 @@ describe("NER bridge", () => {
    * `doc.dates()`, which only exists with the compromise-dates plugin
    * installed. Both surfaced only as "Unknown error" against the document.
    */
-  it("handles every category the UI can enable without throwing", async () => {
-    for (const category of ALL_CATEGORIES) {
-      await expect(extractEntities(CONTRACT, [category])).resolves.toBeTypeOf(
-        "object",
-      );
-    }
-  });
+  it(
+    "handles every category the UI can enable without throwing",
+    async () => {
+      // Re-imports and re-tags with compromise.js once per category (ALL_CATEGORIES),
+      // which routinely exceeds vitest's 5s default — not a correctness issue.
+      for (const category of ALL_CATEGORIES) {
+        await expect(extractEntities(CONTRACT, [category])).resolves.toBeTypeOf(
+          "object",
+        );
+      }
+    },
+    20000,
+  );
 
   it("labels entities with the engine's vocabulary", async () => {
     const entities = await extractEntities(CONTRACT, ALL_CATEGORIES);

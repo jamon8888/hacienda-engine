@@ -46,6 +46,21 @@ impl std::fmt::Display for ReviewStatus {
     }
 }
 
+impl std::str::FromStr for ReviewStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(ReviewStatus::Pending),
+            "in_review" => Ok(ReviewStatus::InReview),
+            "approved" => Ok(ReviewStatus::Approved),
+            "rejected" => Ok(ReviewStatus::Rejected),
+            "modified" => Ok(ReviewStatus::Modified),
+            other => Err(format!("unknown review status '{other}'")),
+        }
+    }
+}
+
 /// Urgency of a review item, derived from detection confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +84,20 @@ impl std::fmt::Display for Priority {
     }
 }
 
+impl std::str::FromStr for Priority {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "low" => Ok(Priority::Low),
+            "normal" => Ok(Priority::Normal),
+            "high" => Ok(Priority::High),
+            "critical" => Ok(Priority::Critical),
+            other => Err(format!("unknown priority '{other}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
@@ -76,6 +105,30 @@ pub enum ReviewDecision {
     Approve,
     Reject,
     Modify,
+}
+
+impl std::fmt::Display for ReviewDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ReviewDecision::Approve => "approve",
+            ReviewDecision::Reject => "reject",
+            ReviewDecision::Modify => "modify",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::str::FromStr for ReviewDecision {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "approve" => Ok(ReviewDecision::Approve),
+            "reject" => Ok(ReviewDecision::Reject),
+            "modify" => Ok(ReviewDecision::Modify),
+            other => Err(format!("unknown review decision '{other}'")),
+        }
+    }
 }
 
 /// Submission payload for a new review item.

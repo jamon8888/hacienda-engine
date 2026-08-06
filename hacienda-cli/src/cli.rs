@@ -2,11 +2,15 @@
 //!
 //! Scope is Phases 2 and 4 of
 //! `superpowers/specs/2026-07-28-hacienda-cli-api-integration-design.md` §9: `extract`,
-//! `scan`, `config show`, and `serve`. The remaining commands of §6.2 — `audit`,
-//! `review`, `compliance`, `glossary`, `completions`, and the `xberg` passthrough —
-//! belong to Phases 5 through 7 and are deliberately absent rather than present and
-//! stubbed. A subcommand that parses and then apologises is indistinguishable from one
-//! that is broken.
+//! `scan`, `config show`, and `serve`, plus a later, narrower slice closing part of the
+//! CLI/API parity gap: `audit verify` (verifying the `--audit-out` export, not the full
+//! `GET /v1/audit` surface) and `pii reveal`, plus a `--glossary-out` flag on `extract`
+//! and `scan` (glossary state lives only inside a live run's facade, so there is nothing
+//! for a standalone `glossary` subcommand to read — see `ExtractArgs::glossary_out`).
+//! `review`, `compliance`, the rest of `audit`, `completions`, and the `xberg`
+//! passthrough remain deliberately absent rather than present and stubbed. A
+//! subcommand that parses and then apologises is indistinguishable from one that is
+//! broken.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::net::SocketAddr;
@@ -44,6 +48,65 @@ pub enum Command {
     },
     /// Serve the HTTP API.
     Serve(ServeArgs),
+    /// Operations on pseudonym tokens.
+    Pii {
+        #[command(subcommand)]
+        command: PiiCommand,
+    },
+    /// Operations on the audit chain.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PiiCommand {
+    /// Reverse a pseudonym token to its plaintext.
+    ///
+    /// The CLI is in-process, so this always runs as the trusted caller — the same
+    /// precedent `serve` documents for `Caller::Trusted` (the process boundary is the
+    /// trust boundary). Requires the same `HACIENDA_PSEUDONYM_*` environment variables
+    /// as `--mode pseudonymize`. A token minted under a key this process cannot resolve
+    /// and a malformed or tampered token both fail with the same generic message,
+    /// deliberately — mirroring the HTTP API's `PseudonymError` collapsing, so a caller
+    /// cannot use error text to probe which part of a token or key is wrong.
+    Reveal(RevealArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct RevealArgs {
+    /// The pseudonym token to reverse, e.g. `[EMAIL:k1:base32...]`.
+    #[arg(value_name = "TOKEN")]
+    pub token: String,
+
+    /// Output format for the revealed plaintext.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    /// Independently re-verify an audit chain written by `--audit-out`.
+    ///
+    /// Verifies the flat `audit.json` export (a `Vec<AuditEntry>`), the same shape
+    /// `extract --audit-out`/`--vault` write — not the segmented `FileAuditStore`
+    /// format `hacienda serve` uses for durable storage. A one-shot CLI verification has
+    /// no need for that store's `NodeId`/segment-sealing machinery; see
+    /// `write_audit_chain`'s own doc comment in `commands.rs` for the same call applied
+    /// to writing.
+    Verify(AuditVerifyArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct AuditVerifyArgs {
+    /// Directory containing `audit.json`, as written by `--audit-out`.
+    #[arg(value_name = "DIR")]
+    pub dir: PathBuf,
+
+    /// Output format for the verification result.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Parser)]
@@ -122,6 +185,20 @@ pub struct ExtractArgs {
     #[arg(long, value_name = "DIR")]
     pub vault: Option<PathBuf>,
 
+    /// Write this run's entity glossary to `<DIR>/glossary.json`.
+    ///
+    /// Glossary state (`EntityGlossary`) lives only inside this run's facade, populated
+    /// as documents are processed — there is nothing to read outside a live
+    /// `extract`/`scan` run, which is why this is a flag here rather than a standalone
+    /// `hacienda glossary` subcommand. Entries are `{category, term, count,
+    /// mean_confidence}` — never document text. Distinct from `--vault`'s absent
+    /// `GLOSSARY.md`: that one is a general NER entity-linking graph the CLI has no
+    /// pipeline for (Track K); this is the PII-category glossary the facade already
+    /// produces. Materialises a `[glossary]` config section (enabled) if none was
+    /// loaded, mirroring how `--mode` materialises `[pii]`.
+    #[arg(long, value_name = "DIR")]
+    pub glossary_out: Option<PathBuf>,
+
     /// Emit unredacted text. Refused on its own — see `--i-accept-unredacted-pii`.
     #[arg(long)]
     pub no_redact: bool,
@@ -145,6 +222,15 @@ pub struct ScanArgs {
 
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
+
+    /// Write this run's entity glossary to `<DIR>/glossary.json`.
+    ///
+    /// See `ExtractArgs::glossary_out` — same artifact, same reasoning. `scan` already
+    /// runs full PII detection, so it populates the same glossary the same way; an
+    /// entry is `{category, term, count, mean_confidence}`, never document text, so
+    /// offering this here does not violate scan's "no document text" contract.
+    #[arg(long, value_name = "DIR")]
+    pub glossary_out: Option<PathBuf>,
 
     #[command(flatten)]
     pub concurrency: ConcurrencyArgs,

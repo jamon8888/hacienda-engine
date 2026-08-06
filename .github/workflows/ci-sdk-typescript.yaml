@@ -1,0 +1,65 @@
+name: CI - SDK TypeScript
+
+# hacienda-api/** is in the path filter, not just sdks/typescript/**: a schema
+# change must re-run this even if no file under sdks/ changed — see
+# ci-sdk-python.yaml's comment for the full rationale (same reasoning here).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/typescript/**"
+      - "sdks/scripts/**"
+      - "hacienda-api/**"
+      - "hacienda-core/**"
+      - "package.json"
+      - ".github/workflows/ci-sdk-typescript.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/typescript/**"
+      - "sdks/scripts/**"
+      - "hacienda-api/**"
+      - "hacienda-core/**"
+      - "package.json"
+      - ".github/workflows/ci-sdk-typescript.yaml"
+
+concurrency:
+  group: ci-sdk-typescript-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node 22)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Matches ci-rust.yaml/ci-lint.yaml's toolchain choice — this workflow
+      # builds the same hacienda-cli/hacienda-api those validate against.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps (npm workspace root)
+        run: npm ci
+
+      - name: Generate types (builds hacienda-cli, fetches /openapi.json)
+        run: npm run generate --workspace=sdks/typescript
+
+      - name: Lint
+        run: |
+          npm run lint --workspace=sdks/typescript
+          npm run format:check --workspace=sdks/typescript
+
+      - name: Test
+        run: npm run test:unit --workspace=sdks/typescript
+
+      - name: Build
+        run: npm run build --workspace=sdks/typescript

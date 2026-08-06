@@ -24,7 +24,7 @@ pub mod store_file;
 #[cfg(target_arch = "wasm32")]
 pub mod store_idb;
 
-pub use chain::{AuditChain, GENESIS_HASH};
+pub use chain::{verify_entries, AuditChain, GENESIS_HASH};
 pub use entry::{
     compute_chain_hash, AuditEntry, AuditEntryInput, ChainHashFields, EntitySource, RedactionAction,
 };

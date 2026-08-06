@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
+members = ["crates/hacienda-rag", "crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
 exclude = ["packages/*"]
 
 [workspace.package]
@@ -40,9 +40,40 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 # base32 for pseudonym tokens (BASE32_NOPAD — no `=` to escape inside a token).
 data-encoding = "2.11"
+# `Stream`/`StreamExt` combinators for RAG streaming answer synthesis (Track 3,
+# `hacienda-rag`'s `stream` feature) — maps a `liter-llm` token-chunk stream to
+# `AnswerEvent`s without pulling in a full async-runtime-specific stream crate.
+futures = "0.3"
+# Direct LLM client for streaming chat completions (Track 3, `hacienda-rag`'s `stream`
+# feature). A *direct* dependency deliberately bypassing xberg's own `llm` module: that
+# module's `complete_text`/`complete_with_json_schema` are whole-response only (no
+# `chat_stream`), and its client constructor is `pub(crate)` (see
+# `crates/hacienda-rag/src/stream.rs`'s module doc for the investigation). `xberg::LlmConfig`
+# itself is unconditional (no feature gate, pure config data — see
+# `xberg/src/core/config/llm.rs`), so this dependency does NOT enable xberg's own
+# `liter-llm` feature, which would additionally pull in `ocr-pipeline` or ONNX Runtime for
+# no benefit here — mirrors the xberg comment above about not re-adding features without a
+# call site. Version pinned to match xberg's own workspace pin (see xberg's root
+# `Cargo.toml`) so the wire types constructed here match what liter-llm's HTTP layer
+# expects.
+liter-llm = { version = "1.11.3", default-features = false, features = ["native-http", "tracing"] }
 regex = "1.10"
+# HTTP client for the presigned-upload `confirm` step's server-side HEAD request against
+# the object store (Phase 13 Task 4). Already resolved transitively via `xberg`'s `hf-hub`
+# dependency with a rustls (not native-tls/openssl) backend and no other TLS stack appears
+# anywhere else in Cargo.lock — matching that backend explicitly here rather than pulling
+# a second one.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+# Pure-computation AWS SigV4 presigned-URL signing (Phase 13 Task 4). Deliberately not
+# `aws-sdk-s3`: that pulls its own credential-provider chain, retry/tower middleware stack,
+# and a second HTTP client, none of which this feature needs — the client PUTs directly to
+# the presigned URL, and the server only ever issues a HEAD to confirm completion (via
+# `reqwest` above). `rusty-s3` has no HTTP client of its own; it only computes SigV4 URLs,
+# which keeps this dependency-light on a RAM-constrained build host.
+rusty-s3 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tempfile = "3"
 thiserror = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync"] }
 toml = "0.8"
@@ -51,6 +82,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # NFKC normalisation. Part of the pseudonym token contract: it decides which spellings
 # co-refer, so changing it later re-derives every token ever emitted.
 unicode-normalization = "0.1"
+# `rusty-s3`'s `Bucket::new` takes a `url::Url` directly and does not re-export the
+# `url` crate itself — needed by `S3Config::endpoint` (Phase 13 Task 4). Already resolved
+# transitively via `reqwest`/`rusty-s3`; version pinned to match.
+url = "2.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Drop-in `Instant`/`SystemTime` for code that must run on both native targets and
 # wasm32-unknown-unknown (Track L3): passes through to `std::time` natively, backs onto
@@ -83,6 +118,20 @@ xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", feature
 # Key material must not survive a drop. `PseudonymKey` holds the secret that
 # de-pseudonymises an entire corpus.
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
+# Postgres client for Phase 9 durable store backend. `runtime-tokio` for pool,
+# `postgres` for the driver, `uuid`/`chrono`/`json` for compile-time checked
+# query! macros with native types. `migrate` feature for embedded migrations.
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate"] }
+# Argon2id for API key hashing (Phase 11). Slow hash for credential storage.
+argon2 = { version = "0.5", features = ["std"] }
+# Random number generation for API key entropy.
+rand = { version = "0.8", features = ["std"] }
+# Disposable-Postgres test fixture for the `postgres` feature's integration tests (Phase 9
+# Task 1 Step 5) — spins up a real container via the local Docker daemon so
+# `connect_and_migrate` and friends don't need a human-supplied `DATABASE_URL`. Dev-only:
+# never a runtime dependency of any published crate.
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 
 # Profiles must live in the workspace root manifest. Cargo silently ignores
 # `[profile.*]` in path dependencies, so the tuning in ../xberg/Cargo.toml has never

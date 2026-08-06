@@ -1,7 +1,7 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
 use crate::audit::{AuditEntry, AuditEntryInput, AuditStore, InMemoryAuditStore, RedactionAction};
-use crate::auth::{Caller, Capability};
+use crate::auth::{ApiKeyStore, Caller, Capability, CapabilitySet};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
@@ -23,6 +23,12 @@ pub struct HaciendaFacade {
     /// `Arc`-wrapped so [`Self::detect_concurrently`] can hand each spawned task its own
     /// cheap clone without cloning the pipeline itself (`PiiPipeline` is not `Clone`).
     pii_pipeline: Option<Arc<PiiPipeline>>,
+    /// The pseudonymiser instance used for minting and revealing tokens.
+    ///
+    /// Separate from `pii_pipeline` because token reveal is a standalone operation that
+    /// does not require running the full detection pipeline. Cloned from the same
+    /// `Arc<Pseudonymiser>` passed to the pipeline to maintain a single instance per key set.
+    pseudonymiser: Option<Arc<Pseudonymiser>>,
     compliance: Option<ComplianceGenerator>,
     /// The persistence backend for the tamper-evident audit log.
     ///
@@ -32,6 +38,11 @@ pub struct HaciendaFacade {
     audit_store: Option<Arc<dyn AuditStore>>,
     review_queue: Option<ReviewQueue>,
     glossary: Option<Mutex<EntityGlossary>>,
+    /// The persistence backend for API keys.
+    ///
+    /// `None` when API key auth is not configured. When `Some`, enables
+    /// `issue_key_with_auth`, `revoke_key_with_auth`, and token resolution.
+    api_key_store: Option<Arc<dyn ApiKeyStore>>,
 }
 
 /// Everything one [`HaciendaFacade::process`] call produced.
@@ -125,7 +136,7 @@ impl HaciendaFacade {
     ///
     /// [`FileAuditStore`]: crate::audit::FileAuditStore
     pub fn new(config: HaciendaConfig) -> Result<Self, HaciendaError> {
-        Self::build(config, None, None, None)
+        Self::build(config, None, None, None, None)
     }
 
     /// Build a facade that can mint and reverse pseudonym tokens.
@@ -164,22 +175,23 @@ impl HaciendaFacade {
             None => Pseudonymiser::new(resolver, retired),
         }
         .map_err(key_error)?;
-        Self::build(config, Some(Arc::new(pseudonymiser)), None, None)
+        Self::build(config, Some(Arc::new(pseudonymiser)), None, None, None)
     }
 
     /// Build a facade with explicit store backends.
     ///
-    /// Use this when you need a durable audit record or a shared review store. The
-    /// caller owns the store's lifetime — the facade holds an `Arc` clone and does not
-    /// close the store on drop. Call [`close`](Self::close) before dropping the facade
-    /// when you have supplied a `FileAuditStore`, so the open segment is sealed before
-    /// the file handle is released.
+    /// Use this when you need a durable audit record, a shared review store, or API key
+    /// management. The caller owns the store's lifetime — the facade holds an `Arc` clone
+    /// and does not close the store on drop. Call [`close`](Self::close) before dropping
+    /// the facade when you have supplied a `FileAuditStore`, so the open segment is sealed
+    /// before the file handle is released.
     ///
-    /// Supplying `None` for either store falls back to the same default as
-    /// [`new`](Self::new): an in-memory audit store when auditing is enabled, and no
-    /// review queue when `config.review` is `None`.
+    /// Supplying `None` for any store falls back to the same default as
+    /// [`new`](Self::new): an in-memory audit store when auditing is enabled, no review
+    /// queue when `config.review` is `None`, and no API key store when auth is not
+    /// configured.
     ///
-    /// Supplying a store overrides the config in both cases. A review store passed here
+    /// Supplying a store overrides the config in all cases. A review store passed here
     /// builds a queue even when `config.review` is `None`, using
     /// [`ReviewConfig::default`] for the threshold and deadline — handing over a durable
     /// store and receiving no queue would discard every decision made against it.
@@ -191,8 +203,9 @@ impl HaciendaFacade {
         config: HaciendaConfig,
         audit_store: Option<Arc<dyn AuditStore>>,
         review_store: Option<Arc<dyn ReviewStore>>,
+        api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
-        Self::build(config, None, audit_store, review_store)
+        Self::build(config, None, audit_store, review_store, api_key_store)
     }
 
     /// Shared construction. Accepts all optional overrides and applies defaults for any
@@ -202,6 +215,7 @@ impl HaciendaFacade {
         pseudonymiser: Option<Arc<Pseudonymiser>>,
         audit_store: Option<Arc<dyn AuditStore>>,
         review_store: Option<Arc<dyn ReviewStore>>,
+        api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
         let pii_pipeline = config
             .pii
@@ -252,7 +266,9 @@ impl HaciendaFacade {
                 .filter(|g| g.enabled)
                 .map(|g| Mutex::new(EntityGlossary::new(g))),
             pii_pipeline,
+            pseudonymiser,
             audit_store,
+            api_key_store,
             config,
         })
     }
@@ -266,7 +282,7 @@ impl HaciendaFacade {
         self.review_queue.as_ref()
     }
 
-    /// Get the review queue with authentication context.
+    /// Get the review queue with authentication context, for making a decision on an item.
     ///
     /// Requires `review:decide` capability.
     pub fn review_queue_with_auth(
@@ -275,6 +291,93 @@ impl HaciendaFacade {
     ) -> Result<Option<&ReviewQueue>, HaciendaError> {
         caller.require(Capability::ReviewDecide)?;
         Ok(self.review_queue.as_ref())
+    }
+
+    /// Get the review queue with authentication context, for reading its contents.
+    ///
+    /// Requires `audit:read` capability — same sensitivity class as the audit log itself
+    /// (D6's reasoning applied a third time). Distinct from [`Self::review_queue_with_auth`],
+    /// which requires `review:decide`: listing the queue and deciding on an item are
+    /// different privileges, and `GET /v1/review` is declared under `Capability::AuditRead`
+    /// in the route table — a caller with only that capability must not be rejected here.
+    pub fn review_queue_read_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<&ReviewQueue>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self.review_queue.as_ref())
+    }
+
+    /// Issue a new API key for the given owner with the specified capabilities.
+    ///
+    /// Requires `auth:manage` capability. Returns the raw key (shown once) and the
+    /// stored key record. The raw key is never stored — only its Argon2id hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Authz`] without `AuthManage` capability.
+    /// Returns [`HaciendaError::ApiKey`] if key generation or storage fails.
+    /// Returns [`HaciendaError::ApiKey`] wrapping [`ApiKeyError::Generation`]
+    /// if no API key store is configured.
+    pub async fn issue_key_with_auth(
+        &self,
+        caller: Caller<'_>,
+        owner: &str,
+        capabilities: Vec<Capability>,
+    ) -> Result<(crate::auth::keys::ApiKeyPair, crate::auth::keys::ApiKey), HaciendaError> {
+        caller.require(Capability::AuthManage)?;
+        let store = self.api_key_store.as_ref().ok_or_else(|| {
+            crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
+        })?;
+        let pair = crate::auth::keys::generate_key()?;
+        let key = store
+            .create(&pair.key_hash, &pair.lookup_hash, owner, capabilities)
+            .await?;
+        Ok((pair, key))
+    }
+
+    /// Revoke an API key by its ID.
+    ///
+    /// Requires `auth:manage` capability. The key is marked as revoked and can no
+    /// longer be used for authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Authz`] without `AuthManage` capability.
+    /// Returns [`HaciendaError::ApiKey`] if no API key store is configured or revocation fails.
+    pub async fn revoke_key_with_auth(
+        &self,
+        caller: Caller<'_>,
+        key_id: uuid::Uuid,
+    ) -> Result<(), HaciendaError> {
+        caller.require(Capability::AuthManage)?;
+        let store = self.api_key_store.as_ref().ok_or_else(|| {
+            crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
+        })?;
+        store.revoke(key_id).await?;
+        Ok(())
+    }
+
+    /// Resolve a bearer token to its capability set.
+    ///
+    /// This is used by the auth middleware. The presented token is first looked up by
+    /// its deterministic lookup digest (Argon2id's salted hash cannot serve as a lookup
+    /// key — see the `auth::keys` module docs), then the match is confirmed with a full
+    /// Argon2id [`verify_key`](crate::auth::keys::verify_key) check against the stored
+    /// hash before any capability is granted. Returns `None` if the token is not found,
+    /// fails verification, is revoked, or is malformed. The raw token is never stored —
+    /// only its hashes.
+    pub async fn resolve_token(&self, bearer_token: &str) -> Option<CapabilitySet> {
+        let store = self.api_key_store.as_ref()?;
+        let lookup_hash = crate::auth::keys::lookup_key(bearer_token);
+        let key = store.get_by_lookup_hash(&lookup_hash).await.ok()??;
+        if key.revoked_at.is_some() {
+            return None;
+        }
+        if !crate::auth::keys::verify_key(bearer_token, &key.key_hash).ok()? {
+            return None;
+        }
+        serde_json::from_value(key.capabilities).ok()
     }
 
     /// A snapshot of the open segment's audit entries.
@@ -396,6 +499,38 @@ impl HaciendaFacade {
         };
 
         audit.and(review)
+    }
+
+    /// Get a snapshot of the current entity glossary.
+    ///
+    /// Requires `audit:read` capability (same sensitivity class as audit — the glossary
+    /// contains detected entity terms in clear text).
+    ///
+    /// Returns an empty `Vec` when glossary is not configured.
+    pub async fn glossary_snapshot_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Vec<GlossaryEntry>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self
+            .glossary
+            .as_ref()
+            .map(|g| lock(g).entries())
+            .unwrap_or_default())
+    }
+
+    /// Generate a compliance report for the current pipeline configuration.
+    ///
+    /// Requires `audit:read` capability (DPIA/ModelCard/DORA/Checklist are derived from
+    /// the same pipeline facts that audit guards).
+    ///
+    /// Returns `None` when compliance is not configured.
+    pub async fn compliance_report_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<ComplianceReport>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self.compliance.as_ref().map(|c| c.report(None)))
     }
 
     /// Extract, detect, redact, audit, review, and generate compliance artefacts.
@@ -636,6 +771,79 @@ impl HaciendaFacade {
         })
     }
 
+    /// Reverse a pseudonym token to its normalised plaintext, enforcing `Capability::PiiReveal`.
+    ///
+    /// Writes one `Reveal` audit entry keyed by `blake3(plaintext)` — the same digest scheme
+    /// `record_reveal` already uses for scan-time reveals, so an auditor can join this call to
+    /// the redaction that minted the token by span_hash, exactly as for the scan path.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::Authz`] without `PiiReveal`. [`HaciendaError::PiiDisabled`] if no
+    /// pseudonymiser is configured (redaction mode is not `pseudonymize`, or PII is off).
+    /// A malformed or unreadable token surfaces as [`HaciendaError::Pii`] wrapping
+    /// [`PseudonymError::MalformedToken`] / `UnreadableToken` / `KeyNotFound` — never panics,
+    /// per `redaction-safety`'s ban on disclosing internal detail: the three token-specific
+    /// variants are distinguishable to an operator but the HTTP layer maps all three to one
+    /// 400, not three status codes, so a client cannot use error-shape to probe key material.
+    pub async fn reveal_token_with_auth(
+        &self,
+        caller: Caller<'_>,
+        token: &str,
+    ) -> Result<String, HaciendaError> {
+        caller.require(Capability::PiiReveal)?;
+        let pseudonymiser = self
+            .pseudonymiser
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+        let plaintext = pseudonymiser.reveal(token)?;
+        self.record_token_reveal(&plaintext, caller).await?;
+        Ok(plaintext)
+    }
+
+    /// Record a token reveal audit entry for a single plaintext value.
+    ///
+    /// Mirrors `record_reveal` but operates on a bare token reveal where no entity
+    /// metadata (category, offsets, confidence, source) is available — the token
+    /// carries only the ciphertext and key id. The category is recorded as
+    /// `"pseudonym"` to distinguish these entries from scan-time reveals.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Audit`] if the store rejects the entry.
+    async fn record_token_reveal(
+        &self,
+        plaintext: &str,
+        caller: Caller<'_>,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        let Some(store) = &self.audit_store else {
+            return Ok(Vec::new());
+        };
+
+        let principal = caller.principal_id().map(str::to_owned);
+        let span_hash = blake3::hash(plaintext.as_bytes()).to_hex().to_string();
+        let vertical = self
+            .pii_pipeline
+            .as_ref()
+            .and_then(|p| p.vertical_provenance_id());
+
+        let input = AuditEntryInput {
+            id: uuid::Uuid::new_v4().to_string(),
+            category: "pseudonym".to_string(),
+            action: RedactionAction::Reveal,
+            span_hash,
+            span_length: plaintext.len() as u32,
+            confidence: None,
+            source: crate::audit::EntitySource::Regex,
+            pipeline_version: PIPELINE_VERSION.to_string(),
+            config_hash: String::new(),
+            principal,
+            vertical,
+        };
+
+        Ok(store.append(vec![input]).await?)
+    }
+
     /// Append one `Reveal` entry per span whose plaintext was handed to `caller`.
     ///
     /// One entry per span rather than one per call, so every field is a fact about a
@@ -665,6 +873,10 @@ impl HaciendaFacade {
         }
 
         let principal = caller.principal_id().map(str::to_owned);
+        let vertical = self
+            .pii_pipeline
+            .as_ref()
+            .and_then(|p| p.vertical_provenance_id());
         let inputs: Vec<AuditEntryInput> = entities
             .iter()
             .map(|entity| {
@@ -687,6 +899,7 @@ impl HaciendaFacade {
                     // The store owns config_hash — see `record_audit`.
                     config_hash: String::new(),
                     principal: principal.clone(),
+                    vertical: vertical.clone(),
                 }
             })
             .collect();
@@ -729,6 +942,10 @@ impl HaciendaFacade {
         };
 
         let principal = caller.principal_id().map(str::to_owned);
+        let vertical = self
+            .pii_pipeline
+            .as_ref()
+            .and_then(|p| p.vertical_provenance_id());
         let inputs: Vec<AuditEntryInput> = result
             .audit_log
             .iter()
@@ -746,6 +963,7 @@ impl HaciendaFacade {
                 // the ownership explicit and removes the reason to read it first.
                 config_hash: String::new(),
                 principal: principal.clone(),
+                vertical: vertical.clone(),
             })
             .collect();
 
@@ -899,6 +1117,8 @@ mod tests {
     use super::*;
     use crate::audit::store::AuditStore;
     use crate::audit::{AuditEntry, AuditEntryInput, AuditError, FileAuditStore, NodeId};
+    use crate::auth::authn::TokenResolver as _;
+    use crate::auth::InMemoryApiKeyStore;
     use crate::glossary::GlossaryConfig;
     use crate::pii::PipelineConfig;
     use crate::redaction::{
@@ -1394,6 +1614,7 @@ mod tests {
             HaciendaConfig::default().with_pii(pii_config()),
             Some(Arc::clone(&counting_store) as Arc<dyn AuditStore>),
             None,
+            None,
         )
         .unwrap();
 
@@ -1457,6 +1678,7 @@ mod tests {
                 config.clone(),
                 Some(Arc::clone(&store) as Arc<dyn AuditStore>),
                 None,
+                None,
             )
             .unwrap();
 
@@ -1485,6 +1707,7 @@ mod tests {
             let facade = HaciendaFacade::with_stores(
                 config.clone(),
                 Some(Arc::clone(&store) as Arc<dyn AuditStore>),
+                None,
                 None,
             )
             .unwrap();
@@ -1529,6 +1752,7 @@ mod tests {
                 config.clone(),
                 None,
                 Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
+                None,
             )
             .unwrap();
 
@@ -1567,6 +1791,7 @@ mod tests {
                 config,
                 None,
                 Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
+                None,
             )
             .unwrap();
 
@@ -1597,6 +1822,7 @@ mod tests {
             HaciendaConfig::default().with_pii(pii_config()),
             None,
             Some(Arc::clone(&store) as Arc<dyn ReviewStore>),
+            None,
         )
         .unwrap();
 
@@ -1618,7 +1844,8 @@ mod tests {
 
         let store = Arc::new(InMemoryReviewStore::new());
         let facade =
-            HaciendaFacade::with_stores(config, None, Some(store as Arc<dyn ReviewStore>)).unwrap();
+            HaciendaFacade::with_stores(config, None, Some(store as Arc<dyn ReviewStore>), None)
+                .unwrap();
 
         let queue = facade.review_queue().expect(
             "passing a review store must build a queue; dropping it silently loses every decision",
@@ -1680,7 +1907,8 @@ mod tests {
         let failing_store = Arc::new(FailingAuditStore);
         let facade = HaciendaFacade::with_stores(
             HaciendaConfig::default().with_pii(pii_config()),
-            Some(failing_store as Arc<dyn AuditStore>),
+            Some(Arc::clone(&failing_store) as Arc<dyn AuditStore>),
+            None,
             None,
         )
         .unwrap();
@@ -1762,6 +1990,8 @@ mod tests {
             audit_store,
             review_queue: None,
             glossary: None,
+            pseudonymiser: None,
+            api_key_store: None,
         }
     }
 
@@ -2019,6 +2249,397 @@ mod tests {
         );
     }
 
+    // ── Task 1: reveal_token_with_auth (Phase 8) ──────────────────────────────
+
+    #[tokio::test]
+    async fn should_reveal_a_previously_minted_pseudonym_token() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let result = facade
+            .process(text_input("mail bob@example.com"))
+            .await
+            .unwrap();
+
+        let content = &result.extraction.results[0].content;
+        let token = token_in(content);
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let revealed = facade.reveal_token_with_auth(caller, token).await.unwrap();
+
+        assert_eq!(revealed, "bob@example.com");
+    }
+
+    #[tokio::test]
+    async fn should_reject_reveal_without_pii_reveal_capability() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let result = facade
+            .process(text_input("mail bob@example.com"))
+            .await
+            .unwrap();
+
+        let content = &result.extraction.results[0].content;
+        let token = token_in(content);
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.reveal_token_with_auth(caller, token).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_malformed_token() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.reveal_token_with_auth(caller, "not-a-token").await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Pseudonym(_)));
+    }
+
+    #[tokio::test]
+    async fn should_record_an_audit_entry_for_a_token_reveal() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+
+        let result = facade
+            .process(text_input("mail bob@example.com"))
+            .await
+            .unwrap();
+
+        let content = &result.extraction.results[0].content;
+        let token = token_in(content);
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let revealed = facade.reveal_token_with_auth(caller, token).await.unwrap();
+
+        assert_eq!(revealed, "bob@example.com");
+
+        let entries = facade.audit_entries().await.unwrap();
+        let reveal_entry = entries
+            .iter()
+            .find(|e| e.action == crate::audit::RedactionAction::Reveal)
+            .expect("reveal entry must exist");
+
+        assert_eq!(reveal_entry.category, "pseudonym");
+        assert_eq!(
+            reveal_entry.span_hash,
+            blake3::hash("bob@example.com".as_bytes())
+                .to_hex()
+                .to_string()
+        );
+        assert_eq!(reveal_entry.principal.as_deref(), Some("test-principal"));
+    }
+
+    #[tokio::test]
+    async fn should_reject_reveal_when_pii_is_disabled() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default()).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .reveal_token_with_auth(caller, "[EMAIL:k1:AAAA]")
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::PiiDisabled));
+    }
+
+    // ── Phase 10: glossary_snapshot_with_auth and compliance_report_with_auth ──────
+
+    #[tokio::test]
+    async fn should_return_the_current_glossary_snapshot() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.glossary = Some(crate::glossary::GlossaryConfig {
+            enabled: true,
+            min_count: 2, // Need at least 2 occurrences to publish
+            ..Default::default()
+        });
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        // Process a document with repeated email to populate the glossary
+        // Email is detected by regex, so no model needed
+        let _ = facade
+            .process(text_input("mail alice@example.com and alice@example.com"))
+            .await
+            .unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let entries = facade.glossary_snapshot_with_auth(caller).await.unwrap();
+
+        assert!(!entries.is_empty());
+        assert_eq!(entries[0].term, "alice@example.com");
+        assert_eq!(entries[0].category, "Email");
+        assert_eq!(entries[0].count, 2);
+    }
+
+    #[tokio::test]
+    async fn should_reject_glossary_without_audit_read_capability() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.glossary = Some(crate::glossary::GlossaryConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.glossary_snapshot_with_auth(caller).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_return_empty_glossary_when_not_configured() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let entries = facade.glossary_snapshot_with_auth(caller).await.unwrap();
+
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn should_generate_a_compliance_report_for_the_active_config() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let report = facade.compliance_report_with_auth(caller).await.unwrap();
+
+        assert!(report.is_some());
+        let report = report.unwrap();
+        assert!(report.dpia.is_some());
+        assert!(report.model_card.is_some());
+        assert!(report.checklist.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_reject_compliance_without_audit_read_capability() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.compliance_report_with_auth(caller).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_return_none_compliance_when_not_configured() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let report = facade.compliance_report_with_auth(caller).await.unwrap();
+
+        assert!(report.is_none());
+    }
+
+    // ── Phase 10 Task 2 Step 3: review_queue_read_with_auth vs review_queue_with_auth ──
+    //
+    // `GET /v1/review` is declared under `Capability::AuditRead` in the route table, and
+    // `POST /v1/review/{id}/decide` under `Capability::ReviewDecide` — two different
+    // privileges. Before `review_queue_read_with_auth` existed, `get_review` called
+    // `review_queue_with_auth`, which unconditionally required `ReviewDecide` — so a
+    // caller with only `audit:read` would pass the route-level guard and then be
+    // rejected by the facade. These tests pin the fixed, distinct behaviour.
+
+    #[tokio::test]
+    async fn should_read_review_queue_with_audit_read_capability() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.review = Some(ReviewConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let queue = facade.review_queue_read_with_auth(caller).unwrap();
+
+        assert!(queue.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_reject_review_queue_read_without_audit_read_capability() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        let ctx = principal_with(&[Capability::ReviewDecide]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.review_queue_read_with_auth(caller);
+
+        // `ReviewQueue` (the `Ok` payload) has no `Debug` impl, so `unwrap_err` is unusable here.
+        let Err(err) = result else {
+            panic!("expected an authz error");
+        };
+        assert!(matches!(err, HaciendaError::Authz(_)));
+    }
+
+    #[tokio::test]
+    async fn should_reject_review_decide_without_review_decide_capability() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+
+        // audit:read is sufficient to read the queue but not to decide on an item —
+        // the inverse of the bug this test module documents above.
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade.review_queue_with_auth(caller);
+
+        let Err(err) = result else {
+            panic!("expected an authz error");
+        };
+        assert!(matches!(err, HaciendaError::Authz(_)));
+    }
+
+    // ── Phase 11 Task 2: issue_key_with_auth / revoke_key_with_auth ─────────────
+    //
+    // `issue_key_with_auth` and `revoke_key_with_auth` previously had no coverage at
+    // all. These tests exercise them end to end against an `InMemoryApiKeyStore`,
+    // including the capability guard and the round trip through
+    // `authn::ApiKeyTokenResolver` — the resolver the Axum auth middleware actually
+    // calls (`authn::TokenResolver`, distinct from the capability-set-only
+    // `auth::TokenResolver`).
+
+    fn facade_with_key_store() -> (HaciendaFacade, Arc<InMemoryApiKeyStore>) {
+        let store = Arc::new(InMemoryApiKeyStore::new());
+        let facade = HaciendaFacade::with_stores(
+            HaciendaConfig::default(),
+            None,
+            None,
+            Some(Arc::clone(&store) as Arc<dyn ApiKeyStore>),
+        )
+        .unwrap();
+        (facade, store)
+    }
+
+    #[tokio::test]
+    async fn should_reject_issue_key_without_auth_manage_capability() {
+        let (facade, _store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .issue_key_with_auth(caller, "owner-1", vec![Capability::DocumentsProcess])
+            .await;
+
+        assert!(matches!(result, Err(HaciendaError::Authz(_))));
+    }
+
+    #[tokio::test]
+    async fn should_reject_revoke_key_without_auth_manage_capability() {
+        let (facade, _store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        let result = facade
+            .revoke_key_with_auth(caller, uuid::Uuid::new_v4())
+            .await;
+
+        assert!(matches!(result, Err(HaciendaError::Authz(_))));
+    }
+
+    #[tokio::test]
+    async fn should_issue_a_key_and_authenticate_with_it_via_the_token_resolver() {
+        let (facade, store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::AuthManage]);
+        let caller = Caller::Principal(&ctx);
+
+        let issued_caps = vec![Capability::DocumentsProcess, Capability::AuditRead];
+        let (pair, record) = facade
+            .issue_key_with_auth(caller, "owner-1", issued_caps.clone())
+            .await
+            .expect("issue must succeed with AuthManage");
+        assert_eq!(record.owner, "owner-1");
+        assert!(record.revoked_at.is_none());
+
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(store as Arc<dyn ApiKeyStore>);
+        let token = resolver
+            .resolve(&pair.raw_key)
+            .await
+            .expect("resolve must not error")
+            .expect("a freshly issued key must resolve");
+
+        assert_eq!(token.principal_id, "owner-1");
+        for cap in &issued_caps {
+            assert!(
+                token.capabilities.has(*cap),
+                "resolved token missing capability {cap}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn should_stop_authenticating_a_revoked_key() {
+        let (facade, store) = facade_with_key_store();
+        let ctx = principal_with(&[Capability::AuthManage]);
+        let caller = Caller::Principal(&ctx);
+
+        let (pair, record) = facade
+            .issue_key_with_auth(caller, "owner-1", vec![Capability::DocumentsProcess])
+            .await
+            .expect("issue must succeed");
+
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(
+            Arc::clone(&store) as Arc<dyn ApiKeyStore>
+        );
+        assert!(
+            resolver.resolve(&pair.raw_key).await.unwrap().is_some(),
+            "key must authenticate before revocation"
+        );
+
+        facade
+            .revoke_key_with_auth(caller, record.id)
+            .await
+            .expect("revoke must succeed with AuthManage");
+
+        let resolved_after_revoke = resolver
+            .resolve(&pair.raw_key)
+            .await
+            .expect("resolve must not error even for a revoked key");
+        assert!(
+            resolved_after_revoke.is_none(),
+            "a revoked key must not authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_resolver_rejects_a_key_that_was_never_issued() {
+        let store = Arc::new(InMemoryApiKeyStore::new());
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(store as Arc<dyn ApiKeyStore>);
+
+        let resolved = resolver
+            .resolve("hcd_live_not-a-real-key")
+            .await
+            .expect("resolve must not error");
+        assert!(resolved.is_none());
+    }
+
     // ── Concurrency spike (Task 4, Step 1 — closes #30) ─────────────────────────
     //
     // Throwaway proof-of-compile, not part of `process_batch_with_auth`. Every
@@ -2125,6 +2746,8 @@ mod tests {
             audit_store,
             review_queue: None,
             glossary: None,
+            pseudonymiser: None,
+            api_key_store: None,
         }
     }
 
@@ -2182,6 +2805,7 @@ mod tests {
         let facade = HaciendaFacade::with_stores(
             HaciendaConfig::default().with_pii(config),
             Some(Arc::clone(&counting_store) as Arc<dyn AuditStore>),
+            None,
             None,
         )
         .unwrap();
@@ -2394,6 +3018,7 @@ mod tests {
             let facade = HaciendaFacade::with_stores(
                 HaciendaConfig::default().with_pii(config),
                 Some(Arc::clone(&timing_store) as Arc<dyn AuditStore>),
+                None,
                 None,
             )
             .unwrap();

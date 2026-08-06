@@ -76,24 +76,7 @@ impl AuditChain {
     /// Returns [`AuditError::ChainIntegrity`] naming the index of the first entry
     /// whose recorded hash does not match its recomputed value.
     pub fn verify(&self) -> Result<(), AuditError> {
-        let mut prev_hash = GENESIS_HASH.to_string();
-
-        for (index, entry) in self.entries.iter().enumerate() {
-            let expected_hash =
-                compute_chain_hash(&prev_hash, index as u64, entry.chain_hash_fields());
-
-            if entry.chain_hash != expected_hash {
-                return Err(AuditError::ChainIntegrity {
-                    index: index as u64,
-                    expected: expected_hash,
-                    actual: entry.chain_hash.clone(),
-                });
-            }
-
-            prev_hash = entry.chain_hash.clone();
-        }
-
-        Ok(())
+        verify_entries(&self.entries)
     }
 
     pub fn entries(&self) -> &[AuditEntry] {
@@ -118,6 +101,39 @@ impl AuditChain {
     }
 }
 
+/// Recompute every chain hash in `entries` from genesis and report the first mismatch.
+///
+/// The slice-only counterpart of [`AuditChain::verify`], for callers holding a
+/// deserialized `Vec<AuditEntry>` (e.g. `hacienda-cli`'s `audit verify`, reading back a
+/// flat JSON export) without also holding an `AuditChain`. Each entry's own `config_hash`
+/// is already part of [`AuditEntry::chain_hash_fields`](crate::audit::entry::AuditEntry::chain_hash_fields),
+/// so no chain-level config hash is needed here — this is exactly the loop
+/// [`AuditChain::verify`] runs internally.
+///
+/// # Errors
+///
+/// Returns [`AuditError::ChainIntegrity`] naming the index of the first entry whose
+/// recorded hash does not match its recomputed value.
+pub fn verify_entries(entries: &[AuditEntry]) -> Result<(), AuditError> {
+    let mut prev_hash = GENESIS_HASH.to_string();
+
+    for (index, entry) in entries.iter().enumerate() {
+        let expected_hash = compute_chain_hash(&prev_hash, index as u64, entry.chain_hash_fields());
+
+        if entry.chain_hash != expected_hash {
+            return Err(AuditError::ChainIntegrity {
+                index: index as u64,
+                expected: expected_hash,
+                actual: entry.chain_hash.clone(),
+            });
+        }
+
+        prev_hash = entry.chain_hash.clone();
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +151,7 @@ mod tests {
             pipeline_version: "1.0".into(),
             config_hash: String::new(),
             principal: None,
+            vertical: None,
         }
     }
 
@@ -175,6 +192,25 @@ mod tests {
         match chain.verify() {
             Err(AuditError::ChainIntegrity { index, .. }) => assert_eq!(index, 1),
             other => panic!("expected a chain integrity error at index 1, got {other:?}"),
+        }
+    }
+
+    /// Vertical provenance is inside the chain hash exactly like `principal` and
+    /// `category` — rewriting it at rest must invalidate the entry, or the audit trail
+    /// would answer "which vertical detected this" with a field an operator could edit
+    /// after the fact.
+    #[test]
+    fn should_reject_a_tampered_vertical_id() {
+        let mut chain = AuditChain::new("cfg");
+        chain.push(AuditEntryInput {
+            vertical: Some("finance@3f9a1c02".into()),
+            ..input("a")
+        });
+        chain.entries[0].vertical = Some("finance@ffffffff".into());
+
+        match chain.verify() {
+            Err(AuditError::ChainIntegrity { index, .. }) => assert_eq!(index, 0),
+            other => panic!("expected a chain integrity error at index 0, got {other:?}"),
         }
     }
 

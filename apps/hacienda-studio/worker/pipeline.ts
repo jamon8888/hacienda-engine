@@ -307,8 +307,17 @@ async function initEngine(): Promise<void> {
   await Promise.all([
     initWasm({ module_or_path: fetch(xbergWasmUrl) }),
     initPiiEngine(),
-    initNerBackend(),
   ]);
+  // NER model loading is deliberately not awaited here. On a fresh/uncached browser it is a
+  // ~614 MB network fetch (minutes, not seconds) — awaiting it inside the same Promise.all
+  // that gates the worker's "ready" handshake left the file input disabled for that whole
+  // fetch on every uncached session, independent of whether onboarding had already been
+  // dismissed (the worker's IndexedDB cache is separate from the main thread's
+  // "xberg-studio-visited" flag). `initNerBackend` already catches its own errors and
+  // `selectNerBridge` reads module-level `nerRuntime` fresh per file, so a file processed
+  // while this is still in flight correctly falls back to the regex/compromise bridge and
+  // later files upgrade to neural NER transparently once it resolves.
+  void initNerBackend();
 }
 
 async function processFile(

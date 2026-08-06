@@ -4,11 +4,14 @@ extend-exclude = [
   ".ai-rulez/",
   "scripts/",
   "poly.toml",
-  # French-language prose. `typos` is an English dictionary, so it reads "moteur" as
-  # "motor", "ressources" as "resources", "amont" as "amount" — corrections that would each
-  # make the text wrong. `docs/architecture/` is the French architecture corpus (analysis +
-  # index); English documents belong at the `docs/` root, where they stay checked. Same
-  # reason `superpowers/` is excluded above: it holds the French design specs.
+  # fixtures/ner-eval/ is hand-written French/English NER eval prose
+  # (hacienda-core/tests/ner_eval.rs); an English spell-checker has nothing useful to say
+  # about French sentences.
+  "fixtures/ner-eval/",
+  # Same reason, for the same language: `typos` reads "moteur" as "motor", "ressources" as
+  # "resources", "amont" as "amount" — corrections that would each make the text wrong.
+  # `docs/architecture/` is the French architecture corpus (analysis + index); English
+  # documents belong at the `docs/` root, where they stay checked.
   "docs/architecture/",
 ]
 
@@ -31,5 +34,8 @@ unparseable = "unparseable"
 frist = "frist"
 reveiw = "reveiw"
 cahce = "cahce"
+# hacienda-core/tests/ner_eval.rs doc comment: an example of a typo'd fixture label the
+# schema test is designed to catch, not a typo to fix.
+loaction = "loaction"
 
 [default.extend-identifiers]

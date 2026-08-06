@@ -1,0 +1,45 @@
+[package]
+name = "hacienda-wasm"
+version = "0.1.0"
+
+[wasm-opt]
+# Enable wasm-opt with aggressive optimizations
+optimize = true
+# O4 = maximum optimization level
+level = "O4"
+# Enable all optimization passes
+enable-simd = true
+enable-bulk-memory = true
+enable-reference-types = true
+enable-tail-call = true
+# Strip debug info
+debug = false
+# Additional flags
+extra-args = [
+    "--strip-dwarf",
+    "--strip-debug",
+    "--strip-producers",
+    "--strip-linking",
+    "--vacuum",
+    "--converge",
+    "--dce",
+    "--optimize-instructions",
+    "--rse",
+    "--gufa",
+    "--vacuum",
+    "--flatten",
+    "--merge-blocks",
+    "--inline",
+    "--global-cse",
+    "--remove-unused-module-elements",
+    "--remove-unused-brs",
+    "--remove-unused-module-elements",
+    "--minify-imports",
+    "--minify-exports",
+]
+
+[build]
+# Release build
+mode = "release"
+# Enable wasm-opt by default
+wasm-opt = true
