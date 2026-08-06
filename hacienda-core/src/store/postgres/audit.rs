@@ -6,6 +6,7 @@
 //! Phase 1 Design Decision D3.
 
 use crate::audit::{
+    cursor::{page_from, AuditCursor, AuditPage},
     entry::{AuditEntry, AuditEntryInput, EntitySource, RedactionAction},
     error::AuditError,
     segment::{compute_seal_hash, verify_seal_chain, SegmentSeal},
@@ -99,6 +100,88 @@ impl AuditStore for PostgresAuditStore {
         .await?;
 
         rows.into_iter().map(row_to_entry).collect()
+    }
+
+    async fn history(
+        &self,
+        after: Option<&AuditCursor>,
+        limit: usize,
+    ) -> Result<AuditPage, AuditError> {
+        // Build extents: sealed segments (oldest first), then the open segment
+        let sealed_extents = sqlx::query!(
+            r#"
+            SELECT segment_id, entry_count
+            FROM audit_segments
+            WHERE sealed_at IS NOT NULL
+            ORDER BY created_at
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut extents = Vec::with_capacity(sealed_extents.len() + 1);
+        for row in sealed_extents {
+            extents.push((row.segment_id.to_string(), row.entry_count as u64));
+        }
+
+        // Add open segment
+        let open_row = sqlx::query!(
+            r#"
+            SELECT segment_id, entry_count
+            FROM audit_segments
+            WHERE sealed_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = open_row {
+            extents.push((row.segment_id.to_string(), row.entry_count as u64));
+        }
+
+        page_from(&extents, after, limit, |position| {
+            // position indexes into extents: 0 = first sealed segment, etc.
+            if position < sealed_extents.len() {
+                // Sealed segment
+                let segment_id = sealed_extents[position].segment_id.to_string();
+                let rows = sqlx::query_as!(
+                    AuditEntryRow,
+                    r#"
+                    SELECT id, category, action, span_hash, span_length, confidence, source,
+                           pipeline_version, config_hash, principal, chain_hash, created_at
+                    FROM audit_entries
+                    WHERE segment_id = $1
+                    ORDER BY sequence_num
+                    "#,
+                    Uuid::parse_str(&segment_id).map_err(|e| AuditError::Backend(e.to_string()))?
+                )
+                .fetch_all(&self.pool)
+                .await?;
+                rows.into_iter().map(row_to_entry).collect()
+            } else {
+                // Open segment
+                let rows = sqlx::query_as!(
+                    AuditEntryRow,
+                    r#"
+                    SELECT id, category, action, span_hash, span_length, confidence, source,
+                           pipeline_version, config_hash, principal, chain_hash, created_at
+                    FROM audit_entries
+                    WHERE segment_id = (
+                        SELECT segment_id FROM audit_segments
+                        WHERE sealed_at IS NULL
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    )
+                    ORDER BY sequence_num
+                    "#
+                )
+                .fetch_all(&self.pool)
+                .await?;
+                rows.into_iter().map(row_to_entry).collect()
+            }
+        })
     }
 
     async fn tip(&self) -> Result<String, AuditError> {
