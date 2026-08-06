@@ -149,46 +149,52 @@ impl AuditStore for PostgresAuditStore {
             extents.push((row.segment_id.to_string(), row.entry_count as u64));
         }
 
-        page_from(&extents, after, limit, |position| {
-            // position indexes into extents: 0 = first sealed segment, etc.
-            if position < sealed_extents.len() {
-                // Sealed segment
-                let segment_id = sealed_extents[position].segment_id.to_string();
-                let rows = sqlx::query_as!(
-                    AuditEntryRow,
-                    r#"
-                    SELECT id, category, action, span_hash, span_length, confidence, source,
-                           pipeline_version, config_hash, principal, chain_hash, created_at
-                    FROM audit_entries
-                    WHERE segment_id = $1
-                    ORDER BY sequence_num
-                    "#,
-                    Uuid::parse_str(&segment_id).map_err(|e| AuditError::Backend(e.to_string()))?
-                )
-                .fetch_all(&self.pool)
-                .await?;
-                rows.into_iter().map(row_to_entry).collect()
-            } else {
-                // Open segment
-                let rows = sqlx::query_as!(
-                    AuditEntryRow,
-                    r#"
-                    SELECT id, category, action, span_hash, span_length, confidence, source,
-                           pipeline_version, config_hash, principal, chain_hash, created_at
-                    FROM audit_entries
-                    WHERE segment_id = (
-                        SELECT segment_id FROM audit_segments
-                        WHERE sealed_at IS NULL
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    )
-                    ORDER BY sequence_num
-                    "#
-                )
-                .fetch_all(&self.pool)
-                .await?;
-                rows.into_iter().map(row_to_entry).collect()
-            }
+        // Fetch all entries for all segments upfront since page_from uses a sync closure
+        let mut all_segment_entries = Vec::with_capacity(extents.len());
+        
+        for row in &sealed_extents {
+            let segment_id = row.segment_id.to_string();
+            let rows = sqlx::query_as!(
+                AuditEntryRow,
+                r#"
+                SELECT id, category, action, span_hash, span_length, confidence, source,
+                       pipeline_version, config_hash, principal, chain_hash, created_at
+                FROM audit_entries
+                WHERE segment_id = $1
+                ORDER BY sequence_num
+                "#,
+                Uuid::parse_str(&segment_id).map_err(|e| AuditError::Backend(e.to_string()))?
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            all_segment_entries.push(rows.into_iter().map(row_to_entry).collect::<Vec<_>>());
+        }
+
+        // Open segment
+        let open_rows = sqlx::query_as!(
+            AuditEntryRow,
+            r#"
+            SELECT id, category, action, span_hash, span_length, confidence, source,
+                   pipeline_version, config_hash, principal, chain_hash, created_at
+            FROM audit_entries
+            WHERE segment_id = (
+                SELECT segment_id FROM audit_segments
+                WHERE sealed_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            ORDER BY sequence_num
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        all_segment_entries.push(open_rows.into_iter().map(row_to_entry).collect::<Vec<_>>());
+
+        // Build extents slice for page_from
+        let extent_refs: Vec<(&str, u64)> = extents.iter().map(|(s, c)| (s.as_str(), *c)).collect();
+
+        page_from(&extent_refs, after, limit, |position| {
+            Ok(all_segment_entries[position].clone())
         })
     }
 
