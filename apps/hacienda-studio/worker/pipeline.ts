@@ -59,11 +59,8 @@ let wasmReady: Promise<void> | null = null;
 // Track B1/B2: `createNerBackend()` targets xberg-wasm's neural `NerModel` — multilingual,
 // PII-specific, and already the model the onboarding screen downloads. `null` means the
 // model failed to load (or was never cached), in which case `selectNerBridge` falls back to
-// `extractEntities` (compromise.js, English-only). IndexedDB is worker-accessible, so on a
-// cache hit this load reuses what `App.tsx`'s preloadAssets already populated — no
-// re-download. On a cache *miss* (never attempted, or attempted and failed) this call does
-// perform the full fetch — `initEngine`'s `skipNer` parameter is what prevents this from
-// pointlessly repeating a failure `App.tsx` already saw this session.
+// `extractEntities` (compromise.js, English-only). IndexedDB is worker-accessible, so this
+// load hits the cache `App.tsx`'s preloadAssets already populated — no re-download here.
 type NerRuntime = Awaited<ReturnType<typeof createNerBackend>>;
 let nerRuntime: NerRuntime | null = null;
 
@@ -306,22 +303,11 @@ export function buildGlossaryIndex(entities: RegistryEntity[]): string {
   return md;
 }
 
-async function initEngine(skipNer: boolean): Promise<void> {
+async function initEngine(): Promise<void> {
   await Promise.all([
     initWasm({ module_or_path: fetch(xbergWasmUrl) }),
     initPiiEngine(),
   ]);
-  // `skipNer` is set when `App.tsx`'s own preload already tried and failed to populate the
-  // IndexedDB model cache this session (e.g. QuotaExceededError writing the ~614MB model).
-  // Without this, `loadNerModel()` below sees the same empty cache and re-fetches the full
-  // model over the network only to hit the same write failure again — wasted bandwidth and
-  // time on top of an outcome that's already known for this session.
-  if (skipNer) {
-    console.log(
-      "[Worker] Skipping neural NER init — main thread already failed to cache the model this session",
-    );
-    return;
-  }
   // NER model loading is deliberately not awaited here. On a fresh/uncached browser it is a
   // ~614 MB network fetch (minutes, not seconds) — awaiting it inside the same Promise.all
   // that gates the worker's "ready" handshake left the file input disabled for that whole
@@ -741,11 +727,11 @@ async function processFiles(
 }
 
 self.onmessage = async (event: MessageEvent) => {
-  const { type, files, config, skipNer } = event.data;
+  const { type, files, config } = event.data;
   console.log("[Worker] Received message:", type, files?.length);
 
   if (type === "init") {
-    wasmReady = initEngine(Boolean(skipNer));
+    wasmReady = initEngine();
     await wasmReady;
     self.postMessage({ type: "ready" });
     return;

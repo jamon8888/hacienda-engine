@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "cd ../../crates/hacienda-wasm && wasm-pack build --target web --no-default-features --no-opt",
+    "build:wasm": "cd ../../crates/hacienda-wasm && wasm-pack build --target web --no-default-features",
     "build:wasm:if-needed": "bash scripts/build-wasm-if-needed.sh",
     "predev": "npm run build:wasm:if-needed",
     "prebuild": "npm run build:wasm",
