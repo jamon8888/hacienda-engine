@@ -8,6 +8,9 @@ on:
       - "hacienda-core/**"
   pull_request:
     branches: [main]
+    paths:
+      - "hacienda/**"
+      - "hacienda-core/**"
 
 jobs:
   clippy:
