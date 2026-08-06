@@ -167,9 +167,19 @@ pub async fn upsert_document(
     let store = require_store(&state)?;
 
     let chunks = if body.chunks.is_empty() {
-        let config = hacienda_rag::ChunkingConfig::default();
-        hacienda_rag::chunk_full_text(&body.document.full_text, &config)
-            .map_err(ApiError::from)?
+        // Off the async runtime: `chunk_text` is synchronous, CPU-bound work over
+        // `full_text` (unbounded caller input), and running it inline on a request's
+        // worker thread would block every other task scheduled on it for the duration —
+        // unlike the audit handlers' deliberately-inline blocking reads (see
+        // `handlers::audit`'s module doc), this sits on the document-ingestion hot path.
+        let full_text = body.document.full_text.clone();
+        tokio::task::spawn_blocking(move || {
+            let config = hacienda_rag::ChunkingConfig::default();
+            hacienda_rag::chunk_full_text(&full_text, &config)
+        })
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::from)?
     } else {
         body.chunks
     };

@@ -989,9 +989,17 @@ pub(crate) mod tests {
     /// (full-text/keyword only) because the server-side chunker leaves `embedding`
     /// empty — a caller wanting embedded chunks still submits `chunks` itself or
     /// re-embeds afterward, per `handlers::rag::upsert_document`'s doc comment.
+    ///
+    /// Asserts on the stored chunks directly via `get_document_chunks` (bypassing HTTP,
+    /// which has no chunk-returning read path) rather than only checking the document
+    /// exists — a store that silently kept zero chunks would still pass a
+    /// document-exists-only check.
     #[tokio::test]
     async fn upsert_document_without_chunks_is_chunked_server_side() {
-        let app = build_router(state_with_rag());
+        use hacienda_rag::{InMemoryVectorStore, RagStore};
+        let store = Arc::new(InMemoryVectorStore::new("test"));
+        let rag_store: Arc<dyn RagStore> = store.clone();
+        let app = build_router(test_state_no_auth().with_rag_store(rag_store));
 
         assert_eq!(create_collection(&app, "c1", 0).await, 201);
 
@@ -1016,20 +1024,23 @@ pub(crate) mod tests {
             201,
             "upsert without chunks must succeed by chunking full_text server-side"
         );
+        let upsert = json_body(upsert).await;
+        let document_id: hacienda_rag::DocumentId =
+            serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
 
-        let list = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/v1/rag/collections/c1/documents")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let (_document, chunks) = store
+            .get_document_chunks("c1", &document_id)
             .await
-            .unwrap();
-        assert_eq!(list.status().as_u16(), 200);
-        let list = json_body(list).await;
-        assert_eq!(list["total"], 1);
+            .expect("get_document_chunks")
+            .expect("document must exist");
+        assert!(
+            !chunks.is_empty(),
+            "full_text must have been split into at least one chunk"
+        );
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.ordinal, i as u32, "chunks must be stored in order");
+            assert!(!chunk.content.is_empty());
+        }
     }
 
     /// `GET` on a collection that was never created must be 404, not 500 or 200
@@ -2235,7 +2246,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["valid"], serde_json::Value::Bool(true));
+        assert_eq!(json["verified"], serde_json::Value::Bool(true));
 
         // GET /v1/review — the seeded item comes back pending. `list(None)` returns the
         // whole table, shared with every other test that submits to this database, so

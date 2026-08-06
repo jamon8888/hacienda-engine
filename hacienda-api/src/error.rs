@@ -365,6 +365,7 @@ impl From<hacienda_rag::RagError> for ApiError {
             RagError::CollectionAlreadyExists(_)
             | RagError::UnsupportedMode { .. }
             | RagError::Core(_)
+            | RagError::Chunking { .. }
             | RagError::Backend(_) => {
                 tracing::error!(error = %err, "rag store error processing request");
                 ApiError::internal()

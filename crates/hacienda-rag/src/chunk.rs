@@ -8,7 +8,7 @@
 //! separately or leave unembedded (a collection used only for full-text/keyword
 //! retrieval has no need of one).
 
-use crate::error::RagResult;
+use crate::error::{RagError, RagResult};
 use crate::types::ChunkRecord;
 use xberg::chunking::{chunk_text, ChunkingConfig};
 
@@ -19,8 +19,16 @@ use xberg::chunking::{chunk_text, ChunkingConfig};
 /// embedding of its own; a caller that wants embedded chunks runs them through an
 /// embedder (e.g. `xberg::embed_texts_async`, already used by `migrate_embeddings`)
 /// before upserting.
+///
+/// # Errors
+///
+/// Returns [`RagError::Chunking`], not a bare [`RagError::Core`] — see that
+/// variant's doc comment for why this call site is worth naming explicitly.
 pub fn chunk_full_text(full_text: &str, config: &ChunkingConfig) -> RagResult<Vec<ChunkRecord>> {
-    let result = chunk_text(full_text, config, None)?;
+    let result = chunk_text(full_text, config, None).map_err(|source| RagError::Chunking {
+        input_chars: full_text.chars().count(),
+        source: Box::new(source),
+    })?;
 
     Ok(result
         .chunks

@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI (`ci-rust.yaml`) had been red on `main` since `00b210b`.
 - **The full 5-endpoint audit API is live again**, not just documented in
   `hacienda-api/README.md`: `GET /v1/audit/{entries,verify,seals,export,tip}`, cursor-paginated,
-  with the verifiable evidence-envelope export and the `audit:export` capability. This code
+  with the `audit:export` capability gating `/export`. This code
   (`hacienda-api/src/handlers/audit.rs`) existed since `93c6290` but was orphaned by a later
   merge — never declared in `handlers/mod.rs`, never wired into `ROUTE_TABLE` — leaving only the
   coarser Phase 10 `/v1/audit`/`/v1/audit/verify` (`audit_review.rs`) live. Restored
@@ -28,7 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/v1/audit` stays on `audit_review::get_audit` for `sdks/typescript`'s hand-written
   `getAudit()`; `/v1/audit/verify` now serves the richer handler (broken-chain-as-200, names
   the offending entry/seal) — `sdks/typescript/src/client.ts`'s `verifyAudit()` return type
-  updated to match, `audit_review::verify_audit` kept unrouted as a reference implementation.
+  updated to match (operation id kept as `verifyAudit` so `sdks/python`'s generated client
+  still exposes a `verify_audit` function under the new handler), `audit_review::verify_audit`
+  kept unrouted as a reference implementation. `/v1/audit/export`'s `json`/`jsonl` formats are a
+  flat, chain-ordered export (verifiable via consecutive `chain_hash` recomputation) — not the
+  segment-grouped, seal-embedding envelope the original design sketched; that richer shape is
+  unimplemented, and the handler's doc comment and this entry now say so rather than overclaim.
+  `PostgresAuditStore::history()` reads its extent counts, open-segment id, and entries inside
+  one `REPEATABLE READ` transaction (previously separate queries, so a concurrent
+  append/rotation could make a legitimate chain look like a `SegmentEntryCount` mismatch), and
+  the RAG upsert path's server-side chunking (below) runs in `spawn_blocking` rather than
+  inline on the async runtime.
 - **README's bindings table no longer claims 14 language bindings that don't exist.** `alef.toml`
   references six Rust source files that were never written and a `packages/` output tree that
   was never created; the table's 14 "✅" rows described `cargo-alef`-generated FFI bindings that
@@ -36,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clients, the hand-written `crates/hacienda-wasm`) and an honest note on what's aspirational.
   `.ai-rulez/skills/{crate-structure,alef-generated-bindings}/SKILL.md` flagged as copied from
   the upstream `xberg` repo — they describe a crate/package layout that doesn't exist here.
+- **`GET /v1/review` required `review:decide` instead of the route table's declared
+  `audit:read` (Phase 10).** `get_review` and `decide_review` both called
+  `HaciendaFacade::review_queue_with_auth`, which unconditionally required
+  `Capability::ReviewDecide` — so a caller with only `audit:read` passed the route-level
+  guard on `GET /v1/review` and was then rejected by the facade. New
+  `HaciendaFacade::review_queue_read_with_auth` requires `audit:read`, used by `get_review`
+  only; `decide_review` keeps the original `review_queue_with_auth` (`review:decide`).
+  Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
+  (no handler-level test exercised the two capabilities' distinction).
 
 ### Added
 
@@ -557,18 +576,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updated.
 - Hash-chained audit log with blake3
 - JWT authentication for API
-
-### Fixed
-
-- **`GET /v1/review` required `review:decide` instead of the route table's declared
-  `audit:read` (Phase 10).** `get_review` and `decide_review` both called
-  `HaciendaFacade::review_queue_with_auth`, which unconditionally required
-  `Capability::ReviewDecide` — so a caller with only `audit:read` passed the route-level
-  guard on `GET /v1/review` and was then rejected by the facade. New
-  `HaciendaFacade::review_queue_read_with_auth` requires `audit:read`, used by `get_review`
-  only; `decide_review` keeps the original `review_queue_with_auth` (`review:decide`).
-  Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
-  (no handler-level test exercised the two capabilities' distinction).
 
 ## [0.1.0] - 2026-07-28
 

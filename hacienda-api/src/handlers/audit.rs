@@ -218,7 +218,11 @@ fn resolve_limit(requested: Option<usize>) -> Result<usize, ApiError> {
     get,
     path = "/v1/audit/verify",
     tag = "audit",
-    operation_id = "verifyAuditChain",
+    // Kept as "verifyAudit", not renamed: this operationId is what generated SDKs derive
+    // their function name from (sdks/python/src/hacienda_sdk/client.py imports
+    // `verify_audit` from the generated module by exactly this name), and swapping the
+    // route's handler here is not a wire-contract rename.
+    operation_id = "verifyAudit",
     description = "Requires audit:read",
     security(("bearerAuth" = [])),
     responses((status = 200, description = "Verification verdict for this node's chain", body = VerifyResponse))
@@ -374,14 +378,23 @@ pub async fn audit_seals(
 ///
 /// # The two artefacts, and why the response shouts about which one it is
 ///
-/// `json` and `jsonl` return an **evidence envelope**: entries grouped by segment, with the
-/// seals, which a regulator can re-verify offline with nothing but the bytes. `csv` returns
-/// a **tabular extract**, which cannot be verified at all — a flat table carries no segment
-/// boundary and no sequence number, so no row's `chain_hash` can be recomputed, and no
-/// seals accompany it. Adding columns would not fix that; it is structural.
+/// `json` and `jsonl` return every entry across every segment, in chain order, as a **flat,
+/// chain-ordered export**: consecutive entries' `chain_hash`es can be recomputed and checked
+/// offline against each other, which is what makes it verifiable. `csv` returns the same
+/// entries as a **tabular extract**, which cannot be verified at all — a flat table's rows
+/// have no reliable adjacency guarantee once opened in different tools, so no row's
+/// `chain_hash` can be trusted to check against its neighbour. Adding columns would not fix
+/// that; it is structural.
+///
+/// This is *not* the segment-grouped, seal-embedding evidence envelope the format was
+/// originally speced to produce (seals are a separate call, `GET /v1/audit/seals`) — that
+/// richer shape is unimplemented; `hacienda_core::audit::export::export_json` only
+/// serialises `chain.entries()`. Track building the grouped envelope separately rather than
+/// reading this doc comment as already describing it.
 ///
 /// Someone handing a regulator a CSV in the belief that it is probative is the failure this
-/// whole spec exists to prevent, so the distinction is carried three ways:
+/// whole spec exists to prevent, so the distinction the code *does* make (json/jsonl
+/// verifiable, csv not) is carried three ways:
 ///
 /// - `x-hacienda-audit-evidence: envelope | none` — machine-readable, for a client that
 ///   automates the hand-off.
@@ -395,7 +408,7 @@ pub async fn audit_seals(
 ///
 /// For CSV there is nowhere to put one: a comment row is not RFC 4180 and breaks every
 /// spreadsheet importer, and an extra column would be attached to each row rather than to
-/// the file. For JSON the envelope's bytes are the thing an offline verifier parses, and
+/// the file. For JSON the exported bytes are the thing an offline verifier parses, and
 /// this handler must not alter them — the whole guarantee is that what the server sent is
 /// what the verifier checks. So the marker lives in the envelope of the *response*, not in
 /// the evidence.
@@ -410,9 +423,11 @@ pub async fn audit_seals(
     description = "Requires audit:export",
     security(("bearerAuth" = [])),
     params(
-        ("format" = Option<String>, Query, description = "json (default) or jsonl — evidence envelope, verifiable offline; csv — tabular extract, not verifiable")
+        ("format" = Option<String>, Query, description = "json (default) or jsonl — flat, chain-ordered export, verifiable offline via consecutive chain_hash recomputation; csv — tabular extract, not verifiable")
     ),
-    responses((status = 200, description = "The whole history as bytes, in the requested format"))
+    responses(
+        (status = 200, description = "The whole history, oldest first: a JSON array of NodeAuditEntryDto (format=json, the default), one such object per line (format=jsonl, content-type application/x-ndjson), or a CSV table with an id,timestamp,category,... header row (format=csv, content-type text/csv). See `x-hacienda-audit-evidence` and this operation's own doc comment for which formats are offline-verifiable.")
+    )
 )]
 pub async fn audit_export(
     State(state): State<ApiState>,

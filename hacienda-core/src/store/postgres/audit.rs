@@ -114,6 +114,16 @@ impl AuditStore for PostgresAuditStore {
             entry_count: i64,
         }
 
+        // Every read below runs against one REPEATABLE READ snapshot. Without this, an
+        // `append` or `rotate` committing between the extent queries and the entry
+        // queries could change a segment's entry count (or which segment is "open")
+        // out from under this method, and `page_from` would report a `SegmentEntryCount`
+        // mismatch against a chain that was never actually broken.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+
         let sealed_extents: Vec<ExtentRow> = sqlx::query_as!(
             ExtentRow,
             r#"
@@ -123,7 +133,7 @@ impl AuditStore for PostgresAuditStore {
             ORDER BY created_at
             "#
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         let mut extents = Vec::with_capacity(sealed_extents.len() + 1);
@@ -131,7 +141,11 @@ impl AuditStore for PostgresAuditStore {
             extents.push((row.segment_id.to_string(), row.entry_count as u64));
         }
 
-        // Add open segment
+        // Add open segment — its id is captured here and reused below for the entry
+        // query, rather than re-selected, so both agree on the same segment even if a
+        // rotation opens a new one concurrently (blocked from being visible mid-read by
+        // the snapshot above regardless, but reusing the id keeps the two queries from
+        // ever being able to disagree even under a weaker isolation level).
         let open_row: Option<ExtentRow> = sqlx::query_as!(
             ExtentRow,
             r#"
@@ -142,10 +156,10 @@ impl AuditStore for PostgresAuditStore {
             LIMIT 1
             "#
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
-        if let Some(row) = open_row {
+        if let Some(row) = &open_row {
             extents.push((row.segment_id.to_string(), row.entry_count as u64));
         }
 
@@ -156,7 +170,6 @@ impl AuditStore for PostgresAuditStore {
         let mut all_segment_entries: Vec<Vec<AuditEntry>> = Vec::with_capacity(extents.len());
 
         for row in &sealed_extents {
-            let segment_id = row.segment_id.to_string();
             let rows = sqlx::query_as!(
                 AuditEntryRow,
                 r#"
@@ -166,41 +179,32 @@ impl AuditStore for PostgresAuditStore {
                 WHERE segment_id = $1
                 ORDER BY sequence_num
                 "#,
-                Uuid::parse_str(&segment_id).map_err(|e| AuditError::Backend(e.to_string()))?
+                row.segment_id
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await?;
-            all_segment_entries.push(
-                rows.into_iter()
-                    .map(row_to_entry)
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            all_segment_entries.push(decode_segment_rows(row.segment_id, rows)?);
         }
 
-        // Open segment
-        let open_rows = sqlx::query_as!(
-            AuditEntryRow,
-            r#"
-            SELECT id, category, action, span_hash, span_length, confidence, source,
-                   pipeline_version, config_hash, principal, chain_hash, created_at
-            FROM audit_entries
-            WHERE segment_id = (
-                SELECT segment_id FROM audit_segments
-                WHERE sealed_at IS NULL
-                ORDER BY created_at DESC
-                LIMIT 1
+        // Open segment, keyed by the id captured above — not re-queried.
+        if let Some(row) = &open_row {
+            let open_rows = sqlx::query_as!(
+                AuditEntryRow,
+                r#"
+                SELECT id, category, action, span_hash, span_length, confidence, source,
+                       pipeline_version, config_hash, principal, chain_hash, created_at
+                FROM audit_entries
+                WHERE segment_id = $1
+                ORDER BY sequence_num
+                "#,
+                row.segment_id
             )
-            ORDER BY sequence_num
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        all_segment_entries.push(
-            open_rows
-                .into_iter()
-                .map(row_to_entry)
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+            .fetch_all(&mut *tx)
+            .await?;
+            all_segment_entries.push(decode_segment_rows(row.segment_id, open_rows)?);
+        }
+
+        tx.commit().await?;
 
         // Build extents slice for page_from
         let extent_refs: Vec<(&str, u64)> = extents.iter().map(|(s, c)| (s.as_str(), *c)).collect();
@@ -437,6 +441,25 @@ impl AuditStore for PostgresAuditStore {
 
 /// Confidence is stored as `DOUBLE PRECISION` (f64) because Postgres has no native f32,
 /// but the domain type is `f32` (matches [`AuditEntryInput::confidence`]). `as f32` is a
+/// Decode every row of one segment, naming the segment and the offending row's id in any
+/// error `row_to_entry` returns — a malformed stored `action`/`source`/`category` on its
+/// own says nothing about which segment or record needs repair.
+fn decode_segment_rows(
+    segment_id: Uuid,
+    rows: Vec<AuditEntryRow>,
+) -> Result<Vec<AuditEntry>, AuditError> {
+    rows.into_iter()
+        .map(|row| {
+            let row_id = row.id.clone();
+            row_to_entry(row).map_err(|source| {
+                AuditError::Backend(format!(
+                    "segment {segment_id}, entry {row_id}: {source}"
+                ))
+            })
+        })
+        .collect()
+}
+
 /// narrowing cast; acceptable here because confidence scores are bounded in `[0, 1]` and
 /// the precision Postgres can't represent is well below what any detector reports.
 fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
