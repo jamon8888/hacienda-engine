@@ -31,6 +31,14 @@ fn main() -> std::process::ExitCode {
                 }
             },
             Command::Serve(args) => commands::run_serve(args, cli.config, cli.config_json).await,
+            Command::Pii { command } => match command {
+                cli::PiiCommand::Reveal(args) => {
+                    commands::run_pii_reveal(args, cli.config, cli.config_json).await
+                }
+            },
+            Command::Audit { command } => match command {
+                cli::AuditCommand::Verify(args) => commands::run_audit_verify(args).await,
+            },
         }
     });
 

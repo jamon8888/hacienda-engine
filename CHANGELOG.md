@@ -64,6 +64,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot serve as a general capability probe. `whoami` is gated on
   `Capability::DocumentsProcess` instead and returns only the presented token's own
   grants, with no elevated privilege required to ask "what can I do."
+- **CLI `--mode pseudonymize` now works.** `hacienda extract`/`hacienda scan` build their
+  facade via `HaciendaFacade::with_key_resolver` with an `EnvKeyResolver` when the
+  effective redaction mode is `pseudonymize`, instead of always calling
+  `HaciendaFacade::new` (which never supplies a pseudonymiser and made
+  `--mode pseudonymize` fail unconditionally — `RedactionEngine::new` returns
+  `MissingPseudonymKey` whenever that mode has no pseudonymiser). Conditional on mode,
+  not unconditional: `Pseudonymiser::new` resolves the active key eagerly, so wiring it
+  in on every run would break every non-pseudonymize invocation on a host with no
+  `HACIENDA_PSEUDONYM_ACTIVE_KEY` set. `hacienda serve` has the identical gap and is not
+  fixed by this change — known, not yet addressed.
+- **`hacienda pii reveal <token>` (CLI/API parity).** Reverses a pseudonym token via
+  `HaciendaFacade::reveal_token_with_auth` as `Caller::Trusted` (the CLI's process
+  boundary is the trust boundary, same precedent `serve` documents). Every
+  `PseudonymError`/`PiiDisabled` from the reveal call collapses to one generic refusal,
+  mirroring the HTTP API's `ApiError::from(HaciendaError::Pseudonym(_))` mapping, so CLI
+  error text cannot be used to distinguish a wrong key from a malformed token.
+  Facade-construction failure (no active key configured at all) is reported with its real
+  message instead, since that is an operator misconfiguration, not a token probe.
+- **`hacienda audit verify <dir>` (CLI/API parity).** Independently re-verifies the flat
+  `audit.json` export written by `extract --audit-out` — the same one-shot-CLI shape, not
+  the segmented `FileAuditStore` format `serve` uses for durable storage. Adds
+  `hacienda_core::audit::verify_entries(&[AuditEntry]) -> Result<(), AuditError>`, a
+  slice-only counterpart to `AuditChain::verify` for callers holding a deserialized entry
+  vector without a chain's `config_hash`; `AuditChain::verify` now delegates to it.
+- **`--glossary-out <dir>` on `extract`/`scan`.** Writes this run's entity glossary
+  (`{category, term, count, mean_confidence}`, never document text) to
+  `<dir>/glossary.json` via `HaciendaFacade::glossary_snapshot_with_auth`. Not a
+  standalone `glossary` subcommand: glossary state (`EntityGlossary`) lives only inside a
+  live run's facade, populated as documents are processed, with nothing durable to reread
+  afterwards. Materialises a `[glossary]` config section when none was loaded, matching
+  `--mode`'s existing materialisation of `[pii]` — without it, `--glossary-out` against a
+  config with no `[glossary]` section would silently write an empty array.
+
 - **`POST /v1/pii/reveal` endpoint (Phase 8).** Reverses a pseudonym token
   (`[CATEGORY:key_id:base32_ciphertext]`) back to its normalised plaintext.
   Requires `pii:reveal` capability. Writes a `Reveal` audit entry keyed by

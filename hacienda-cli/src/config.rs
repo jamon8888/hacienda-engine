@@ -15,6 +15,7 @@
 use crate::cli::{ExtractArgs, Mode, ScanArgs};
 use anyhow::{Context, Result};
 use hacienda::HaciendaConfig;
+use hacienda_core::glossary::GlossaryConfig;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::RedactionMode;
 use serde_json::Value;
@@ -197,6 +198,18 @@ fn apply_cli_overrides(
             pii.model_threshold_default = threshold;
         }
     }
+
+    // `--glossary-out` reads `HaciendaFacade::glossary_snapshot_with_auth`, which is only
+    // ever populated when `config.glossary` is `Some` and `enabled` — a config with no
+    // `[glossary]` section loaded would otherwise silently produce an empty
+    // `glossary.json`, the same "flag parsed, then discarded" failure shape the `[pii]`
+    // materialisation above already guards against. `GlossaryConfig::default()` already
+    // has `enabled: true`, so inserting the default is sufficient.
+    let wants_glossary = extract_args.is_some_and(|a| a.glossary_out.is_some())
+        || scan_args.is_some_and(|a| a.glossary_out.is_some());
+    if wants_glossary {
+        config.glossary.get_or_insert_with(GlossaryConfig::default);
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +306,7 @@ mod tests {
             format: crate::cli::Format::Text,
             audit_out: None,
             vault: None,
+            glossary_out: None,
             no_redact: false,
             i_accept_unredacted_pii: false,
             concurrency: crate::cli::ConcurrencyArgs { concurrency: None },

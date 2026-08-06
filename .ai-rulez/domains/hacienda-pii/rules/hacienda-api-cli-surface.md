@@ -9,4 +9,4 @@ priority: high
 - CLI `extract` takes `--mode {mask|hash|pseudonymize}` with no default — never silently pick a redaction mode for the user.
 - CLI `scan` is detect-only and must not rewrite or leak entity text by default.
 - CLI `serve` binds loopback-only by default and refuses non-loopback binding unless auth is enabled — do not weaken this without an explicit auth story.
-- CLI audit/review/compliance/glossary subcommands are deliberately absent (not stubbed) — do not add placeholder commands that appear to work but don't.
+- CLI has `hacienda audit verify <dir>` (verifies the `--audit-out` flat-JSON export only, not the full `GET /v1/audit` surface) and `hacienda pii reveal <token>`, plus a `--glossary-out <dir>` flag on `extract`/`scan` (not a subcommand — glossary state has no existence outside a live run). `review`, `compliance`, and the rest of `audit` remain deliberately absent (not stubbed) — do not add placeholder commands that appear to work but don't.
