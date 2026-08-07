@@ -92,13 +92,21 @@ pub async fn process_documents(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
+    // `result.pii` is either empty (no PII pipeline configured, `HaciendaMetadata::pii_enabled`
+    // is false) or exactly as long as `result.extraction.results` (one `PipelineResult` per
+    // document, per `HaciendaFacade::process_batch_with_auth`'s contract) — never anything in
+    // between. A three-way `.zip()` over both would silently truncate to zero when PII is
+    // disabled, discarding every extracted document; iterating `pii` by `.next()` alongside the
+    // extraction results and falling back to no entities once it runs dry handles both cases
+    // uniformly without relying on that length invariant holding exactly.
     let mut documents: Vec<DocumentResult> = Vec::with_capacity(result.extraction.results.len());
-    for ((input, doc), pii) in body
-        .documents
-        .iter()
-        .zip(result.extraction.results)
-        .zip(result.pii)
-    {
+    let mut pii_results = result.pii.into_iter();
+    for (input, doc) in body.documents.iter().zip(result.extraction.results) {
+        let entities = pii_results
+            .next()
+            .map(|pii| pii.entities)
+            .unwrap_or_default();
+
         let (document_id, version_sequence) = if let Some(document_id) = input.document_id {
             // Checked above: version_store is Some whenever any document_id is set.
             let store = state
@@ -107,7 +115,7 @@ pub async fn process_documents(
                 .expect("version_store checked present above");
             let content_hash = blake3::hash(doc.content.as_bytes()).to_hex().to_string();
             let entities_json =
-                serde_json::to_value(&pii.entities).unwrap_or_else(|_| serde_json::json!([]));
+                serde_json::to_value(&entities).unwrap_or_else(|_| serde_json::json!([]));
             let version_sequence = store
                 .create_version(document_id, &content_hash, &doc.content, entities_json)
                 .await
@@ -119,7 +127,7 @@ pub async fn process_documents(
 
         documents.push(DocumentResult {
             content: doc.content,
-            entities: pii.entities.into_iter().map(EntityDto::from).collect(),
+            entities: entities.into_iter().map(EntityDto::from).collect(),
             document_id,
             version_sequence,
         });

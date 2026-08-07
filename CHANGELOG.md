@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`POST /v1/documents` no longer silently drops every document when no PII pipeline is
+  configured.** `process_documents` zipped `body.documents`, `result.extraction.results`,
+  and `result.pii` three ways; `Iterator::zip` truncates to the shortest input, and
+  `result.pii` is an empty `Vec` whenever `HaciendaFacade`'s PII pipeline is unset — so the
+  whole zip produced zero results regardless of how many documents were submitted or
+  extracted successfully. Fixed by iterating `result.extraction.results` (always one entry
+  per submitted document) and pairing each with `result.pii`'s corresponding entry when one
+  exists, defaulting to no entities otherwise — matching the facade-level contract already
+  pinned by `should_extract_without_touching_pii_when_it_is_not_configured`
+  (`hacienda-core/src/facade.rs`). Was previously flagged as a known, unfixed gap (see the
+  "Known gap surfaced" note further down this changelog); the SDK tests that pinned the
+  buggy `documents: []` response (`sdks/typescript/tests/extract.test.ts`,
+  `sdks/python/tests/test_extract.py`) now assert the corrected behavior instead.
 - **`main` build restored.** `hacienda-core` failed to compile (`page_from` re-exported at a
   wider visibility than its `pub(crate)` definition, plus two knock-on `E0282`s in the new
   `PostgresAuditStore::history()`), `hacienda-api` had two independent duplicate-definition
