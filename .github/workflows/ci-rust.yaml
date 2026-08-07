@@ -3,14 +3,8 @@ name: CI - Rust
 on:
   push:
     branches: [main]
-    paths:
-      - "hacienda/**"
-      - "hacienda-core/**"
   pull_request:
     branches: [main]
-    paths:
-      - "hacienda/**"
-      - "hacienda-core/**"
 
 jobs:
   clippy:
@@ -47,6 +41,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-hack
       - run: cargo hack check -p hacienda -p hacienda-core --each-feature --features "ner-candle"
+      # hacienda-api/hacienda-rag weren't in this matrix at all before, so their
+      # `postgres`/`s3`/`chunking`/`streaming` feature combinations were never
+      # checked in isolation. `embeddings`/`rag-embeddings` stay excluded — see
+      # the workspace root Cargo.toml's xberg dependency comment and
+      # hacienda-api/Cargo.toml's `rag-embeddings` comment: they pull ONNX
+      # Runtime, whose accelerator-specific prebuilt binary is not guaranteed
+      # available on every host, which is exactly the kind of host-dependent
+      # flakiness this matrix must not introduce.
+      - run: cargo hack check -p hacienda-api -p hacienda-rag --each-feature --exclude-features "embeddings,rag-embeddings"
 
   test-bindings:
     runs-on: ubuntu-24.04

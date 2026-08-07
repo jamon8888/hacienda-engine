@@ -36,7 +36,10 @@ fn run_with_key(args: &[&str]) -> (bool, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_hacienda"))
         .args(args)
         .env("HACIENDA_PSEUDONYM_ACTIVE_KEY", KEY_ID)
-        .env(format!("HACIENDA_PSEUDONYM_KEY_{}", KEY_ID.to_uppercase()), key_hex())
+        .env(
+            format!("HACIENDA_PSEUDONYM_KEY_{}", KEY_ID.to_uppercase()),
+            key_hex(),
+        )
         .output()
         .expect("failed to run the hacienda binary");
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -111,10 +114,14 @@ fn should_support_json_format() {
     let token = extract_token(&extract_text);
 
     let (ok, reveal_text) = run_with_key(&["pii", "reveal", "--format", "json", &token]);
-    assert!(ok, "`pii reveal --format json` did not exit 0:\n{reveal_text}");
+    assert!(
+        ok,
+        "`pii reveal --format json` did not exit 0:\n{reveal_text}"
+    );
 
-    let value: serde_json::Value = serde_json::from_str(&reveal_text)
-        .unwrap_or_else(|e| panic!("`pii reveal --format json` did not print valid JSON: {e}\n{reveal_text}"));
+    let value: serde_json::Value = serde_json::from_str(&reveal_text).unwrap_or_else(|e| {
+        panic!("`pii reveal --format json` did not print valid JSON: {e}\n{reveal_text}")
+    });
     assert_eq!(
         value["plaintext"].as_str(),
         Some(KNOWN_EMAIL),
@@ -135,7 +142,10 @@ fn should_collapse_every_pseudonym_error_to_one_generic_message() {
     let (unknown_key_ok, unknown_key_text) =
         run_with_key(&["pii", "reveal", "[EMAIL:unknownkey:AAAAAAAA]"]);
 
-    assert!(!malformed_ok, "a malformed token exited 0:\n{malformed_text}");
+    assert!(
+        !malformed_ok,
+        "a malformed token exited 0:\n{malformed_text}"
+    );
     assert!(
         !unknown_key_ok,
         "a token minted under an unresolvable key exited 0:\n{unknown_key_text}"

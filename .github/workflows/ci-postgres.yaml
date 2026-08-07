@@ -1,0 +1,83 @@
+name: CI - Postgres Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # hacienda-core's Postgres-backed store tests (audit/jobs/presets/review/
+  # usage/versions/api_keys) spin up their own disposable Postgres container
+  # via `testcontainers` (see hacienda-core/src/store/postgres/test_support.rs)
+  # — no `services:` block needed, just a Docker daemon, which GitHub-hosted
+  # runners already provide. They're `#[ignore]`d so a normal `cargo test`
+  # skips them; `--test-threads=1` is required (see test_support.rs's doc
+  # comment: several suites share one instance and are not safe to
+  # interleave).
+  #
+  # The name filter (`--lib store::postgres`) deliberately excludes this
+  # crate's other `#[ignore]`d tests (`audit::store_file`'s sandboxed
+  # chmod/timing test, `facade.rs`'s equivalent, `tests/ner_eval.rs`'s
+  # model-download test) — none of those are Postgres-related, and running
+  # them here would either fail outright under CI's root user or need
+  # network access this job has no reason to request.
+  postgres-store-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run hacienda-core Postgres store tests
+        run: |
+          cargo test -p hacienda-core --features postgres --lib store::postgres \
+            -- --ignored --test-threads=1
+
+  # hacienda-rag's pgvector tests and hacienda-api's routes.rs Postgres-backed
+  # route tests read `DATABASE_URL` directly instead of managing their own
+  # container, so this job needs a real Postgres service. Two databases in
+  # one service container, one per crate: hacienda-core's and hacienda-rag's
+  # independently-embedded `sqlx::migrate!` directories reserve disjoint
+  # version ranges (0001-0099 vs 0100-0199, see
+  # hacienda-core/migrations/README.md) precisely so they *can* share one
+  # database — but exercising that shared-database path is
+  # `PgVectorStore`'s own `should_run_both_crates_migrations_against_one_shared_database`
+  # test, not something this job needs to additionally set up by hand.
+  postgres-integration-tests:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Create per-crate databases
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE hacienda_api_test;'
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE hacienda_rag_test;'
+      - name: Run hacienda-api Postgres-backed route tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/hacienda_api_test
+        run: |
+          cargo test -p hacienda-api --lib routes \
+            -- --ignored --test-threads=1 --skip rag_migrate_embeddings_full_round_trip
+      - name: Run hacienda-rag pgvector tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/hacienda_rag_test
+        run: |
+          cargo test -p hacienda-rag --features postgres --lib backends::pgvector \
+            -- --ignored --test-threads=1

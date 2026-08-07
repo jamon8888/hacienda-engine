@@ -168,7 +168,11 @@ pub async fn audit_entries(
 
     Ok(Json(NodeAuditPage {
         scope: AuditScope::ThisNode,
-        entries: page.entries.into_iter().map(NodeAuditEntryDto::from).collect(),
+        entries: page
+            .entries
+            .into_iter()
+            .map(NodeAuditEntryDto::from)
+            .collect(),
         next_cursor: page.next.map(|cursor| cursor.to_string()),
     }))
 }
