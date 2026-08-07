@@ -11,6 +11,16 @@ on:
 permissions:
   contents: read
 
+# sqlx::query!/query_as! verify SQL against a live database at compile time whenever
+# DATABASE_URL is set — which postgres-integration-tests does, pointing at a database that
+# isn't migrated until the *test binary* runs, not at compile time. Without SQLX_OFFLINE,
+# that compile-time verification queries tables that don't exist yet and the build fails
+# with cascading type errors. SQLX_OFFLINE forces both jobs to check queries against the
+# committed `.sqlx` cache instead, which is what CI should be doing anyway (a stale cache
+# entry should fail the build, not silently query a live schema).
+env:
+  SQLX_OFFLINE: "true"
+
 jobs:
   # hacienda-core's Postgres-backed store tests (audit/jobs/presets/review/
   # usage/versions/api_keys) spin up their own disposable Postgres container

@@ -280,62 +280,66 @@ mod tests {
         PostgresJobStore::new(test_support::shared().await.pool())
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_create_and_get_round_trip() {
-        let store = test_store().await;
+    fn should_create_and_get_round_trip() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
 
-        let job = store
-            .create(Some("tenant-a".to_owned()))
-            .await
-            .expect("create failed");
-        assert_eq!(job.status, JobStatus::Queued);
-        assert_eq!(job.owner.as_deref(), Some("tenant-a"));
+            let job = store
+                .create(Some("tenant-a".to_owned()))
+                .await
+                .expect("create failed");
+            assert_eq!(job.status, JobStatus::Queued);
+            assert_eq!(job.owner.as_deref(), Some("tenant-a"));
 
-        let fetched = store
-            .get(&job.id)
-            .await
-            .expect("get failed")
-            .expect("job must exist");
-        assert_eq!(fetched.id, job.id);
-        assert_eq!(fetched.status, JobStatus::Queued);
+            let fetched = store
+                .get(&job.id)
+                .await
+                .expect("get failed")
+                .expect("job must exist");
+            assert_eq!(fetched.id, job.id);
+            assert_eq!(fetched.status, JobStatus::Queued);
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_let_exactly_one_concurrent_claim_win() {
-        let store = Arc::new(test_store().await);
-        let job = store.create(None).await.expect("create failed");
+    fn should_let_exactly_one_concurrent_claim_win() {
+        test_support::block_on_shared(async {
+            let store = Arc::new(test_store().await);
+            let job = store.create(None).await.expect("create failed");
 
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let store = Arc::clone(&store);
-            let id = job.id.clone();
-            handles.push(tokio::spawn(async move {
-                store
-                    .transition(&id, JobStatus::Queued, JobStatus::Running)
-                    .await
-            }));
-        }
-
-        let mut wins = 0;
-        let mut losses = 0;
-        for handle in handles {
-            match handle.await.expect("task panicked") {
-                Ok(_) => wins += 1,
-                Err(JobError::StatusMismatch { .. }) => losses += 1,
-                Err(other) => panic!("unexpected error: {other}"),
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let store = Arc::clone(&store);
+                let id = job.id.clone();
+                handles.push(tokio::spawn(async move {
+                    store
+                        .transition(&id, JobStatus::Queued, JobStatus::Running)
+                        .await
+                }));
             }
-        }
 
-        assert_eq!(wins, 1, "exactly one concurrent claim must win");
-        assert_eq!(losses, 7);
+            let mut wins = 0;
+            let mut losses = 0;
+            for handle in handles {
+                match handle.await.expect("task panicked") {
+                    Ok(_) => wins += 1,
+                    Err(JobError::StatusMismatch { .. }) => losses += 1,
+                    Err(other) => panic!("unexpected error: {other}"),
+                }
+            }
 
-        let final_job = store
-            .get(&job.id)
-            .await
-            .expect("get failed")
-            .expect("job must exist");
-        assert_eq!(final_job.status, JobStatus::Running);
+            assert_eq!(wins, 1, "exactly one concurrent claim must win");
+            assert_eq!(losses, 7);
+
+            let final_job = store
+                .get(&job.id)
+                .await
+                .expect("get failed")
+                .expect("job must exist");
+            assert_eq!(final_job.status, JobStatus::Running);
+        });
     }
 }

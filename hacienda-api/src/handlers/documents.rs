@@ -108,11 +108,16 @@ pub async fn process_documents(
             .unwrap_or_default();
 
         let (document_id, version_sequence) = if let Some(document_id) = input.document_id {
-            // Checked above: version_store is Some whenever any document_id is set.
-            let store = state
-                .version_store
-                .as_ref()
-                .expect("version_store checked present above");
+            // Checked above: version_store is Some whenever any document_id is set. Still
+            // propagate rather than `.expect()` — a library handler must not panic if that
+            // invariant is ever weakened.
+            let store = state.version_store.as_ref().ok_or_else(|| {
+                tracing::error!(
+                    %document_id,
+                    "version_store missing despite earlier batch-level check"
+                );
+                ApiError::internal()
+            })?;
             let content_hash = blake3::hash(doc.content.as_bytes()).to_hex().to_string();
             // Silently falling back to `[]` here would save a version whose entities
             // disagree with the ones this response returns — a later `GET
