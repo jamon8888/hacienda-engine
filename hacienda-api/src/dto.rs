@@ -418,7 +418,9 @@ pub struct AuditResponse {
     pub audit_chain_tip: Option<String>,
 }
 
-/// Response from `GET /v1/audit/verify`.
+/// Response shape for `handlers::audit_review::verify_audit`, kept unrouted as a
+/// smaller reference implementation — see that function's doc comment.
+#[allow(dead_code)]
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuditVerifyResponse {
     pub valid: bool,
@@ -560,28 +562,36 @@ pub struct PiiConfigResponse {
 /// writers, so a server can only ever speak for its own node. Saying so in the payload —
 /// rather than in prose a client never reads — is what stops "the audit entries" being
 /// read as the deployment's when it means this node's.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditScope {
     /// The chain held by the node that served the request, and no other.
     ThisNode,
 }
 
-/// One audit entry on the wire.
+/// One audit entry on the wire, for the node-scoped audit surface
+/// (`/v1/audit/entries`, `/seals`, `/export`, `/tip` — see [`NodeAuditPage`]).
+///
+/// Distinct from [`AuditEntryDto`], which backs the older, coarser `/v1/audit` response
+/// (`AuditResponse`) and stringifies `action`/`source` rather than carrying them typed.
+/// The two were briefly declared under the same name during the Phase 5/Phase 10 merge;
+/// kept separate here because they serve different routes with different wire shapes.
 ///
 /// Carries no span text by construction: `span_hash` is a blake3 digest and `span_length`
 /// a count. That is a property of the core entry, and this DTO is where it is pinned.
-#[derive(Debug, Serialize)]
-pub struct AuditEntryDto {
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NodeAuditEntryDto {
     pub id: String,
     pub timestamp: String,
     /// The PII category, e.g. `Email` — never the value that was found.
     pub category: String,
+    #[schema(value_type = String)]
     pub action: hacienda_core::audit::RedactionAction,
     /// blake3 digest of the span. The span itself is never recorded anywhere.
     pub span_hash: String,
     pub span_length: u32,
     pub confidence: Option<f32>,
+    #[schema(value_type = String)]
     pub source: hacienda_core::audit::EntitySource,
     pub pipeline_version: String,
     pub config_hash: String,
@@ -591,7 +601,7 @@ pub struct AuditEntryDto {
     pub chain_hash: String,
 }
 
-impl From<hacienda_core::audit::AuditEntry> for AuditEntryDto {
+impl From<hacienda_core::audit::AuditEntry> for NodeAuditEntryDto {
     fn from(entry: hacienda_core::audit::AuditEntry) -> Self {
         Self {
             id: entry.id,
@@ -611,7 +621,7 @@ impl From<hacienda_core::audit::AuditEntry> for AuditEntryDto {
 }
 
 /// One segment seal on the wire.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SegmentSealDto {
     pub segment_id: String,
     /// The writer that produced the segment. This is where a client learns the node
@@ -654,23 +664,23 @@ impl From<hacienda_core::audit::SegmentSeal> for SegmentSealDto {
 /// `next_cursor` is `null`. An append-only chain is never finished, only momentarily
 /// caught up, and a caller that reached the end still needs a resumable position to
 /// follow what comes next. See `hacienda_core::audit::AuditPage::next`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NodeAuditPage {
     pub scope: AuditScope,
-    pub entries: Vec<AuditEntryDto>,
+    pub entries: Vec<NodeAuditEntryDto>,
     /// Opaque. Hand it back as `?cursor=`; never parse, construct, or arithmetic on it.
     pub next_cursor: Option<String>,
 }
 
 /// Response from `GET /v1/audit/seals`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NodeSealsResponse {
     pub scope: AuditScope,
     pub seals: Vec<SegmentSealDto>,
 }
 
 /// Response from `GET /v1/audit/tip`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuditTipResponse {
     pub scope: AuditScope,
     /// The chain head, an opaque blake3 digest.
@@ -683,7 +693,7 @@ pub struct AuditTipResponse {
 /// failure is not a verdict on the chain and is reported as a 500 instead, because
 /// answering "broken" when the truth is "could not be read" would raise a tamper alarm
 /// over a full disk.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifyFailureKind {
     /// An entry's recorded hash does not follow its predecessor's.
@@ -712,7 +722,7 @@ pub enum VerifyFailureKind {
 /// failures, which report it; core's entry-chain check does not carry the segment through,
 /// so it is `null` there. That is a real limitation of the underlying error, stated rather
 /// than papered over with a guess.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct VerifyFailure {
     pub kind: VerifyFailureKind,
     /// The core error, rendered. Contains only identifiers and hashes — no path, no
@@ -731,7 +741,7 @@ pub struct VerifyFailure {
 /// asked — "is this chain intact?" — was answered; a 500 would report that the server
 /// failed to answer, which is a different and less useful statement, and one that hides
 /// the identity of the offending record behind a generic error envelope.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct VerifyResponse {
     pub scope: AuditScope,
     pub verified: bool,

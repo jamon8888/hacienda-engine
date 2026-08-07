@@ -1,6 +1,9 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
-use crate::audit::{AuditEntry, AuditEntryInput, AuditStore, InMemoryAuditStore, RedactionAction};
+use crate::audit::{
+    export as export_chain, AuditChain, AuditCursor, AuditEntry, AuditEntryInput, AuditPage,
+    AuditStore, ExportFormat, InMemoryAuditStore, RedactionAction, SegmentSeal,
+};
 use crate::auth::{ApiKeyStore, Caller, Capability, CapabilitySet};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
@@ -420,6 +423,103 @@ impl HaciendaFacade {
             Some(store) => Ok(Some(store.tip().await?)),
             None => Ok(None),
         }
+    }
+
+    /// Whether an audit store is configured at all, independent of the caller's
+    /// capabilities.
+    ///
+    /// Distinguishes "nothing failed" from "there is no chain to fail" — see
+    /// [`Self::verify_audit_with_auth`], which returns `Ok(())` in both cases and
+    /// therefore cannot answer this on its own.
+    pub fn audit_enabled(&self) -> bool {
+        self.audit_store.is_some()
+    }
+
+    /// One page of this node's full audit history, oldest-first, across every sealed
+    /// segment and the open one.
+    ///
+    /// `None` when auditing is not configured — distinct from `Some` with an empty page,
+    /// which means the store exists but has nothing recorded yet (or the caller has
+    /// paged to the end). Requires `audit:read`.
+    pub async fn audit_history_with_auth(
+        &self,
+        caller: Caller<'_>,
+        after: Option<&AuditCursor>,
+        limit: usize,
+    ) -> Result<Option<AuditPage>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        match &self.audit_store {
+            Some(store) => Ok(Some(store.history(after, limit).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every seal this node holds, oldest first.
+    ///
+    /// `None` when auditing is not configured. Requires `audit:read`.
+    pub async fn audit_seals_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<Vec<SegmentSeal>>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        match &self.audit_store {
+            Some(store) => Ok(Some(store.seals().await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The whole history as bytes, in `format`.
+    ///
+    /// `None` when auditing is not configured. Requires `audit:export`.
+    ///
+    /// # Implementation
+    ///
+    /// Pages through [`AuditStore::history`] until an empty page — the store's own
+    /// "caught up" signal — then hands every entry to an [`AuditChain`] built from the
+    /// first entry's `config_hash`. An empty store exports as an empty chain under a
+    /// placeholder config hash, since there is no entry to take one from.
+    ///
+    /// A store whose history spans more than one `config_hash` (an operator changed the
+    /// pipeline config without rotating audit segments) fails this call with
+    /// [`crate::audit::AuditError::ConfigMismatch`] rather than silently exporting a
+    /// chain that mixes them — the same integrity rule [`AuditChain::append`] already
+    /// enforces one entry at a time.
+    pub async fn audit_export_with_auth(
+        &self,
+        caller: Caller<'_>,
+        format: ExportFormat,
+    ) -> Result<Option<Vec<u8>>, HaciendaError> {
+        caller.require(Capability::AuditExport)?;
+        let store = match &self.audit_store {
+            Some(store) => store,
+            None => return Ok(None),
+        };
+
+        let mut all_entries: Vec<AuditEntry> = Vec::new();
+        let mut cursor: Option<AuditCursor> = None;
+        const EXPORT_PAGE_SIZE: usize = 1000;
+        loop {
+            let page = store.history(cursor.as_ref(), EXPORT_PAGE_SIZE).await?;
+            if page.entries.is_empty() {
+                break;
+            }
+            cursor = page.next.clone();
+            all_entries.extend(page.entries);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let config_hash = all_entries
+            .first()
+            .map(|e| e.config_hash.clone())
+            .unwrap_or_default();
+        let mut chain = AuditChain::new(config_hash);
+        for entry in all_entries {
+            chain.append(entry)?;
+        }
+
+        Ok(Some(export_chain(&chain, format)?))
     }
 
     /// Verify the audit chain has not been tampered with.
@@ -1210,6 +1310,14 @@ mod tests {
             self.inner.seals().await
         }
 
+        async fn history(
+            &self,
+            after: Option<&crate::audit::AuditCursor>,
+            limit: usize,
+        ) -> Result<crate::audit::AuditPage, AuditError> {
+            self.inner.history(after, limit).await
+        }
+
         async fn verify(&self) -> Result<(), AuditError> {
             self.inner.verify().await
         }
@@ -1319,6 +1427,17 @@ mod tests {
 
         async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             Ok(Vec::new())
+        }
+
+        async fn history(
+            &self,
+            _after: Option<&crate::audit::AuditCursor>,
+            _limit: usize,
+        ) -> Result<crate::audit::AuditPage, AuditError> {
+            Ok(crate::audit::AuditPage {
+                entries: Vec::new(),
+                next: None,
+            })
         }
 
         async fn verify(&self) -> Result<(), AuditError> {
@@ -2933,6 +3052,14 @@ mod tests {
 
         async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             self.inner.seals().await
+        }
+
+        async fn history(
+            &self,
+            after: Option<&crate::audit::AuditCursor>,
+            limit: usize,
+        ) -> Result<crate::audit::AuditPage, AuditError> {
+            self.inner.history(after, limit).await
         }
 
         async fn verify(&self) -> Result<(), AuditError> {

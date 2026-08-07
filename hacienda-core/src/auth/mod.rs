@@ -13,6 +13,7 @@ pub mod authz;
 pub mod keys;
 
 pub use crate::auth::keys::ApiKey;
+use crate::tenancy::{ActorId, TenantCtx, TenantId};
 use async_trait::async_trait;
 
 use serde::{Deserialize, Serialize};
@@ -158,17 +159,35 @@ pub struct AuthContext {
     pub principal_name: Option<String>,
     /// Capabilities granted to this principal.
     pub capabilities: CapabilitySet,
-    /// Optional metadata (tenant, roles, etc.).
+    /// The tenant this principal belongs to (S1). Every capability this context grants
+    /// is scoped to this tenant — a principal does not carry capabilities across tenants.
+    pub tenant: TenantId,
+    /// Optional metadata (roles, etc.).
     pub metadata: serde_json::Value,
 }
 
 impl AuthContext {
-    /// Create a new auth context with the given principal ID and capabilities.
+    /// Create a new auth context with the given principal ID and capabilities, scoped to
+    /// the default tenant.
+    ///
+    /// Most existing call sites (single-tenant deployments, tests) want this. A principal
+    /// resolved from a real, multi-tenant-aware store should use
+    /// [`Self::with_tenant`] instead so its capabilities are scoped to its actual tenant.
     pub fn new(principal_id: impl Into<String>, capabilities: CapabilitySet) -> Self {
+        Self::with_tenant(principal_id, TenantId::default_tenant(), capabilities)
+    }
+
+    /// Create a new auth context scoped to an explicit tenant.
+    pub fn with_tenant(
+        principal_id: impl Into<String>,
+        tenant: TenantId,
+        capabilities: CapabilitySet,
+    ) -> Self {
         Self {
             principal_id: principal_id.into(),
             principal_name: None,
             capabilities,
+            tenant,
             metadata: serde_json::Value::Null,
         }
     }
@@ -221,6 +240,24 @@ impl<'a> Caller<'a> {
         match self {
             Self::Trusted => None,
             Self::Principal(ctx) => Some(&ctx.principal_id),
+        }
+    }
+
+    /// The tenant-scoping context (S1) this caller acts under.
+    ///
+    /// `Principal` callers carry their real, resolved tenant. `Trusted` (in-process)
+    /// callers have no tenant of their own to assert, so this resolves to the default
+    /// tenant — the same one every pre-S1 row is migrated onto (spec §8). A deployment
+    /// that wants an in-process caller scoped to a *specific* tenant (e.g. a CLI operator
+    /// managing one tenant among several) does not yet have a way to express that; no
+    /// caller in this codebase needs it today, so it is left as a known gap rather than
+    /// guessed at.
+    pub fn tenant_ctx(&self) -> TenantCtx {
+        match self {
+            Self::Trusted => TenantCtx::default_tenant(ActorId::new("trusted")),
+            Self::Principal(ctx) => {
+                TenantCtx::new(ctx.tenant.clone(), ActorId::new(ctx.principal_id.clone()))
+            }
         }
     }
 }
@@ -434,5 +471,58 @@ mod tests {
             Err(AuthzError::MissingCapability { .. })
         ));
         assert_eq!(caller.principal_id(), Some("user-123"));
+    }
+
+    #[test]
+    fn auth_context_new_defaults_to_the_default_tenant() {
+        let ctx = AuthContext::new("user-123", CapabilitySet::empty());
+        assert_eq!(ctx.tenant, crate::tenancy::TenantId::default_tenant());
+    }
+
+    #[test]
+    fn auth_context_with_tenant_carries_the_given_tenant() {
+        let ctx = AuthContext::with_tenant(
+            "user-123",
+            crate::tenancy::TenantId::new("acme"),
+            CapabilitySet::empty(),
+        );
+        assert_eq!(ctx.tenant, crate::tenancy::TenantId::new("acme"));
+    }
+
+    #[test]
+    fn trusted_caller_tenant_ctx_is_the_default_tenant() {
+        let ctx = Caller::Trusted.tenant_ctx();
+        assert_eq!(ctx.tenant, crate::tenancy::TenantId::default_tenant());
+    }
+
+    #[test]
+    fn principal_caller_tenant_ctx_carries_the_principals_tenant_and_id() {
+        let auth_ctx = AuthContext::with_tenant(
+            "user-123",
+            crate::tenancy::TenantId::new("acme"),
+            CapabilitySet::empty(),
+        );
+        let caller = Caller::from(&auth_ctx);
+        let tenant_ctx = caller.tenant_ctx();
+        assert_eq!(tenant_ctx.tenant, crate::tenancy::TenantId::new("acme"));
+        assert_eq!(tenant_ctx.actor, crate::tenancy::ActorId::new("user-123"));
+    }
+
+    #[test]
+    fn two_principals_in_different_tenants_get_different_tenant_ctx() {
+        let acme = AuthContext::with_tenant(
+            "user-1",
+            crate::tenancy::TenantId::new("acme"),
+            CapabilitySet::empty(),
+        );
+        let globex = AuthContext::with_tenant(
+            "user-2",
+            crate::tenancy::TenantId::new("globex"),
+            CapabilitySet::empty(),
+        );
+        assert_ne!(
+            Caller::from(&acme).tenant_ctx().tenant,
+            Caller::from(&globex).tenant_ctx().tenant
+        );
     }
 }

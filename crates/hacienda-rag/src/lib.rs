@@ -38,6 +38,8 @@
 
 pub mod backends;
 pub mod capability;
+#[cfg(feature = "chunking")]
+pub mod chunk;
 pub mod error;
 pub mod filter;
 pub mod query;
@@ -49,6 +51,10 @@ pub mod types;
 
 pub use backends::memory::InMemoryVectorStore;
 pub use capability::Capabilities;
+#[cfg(feature = "chunking")]
+pub use chunk::chunk_full_text;
+#[cfg(feature = "chunking")]
+pub use xberg::chunking::ChunkingConfig;
 pub use error::{ComplexityKind, RagError, RagResult};
 pub use filter::{Filter, FilterField, FilterNamespace};
 pub use query::{RetrieveMode, RetrieveOutput, RetrieveQuery};

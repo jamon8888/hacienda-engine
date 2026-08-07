@@ -27,8 +27,12 @@ jobs:
       - name: Install typos
         run: cargo install typos-cli --locked
 
+      # `.agents/skills` holds Claude Code agent skill definitions, not prose
+      # documentation — same category as the already-excluded `superpowers`
+      # and `.ai-rulez` directories, and not meant to satisfy a human-prose
+      # markdown linter any more than those are.
       - name: Lint markdown
-        run: rumdl check . --exclude "superpowers,.ai-rulez" -d MD013
+        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents" -d MD013
 
       - name: Check spelling
         run: typos . --config _typos.toml

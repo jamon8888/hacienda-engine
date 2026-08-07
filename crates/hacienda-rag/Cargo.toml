@@ -10,6 +10,11 @@ description = "Vector-store contract and retrieval IR for hacienda RAG, recovere
 # that only need the in-memory backend don't pull sqlx — mirrors
 # `hacienda-core`'s own `postgres` feature (see `hacienda-core/Cargo.toml`).
 postgres = ["dep:sqlx", "dep:pgvector", "dep:uuid", "dep:chrono"]
+# Server-side text chunking for `POST .../documents` (splits `DocumentRecord.full_text`
+# into `ChunkRecord`s when the caller doesn't submit pre-chunked content). Pure Rust,
+# no ONNX — deliberately does not imply `embeddings` (that pulls ONNX Runtime); a
+# caller wanting embedded chunks still needs both features on.
+chunking = ["xberg/chunking"]
 # Real re-embedding for `migrate-embeddings` jobs (Phase 12). `xberg` is
 # already a mandatory dependency (for its error type only, see error.rs), so
 # this just turns on its ONNX-gated `embeddings` feature — off by default so

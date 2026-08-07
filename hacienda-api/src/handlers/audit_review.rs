@@ -46,15 +46,11 @@ pub async fn get_audit(
     }))
 }
 
-/// `GET /v1/audit/verify`
-#[utoipa::path(
-    get,
-    path = "/v1/audit/verify",
-    tag = "audit",
-    operation_id = "verifyAudit",
-    security(("bearerAuth" = [])),
-    responses((status = 200, description = "Whether the audit chain verifies", body = AuditVerifyResponse))
-)]
+/// Coarse `valid: bool` verification, superseded at `/v1/audit/verify` by
+/// `handlers::audit::audit_verify` (broken-chain-as-200, names the offending
+/// entry/seal — see `hacienda-api/src/routes.rs`'s comment on the `/v1/audit*`
+/// routes). Kept, unrouted, as a smaller reference implementation.
+#[allow(dead_code)]
 pub async fn verify_audit(
     State(state): State<ApiState>,
     parts: Parts,

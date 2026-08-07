@@ -29,40 +29,6 @@ use serde::de::DeserializeOwned;
 
 use crate::error::ApiError;
 
-/// Query-string extractor whose rejections are [`ApiError`]s.
-///
-/// Drop-in for `axum::extract::Query` in argument position. Same rationale as [`Json`]:
-/// axum's own `QueryRejection` renders as `text/plain`, breaking the `{"error": {...}}`
-/// envelope every other rejection in this crate uses.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Query<T>(pub T);
-
-impl<T, S> FromRequestParts<S> for Query<T>
-where
-    T: DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let axum::extract::Query(value) =
-            axum::extract::Query::<T>::from_request_parts(parts, state).await?;
-        Ok(Self(value))
-    }
-}
-
-/// Map an axum query-string rejection to the error envelope.
-///
-/// Unlike [`JsonRejection`], a query rejection cannot echo document content (query
-/// strings never carry document bytes), so leaking the parameter name/value here is not
-/// the same disclosure risk. It is still normalised to the envelope for consistency: every
-/// rejection in this API returns the same `{"error": {...}}` shape.
-impl From<QueryRejection> for ApiError {
-    fn from(rejection: QueryRejection) -> Self {
-        ApiError::invalid_request(rejection.to_string())
-    }
-}
-
 /// JSON body extractor whose rejections are [`ApiError`]s.
 ///
 /// Drop-in for `axum::Json` in argument position.

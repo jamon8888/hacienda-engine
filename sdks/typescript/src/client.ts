@@ -129,7 +129,9 @@ export class HaciendaClient {
 
   readonly audit: {
     getAudit(): Promise<Schemas["AuditResponse"]>;
-    verifyAudit(): Promise<Schemas["AuditVerifyResponse"]>;
+    // Backed by the richer `/v1/audit/verify` (broken-chain-as-200, names the
+    // offending entry/seal) — see hacienda-api/src/routes.rs's `/v1/audit*` comment.
+    verifyAudit(): Promise<Schemas["VerifyResponse"]>;
   };
 
   readonly review: {

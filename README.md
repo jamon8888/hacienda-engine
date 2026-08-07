@@ -205,22 +205,31 @@ gh workflow run publish.yaml -f tag=v0.1.0
 
 ## Bindings
 
-| Language       | Package                                | Status |
-| -------------- | -------------------------------------- | ------ |
-| Python         | `pip install hacienda`                 | ✅     |
-| Node.js        | `npm i @hacienda/hacienda`             | ✅     |
-| WASM           | `@hacienda/hacienda-wasm`              | ✅     |
-| Ruby           | `gem install hacienda`                 | ✅     |
-| PHP            | `composer require hacienda/hacienda`   | ✅     |
-| Go             | `go get github.com/jamon8888/hacienda` | ✅     |
-| Java           | Maven Central                          | ✅     |
-| C#             | NuGet                                  | ✅     |
-| Elixir         | Hex.pm                                 | ✅     |
-| Dart           | pub.dev                                | ✅     |
-| Kotlin/Android | Maven Central                          | ✅     |
-| Swift          | SPM                                    | ✅     |
-| Zig            | GitHub Releases                        | ✅     |
-| C FFI          | GitHub Releases                        | ✅     |
+### REST API clients (real, generated from the live OpenAPI schema)
+
+| Language   | Package                       | Status |
+| ---------- | ------------------------------ | ------ |
+| Python     | `sdks/python` (not yet on PyPI) | ✅     |
+| TypeScript | `sdks/typescript` (not yet on npm) | ✅     |
+
+Generated in this repo (`sdks/`) against `GET /openapi.json` on every CI run — see `sdks/README.md`.
+`publish-sdk.yaml` is scaffolded but not activated (needs org-level trusted-publishing setup).
+
+### In-browser (hand-written, narrow scope)
+
+| Language | Package                        | Status |
+| -------- | ------------------------------- | ------ |
+| WASM     | `crates/hacienda-wasm` (not published) | ✅ (used by Hacienda Studio only) |
+
+### Native FFI bindings (planned, not yet generated)
+
+The table this used to show — Python, Node.js, WASM, Ruby, PHP, Go, Java, C#, Elixir, Dart,
+Kotlin/Android, Swift, Zig, C FFI, all "✅" via a `cargo-alef`-generated `packages/` tree — does
+not reflect this repo: `packages/` does not exist, `alef.toml` references six Rust source files
+that were never written (`hacienda/src/{cli,api,prelude,config}.rs`,
+`hacienda-core/src/pii/{profiles,xberg_integration}.rs`), and `.github/workflows/publish.yaml`'s
+build/publish matrix has nothing to build. Generating these bindings is unstarted work, not a
+`cargo alef generate` away — tracked as a roadmap item, not claimed here until it exists.
 
 ## License
 
