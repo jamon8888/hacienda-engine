@@ -564,10 +564,23 @@ struct SealRow {
 /// same `MAX(sequence_num)` in [`get_next_sequence_num`] and race to insert the same
 /// `(segment_id, sequence_num)`, so one loses to the `UNIQUE` constraint instead of
 /// serialising behind the other — see `should_serialise_concurrent_appends_without_breaking_the_chain`.
+///
+/// `FOR UPDATE` alone only locks a row that already exists — it locks nothing when the
+/// table has no open segment, so two transactions racing the very first append (or the
+/// first append after a rotate) can both see `None` here and both insert their own "open"
+/// segment, splitting later entries across two chains that both claim to be *the* open
+/// segment. The advisory lock closes that gap: it serialises the whole
+/// read-or-create decision itself, not just the row it might find, the same pattern
+/// `create_version` (`versions.rs`) uses for its own check-then-insert race. Held for the
+/// transaction (`_xact_lock`), released automatically on commit/rollback.
 async fn get_or_create_open_segment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config_hash: &str,
 ) -> Result<(Uuid, String), AuditError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('hacienda_audit_open_segment')::bigint)")
+        .execute(&mut **tx)
+        .await?;
+
     let row = sqlx::query!(
         "SELECT segment_id, config_hash FROM audit_segments \
          WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE"
