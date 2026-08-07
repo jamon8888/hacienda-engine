@@ -152,7 +152,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   afterwards. Materialises a `[glossary]` config section when none was loaded, matching
   `--mode`'s existing materialisation of `[pii]` — without it, `--glossary-out` against a
   config with no `[glossary]` section would silently write an empty array.
-
 - **`POST /v1/pii/reveal` endpoint (Phase 8).** Reverses a pseudonym token
   (`[CATEGORY:key_id:base32_ciphertext]`) back to its normalised plaintext.
   Requires `pii:reveal` capability. Writes a `Reveal` audit entry keyed by
@@ -165,7 +164,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recording the token reveal in the audit chain. `HaciendaFacade` now holds a
   cloned `Arc<Pseudonymiser>` so the de-pseudonymisation path is available
   outside a live pipeline run.
-
 - **Postgres store backend (Phase 9).** `AuditStore`, `ReviewStore`, `JobStore`
   implementations backed by Postgres via `sqlx`, plus new stores for document
   versions, presets, and API keys. All stores share a single `PgPool` injected
@@ -177,7 +175,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three new store types (`DocumentVersionStore`, `PresetStore`, `ApiKeyStore`).
 - `hacienda-core` gains a `postgres` feature flag (off by default) to gate
   `sqlx` dependency for wasm32 and non-Postgres consumers.
-
 - **Phase 5 routes: audit, review, compliance, glossary (Phase 10).** 7 new
   endpoints: `GET /v1/audit`, `GET /v1/audit/verify`, `GET /v1/review`,
   `POST /v1/review/{id}/decide`, `GET /v1/compliance/dpia`,
@@ -204,7 +201,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not `#[non_exhaustive]`, so an embedder who matches on it exhaustively (no wildcard
   arm) fails to compile until they handle the new variant — flagged per this crate's own
   semver policy regardless of the fact that nothing has shipped yet.
-
 - **Deterministic API key lookup and `ApiKeyTokenResolver` (Phase 11 Task 2).**
   Argon2id salts every hash it produces, so `key_hash` alone could never be used to
   look up a stored `ApiKey` from a freshly presented key — only to verify one already
@@ -225,7 +221,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build_token_resolver`, since it needs a live store handle that `AuthConfig`'s
   serializable fields cannot carry — the same reasoning `HaciendaFacade::with_stores`
   already uses for its optional stores.
-
 - **API key management routes (Phase 11 Task 3).** 3 new endpoints, all guarded by
   `auth:manage`: `POST /v1/auth/keys` (issue — the raw key appears exactly once, in
   this response, and is never logged or echoed elsewhere), `DELETE /v1/auth/keys/{id}`
@@ -247,7 +242,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth_config_resolver_reflects_declared_config_not_the_live_resolver` demonstrates
   this rather than papering over it. Fixing it needs an `AuthState` introspection API
   in `hacienda-core`, out of scope here.
-
 - **`GET /v1/jobs`, `GET /v1/jobs/{id}/result` (Phase 13 Task 1).** Both guarded by
   `documents:process`, same as the existing `GET /v1/jobs/{id}`. `list_jobs` filters by
   `?status=`, is tenant-scoped (a principal sees only jobs it owns; a trusted in-process
@@ -262,7 +256,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `extract::Query<T>` extractor mirrors the existing `Json<T>` pattern so a malformed query
   string fails into the `{"error": {...}}` envelope rather than axum's default plain-text
   rejection.
-
 - **`GET/POST /v1/presets`, `GET/DELETE /v1/presets/{id}` (Phase 13 Task 2).** Thin CRUD
   routes over Phase 9's `PresetStore`, guarded by `documents:process` — presets are inert
   config, not part of the audit-bearing pipeline. Opt-in via a new
@@ -280,7 +273,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real Postgres instance; sqlx picks this up automatically with no `DATABASE_URL` or
   `SQLX_OFFLINE` needed. This was never previously exercised by CI on this branch, so it is
   a fix to a pre-existing gap, not a regression.
-
 - **`GET /v1/documents/{id}/versions`, `GET /v1/documents/{id}`, `GET /v1/documents/{id}/diff`,
   `GET /v1/documents/{id}/diff/{diff_job_id}` (Phase 13 Task 3).** Document versioning and
   diffing over Phase 9's `DocumentVersionStore`, guarded by `documents:process` since a
@@ -308,7 +300,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently returns `{"documents":[]}` for any batch when no PII pipeline is configured
   (`result.pii` is empty, so zipping it with `result.extraction.results` yields zero
   entries regardless of extraction success). Pre-existing before this task's changes.
-
 - **`POST /v1/uploads/presign`, `POST /v1/uploads/confirm` (Phase 13 Task 4).** Presigned
   uploads for large documents that should not transit the API server as a base64 body.
   `hacienda_core::store::object::ObjectStore` trait (`presign_put`, `head`) with an
@@ -322,7 +313,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived solely from the server-issued `upload_id`, never from the client-supplied
   `filename` — the SSRF-safety argument this reopens (spec §5) holds because no
   client-supplied URL or path ever reaches `ObjectStore::head`/`presign_put`.
-
 - **`GET /v1/usage` (Phase 13 Task 5).** Per-principal usage metering, derived from the audit
   chain rather than tracked separately (Decision 3): entity count (row count) and byte count
   (`SUM(span_length)`), optionally windowed by `?since=`/`?until=` on `created_at`.
@@ -338,7 +328,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integration test: `span_length` is `BIGINT`, and Postgres's `SUM(BIGINT)` returns `NUMERIC`,
   not `BIGINT`, which failed the runtime column-type check — fixed with an explicit
   `::BIGINT` cast on the aggregate.
-
 - **`hacienda-rag` crate: `RagStore` trait, backend-agnostic IR, in-memory backend (Phase 12
   Task 1).** New workspace member `crates/hacienda-rag`, recovered near-verbatim from xberg's
   own MIT-licensed `xberg-rag` crate (removed from that workspace pre-1.0 in commit
@@ -379,7 +368,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenAPI spec (Phase 12 Task 3 Step 1); answer-synthesis (streaming LLM answers over
   retrieved chunks) was explicitly scoped out of Phase 12 (Task 3 Step 4) — no upstream route
   exists to build a contract against.
-
 - **`/v1/rag/*` HTTP routes (Phase 12 Task 3).** `POST /v1/rag/collections`,
   `GET`/`DELETE /v1/rag/collections/{name}`, `POST /v1/rag/collections/{name}/documents`, and
   `POST /v1/rag/collections/{name}/retrieve` — the 5 of 8 confirmed `/v1/rag/*` routes that map
@@ -405,7 +393,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `retrieve` call over HTTP 500'd. Fixed by giving each variant a named `score` field; no
   existing test had round-tripped a `RetrieveOutput` through `serde_json` before this route
   test did.
-
 - **Real pseudonymisation.** `RedactionMode::Pseudonymize` now emits a keyed, deterministic,
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal

@@ -452,9 +452,7 @@ fn decode_segment_rows(
         .map(|row| {
             let row_id = row.id.clone();
             row_to_entry(row).map_err(|source| {
-                AuditError::Backend(format!(
-                    "segment {segment_id}, entry {row_id}: {source}"
-                ))
+                AuditError::Backend(format!("segment {segment_id}, entry {row_id}: {source}"))
             })
         })
         .collect()

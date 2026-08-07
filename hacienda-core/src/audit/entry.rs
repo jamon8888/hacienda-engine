@@ -261,11 +261,7 @@ const VERTICAL_PRESENT_TAG: u8 = 0xff;
 /// Compute the chain hash linking an entry to its predecessor.
 ///
 /// The timestamp is deliberately excluded so verification is reproducible.
-pub fn compute_chain_hash(
-    prev_chain_hash: &str,
-    seq: u64,
-    fields: ChainHashFields<'_>,
-) -> String {
+pub fn compute_chain_hash(prev_chain_hash: &str, seq: u64, fields: ChainHashFields<'_>) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(prev_chain_hash.as_bytes());
     hasher.update(&seq.to_le_bytes());

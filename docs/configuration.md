@@ -28,7 +28,7 @@ deadline_hours = 24
 enabled = true
 link_style = "Markdown"
 min_confidence = 0.5
-```text
+```
 
 ## Profiles
 
@@ -41,7 +41,7 @@ Basic PII detection with standard redaction modes.
 ```toml
 [pii]
 redaction_profile = "PCI"
-```text
+```
 
 Detects: Credit card numbers, PANs, CVV, expiration dates
 
@@ -50,7 +50,7 @@ Detects: Credit card numbers, PANs, CVV, expiration dates
 ```toml
 [pii]
 redaction_profile = "HIPAA"
-```text
+```
 
 Detects: SSN, MRN, PHI identifiers, dates, phone numbers
 
@@ -59,7 +59,7 @@ Detects: SSN, MRN, PHI identifiers, dates, phone numbers
 ```toml
 [pii]
 redaction_profile = "GDPR"
-```text
+```
 
 Detects: Email, phone, IP, names, addresses, personal identifiers
 
@@ -76,7 +76,7 @@ custom_terms = [
     "CONFIDENTIAL",
     "PROPRIETARY"
 ]
-```text
+```
 
 ## Production Configuration
 
@@ -104,7 +104,7 @@ metrics_port = 9090
 log_level = "info"
 log_format = "json"
 tracing_enabled = true
-```text
+```
 
 ## Environment Variables
 
@@ -139,7 +139,7 @@ hacienda review decide <id> --decision approve --reviewer alice
 hacienda audit query --from 2024-01-01 --to 2024-01-31
 hacienda audit export --format csv --from 2024-01-01
 hacienda audit verify
-```text
+```
 
 ## Programmatic Usage
 
@@ -158,7 +158,7 @@ let facade = HaciendaFacade::new(HaciendaFacadeConfig {
 })?;
 
 let result = facade.process(ExtractInput::from_uri("document.pdf")).await?;
-```text
+```
 
 ### Python
 
@@ -168,7 +168,7 @@ import hacienda
 facade = hacienda.HaciendaFacade()
 result = facade.process(hacienda.ExtractInput.from_uri("contract.pdf"))
 print(result.pii.redacted_text)
-```text
+```
 
 ### REST API
 
@@ -185,7 +185,7 @@ curl -X POST http://localhost:8080/v1/pii/scan \
   ],
   "redacted": "Contact [EMAIL:john@example.com]"
 }
-```text
+```
 
 ## Docker Compose
 
@@ -216,7 +216,7 @@ services:
         reservations:
           memory: 2G
           cpus: "1"
-```text
+```
 
 ## Kubernetes Deployment
 
@@ -301,7 +301,7 @@ spec:
     - name: health
       port: 8081
       targetPort: 8081
-```text
+```
 
 ## Model Management
 
@@ -317,7 +317,7 @@ hacienda model info fastino/GLiNER2-Guardrails-PII-Multi
 
 # Pin model version
 hacienda model pin fastino/GLiNER2-Guardrails-PII-Multi@v1.2.3
-```text
+```
 
 ## Monitoring
 
@@ -329,7 +329,7 @@ scrape_configs:
   - job_name: "hacienda"
     static_configs:
       - targets: ["hacienda:9090"]
-```text
+```
 
 ### Key Metrics
 
