@@ -12,6 +12,7 @@
 
 use super::connection;
 use sqlx::PgPool;
+use std::sync::OnceLock;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
 use testcontainers_modules::postgres::Postgres as PostgresImage;
 use tokio::sync::OnceCell;
@@ -100,4 +101,28 @@ static SHARED: OnceCell<PostgresFixture> = OnceCell::const_new();
 /// requirement, it does not change that constraint.
 pub async fn shared() -> &'static PostgresFixture {
     SHARED.get_or_init(PostgresFixture::start).await
+}
+
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// Run `fut` on the single Tokio runtime that owns the [`shared`] fixture's pool for the
+/// whole test binary's lifetime.
+///
+/// `#[tokio::test]` builds and tears down a brand-new runtime per test. sqlx ties each
+/// connection's socket to the runtime that established it, so a connection opened while
+/// servicing one `#[tokio::test]` becomes unusable the moment that test's runtime is
+/// dropped — the next test, running under its own separate runtime, hands the pool a
+/// connection whose return-to-pool bookkeeping never completes, permanently shrinking the
+/// shared pool's usable capacity by one. Across `--test-threads=1` sequential tests this
+/// compounds until the pool has nothing left to hand out and every later test times out on
+/// `pool.acquire()` regardless of how simple its query is.
+///
+/// Every test that touches [`shared`] (or [`PostgresFixture::start`]'s pool) must drive its
+/// async body through this function — with `#[test]` instead of `#[tokio::test]` — so the
+/// pool is created and used by the same runtime for the test binary's entire run.
+pub fn block_on_shared<F: std::future::Future>(fut: F) -> F::Output {
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Runtime::new().expect("failed to build shared Postgres test runtime")
+    });
+    runtime.block_on(fut)
 }

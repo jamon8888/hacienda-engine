@@ -168,7 +168,11 @@ pub async fn audit_entries(
 
     Ok(Json(NodeAuditPage {
         scope: AuditScope::ThisNode,
-        entries: page.entries.into_iter().map(NodeAuditEntryDto::from).collect(),
+        entries: page
+            .entries
+            .into_iter()
+            .map(NodeAuditEntryDto::from)
+            .collect(),
         next_cursor: page.next.map(|cursor| cursor.to_string()),
     }))
 }
@@ -426,7 +430,11 @@ pub async fn audit_seals(
         ("format" = Option<String>, Query, description = "json (default) or jsonl — flat, chain-ordered export, verifiable offline via consecutive chain_hash recomputation; csv — tabular extract, not verifiable")
     ),
     responses(
-        (status = 200, description = "The whole history, oldest first: a JSON array of NodeAuditEntryDto (format=json, the default), one such object per line (format=jsonl, content-type application/x-ndjson), or a CSV table with an id,timestamp,category,... header row (format=csv, content-type text/csv). See `x-hacienda-audit-evidence` and this operation's own doc comment for which formats are offline-verifiable.")
+        (status = 200, description = "The whole history, oldest first: a JSON array of NodeAuditEntryDto (format=json, the default), one such object per line (format=jsonl), or a CSV table with an id,timestamp,category,... header row (format=csv). See `x-hacienda-audit-evidence` and this operation's own doc comment for which formats are offline-verifiable.", content(
+            (Vec<NodeAuditEntryDto> = "application/json"),
+            (String = "application/x-ndjson"),
+            (String = "text/csv")
+        ))
     )
 )]
 pub async fn audit_export(

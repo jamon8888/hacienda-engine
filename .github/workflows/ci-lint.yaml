@@ -48,8 +48,8 @@ jobs:
 
       - name: Check Rust formatting
         if: steps.deps.outcome == 'success'
-        run: cargo fmt -p hacienda -p hacienda-core --check
+        run: cargo fmt --all --check
 
       - name: Run clippy
         if: steps.deps.outcome == 'success'
-        run: cargo clippy -p hacienda -p hacienda-core --all-targets --features "ner-candle" -- -D warnings
+        run: cargo clippy --workspace --all-targets --features "ner-candle" -- -D warnings

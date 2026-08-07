@@ -317,108 +317,114 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_submit_and_get_round_trip() {
-        let store = test_store().await;
-        let id = uuid::Uuid::new_v4().to_string();
-        let item = test_item(&id);
+    fn should_submit_and_get_round_trip() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
+            let id = uuid::Uuid::new_v4().to_string();
+            let item = test_item(&id);
 
-        store.submit(item.clone()).await.expect("submit failed");
+            store.submit(item.clone()).await.expect("submit failed");
 
-        let fetched = store
-            .get(&id)
-            .await
-            .expect("get failed")
-            .expect("item must exist");
-        assert_eq!(fetched.id, id);
-        assert_eq!(fetched.text_snippet, "jane@example.com");
-        assert_eq!(fetched.status, ReviewStatus::Pending);
-        assert_eq!(fetched.priority, Priority::High);
+            let fetched = store
+                .get(&id)
+                .await
+                .expect("get failed")
+                .expect("item must exist");
+            assert_eq!(fetched.id, id);
+            assert_eq!(fetched.text_snippet, "jane@example.com");
+            assert_eq!(fetched.status, ReviewStatus::Pending);
+            assert_eq!(fetched.priority, Priority::High);
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_let_exactly_one_concurrent_assign_win() {
-        let store = Arc::new(test_store().await);
-        let id = uuid::Uuid::new_v4().to_string();
-        store.submit(test_item(&id)).await.expect("submit failed");
+    fn should_let_exactly_one_concurrent_assign_win() {
+        test_support::block_on_shared(async {
+            let store = Arc::new(test_store().await);
+            let id = uuid::Uuid::new_v4().to_string();
+            store.submit(test_item(&id)).await.expect("submit failed");
 
-        let mut handles = Vec::new();
-        for i in 0..8 {
-            let store = Arc::clone(&store);
-            let id = id.clone();
-            handles.push(tokio::spawn(async move {
-                store.assign(&id, &format!("reviewer-{i}")).await
-            }));
-        }
-
-        let mut wins = 0;
-        let mut losses = 0;
-        for handle in handles {
-            match handle.await.expect("task panicked") {
-                Ok(_) => wins += 1,
-                Err(ReviewError::InvalidTransition { .. }) => losses += 1,
-                Err(other) => panic!("unexpected error: {other}"),
+            let mut handles = Vec::new();
+            for i in 0..8 {
+                let store = Arc::clone(&store);
+                let id = id.clone();
+                handles.push(tokio::spawn(async move {
+                    store.assign(&id, &format!("reviewer-{i}")).await
+                }));
             }
-        }
 
-        assert_eq!(wins, 1, "exactly one concurrent assign must win");
-        assert_eq!(losses, 7);
+            let mut wins = 0;
+            let mut losses = 0;
+            for handle in handles {
+                match handle.await.expect("task panicked") {
+                    Ok(_) => wins += 1,
+                    Err(ReviewError::InvalidTransition { .. }) => losses += 1,
+                    Err(other) => panic!("unexpected error: {other}"),
+                }
+            }
 
-        let final_item = store
-            .get(&id)
-            .await
-            .expect("get failed")
-            .expect("item must exist");
-        assert_eq!(final_item.status, ReviewStatus::InReview);
+            assert_eq!(wins, 1, "exactly one concurrent assign must win");
+            assert_eq!(losses, 7);
+
+            let final_item = store
+                .get(&id)
+                .await
+                .expect("get failed")
+                .expect("item must exist");
+            assert_eq!(final_item.status, ReviewStatus::InReview);
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_let_exactly_one_concurrent_decide_win() {
-        let store = Arc::new(test_store().await);
-        let id = uuid::Uuid::new_v4().to_string();
-        store.submit(test_item(&id)).await.expect("submit failed");
-        store
-            .assign(&id, "reviewer-0")
-            .await
-            .expect("assign failed");
+    fn should_let_exactly_one_concurrent_decide_win() {
+        test_support::block_on_shared(async {
+            let store = Arc::new(test_store().await);
+            let id = uuid::Uuid::new_v4().to_string();
+            store.submit(test_item(&id)).await.expect("submit failed");
+            store
+                .assign(&id, "reviewer-0")
+                .await
+                .expect("assign failed");
 
-        let mut handles = Vec::new();
-        for i in 0..8 {
-            let store = Arc::clone(&store);
-            let id = id.clone();
-            handles.push(tokio::spawn(async move {
-                store
-                    .decide(
-                        &id,
-                        ReviewDecision::Approve,
-                        &format!("reviewer-{i}"),
-                        "looks fine",
-                    )
-                    .await
-            }));
-        }
-
-        let mut wins = 0;
-        let mut losses = 0;
-        for handle in handles {
-            match handle.await.expect("task panicked") {
-                Ok(_) => wins += 1,
-                Err(ReviewError::AlreadyDecided(_)) => losses += 1,
-                Err(other) => panic!("unexpected error: {other}"),
+            let mut handles = Vec::new();
+            for i in 0..8 {
+                let store = Arc::clone(&store);
+                let id = id.clone();
+                handles.push(tokio::spawn(async move {
+                    store
+                        .decide(
+                            &id,
+                            ReviewDecision::Approve,
+                            &format!("reviewer-{i}"),
+                            "looks fine",
+                        )
+                        .await
+                }));
             }
-        }
 
-        assert_eq!(wins, 1, "exactly one concurrent decide must win");
-        assert_eq!(losses, 7);
+            let mut wins = 0;
+            let mut losses = 0;
+            for handle in handles {
+                match handle.await.expect("task panicked") {
+                    Ok(_) => wins += 1,
+                    Err(ReviewError::AlreadyDecided(_)) => losses += 1,
+                    Err(other) => panic!("unexpected error: {other}"),
+                }
+            }
 
-        let final_item = store
-            .get(&id)
-            .await
-            .expect("get failed")
-            .expect("item must exist");
-        assert_eq!(final_item.status, ReviewStatus::Approved);
+            assert_eq!(wins, 1, "exactly one concurrent decide must win");
+            assert_eq!(losses, 7);
+
+            let final_item = store
+                .get(&id)
+                .await
+                .expect("get failed")
+                .expect("item must exist");
+            assert_eq!(final_item.status, ReviewStatus::Approved);
+        });
     }
 }

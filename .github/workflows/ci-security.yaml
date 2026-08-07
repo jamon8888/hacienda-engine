@@ -1,0 +1,35 @@
+name: CI - Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Advisories land continuously, independent of code changes — a weekly
+    # run catches a newly-published RUSTSEC entry against an unchanged
+    # Cargo.lock, not just ones introduced by a PR's own dependency bumps.
+    - cron: "17 6 * * 1"
+
+# The job only reads the repo and reports check results.
+permissions:
+  contents: read
+
+jobs:
+  # cargo-deny's `[advisories]` check wraps the same RustSec advisory-db
+  # `cargo audit` does, but resolves it against the actual dependency graph
+  # (features/targets/workspace) rather than every entry recorded in
+  # Cargo.lock — `cargo audit` flags a couple of crates here (`rkyv`, `rsa`)
+  # that are locked but never actually reachable from any build of this
+  # workspace, which would make a plain cargo-audit job noisy from day one.
+  # `[licenses]`/`[bans]`/`[sources]` ride along in the same tool/config
+  # (`deny.toml`) rather than a second install.
+  cargo-deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

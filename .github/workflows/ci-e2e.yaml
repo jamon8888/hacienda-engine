@@ -3,9 +3,6 @@ name: CI - E2E Tests
 on:
   push:
     branches: [main]
-    paths:
-      - "hacienda/**"
-      - "hacienda-core/**"
   pull_request:
     branches: [main]
 
@@ -29,7 +26,7 @@ jobs:
         if: steps.deps.outcome == 'success'
       - name: Run E2E tests
         if: steps.deps.outcome == 'success'
-        run: cargo test -p hacienda -p hacienda-core --features "ner-candle"
+        run: cargo test --workspace --features "ner-candle"
       - name: Skip notice
         if: steps.deps.outcome != 'success'
         run: echo "::notice::Dependency repos not available - E2E tests skipped."

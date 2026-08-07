@@ -624,6 +624,62 @@ pub(crate) mod tests {
         );
     }
 
+    /// `process_documents` used to zip `result.extraction.results` with `result.pii`
+    /// three ways with `body.documents` — `Iterator::zip` truncates to the shortest
+    /// input, and `result.pii` is empty whenever no PII pipeline is configured, so the
+    /// whole zip silently produced zero documents regardless of what was submitted.
+    /// Pins the fix: extraction still runs and is returned even with PII disabled,
+    /// each document simply carries no entities.
+    #[tokio::test]
+    async fn process_documents_returns_extraction_when_pii_is_not_configured() {
+        use data_encoding::BASE64;
+
+        let app = build_router(test_state_no_auth());
+
+        let body_content = BASE64.encode(b"hello world");
+        let request_body = format!(
+            r#"{{"documents":[{{"filename":"a.txt","mime_type":"text/plain","content_base64":"{body_content}"}}]}}"#
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let documents = json["documents"]
+            .as_array()
+            .expect("documents must be an array");
+
+        assert_eq!(
+            documents.len(),
+            1,
+            "one submitted document must yield one result even with PII disabled, got {json}"
+        );
+        assert_eq!(
+            documents[0]["content"],
+            serde_json::json!("hello world"),
+            "the extracted content must be the submitted content, not an empty stand-in"
+        );
+        assert_eq!(
+            documents[0]["entities"],
+            serde_json::json!([]),
+            "no PII pipeline configured means no entities, not a missing document"
+        );
+    }
+
     /// `GET /v1/review` and `POST /v1/review/{id}/decide` are declared under two
     /// different capabilities in the route table (`audit:read` and `review:decide`
     /// respectively) — reading the queue and deciding on an item are different
@@ -1759,12 +1815,11 @@ pub(crate) mod tests {
             hacienda_core::store::postgres::versions::PostgresDocumentVersionStore::new(pool),
         );
 
-        // `process_documents` zips `result.extraction.results` with `result.pii` — with
-        // no PII pipeline configured, `result.pii` is empty and the zip yields zero
-        // documents regardless of what was submitted (a separate, pre-existing bug in
-        // `documents.rs`, not something this test should paper over). Enable PII with
-        // the default `Mask` mode (needs no key resolver) so the response is populated
-        // and this test actually exercises the versioning path.
+        // PII enabled with the default `Mask` mode (needs no key resolver) — not required
+        // for `process_documents` to return a populated response any more (see
+        // `process_documents_returns_extraction_when_pii_is_not_configured`), but this
+        // test is about the versioning path, and exercising it with entities present is
+        // marginally more representative of a real deployment.
         let pii_config = hacienda_core::pii::PipelineConfig::default();
         let config = hacienda_core::HaciendaConfig::default().with_pii(pii_config);
         let facade = Arc::new(hacienda_core::HaciendaFacade::new(config).unwrap());

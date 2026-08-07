@@ -130,7 +130,10 @@ fn should_materialise_a_glossary_section_when_none_was_configured() {
         glossary_dir_path,
         path,
     ]);
-    assert!(ok, "`extract --glossary-out` with no [glossary] section did not exit 0:\n{text}");
+    assert!(
+        ok,
+        "`extract --glossary-out` with no [glossary] section did not exit 0:\n{text}"
+    );
 
     let glossary = read_glossary(&glossary_dir);
     let entries = glossary.as_array().expect("glossary.json is a JSON array");

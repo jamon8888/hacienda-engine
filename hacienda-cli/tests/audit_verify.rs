@@ -34,11 +34,21 @@ fn should_verify_an_audit_chain_written_by_extract() {
     let audit_dir = TempDir::new().expect("create audit-out directory");
     let audit_dir_path = audit_dir.path().to_str().expect("utf-8 audit dir path");
 
-    let (ok, text) = run(&["extract", "--mode", "mask", "--audit-out", audit_dir_path, path]);
+    let (ok, text) = run(&[
+        "extract",
+        "--mode",
+        "mask",
+        "--audit-out",
+        audit_dir_path,
+        path,
+    ]);
     assert!(ok, "`extract --audit-out` did not exit 0:\n{text}");
 
     let (ok, verify_text) = run(&["audit", "verify", audit_dir_path]);
-    assert!(ok, "`audit verify` on a freshly written chain did not exit 0:\n{verify_text}");
+    assert!(
+        ok,
+        "`audit verify` on a freshly written chain did not exit 0:\n{verify_text}"
+    );
     assert!(
         verify_text.to_lowercase().contains("ok") || verify_text.contains("valid"),
         "`audit verify` output does not report success:\n{verify_text}"
@@ -52,10 +62,20 @@ fn should_support_json_format() {
     let audit_dir = TempDir::new().expect("create audit-out directory");
     let audit_dir_path = audit_dir.path().to_str().expect("utf-8 audit dir path");
 
-    run(&["extract", "--mode", "mask", "--audit-out", audit_dir_path, path]);
+    run(&[
+        "extract",
+        "--mode",
+        "mask",
+        "--audit-out",
+        audit_dir_path,
+        path,
+    ]);
 
     let (ok, verify_text) = run(&["audit", "verify", "--format", "json", audit_dir_path]);
-    assert!(ok, "`audit verify --format json` did not exit 0:\n{verify_text}");
+    assert!(
+        ok,
+        "`audit verify --format json` did not exit 0:\n{verify_text}"
+    );
     let value: serde_json::Value = serde_json::from_str(&verify_text).unwrap_or_else(|e| {
         panic!("`audit verify --format json` did not print valid JSON: {e}\n{verify_text}")
     });
@@ -70,14 +90,24 @@ fn should_fail_when_audit_json_is_tampered() {
     let audit_dir = TempDir::new().expect("create audit-out directory");
     let audit_dir_path = audit_dir.path().to_str().expect("utf-8 audit dir path");
 
-    let (ok, text) = run(&["extract", "--mode", "mask", "--audit-out", audit_dir_path, path]);
+    let (ok, text) = run(&[
+        "extract",
+        "--mode",
+        "mask",
+        "--audit-out",
+        audit_dir_path,
+        path,
+    ]);
     assert!(ok, "`extract --audit-out` did not exit 0:\n{text}");
 
     let audit_json_path = audit_dir.path().join("audit.json");
     let mut entries: Vec<hacienda::audit::AuditEntry> =
         serde_json::from_slice(&std::fs::read(&audit_json_path).expect("read audit.json"))
             .expect("audit.json is valid JSON");
-    assert!(!entries.is_empty(), "fixture with a detectable email produced no entries");
+    assert!(
+        !entries.is_empty(),
+        "fixture with a detectable email produced no entries"
+    );
     entries[0].category = "CreditCard".to_string();
     std::fs::write(
         &audit_json_path,

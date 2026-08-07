@@ -61,10 +61,17 @@ mod tests {
 
         let chunks = chunk_full_text(&text, &config).expect("chunking should succeed");
 
-        assert!(chunks.len() > 1, "expected more than one chunk, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected more than one chunk, got {}",
+            chunks.len()
+        );
         for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.ordinal, i as u32);
-            assert!(chunk.embedding.is_empty(), "chunker must not embed on its own");
+            assert!(
+                chunk.embedding.is_empty(),
+                "chunker must not embed on its own"
+            );
             assert!(!chunk.content.is_empty());
         }
     }

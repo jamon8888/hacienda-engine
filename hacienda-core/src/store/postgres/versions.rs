@@ -213,102 +213,105 @@ mod tests {
         PostgresDocumentVersionStore::new(test_support::shared().await.pool())
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_create_and_list_versions_round_trip() {
-        let store = test_store().await;
-        let document_id = Uuid::new_v4();
+    fn should_create_and_list_versions_round_trip() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
+            let document_id = Uuid::new_v4();
 
-        let v1 = store
-            .create_version(document_id, "hash-1", "redacted content v1", json!([]))
-            .await
-            .expect("create_version failed");
-        let v2 = store
-            .create_version(
-                document_id,
-                "hash-2",
-                "redacted content v2",
-                json!([{"type": "EMAIL", "start": 0, "end": 5}]),
-            )
-            .await
-            .expect("create_version failed");
-        assert_eq!(v1, 1);
-        assert_eq!(v2, 2);
+            let v1 = store
+                .create_version(document_id, "hash-1", "redacted content v1", json!([]))
+                .await
+                .expect("create_version failed");
+            let v2 = store
+                .create_version(
+                    document_id,
+                    "hash-2",
+                    "redacted content v2",
+                    json!([{"type": "EMAIL", "start": 0, "end": 5}]),
+                )
+                .await
+                .expect("create_version failed");
+            assert_eq!(v1, 1);
+            assert_eq!(v2, 2);
 
-        // Re-uploading the same content as the latest version is idempotent.
-        let v2_again = store
-            .create_version(
-                document_id,
-                "hash-2",
-                "redacted content v2",
-                json!([{"type": "EMAIL", "start": 0, "end": 5}]),
-            )
-            .await
-            .expect("create_version failed");
-        assert_eq!(v2_again, 2);
+            // Re-uploading the same content as the latest version is idempotent.
+            let v2_again = store
+                .create_version(
+                    document_id,
+                    "hash-2",
+                    "redacted content v2",
+                    json!([{"type": "EMAIL", "start": 0, "end": 5}]),
+                )
+                .await
+                .expect("create_version failed");
+            assert_eq!(v2_again, 2);
 
-        let versions = store
-            .list_versions(document_id)
-            .await
-            .expect("list_versions failed");
-        assert_eq!(versions.len(), 2, "idempotent re-upload must not add a row");
-        assert_eq!(versions[0].version_sequence, 2, "newest first");
-        assert_eq!(versions[0].content, "redacted content v2");
-        assert_eq!(
-            versions[0].entities_json,
-            json!([{"type": "EMAIL", "start": 0, "end": 5}])
-        );
-        assert_eq!(versions[1].version_sequence, 1);
-        assert_eq!(versions[1].content, "redacted content v1");
-        assert_eq!(versions[1].entities_json, json!([]));
+            let versions = store
+                .list_versions(document_id)
+                .await
+                .expect("list_versions failed");
+            assert_eq!(versions.len(), 2, "idempotent re-upload must not add a row");
+            assert_eq!(versions[0].version_sequence, 2, "newest first");
+            assert_eq!(versions[0].content, "redacted content v2");
+            assert_eq!(
+                versions[0].entities_json,
+                json!([{"type": "EMAIL", "start": 0, "end": 5}])
+            );
+            assert_eq!(versions[1].version_sequence, 1);
+            assert_eq!(versions[1].content, "redacted content v1");
+            assert_eq!(versions[1].entities_json, json!([]));
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_assign_sequential_version_numbers_with_no_gaps_or_duplicates_under_concurrency()
-    {
-        let store = Arc::new(test_store().await);
-        let document_id = Uuid::new_v4();
-        const N: i64 = 10;
+    fn should_assign_sequential_version_numbers_with_no_gaps_or_duplicates_under_concurrency() {
+        test_support::block_on_shared(async {
+            let store = Arc::new(test_store().await);
+            let document_id = Uuid::new_v4();
+            const N: i64 = 10;
 
-        let mut handles = Vec::new();
-        for i in 0..N {
-            let store = Arc::clone(&store);
-            handles.push(tokio::spawn(async move {
-                store
-                    .create_version(
-                        document_id,
-                        &format!("hash-{i}"),
-                        &format!("content-{i}"),
-                        json!([]),
-                    )
-                    .await
-            }));
-        }
+            let mut handles = Vec::new();
+            for i in 0..N {
+                let store = Arc::clone(&store);
+                handles.push(tokio::spawn(async move {
+                    store
+                        .create_version(
+                            document_id,
+                            &format!("hash-{i}"),
+                            &format!("content-{i}"),
+                            json!([]),
+                        )
+                        .await
+                }));
+            }
 
-        let mut sequences = Vec::new();
-        for handle in handles {
-            sequences.push(
-                handle
-                    .await
-                    .expect("task panicked")
-                    .expect("create_version failed"),
+            let mut sequences = Vec::new();
+            for handle in handles {
+                sequences.push(
+                    handle
+                        .await
+                        .expect("task panicked")
+                        .expect("create_version failed"),
+                );
+            }
+
+            let unique: HashSet<i64> = sequences.iter().copied().collect();
+            assert_eq!(
+                unique.len(),
+                sequences.len(),
+                "no two concurrent creates may receive the same version_sequence"
             );
-        }
 
-        let unique: HashSet<i64> = sequences.iter().copied().collect();
-        assert_eq!(
-            unique.len(),
-            sequences.len(),
-            "no two concurrent creates may receive the same version_sequence"
-        );
-
-        let mut sorted = sequences.clone();
-        sorted.sort_unstable();
-        let expected: Vec<i64> = (1..=N).collect();
-        assert_eq!(
-            sorted, expected,
-            "version numbers must be sequential with no gaps"
-        );
+            let mut sorted = sequences.clone();
+            sorted.sort_unstable();
+            let expected: Vec<i64> = (1..=N).collect();
+            assert_eq!(
+                sorted, expected,
+                "version numbers must be sequential with no gaps"
+            );
+        });
     }
 }

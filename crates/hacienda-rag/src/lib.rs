@@ -53,8 +53,6 @@ pub use backends::memory::InMemoryVectorStore;
 pub use capability::Capabilities;
 #[cfg(feature = "chunking")]
 pub use chunk::chunk_full_text;
-#[cfg(feature = "chunking")]
-pub use xberg::chunking::ChunkingConfig;
 pub use error::{ComplexityKind, RagError, RagResult};
 pub use filter::{Filter, FilterField, FilterNamespace};
 pub use query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
@@ -68,6 +66,8 @@ pub use types::{
     DocumentRecord, DocumentSummary, IndexMethod, MultiVector, PrimaryScore, RetrievedChunk,
     SparseVector,
 };
+#[cfg(feature = "chunking")]
+pub use xberg::chunking::ChunkingConfig;
 
 #[cfg(test)]
 mod tests {

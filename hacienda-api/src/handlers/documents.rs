@@ -92,22 +92,46 @@ pub async fn process_documents(
 
     let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
 
+    // `result.pii` is either empty (no PII pipeline configured, `HaciendaMetadata::pii_enabled`
+    // is false) or exactly as long as `result.extraction.results` (one `PipelineResult` per
+    // document, per `HaciendaFacade::process_batch_with_auth`'s contract) — never anything in
+    // between. A three-way `.zip()` over both would silently truncate to zero when PII is
+    // disabled, discarding every extracted document; iterating `pii` by `.next()` alongside the
+    // extraction results and falling back to no entities once it runs dry handles both cases
+    // uniformly without relying on that length invariant holding exactly.
     let mut documents: Vec<DocumentResult> = Vec::with_capacity(result.extraction.results.len());
-    for ((input, doc), pii) in body
-        .documents
-        .iter()
-        .zip(result.extraction.results)
-        .zip(result.pii)
-    {
+    let mut pii_results = result.pii.into_iter();
+    for (input, doc) in body.documents.iter().zip(result.extraction.results) {
+        let entities = pii_results
+            .next()
+            .map(|pii| pii.entities)
+            .unwrap_or_default();
+
         let (document_id, version_sequence) = if let Some(document_id) = input.document_id {
-            // Checked above: version_store is Some whenever any document_id is set.
-            let store = state
-                .version_store
-                .as_ref()
-                .expect("version_store checked present above");
+            // Checked above: version_store is Some whenever any document_id is set. Still
+            // propagate rather than `.expect()` — a library handler must not panic if that
+            // invariant is ever weakened.
+            let store = state.version_store.as_ref().ok_or_else(|| {
+                tracing::error!(
+                    %document_id,
+                    "version_store missing despite earlier batch-level check"
+                );
+                ApiError::internal()
+            })?;
             let content_hash = blake3::hash(doc.content.as_bytes()).to_hex().to_string();
-            let entities_json =
-                serde_json::to_value(&pii.entities).unwrap_or_else(|_| serde_json::json!([]));
+            // Silently falling back to `[]` here would save a version whose entities
+            // disagree with the ones this response returns — a later `GET
+            // /v1/documents/{id}` would then serve empty entities for a document that
+            // actually had some. Fail the request instead of writing a version that
+            // lies about its own content.
+            let entities_json = serde_json::to_value(&entities).map_err(|error| {
+                tracing::error!(
+                    %error,
+                    %document_id,
+                    "failed to serialise entities for document version"
+                );
+                ApiError::internal()
+            })?;
             let version_sequence = store
                 .create_version(document_id, &content_hash, &doc.content, entities_json)
                 .await
@@ -119,7 +143,7 @@ pub async fn process_documents(
 
         documents.push(DocumentResult {
             content: doc.content,
-            entities: pii.entities.into_iter().map(EntityDto::from).collect(),
+            entities: entities.into_iter().map(EntityDto::from).collect(),
             document_id,
             version_sequence,
         });

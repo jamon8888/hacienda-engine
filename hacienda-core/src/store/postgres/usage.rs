@@ -153,91 +153,95 @@ mod tests {
     /// entity count is the row count per principal, byte count is `span_length` summed.
     /// A third, unattributed entry (no token) must group under `principal: None`, not be
     /// dropped or misattributed to either principal.
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_aggregate_entity_and_byte_counts_per_principal() {
-        let pool = test_support::shared().await.pool();
+    fn should_aggregate_entity_and_byte_counts_per_principal() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
 
-        let audit_store = PostgresAuditStore::new(pool.clone());
-        let usage_store = PostgresUsageStore::new(pool);
+            let audit_store = PostgresAuditStore::new(pool.clone());
+            let usage_store = PostgresUsageStore::new(pool);
 
-        // `audit_entries` is append-only and never cleaned up between test runs (by
-        // design — see the module doc comment), so a fixed principal literal would
-        // accumulate rows across repeated invocations and make this test non-idempotent.
-        // Suffixing every principal with a fresh UUID keeps each run's rows disjoint
-        // from every other run's, past or concurrent.
-        let suffix = Uuid::new_v4();
-        let avocat_7 = format!("avocat-7-{suffix}");
-        let avocat_9 = format!("avocat-9-{suffix}");
-        audit_store
-            .append(vec![
-                entry(&format!("{suffix}-a1"), Some(&avocat_7), 10),
-                entry(&format!("{suffix}-a2"), Some(&avocat_7), 15),
-                entry(&format!("{suffix}-b1"), Some(&avocat_9), 100),
-                entry(&format!("{suffix}-c1"), None, 5),
-            ])
-            .await
-            .expect("append failed");
+            // `audit_entries` is append-only and never cleaned up between test runs (by
+            // design — see the module doc comment), so a fixed principal literal would
+            // accumulate rows across repeated invocations and make this test non-idempotent.
+            // Suffixing every principal with a fresh UUID keeps each run's rows disjoint
+            // from every other run's, past or concurrent.
+            let suffix = Uuid::new_v4();
+            let avocat_7 = format!("avocat-7-{suffix}");
+            let avocat_9 = format!("avocat-9-{suffix}");
+            audit_store
+                .append(vec![
+                    entry(&format!("{suffix}-a1"), Some(&avocat_7), 10),
+                    entry(&format!("{suffix}-a2"), Some(&avocat_7), 15),
+                    entry(&format!("{suffix}-b1"), Some(&avocat_9), 100),
+                    entry(&format!("{suffix}-c1"), None, 5),
+                ])
+                .await
+                .expect("append failed");
 
-        let summary = usage_store
-            .summary(None, None)
-            .await
-            .expect("summary failed");
+            let summary = usage_store
+                .summary(None, None)
+                .await
+                .expect("summary failed");
 
-        let avocat_7_record = summary
-            .iter()
-            .find(|r| r.principal.as_deref() == Some(avocat_7.as_str()))
-            .expect("avocat_7 missing from summary");
-        assert_eq!(avocat_7_record.entity_count, 2);
-        assert_eq!(avocat_7_record.byte_count, 25);
+            let avocat_7_record = summary
+                .iter()
+                .find(|r| r.principal.as_deref() == Some(avocat_7.as_str()))
+                .expect("avocat_7 missing from summary");
+            assert_eq!(avocat_7_record.entity_count, 2);
+            assert_eq!(avocat_7_record.byte_count, 25);
 
-        let avocat_9_record = summary
-            .iter()
-            .find(|r| r.principal.as_deref() == Some(avocat_9.as_str()))
-            .expect("avocat_9 missing from summary");
-        assert_eq!(avocat_9_record.entity_count, 1);
-        assert_eq!(avocat_9_record.byte_count, 100);
+            let avocat_9_record = summary
+                .iter()
+                .find(|r| r.principal.as_deref() == Some(avocat_9.as_str()))
+                .expect("avocat_9 missing from summary");
+            assert_eq!(avocat_9_record.entity_count, 1);
+            assert_eq!(avocat_9_record.byte_count, 100);
 
-        // Unlike the two principals above, `None` is a shared bucket across every
-        // unattributed entry ever inserted (there is no per-run suffix to key on), so
-        // this only asserts the just-inserted entry's presence within that bucket's
-        // aggregate, not the bucket's exact totals.
-        let unattributed = summary
-            .iter()
-            .find(|r| r.principal.is_none())
-            .expect("unattributed entry missing from summary");
-        assert!(unattributed.entity_count >= 1);
-        assert!(unattributed.byte_count >= 5);
+            // Unlike the two principals above, `None` is a shared bucket across every
+            // unattributed entry ever inserted (there is no per-run suffix to key on), so
+            // this only asserts the just-inserted entry's presence within that bucket's
+            // aggregate, not the bucket's exact totals.
+            let unattributed = summary
+                .iter()
+                .find(|r| r.principal.is_none())
+                .expect("unattributed entry missing from summary");
+            assert!(unattributed.entity_count >= 1);
+            assert!(unattributed.byte_count >= 5);
+        });
     }
 
     /// A `since` bound in the future must exclude every entry just inserted — proves the
     /// window filter is applied, not silently ignored.
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn since_in_the_future_excludes_everything() {
-        let pool = test_support::shared().await.pool();
+    fn since_in_the_future_excludes_everything() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
 
-        let audit_store = PostgresAuditStore::new(pool.clone());
-        let usage_store = PostgresUsageStore::new(pool);
+            let audit_store = PostgresAuditStore::new(pool.clone());
+            let usage_store = PostgresUsageStore::new(pool);
 
-        let suffix = Uuid::new_v4();
-        let principal = format!("avocat-1-{suffix}");
-        audit_store
-            .append(vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)])
-            .await
-            .expect("append failed");
+            let suffix = Uuid::new_v4();
+            let principal = format!("avocat-1-{suffix}");
+            audit_store
+                .append(vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)])
+                .await
+                .expect("append failed");
 
-        let future = Utc::now() + chrono::Duration::days(1);
-        let summary = usage_store
-            .summary(Some(future), None)
-            .await
-            .expect("summary failed");
+            let future = Utc::now() + chrono::Duration::days(1);
+            let summary = usage_store
+                .summary(Some(future), None)
+                .await
+                .expect("summary failed");
 
-        assert!(
-            summary
-                .iter()
-                .all(|r| r.principal.as_deref() != Some(principal.as_str())),
-            "a since bound in the future must exclude the entry just inserted"
-        );
+            assert!(
+                summary
+                    .iter()
+                    .all(|r| r.principal.as_deref() != Some(principal.as_str())),
+                "a since bound in the future must exclude the entry just inserted"
+            );
+        });
     }
 }
