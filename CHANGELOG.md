@@ -96,6 +96,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **API keys now carry a real tenant identity (S1 tenancy, item 4.1+4.3).** Previously
+  `ApiKey`/`ApiKeyStore` had no tenant field at all, so a resolved `AuthContext.tenant`
+  could never be anything but the default tenant regardless of which key authenticated
+  the request — even though `AuthContext`, `Caller::tenant_ctx()`, and `TenantCtx`
+  already existed and were fully tested (`hacienda-core/src/tenancy.rs`,
+  `auth/mod.rs`). `ApiKey` gained `tenant: TenantId`; `ApiKeyStore::create`/`list` take
+  a `tenant: &TenantId` parameter, enforced by both `InMemoryApiKeyStore` and
+  `PostgresApiKeyStore` (migration `0004_api_keys_tenant.sql`, existing keys default to
+  the `default` tenant per spec §8); `Token`/`ApiKeyTokenResolver` carry the resolved
+  key's tenant through to `AuthContext` via the now-used `AuthContext::with_tenant`.
+  `HaciendaFacade::issue_key_with_auth` enforces that an authenticated admin
+  (`Caller::Principal`) can only issue keys into its own tenant — requesting a
+  different one is a hard error (`AuthzError::CrossTenantOperation`, mapped to 403),
+  not just a convention — while in-process callers (`Caller::Trusted`: bootstrap, CLI)
+  can specify an explicit tenant to provision a brand-new one.
+  `POST /v1/auth/keys`'s response now echoes the issued key's `tenant`; the request
+  body gained no `tenant` field, by design. No store beyond `ApiKeyStore` enforces
+  tenant scoping yet — that is tracked as follow-up work (`AuditStore`/`ReviewStore`,
+  then `JobStore`/`PresetStore`/`UsageStore`/`DocumentVersionStore`/`ObjectStore`).
 - **Server-side chunking for RAG document upsert.** `POST /v1/rag/collections/{name}/documents`
   previously required the caller to submit pre-chunked, pre-embedded `chunks` — `full_text` was
   stored for search only, never chunked. When `chunks` is omitted, the server now splits

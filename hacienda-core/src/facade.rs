@@ -4,7 +4,7 @@ use crate::audit::{
     export as export_chain, AuditChain, AuditCursor, AuditEntry, AuditEntryInput, AuditPage,
     AuditStore, ExportFormat, InMemoryAuditStore, RedactionAction, SegmentSeal,
 };
-use crate::auth::{ApiKeyStore, Caller, Capability, CapabilitySet};
+use crate::auth::{ApiKeyStore, AuthzError, Caller, Capability, CapabilitySet};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
@@ -13,6 +13,7 @@ use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineR
 use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionError};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
+use crate::tenancy::TenantId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
@@ -313,12 +314,25 @@ impl HaciendaFacade {
 
     /// Issue a new API key for the given owner with the specified capabilities.
     ///
+    /// `tenant` controls which tenant the new key is scoped to:
+    /// - `Caller::Principal` may only issue into its own tenant (`caller.tenant_ctx().tenant`)
+    ///   — passing `Some` for a different tenant is rejected with
+    ///   [`AuthzError::CrossTenantOperation`], and passing `None` implicitly uses the
+    ///   caller's own tenant. An authenticated admin can never mint a key for a tenant
+    ///   other than its own, regardless of what it asks for.
+    /// - `Caller::Trusted` (in-process callers — bootstrap, CLI) has no tenant of its
+    ///   own to inherit (`Caller::tenant_ctx()` resolves it to the default tenant only
+    ///   because it must resolve to *something*), so `Some(tenant)` is how an in-process
+    ///   caller bootstraps the first key of a brand-new tenant. `None` still falls back
+    ///   to the default tenant, matching every pre-S1 deployment (spec §8).
+    ///
     /// Requires `auth:manage` capability. Returns the raw key (shown once) and the
     /// stored key record. The raw key is never stored — only its Argon2id hash.
     ///
     /// # Errors
     ///
-    /// Returns [`HaciendaError::Authz`] without `AuthManage` capability.
+    /// Returns [`HaciendaError::Authz`] without `AuthManage` capability, or if a
+    /// `Principal` caller requests a tenant other than its own.
     /// Returns [`HaciendaError::ApiKey`] if key generation or storage fails.
     /// Returns [`HaciendaError::ApiKey`] wrapping [`ApiKeyError::Generation`]
     /// if no API key store is configured.
@@ -326,15 +340,35 @@ impl HaciendaFacade {
         &self,
         caller: Caller<'_>,
         owner: &str,
+        tenant: Option<&TenantId>,
         capabilities: Vec<Capability>,
     ) -> Result<(crate::auth::keys::ApiKeyPair, crate::auth::keys::ApiKey), HaciendaError> {
         caller.require(Capability::AuthManage)?;
+        let own_tenant = caller.tenant_ctx().tenant;
+        let resolved_tenant = match (tenant, &caller) {
+            (Some(requested), Caller::Principal(ctx)) if *requested != own_tenant => {
+                return Err(AuthzError::CrossTenantOperation {
+                    principal: ctx.principal_id.clone(),
+                    own: own_tenant.as_str().to_owned(),
+                    requested: requested.as_str().to_owned(),
+                }
+                .into());
+            }
+            (Some(requested), _) => requested.clone(),
+            (None, _) => own_tenant,
+        };
         let store = self.api_key_store.as_ref().ok_or_else(|| {
             crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
         })?;
         let pair = crate::auth::keys::generate_key()?;
         let key = store
-            .create(&pair.key_hash, &pair.lookup_hash, owner, capabilities)
+            .create(
+                &pair.key_hash,
+                &pair.lookup_hash,
+                owner,
+                &resolved_tenant,
+                capabilities,
+            )
             .await?;
         Ok((pair, key))
     }
@@ -2664,10 +2698,74 @@ mod tests {
         let caller = Caller::Principal(&ctx);
 
         let result = facade
-            .issue_key_with_auth(caller, "owner-1", vec![Capability::DocumentsProcess])
+            .issue_key_with_auth(caller, "owner-1", None, vec![Capability::DocumentsProcess])
             .await;
 
         assert!(matches!(result, Err(HaciendaError::Authz(_))));
+    }
+
+    #[tokio::test]
+    async fn should_scope_a_key_issued_by_a_principal_to_the_principals_own_tenant() {
+        let (facade, _store) = facade_with_key_store();
+        let ctx = crate::auth::AuthContext::with_tenant(
+            "test-principal",
+            crate::tenancy::TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([Capability::AuthManage]),
+        );
+        let caller = Caller::Principal(&ctx);
+
+        let (_pair, record) = facade
+            .issue_key_with_auth(caller, "owner-1", None, vec![Capability::DocumentsProcess])
+            .await
+            .expect("issue must succeed");
+
+        assert_eq!(record.tenant, crate::tenancy::TenantId::new("acme"));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_principal_issuing_a_key_for_a_different_tenant() {
+        let (facade, _store) = facade_with_key_store();
+        let ctx = crate::auth::AuthContext::with_tenant(
+            "test-principal",
+            crate::tenancy::TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([Capability::AuthManage]),
+        );
+        let caller = Caller::Principal(&ctx);
+        let other_tenant = crate::tenancy::TenantId::new("other-corp");
+
+        let result = facade
+            .issue_key_with_auth(
+                caller,
+                "owner-1",
+                Some(&other_tenant),
+                vec![Capability::DocumentsProcess],
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(HaciendaError::Authz(
+                crate::auth::AuthzError::CrossTenantOperation { .. }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_let_a_trusted_caller_bootstrap_a_key_for_an_explicit_tenant() {
+        let (facade, _store) = facade_with_key_store();
+        let tenant = crate::tenancy::TenantId::new("brand-new-tenant");
+
+        let (_pair, record) = facade
+            .issue_key_with_auth(
+                Caller::Trusted,
+                "bootstrap-admin",
+                Some(&tenant),
+                vec![Capability::AuthManage],
+            )
+            .await
+            .expect("trusted issuance with an explicit tenant must succeed");
+
+        assert_eq!(record.tenant, tenant);
     }
 
     #[tokio::test]
@@ -2691,10 +2789,11 @@ mod tests {
 
         let issued_caps = vec![Capability::DocumentsProcess, Capability::AuditRead];
         let (pair, record) = facade
-            .issue_key_with_auth(caller, "owner-1", issued_caps.clone())
+            .issue_key_with_auth(caller, "owner-1", None, issued_caps.clone())
             .await
             .expect("issue must succeed with AuthManage");
         assert_eq!(record.owner, "owner-1");
+        assert_eq!(record.tenant, crate::tenancy::TenantId::default_tenant());
         assert!(record.revoked_at.is_none());
 
         let resolver = crate::auth::authn::ApiKeyTokenResolver::new(store as Arc<dyn ApiKeyStore>);
@@ -2720,7 +2819,7 @@ mod tests {
         let caller = Caller::Principal(&ctx);
 
         let (pair, record) = facade
-            .issue_key_with_auth(caller, "owner-1", vec![Capability::DocumentsProcess])
+            .issue_key_with_auth(caller, "owner-1", None, vec![Capability::DocumentsProcess])
             .await
             .expect("issue must succeed");
 

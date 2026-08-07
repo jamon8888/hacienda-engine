@@ -15,6 +15,7 @@
 //!
 //! [`ApiKeyStore::get_by_lookup_hash`]: crate::auth::ApiKeyStore::get_by_lookup_hash
 
+use crate::tenancy::TenantId;
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -186,6 +187,10 @@ pub struct ApiKey {
     /// docs for why this exists separately from `key_hash`.
     pub lookup_hash: String,
     pub owner: String,
+    /// The tenant this key belongs to. Every capability a resolved `AuthContext` grants
+    /// via this key is scoped to this tenant (see `AuthContext::with_tenant`) — a key
+    /// never grants cross-tenant access, regardless of `owner`.
+    pub tenant: TenantId,
     pub capabilities: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,

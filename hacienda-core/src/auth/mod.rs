@@ -284,6 +284,14 @@ pub enum AuthzError {
     TokenExpired,
     #[error("issuer not trusted: {0}")]
     UntrustedIssuer(String),
+    #[error(
+        "principal {principal} cannot operate on tenant {requested} outside its own tenant {own}"
+    )]
+    CrossTenantOperation {
+        principal: String,
+        own: String,
+        requested: String,
+    },
 }
 
 /// Trait for resolving a bearer token to a capability set.
@@ -315,11 +323,13 @@ pub trait ApiKeyStore: Send + Sync {
     /// `crate::auth::keys` module docs for why it cannot double as a lookup key).
     /// `lookup_hash` is the deterministic BLAKE3 digest used by
     /// [`Self::get_by_lookup_hash`] to find this record from a presented key.
+    /// `tenant` is the tenant this key is scoped to — see [`ApiKey::tenant`].
     async fn create(
         &self,
         key_hash: &str,
         lookup_hash: &str,
         owner: &str,
+        tenant: &TenantId,
         capabilities: Vec<Capability>,
     ) -> Result<ApiKey, crate::auth::keys::ApiKeyError>;
 
@@ -338,8 +348,13 @@ pub trait ApiKeyStore: Send + Sync {
     /// Revoke an API key by ID.
     async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError>;
 
-    /// List API keys for an owner.
-    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError>;
+    /// List API keys for an owner within a tenant. Never returns another tenant's keys,
+    /// even if `owner` happens to collide across tenants.
+    async fn list(
+        &self,
+        tenant: &TenantId,
+        owner: &str,
+    ) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError>;
 }
 
 /// In-memory implementation of [`ApiKeyStore`] for testing.
@@ -361,6 +376,7 @@ impl ApiKeyStore for InMemoryApiKeyStore {
         key_hash: &str,
         lookup_hash: &str,
         owner: &str,
+        tenant: &TenantId,
         capabilities: Vec<Capability>,
     ) -> Result<ApiKey, crate::auth::keys::ApiKeyError> {
         let id = uuid::Uuid::new_v4();
@@ -370,6 +386,7 @@ impl ApiKeyStore for InMemoryApiKeyStore {
             key_hash: key_hash.to_string(),
             lookup_hash: lookup_hash.to_string(),
             owner: owner.to_string(),
+            tenant: tenant.clone(),
             capabilities: serde_json::to_value(capabilities).unwrap(),
             created_at: now,
             revoked_at: None,
@@ -398,13 +415,17 @@ impl ApiKeyStore for InMemoryApiKeyStore {
         Ok(())
     }
 
-    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError> {
+    async fn list(
+        &self,
+        tenant: &TenantId,
+        owner: &str,
+    ) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError> {
         Ok(self
             .keys
             .lock()
             .unwrap()
             .values()
-            .filter(|k| k.owner == owner)
+            .filter(|k| &k.tenant == tenant && k.owner == owner)
             .cloned()
             .collect())
     }

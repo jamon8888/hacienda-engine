@@ -2,6 +2,7 @@
 
 use crate::auth::keys;
 use crate::auth::{ApiKeyStore, AuthContext, AuthzError, Capability, CapabilitySet};
+use crate::tenancy::TenantId;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +20,10 @@ pub struct Token {
     pub principal_name: Option<String>,
     /// Capabilities granted by this token.
     pub capabilities: CapabilitySet,
+    /// The tenant this token is scoped to. Defaults to `TenantId::default_tenant()` —
+    /// only `ApiKeyTokenResolver::resolve` (a real, tenant-carrying `ApiKey`) has reason
+    /// to override it via [`Self::with_tenant`].
+    pub tenant: TenantId,
     /// Optional expiry (Unix timestamp).
     pub expires_at: Option<u64>,
     /// Additional metadata.
@@ -26,7 +31,8 @@ pub struct Token {
 }
 
 impl Token {
-    /// Create a new token.
+    /// Create a new token, scoped to the default tenant. Use [`Self::with_tenant`] for a
+    /// token resolved from a real, tenant-carrying record.
     pub fn new(
         id: impl Into<String>,
         principal_id: impl Into<String>,
@@ -37,6 +43,7 @@ impl Token {
             principal_id: principal_id.into(),
             principal_name: None,
             capabilities,
+            tenant: TenantId::default_tenant(),
             expires_at: None,
             metadata: serde_json::Value::Null,
         }
@@ -45,6 +52,12 @@ impl Token {
     /// Set the expiry time (Unix timestamp).
     pub fn with_expiry(mut self, expires_at: u64) -> Self {
         self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// Set the tenant this token is scoped to.
+    pub fn with_tenant(mut self, tenant: TenantId) -> Self {
+        self.tenant = tenant;
         self
     }
 
@@ -78,7 +91,11 @@ impl Token {
         if self.is_expired() {
             return Err(AuthzError::TokenExpired);
         }
-        let mut ctx = AuthContext::new(&self.principal_id, self.capabilities.clone());
+        let mut ctx = AuthContext::with_tenant(
+            &self.principal_id,
+            self.tenant.clone(),
+            self.capabilities.clone(),
+        );
         ctx.principal_name = self.principal_name.clone();
         ctx.metadata = self.metadata.clone();
         Ok(ctx)
@@ -270,11 +287,10 @@ impl TokenResolver for ApiKeyTokenResolver {
                 AuthzError::InvalidToken(format!("stored capabilities are malformed: {e}"))
             })?;
 
-        Ok(Some(Token::new(
-            api_key.id.to_string(),
-            api_key.owner,
-            capabilities,
-        )))
+        Ok(Some(
+            Token::new(api_key.id.to_string(), api_key.owner, capabilities)
+                .with_tenant(api_key.tenant),
+        ))
     }
 }
 

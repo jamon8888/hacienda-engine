@@ -7,6 +7,7 @@
 
 use crate::auth::keys::ApiKeyError;
 use crate::auth::{ApiKey, ApiKeyStore, Capability};
+use crate::tenancy::TenantId;
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::PgPool;
@@ -40,20 +41,23 @@ impl ApiKeyStore for PostgresApiKeyStore {
         key_hash: &str,
         lookup_hash: &str,
         owner: &str,
+        tenant: &TenantId,
         capabilities: Vec<Capability>,
     ) -> Result<ApiKey, ApiKeyError> {
         let capabilities_json = serde_json::to_value(&capabilities)
             .map_err(|e| ApiKeyError::Verification(e.to_string()))?;
+        let tenant_str = tenant.as_str();
 
         let row = sqlx::query!(
             r#"
-            INSERT INTO api_keys (key_hash, lookup_hash, owner, capabilities)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at
+            INSERT INTO api_keys (key_hash, lookup_hash, owner, tenant_id, capabilities)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, key_hash, lookup_hash, owner, tenant_id, capabilities, created_at, revoked_at
             "#,
             key_hash,
             lookup_hash,
             owner,
+            tenant_str,
             capabilities_json
         )
         .fetch_one(&self.pool)
@@ -65,6 +69,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             key_hash: row.key_hash,
             lookup_hash: row.lookup_hash,
             owner: row.owner,
+            tenant: TenantId::new(row.tenant_id),
             capabilities: row.capabilities,
             created_at: row.created_at,
             revoked_at: row.revoked_at,
@@ -74,7 +79,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
     async fn get_by_lookup_hash(&self, lookup_hash: &str) -> Result<Option<ApiKey>, ApiKeyError> {
         let row = sqlx::query!(
             r#"
-            SELECT id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at
+            SELECT id, key_hash, lookup_hash, owner, tenant_id, capabilities, created_at, revoked_at
             FROM api_keys
             WHERE lookup_hash = $1
             "#,
@@ -89,6 +94,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             key_hash: row.key_hash,
             lookup_hash: row.lookup_hash,
             owner: row.owner,
+            tenant: TenantId::new(row.tenant_id),
             capabilities: row.capabilities,
             created_at: row.created_at,
             revoked_at: row.revoked_at,
@@ -104,14 +110,16 @@ impl ApiKeyStore for PostgresApiKeyStore {
         Ok(())
     }
 
-    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, ApiKeyError> {
+    async fn list(&self, tenant: &TenantId, owner: &str) -> Result<Vec<ApiKey>, ApiKeyError> {
+        let tenant_str = tenant.as_str();
         let rows = sqlx::query!(
             r#"
-            SELECT id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at
+            SELECT id, key_hash, lookup_hash, owner, tenant_id, capabilities, created_at, revoked_at
             FROM api_keys
-            WHERE owner = $1
+            WHERE tenant_id = $1 AND owner = $2
             ORDER BY created_at DESC
             "#,
+            tenant_str,
             owner
         )
         .fetch_all(&self.pool)
@@ -125,6 +133,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
                 key_hash: row.key_hash,
                 lookup_hash: row.lookup_hash,
                 owner: row.owner,
+                tenant: TenantId::new(row.tenant_id),
                 capabilities: row.capabilities,
                 created_at: row.created_at,
                 revoked_at: row.revoked_at,
@@ -158,13 +167,22 @@ mod tests {
             let lookup_hash = format!("lookup-{}", Uuid::new_v4());
             let capabilities = vec![Capability::DocumentsProcess, Capability::AuditRead];
 
+            let tenant = TenantId::new(format!("tenant-{}", Uuid::new_v4()));
+
             let created = store
-                .create(&key_hash, &lookup_hash, &owner, capabilities.clone())
+                .create(
+                    &key_hash,
+                    &lookup_hash,
+                    &owner,
+                    &tenant,
+                    capabilities.clone(),
+                )
                 .await
                 .expect("create failed");
             assert_eq!(created.owner, owner);
             assert_eq!(created.key_hash, key_hash);
             assert_eq!(created.lookup_hash, lookup_hash);
+            assert_eq!(created.tenant, tenant);
             assert!(created.revoked_at.is_none());
 
             let by_lookup_hash = store
@@ -173,9 +191,20 @@ mod tests {
                 .expect("get_by_lookup_hash failed")
                 .expect("key must exist");
             assert_eq!(by_lookup_hash.id, created.id);
+            assert_eq!(by_lookup_hash.tenant, tenant);
 
-            let listed = store.list(&owner).await.expect("list failed");
+            let listed = store.list(&tenant, &owner).await.expect("list failed");
             assert!(listed.iter().any(|k| k.id == created.id));
+
+            let other_tenant = TenantId::new(format!("tenant-{}", Uuid::new_v4()));
+            let listed_other_tenant = store
+                .list(&other_tenant, &owner)
+                .await
+                .expect("list failed");
+            assert!(
+                !listed_other_tenant.iter().any(|k| k.id == created.id),
+                "a key must never be visible from a different tenant, even with the same owner"
+            );
 
             store.revoke(created.id).await.expect("revoke failed");
             let revoked = store

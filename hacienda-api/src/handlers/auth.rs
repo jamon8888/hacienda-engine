@@ -84,9 +84,14 @@ pub async fn issue_key(
     // `Capability`'s `Display` impl).
     let capability_strings: Vec<String> = capabilities.iter().map(ToString::to_string).collect();
 
+    // `tenant: None` — HTTP callers are always `Caller::Principal` (resolved by the auth
+    // middleware from a bearer token), so this always resolves to the caller's own
+    // tenant inside `issue_key_with_auth`. There is no `tenant` field on `IssueKeyRequest`
+    // and there must not be one: an admin cannot mint a key for a different tenant than
+    // its own over this endpoint, by construction, not just by convention.
     let (pair, key) = state
         .facade
-        .issue_key_with_auth(caller, &body.owner, capabilities)
+        .issue_key_with_auth(caller, &body.owner, None, capabilities)
         .await
         .map_err(ApiError::from)?;
 
@@ -94,6 +99,7 @@ pub async fn issue_key(
         id: key.id,
         raw_key: pair.raw_key,
         owner: key.owner,
+        tenant: key.tenant.as_str().to_owned(),
         capabilities: capability_strings,
         created_at: key.created_at.to_rfc3339(),
     }))
@@ -271,6 +277,7 @@ mod tests {
             .issue_key_with_auth(
                 Caller::Trusted,
                 "bootstrap-admin",
+                None,
                 vec![Capability::AuthManage],
             )
             .await

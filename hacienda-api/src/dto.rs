@@ -484,6 +484,8 @@ pub struct IssueKeyResponse {
     /// The plaintext key. Shown once; do not log this response.
     pub raw_key: String,
     pub owner: String,
+    /// The tenant this key is scoped to — always the issuing caller's own tenant (S1).
+    pub tenant: String,
     pub capabilities: Vec<String>,
     pub created_at: String,
 }

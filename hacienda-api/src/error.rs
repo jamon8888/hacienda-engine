@@ -165,9 +165,9 @@ impl From<HaciendaError> for ApiError {
                     AuthzError::TokenExpired | AuthzError::InvalidToken(_) => {
                         ApiError::unauthenticated()
                     }
-                    AuthzError::MissingCapability { .. } | AuthzError::UntrustedIssuer(_) => {
-                        ApiError::forbidden()
-                    }
+                    AuthzError::MissingCapability { .. }
+                    | AuthzError::UntrustedIssuer(_)
+                    | AuthzError::CrossTenantOperation { .. } => ApiError::forbidden(),
                 }
             }
             HaciendaError::PiiDisabled => {
