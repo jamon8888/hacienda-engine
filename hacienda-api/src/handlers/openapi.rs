@@ -384,4 +384,26 @@ mod tests {
             );
         }
     }
+
+    /// `/v1/audit/export` returns `Vec<u8>` at the Rust type level for all three
+    /// `?format=` values, which on its own erases the distinction between them. The
+    /// document must still describe each format's actual content type and body shape
+    /// (`application/json`, `application/x-ndjson`, `text/csv`) rather than only the
+    /// generic byte response — see the handler's own doc comment for why the formats
+    /// are not interchangeable.
+    #[test]
+    fn audit_export_response_documents_every_format_content_type() {
+        let doc = build_openapi().expect("static ApiDoc metadata always serialises");
+        let content = doc["paths"]["/v1/audit/export"]["get"]["responses"]["200"]["content"]
+            .as_object()
+            .expect("/v1/audit/export's 200 response must declare a content map");
+
+        for content_type in ["application/json", "application/x-ndjson", "text/csv"] {
+            assert!(
+                content.contains_key(content_type),
+                "/v1/audit/export's 200 response is missing a {content_type} entry — \
+                 every ?format= value must be documented, not just the default"
+            );
+        }
+    }
 }

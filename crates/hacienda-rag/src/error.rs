@@ -111,10 +111,13 @@ pub enum RagError {
     /// `hacienda-api`'s `ApiError` and reached a log line — this variant names the
     /// operation and how much text was being split (a length, never the content
     /// itself) alongside the root cause.
-    #[error("chunking failed ({input_chars} input chars): {source}")]
+    #[error(
+        "chunking failed ({input_chars} input chars): {source}; suggestion: check the chunking configuration or input size"
+    )]
     Chunking {
         /// Length of the input text in `char`s — never the text itself.
         input_chars: usize,
+        /// The underlying xberg error that caused chunking to fail.
         #[source]
         source: Box<xberg::XbergError>,
     },

@@ -35,6 +35,7 @@ impl TenantId {
         Self::new(DEFAULT_TENANT)
     }
 
+    /// The underlying identifier string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -59,10 +60,12 @@ pub const DEFAULT_TENANT: &str = "default";
 pub struct ActorId(String);
 
 impl ActorId {
+    /// Wrap an existing identifier (e.g. one read back from a store row).
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// The underlying identifier string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -80,10 +83,12 @@ impl std::fmt::Display for ActorId {
 pub struct ProjectId(String);
 
 impl ProjectId {
+    /// Wrap an existing identifier (e.g. one read back from a store row).
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// The underlying identifier string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -101,7 +106,9 @@ impl std::fmt::Display for ProjectId {
 /// than having it captured at construction time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantCtx {
+    /// The tenant this context is scoped to — the cloisonnement boundary.
     pub tenant: TenantId,
+    /// The principal acting within `tenant`.
     pub actor: ActorId,
     /// See the module doc: organizes, does not cloister.
     pub project: Option<ProjectId>,
