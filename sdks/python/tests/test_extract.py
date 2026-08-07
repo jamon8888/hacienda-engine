@@ -26,6 +26,7 @@ def test_process_documents_against_a_pii_disabled_server_still_returns_extractio
     result = client.documents.process_documents(request)
 
     assert len(result.documents) == 1
+    assert result.documents[0].content == "hello world, no PII here"
     assert result.documents[0].entities == []
 
 

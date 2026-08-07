@@ -27,6 +27,7 @@ describe("documents", () => {
     });
 
     expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].content).toBe("hello world, no PII here");
     expect(result.documents[0].entities).toEqual([]);
   });
 

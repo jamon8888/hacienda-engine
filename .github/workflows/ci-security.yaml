@@ -11,6 +11,10 @@ on:
     # Cargo.lock, not just ones introduced by a PR's own dependency bumps.
     - cron: "17 6 * * 1"
 
+# The job only reads the repo and reports check results.
+permissions:
+  contents: read
+
 jobs:
   # cargo-deny's `[advisories]` check wraps the same RustSec advisory-db
   # `cargo audit` does, but resolves it against the actual dependency graph
@@ -24,6 +28,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

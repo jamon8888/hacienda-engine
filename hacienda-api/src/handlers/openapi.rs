@@ -398,12 +398,26 @@ mod tests {
             .as_object()
             .expect("/v1/audit/export's 200 response must declare a content map");
 
-        for content_type in ["application/json", "application/x-ndjson", "text/csv"] {
-            assert!(
-                content.contains_key(content_type),
-                "/v1/audit/export's 200 response is missing a {content_type} entry — \
-                 every ?format= value must be documented, not just the default"
-            );
-        }
+        // Exact set, not just "contains" — an extra or misspelled content type would
+        // pass a `contains_key`-only check just as easily as a missing one.
+        let actual: std::collections::BTreeSet<&str> = content.keys().map(String::as_str).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["application/json", "application/x-ndjson", "text/csv"].into();
+        assert_eq!(
+            actual, expected,
+            "/v1/audit/export's 200 response content types must be exactly the three \
+             ?format= values, no more, no fewer"
+        );
+
+        // The shape matters as much as the presence: json is an array of entries,
+        // jsonl/csv are opaque strings (see this handler's own doc comment on why
+        // jsonl/csv have no structured schema).
+        assert_eq!(content["application/json"]["schema"]["type"], "array");
+        assert_eq!(
+            content["application/json"]["schema"]["items"]["$ref"],
+            "#/components/schemas/NodeAuditEntryDto"
+        );
+        assert_eq!(content["application/x-ndjson"]["schema"]["type"], "string");
+        assert_eq!(content["text/csv"]["schema"]["type"], "string");
     }
 }

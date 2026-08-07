@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Both jobs only read the repo and run tests against a locally-provisioned
+# Postgres — no job needs more than that.
+permissions:
+  contents: read
+
 jobs:
   # hacienda-core's Postgres-backed store tests (audit/jobs/presets/review/
   # usage/versions/api_keys) spin up their own disposable Postgres container
@@ -26,6 +31,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
@@ -61,6 +68,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy

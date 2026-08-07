@@ -669,6 +669,11 @@ pub(crate) mod tests {
             "one submitted document must yield one result even with PII disabled, got {json}"
         );
         assert_eq!(
+            documents[0]["content"],
+            serde_json::json!("hello world"),
+            "the extracted content must be the submitted content, not an empty stand-in"
+        );
+        assert_eq!(
             documents[0]["entities"],
             serde_json::json!([]),
             "no PII pipeline configured means no entities, not a missing document"

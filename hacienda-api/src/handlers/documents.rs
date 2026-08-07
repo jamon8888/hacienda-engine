@@ -114,8 +114,19 @@ pub async fn process_documents(
                 .as_ref()
                 .expect("version_store checked present above");
             let content_hash = blake3::hash(doc.content.as_bytes()).to_hex().to_string();
-            let entities_json =
-                serde_json::to_value(&entities).unwrap_or_else(|_| serde_json::json!([]));
+            // Silently falling back to `[]` here would save a version whose entities
+            // disagree with the ones this response returns — a later `GET
+            // /v1/documents/{id}` would then serve empty entities for a document that
+            // actually had some. Fail the request instead of writing a version that
+            // lies about its own content.
+            let entities_json = serde_json::to_value(&entities).map_err(|error| {
+                tracing::error!(
+                    %error,
+                    %document_id,
+                    "failed to serialise entities for document version"
+                );
+                ApiError::internal()
+            })?;
             let version_sequence = store
                 .create_version(document_id, &content_hash, &doc.content, entities_json)
                 .await
