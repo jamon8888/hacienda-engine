@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
+  segment-creation race.** These `hacienda-core` Postgres-backed store tests were
+  `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
+  in CI" entry) surfaced two real bugs on first execution. First: the shared
+  `PostgresFixture`'s `PgPool` (a static `OnceCell`) was created once but each
+  `#[tokio::test]` ran on its own throwaway Tokio runtime — sqlx ties a connection's
+  socket to the runtime that established it, so a connection handed across a test-runtime
+  boundary lost its return-to-pool bookkeeping, permanently shrinking the pool's capacity
+  test by test until every later test timed out on `pool.acquire()` regardless of
+  complexity. Fixed by routing every fixture-touching test through one persistent runtime
+  (`test_support::block_on_shared`) instead of a runtime per test. Second:
+  `get_or_create_open_segment`'s `SELECT ... FOR UPDATE` only locks a row that already
+  exists, so when no segment is open it locks nothing — two transactions could both see
+  `None` and both insert their own "open" segment, splitting entries across two competing
+  chains. Fixed with a `pg_advisory_xact_lock`, the same pattern `versions.rs`'s
+  `create_version` already uses for its own check-then-insert race. Also fixed the same
+  job's `postgres-integration-tests`: `sqlx::query!`/`query_as!` verify SQL against a live
+  database at compile time whenever `DATABASE_URL` is set, but that job points
+  `DATABASE_URL` at a database migrated only when the *test binary* runs, not at compile
+  time — forced `SQLX_OFFLINE=true` so both jobs check queries against the committed
+  `.sqlx` cache instead. Five further `hacienda-core::store::postgres::audit` tests still
+  fail on an unrelated, pre-existing `SegmentIntegrity` bug (all five fail on the *same*
+  corrupted seal regardless of what each individually exercises — see the comment above
+  `postgres-store-tests` in `ci-postgres.yaml` and next to the audit test module) and are
+  skipped from CI pending further investigation with a live Postgres session.
 - **`POST /v1/documents` no longer silently drops every document when no PII pipeline is
   configured.** `process_documents` zipped `body.documents`, `result.extraction.results`,
   and `result.pii` three ways; `Iterator::zip` truncates to the shortest input, and
