@@ -767,6 +767,7 @@ mod tests {
     use super::*;
     use crate::store::postgres::connection::connect;
     use crate::store::postgres::test_support;
+    use sqlx::Row;
     use std::sync::Arc;
 
     // These tests are ignored by default because they take real wall-clock time to spin
@@ -1117,6 +1118,17 @@ mod tests {
     /// sealed entry directly via SQL (bypassing the store's own API, exactly like an
     /// out-of-band editor of the underlying table would) and requires the error to name
     /// the sealed segment's chain.
+    ///
+    /// Restores the tampered row before returning. `entries()`/`verify()` deliberately
+    /// scan the *whole* database, store-wide (mirroring the single-writer production
+    /// design — see this module's doc comment), not just this test's own segment; every
+    /// test in this file shares one Postgres instance (`test_support::shared`), so a
+    /// tamper left in place here would fail every later test's `verify()` on a
+    /// corruption that has nothing to do with what that test exercises. This was the
+    /// root cause of the `SegmentIntegrity`-mismatch bug this suite used to hit as a
+    /// whole (see `ci-postgres.yaml`'s former `--skip` list for these five tests) — not a
+    /// bug in the seal-chain logic itself, which `store_file.rs`'s equivalent test (a
+    /// fresh `TempDir` per test, so nothing to leak) already proved sound.
     #[test]
     #[ignore]
     fn should_detect_a_tampered_entry_in_a_sealed_segment() {
@@ -1134,13 +1146,13 @@ mod tests {
             store.rotate().await.expect("rotate seals the segment");
             store.verify().await.expect("clean chain verifies");
 
-            sqlx::query!(
-                "UPDATE audit_entries SET category = 'CreditCard' WHERE id = $1",
-                t2
-            )
-            .execute(&store.pool)
-            .await
-            .expect("tamper update failed");
+            // Plain (non-macro) query: no `.sqlx` offline-cache entry needed for a
+            // query this narrowly test-only, unlike the tamper/restore pair below it.
+            sqlx::query("UPDATE audit_entries SET category = 'CreditCard' WHERE id = $1")
+                .bind(&t2)
+                .execute(&store.pool)
+                .await
+                .expect("tamper update failed");
 
             let err = store
                 .verify()
@@ -1150,6 +1162,21 @@ mod tests {
                 matches!(err, AuditError::ChainIntegrity { index: 1, .. }),
                 "expected ChainIntegrity at index 1, got {err:?}"
             );
+
+            // Restore — see the doc comment above for why this must not be skipped.
+            // `test_input`'s `category` is always `"email"`; this is the one and only
+            // value this test ever tampers it to away from, so restoring to that
+            // literal (rather than capturing-and-restoring, as the delete test below
+            // must) is exact and sufficient.
+            sqlx::query("UPDATE audit_entries SET category = 'email' WHERE id = $1")
+                .bind(&t2)
+                .execute(&store.pool)
+                .await
+                .expect("restore after tamper failed");
+            store
+                .verify()
+                .await
+                .expect("chain must verify again once the tamper is undone");
         });
     }
 
@@ -1157,6 +1184,12 @@ mod tests {
     /// makes "holds 1 entry, seal records 2" actionable instead of an opaque hash
     /// mismatch — see Design Decision D2. Deletes a row directly via SQL, mirroring
     /// `should_detect_a_tampered_entry_in_a_sealed_segment`'s out-of-band-edit approach.
+    ///
+    /// Restores the deleted row before returning — see the sibling test's doc comment
+    /// for why leaving a tamper in place corrupts every later test in this shared-database
+    /// suite, not just this one. Deletion can't be undone with a literal like the sibling
+    /// test's `UPDATE ... SET category = 'email'`: the whole row is gone, so this captures
+    /// every column beforehand and re-inserts it verbatim afterward.
     #[test]
     #[ignore]
     fn should_report_a_missing_entry_as_a_count_mismatch() {
@@ -1173,7 +1206,19 @@ mod tests {
                 .expect("append");
             store.rotate().await.expect("rotate");
 
-            sqlx::query!("DELETE FROM audit_entries WHERE id = $1", c2)
+            let captured = sqlx::query(
+                "SELECT id, segment_id, sequence_num, category, action, span_hash, \
+                 span_length, confidence, source, pipeline_version, config_hash, \
+                 principal, chain_hash, created_at \
+                 FROM audit_entries WHERE id = $1",
+            )
+            .bind(&c2)
+            .fetch_one(&store.pool)
+            .await
+            .expect("capturing the row before deleting it failed");
+
+            sqlx::query("DELETE FROM audit_entries WHERE id = $1")
+                .bind(&c2)
                 .execute(&store.pool)
                 .await
                 .expect("tamper delete failed");
@@ -1191,6 +1236,36 @@ mod tests {
                 }
                 other => panic!("expected SegmentEntryCount, got {other:?}"),
             }
+
+            // Restore — see the doc comment above.
+            sqlx::query(
+                "INSERT INTO audit_entries \
+                 (id, segment_id, sequence_num, category, action, span_hash, span_length, \
+                  confidence, source, pipeline_version, config_hash, principal, chain_hash, \
+                  created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            )
+            .bind(captured.get::<String, _>("id"))
+            .bind(captured.get::<Uuid, _>("segment_id"))
+            .bind(captured.get::<i64, _>("sequence_num"))
+            .bind(captured.get::<String, _>("category"))
+            .bind(captured.get::<String, _>("action"))
+            .bind(captured.get::<String, _>("span_hash"))
+            .bind(captured.get::<i64, _>("span_length"))
+            .bind(captured.get::<Option<f64>, _>("confidence"))
+            .bind(captured.get::<String, _>("source"))
+            .bind(captured.get::<String, _>("pipeline_version"))
+            .bind(captured.get::<String, _>("config_hash"))
+            .bind(captured.get::<Option<String>, _>("principal"))
+            .bind(captured.get::<String, _>("chain_hash"))
+            .bind(captured.get::<DateTime<Utc>, _>("created_at"))
+            .execute(&store.pool)
+            .await
+            .expect("restoring the deleted row failed");
+            store
+                .verify()
+                .await
+                .expect("chain must verify again once the row is restored");
         });
     }
 }

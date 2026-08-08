@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The 5 `postgres-store-tests` skipped since the job's first run now pass and are no
+  longer `--skip`-listed in CI.** Root-caused to test isolation, not a seal-chain bug:
+  `should_detect_a_tampered_entry_in_a_sealed_segment` and
+  `should_report_a_missing_entry_as_a_count_mismatch` tamper a row directly via SQL
+  (bypassing the store's own API, on purpose — see their doc comments) to prove `verify()`
+  actually detects corruption, but never restored the row afterward. Every test in this
+  module shares one Postgres instance (`test_support::shared`, mirroring the single-writer
+  production design), and `verify()`/`entries()` deliberately scan the *whole* database
+  rather than just the calling test's own segment — so
+  `should_serialise_concurrent_appends_without_breaking_the_chain`,
+  `should_survive_a_process_restart_against_the_same_database`, and
+  `should_verify_after_a_rotation` (all three call `verify()`) inherited whichever tamper
+  test's corruption ran first in alphabetical order, regardless of what each was itself
+  testing. Confirmed via `hacienda-core/src/audit/store_file.rs`'s equivalent test, which
+  exercises the identical `SegmentIntegrity` path and passes cleanly — it gets a fresh
+  `TempDir` per test, so it has nothing to leak between runs. Fixed by having both tamper
+  tests restore the row (an `UPDATE` reversing the category tamper; a captured-then-
+  reinserted row for the delete tamper, since deletion can't be undone with a literal)
+  before returning — not by narrowing `verify()`'s production query scope to route around
+  the shared state, which the store-wide read is deliberate.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
