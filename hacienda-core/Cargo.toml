@@ -78,7 +78,7 @@ xberg = { workspace = true }
 # Track I needs xberg's extraction on wasm32 and WASI SDK is provisioned in CI.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
-xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", default-features = false, features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "ddb98aebe0aab393c91c3309b350d44ef3405395", default-features = false, features = [
     "no-ort-target",
     "excel-wasm",
     "layout-tract",

@@ -102,15 +102,25 @@ web-time = "1"
 # Runtime (`ort`), `ndarray`, `liter-llm`, and the ICU segmenter family into the graph
 # for no benefit. Do not re-add a feature here without a call site to justify it.
 #
-# Pinned to a release tag rather than `path = "../xberg/crates/xberg"`. The sibling
+# Pinned to a commit rather than `path = "../xberg/crates/xberg"`. The sibling
 # checkout is a working tree: it sits on rc.37 and carries uncommitted edits, one of
 # which adds an `xberg::pii` module re-exporting the very `pii_*` crates this repo
 # vendored away from. Building against it made hacienda's output a function of
-# someone's unstaged work. A tag is reproducible and CI can fetch it.
+# someone's unstaged work. A pinned commit is reproducible and CI can fetch it.
+#
+# Pinned to an exact `rev` rather than `tag = "v1.0.2"` (used previously): the
+# `test_documents` submodule commit that xberg's own history pins as of *every* tagged
+# release from v1.0.2 through v1.0.14 was force-pushed away upstream in
+# `xberg-io/test_documents` (its `main` now has a single, unrelated root commit — no
+# history, no tags). `git fetch <sha>` against that repo confirms each of those
+# submodule commits is gone (`not our ref`); only unreleased `main`'s current tip has a
+# `test_documents` pin that still resolves. See hacienda-engine issue #66. This `rev` is
+# that tip commit at the time of this fix — verify against `xberg-io/xberg`'s `main`
+# before bumping further, since it is not a tagged release.
 #
 # To develop xberg and hacienda together, override locally without editing this file:
 #   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml
-xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "ddb98aebe0aab393c91c3309b350d44ef3405395", features = [
     "redaction",
     "ner",
     "tokio-runtime",

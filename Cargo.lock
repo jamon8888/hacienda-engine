@@ -526,9 +526,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64"
-version = "0.23.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -551,15 +551,15 @@ dependencies = [
 
 [[package]]
 name = "biblib"
-version = "0.4.3"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b2780799e09e18acb1b4224c53f2491fac7b1bedeefe1ca6f60e75a5d30763b"
+checksum = "a2fc152f0c5d30b98ac7ac29547b2bab33778d0677f53c5b332ee0a138bf3900"
 dependencies = [
- "compact_str",
+ "compact_str 0.10.0",
  "either",
- "itertools 0.14.0",
- "quick-xml 0.37.5",
- "regex",
+ "itertools 0.15.0",
+ "quick-xml",
+ "regex-lite",
  "serde",
  "thiserror 2.0.19",
 ]
@@ -977,7 +977,7 @@ dependencies = [
  "encoding_rs",
  "fast-float2",
  "log",
- "quick-xml 0.41.0",
+ "quick-xml",
  "serde",
  "zip",
 ]
@@ -1310,6 +1310,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "compact_str"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
+dependencies = [
+ "castaway",
+ "cfg-if 1.0.4",
+ "itoa",
+ "static_assertions",
+ "zmij",
+]
+
+[[package]]
 name = "comrak"
 version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1324,19 +1337,6 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "typed-arena",
-]
-
-[[package]]
-name = "console"
-version = "0.15.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ccb5b10f9f2cbf51eb355ca1d05c2d279ce1804688d0db74b4733a5aeafd8"
-dependencies = [
- "encode_unicode",
- "libc",
- "once_cell",
- "unicode-width",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2042,12 +2042,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
-
-[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,9 +2143,6 @@ name = "esaxx-rs"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "etcetera"
@@ -3289,13 +3280,13 @@ checksum = "46c1ff2d1cbf39efe5af0900ced8a069b5e61557a17544eb0c4a50239937389e"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.9.2"
+version = "3.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac9408651be7d7f6a6f51d7bebe5f30815ef2fe620314ad5713f989cee7d70d0"
+checksum = "e0736be7417aaf65e02124703aa8db88ad42ceff95df99783d0d48bbed4da3a8"
 dependencies = [
  "ahash 0.8.12",
  "astral-tl",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bitflags 2.13.1",
  "html-escape",
  "html5ever",
@@ -3308,6 +3299,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "tracing",
 ]
 
 [[package]]
@@ -3714,9 +3706,9 @@ dependencies = [
 
 [[package]]
 name = "imagesize"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "imgref"
@@ -3812,19 +3804,6 @@ dependencies = [
  "hashbrown 0.17.1",
  "serde",
  "serde_core",
-]
-
-[[package]]
-name = "indicatif"
-version = "0.17.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "183b3088984b400f4cfac3620d5e076c84da5364016b4f49473de574b2586235"
-dependencies = [
- "console",
- "number_prefix",
- "portable-atomic",
- "unicode-width",
- "web-time",
 ]
 
 [[package]]
@@ -4266,7 +4245,7 @@ dependencies = [
  "ahash 0.8.12",
  "arc-swap",
  "async-trait",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "dashmap",
  "futures-core",
@@ -4283,7 +4262,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "toml 1.1.3+spec-1.1.0",
+ "toml 1.1.4+spec-1.1.0",
  "tracing",
  "url",
 ]
@@ -4916,12 +4895,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "number_prefix"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
-
-[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4960,7 +4933,7 @@ dependencies = [
  "fast-float2",
  "libc",
  "log",
- "quick-xml 0.41.0",
+ "quick-xml",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -5240,7 +5213,7 @@ dependencies = [
  "nom 8.0.0",
  "office_oxide",
  "phf 0.14.0",
- "quick-xml 0.41.0",
+ "quick-xml",
  "regex",
  "serde",
  "serde_json",
@@ -5666,15 +5639,6 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
-
-[[package]]
-name = "quick-xml"
-version = "0.37.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "quick-xml"
@@ -6115,6 +6079,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6193,10 +6163,11 @@ dependencies = [
 
 [[package]]
 name = "resvg"
-version = "0.47.0"
+version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9be183ad6a216aa96f33e4c8033b0988b8b3ea6fd2359d19af5bac4643fd8e81"
+checksum = "67e3803f97b999e80cbf7c6ecdd07a8102204d92e1633cf48783720c521196bd"
 dependencies = [
+ "bytemuck",
  "log",
  "pico-args",
  "rgb",
@@ -6497,7 +6468,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2412ec048709e6a8ee4ee1505313bce003f6b8b27fc41a97e30615223c7ed592"
 dependencies = [
- "base64 0.23.0",
+ "base64 0.23.1",
  "hmac 0.13.0",
  "instant-xml",
  "jiff",
@@ -7833,13 +7804,12 @@ checksum = "a620b996116a59e184c2fa2dfd8251ea34a36d0a514758c6f966386bd2e03476"
 dependencies = [
  "ahash 0.8.12",
  "aho-corasick",
- "compact_str",
+ "compact_str 0.9.1",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
  "fancy-regex 0.14.0",
  "getrandom 0.3.4",
- "indicatif",
  "itertools 0.14.0",
  "log",
  "macro_rules_attribute",
@@ -7867,7 +7837,7 @@ checksum = "b238e22d44a15349529690fb07bd645cf58149a1b1e44d6cb5bd1641ff1a6223"
 dependencies = [
  "ahash 0.8.12",
  "aho-corasick",
- "compact_str",
+ "compact_str 0.9.1",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
@@ -7899,7 +7869,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
 dependencies = [
  "ahash 0.8.12",
- "compact_str",
+ "compact_str 0.9.1",
  "daachorse",
  "dary_heap",
  "derive_builder",
@@ -8048,9 +8018,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.3+spec-1.1.0"
+version = "1.1.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c96ecdfa941c8fc4fcaed14f99ada8ebed502eef533015095a07e3301d4c3c"
+checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
 dependencies = [
  "indexmap 2.14.0",
  "serde_core",
@@ -8725,13 +8695,12 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usvg"
-version = "0.47.0"
+version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d46cf96c5f498d36b7a9693bc6a7075c0bb9303189d61b2249b0dc3d309c07de"
+checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "data-url",
- "flate2",
  "imagesize",
  "kurbo",
  "log",
@@ -9293,15 +9262,6 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
@@ -9560,13 +9520,13 @@ dependencies = [
 
 [[package]]
 name = "xberg"
-version = "1.0.2"
-source = "git+https://github.com/xberg-io/xberg.git?tag=v1.0.2#9dcc864d8591d30f8039266e0bb3e82ec3918556"
+version = "1.1.0"
+source = "git+https://github.com/xberg-io/xberg.git?rev=ddb98aebe0aab393c91c3309b350d44ef3405395#ddb98aebe0aab393c91c3309b350d44ef3405395"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
  "auto_enums",
- "base64 0.23.0",
+ "base64 0.23.1",
  "biblatex",
  "biblib",
  "bitvec",
@@ -9584,7 +9544,6 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "fs2",
- "futures",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
@@ -9618,7 +9577,7 @@ dependencies = [
  "pastey 0.2.3",
  "pdf_oxide",
  "pulldown-cmark",
- "quick-xml 0.41.0",
+ "quick-xml",
  "rake",
  "rayon",
  "regex",
@@ -9639,15 +9598,17 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.19",
+ "tokenizers 0.21.4",
  "tokenizers 0.23.1",
  "tokio",
- "toml 1.1.3+spec-1.1.0",
+ "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tract-onnx",
  "unicode-normalization",
  "ureq",
  "url",
  "urlencoding",
+ "usvg",
  "v_htmlescape",
  "whatlang",
  "xberg-gliner",
@@ -9656,8 +9617,8 @@ dependencies = [
 
 [[package]]
 name = "xberg-gliner"
-version = "1.0.2"
-source = "git+https://github.com/xberg-io/xberg.git?tag=v1.0.2#9dcc864d8591d30f8039266e0bb3e82ec3918556"
+version = "1.1.0"
+source = "git+https://github.com/xberg-io/xberg.git?rev=ddb98aebe0aab393c91c3309b350d44ef3405395#ddb98aebe0aab393c91c3309b350d44ef3405395"
 dependencies = [
  "candle-core",
  "candle-nn",

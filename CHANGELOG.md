@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI unblocked: `xberg` repinned off `tag = "v1.0.2"` after its `test_documents`
+  submodule commit was force-pushed away upstream (issue #66).** Every job that builds
+  the workspace (`test`, `clippy`, `cargo-deny`, `feature-matrix`, `postgres-*-tests`,
+  node/python matrices) failed with `revision ... not found` fetching
+  `xberg-io/test_documents`. Root-caused with a direct clone of both `xberg-io/xberg`
+  and `xberg-io/test_documents`: `test_documents` had its entire history rewritten
+  (only a single current root commit remains, no tags, matching commit messages about
+  moving onto "LFS-free history") — every submodule commit referenced by every xberg
+  tag from `v1.0.2` through `v1.0.14` is gone (`git fetch <sha>` returns `not our ref`
+  for each, confirmed individually), so no tagged release can be depended on as-is.
+  Repinned `xberg`/`xberg-gliner` (`Cargo.toml`, `hacienda-core/Cargo.toml`'s
+  wasm32-target dependency) to `rev = "ddb98aebe0aab393c91c3309b350d44ef3405395"` — the
+  oldest untagged commit on xberg's `main` whose submodule pin still resolves (found by
+  bisecting xberg's history for the commit that first landed the post-rewrite pin, not
+  just jumping to `HEAD`, since `HEAD` itself — commit `425b81f`, "chore: full regen" —
+  does not compile: a non-exhaustive `match` in `xberg::rendering::doctags` is missing
+  two `ElementKind` variants, `CommentDefinition`/`CommentRef`). Verified end-to-end:
+  `cargo build/clippy --all-targets --features ner-candle/test --workspace` all clean,
+  `cargo deny check` passes (some previously-known advisories no longer even match, i.e.
+  the version bump also picked up fixes), `.sqlx` cache unaffected (no query changes).
+  `xberg`/`xberg-gliner` move from `v1.0.2` to `v1.1.0` as a result — a real version
+  jump, not a patch bump, so this should get a close look before merging rather than a
+  rubber stamp; see the `Cargo.toml` comment at the `xberg` dependency for the full
+  investigation trail.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
