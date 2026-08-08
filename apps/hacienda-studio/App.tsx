@@ -6,9 +6,14 @@ import { PiiPanel } from "./components/PiiPanel";
 import { MarkdownEditor } from "./components/MarkdownEditor";
 import { FileBrowser, buildFileRows } from "./components/FileBrowser";
 import { FileUpload } from "./components/extend/file-upload";
+import { DocxViewerPreview } from "./components/extend/docx-viewer";
+import { XlsxViewerPreview } from "./components/extend/xlsx-viewer";
+import { PptxViewerPreview } from "./components/extend/pptx-viewer";
+import { PDFViewer } from "./components/extend/pdf-viewer";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import { renderAnnotatedMarkdown } from "./lib/annotate";
+import { getViewerKind } from "./lib/viewer-kind";
 import { DEFAULT_CONFIG } from "./lib/types";
 import type { AppConfig, OnboardingState, ProcessedFile, ProgressUpdate } from "./lib/types";
 import type { PiiEntity } from "./lib/pii-engine";
@@ -98,10 +103,43 @@ export function App() {
   // the Finder list's "edited" badge keys off, via `handleAddFinding`/`handleRemoveFinding`
   // always writing an entry, never mutating `result.piiFindings` itself.
   const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
+  // Keyed by `ProcessedFile.name` (the `.md` output name), object URLs backing the
+  // docx/xlsx/pptx/pdf preview viewers below. `results` is never cleared mid-session
+  // (see the batch-complete handler above), so these are revoked only on unmount.
+  const [previewUrls, setPreviewUrls] = useState<Map<string, string>>(new Map());
+  // A single viewer-scoped dark toggle — this app has no app-wide dark mode.
+  const [viewerDark, setViewerDark] = useState(false);
 
   const workerRef = useRef<Worker | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
+  const previewUrlsRef = useRef(previewUrls);
+  previewUrlsRef.current = previewUrls;
+
+  useEffect(() => {
+    setPreviewUrls((prev) => {
+      const next = new Map(prev);
+      let changed = false;
+      for (const result of results) {
+        if (next.has(result.name)) continue;
+        const file = files.find(
+          (f) => effectiveFileName(f) === result.frontmatter.source,
+        );
+        if (!file) continue;
+        next.set(result.name, URL.createObjectURL(file));
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [results, files]);
+
+  useEffect(() => {
+    // Reads the ref (not `previewUrls`) so the map at the moment of unmount is
+    // revoked, not the empty map this effect's own closure was created with.
+    return () => {
+      for (const url of previewUrlsRef.current.values()) URL.revokeObjectURL(url);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -418,7 +456,7 @@ export function App() {
           />
           <button
             type="button"
-            className="mode-toggle mx-auto mt-4 block bg-transparent text-xs text-muted-foreground underline hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+            className="mode-toggle mx-auto mt-4 block w-fit bg-transparent text-xs text-muted-foreground underline hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
             disabled={!workerReady}
             onClick={toggleFolderMode}
           >
@@ -465,6 +503,8 @@ export function App() {
             {results.map((result) => {
               const findings = findingsFor(result);
               const edited = editedFindings.has(result.name);
+              const viewerKind = getViewerKind(result.frontmatter.source);
+              const previewUrl = previewUrls.get(result.name);
               return (
                 <div key={result.name} className="flex flex-col gap-2">
                   <div className="flex items-center justify-between text-sm">
@@ -485,6 +525,30 @@ export function App() {
                       )}
                     </div>
                   </div>
+                  {viewerKind === "docx" && previewUrl && (
+                    <DocxViewerPreview
+                      src={previewUrl}
+                      fileName={result.name}
+                      isDark={viewerDark}
+                      onIsDarkChange={setViewerDark}
+                      showUpload={false}
+                    />
+                  )}
+                  {viewerKind === "xlsx" && previewUrl && (
+                    <XlsxViewerPreview
+                      src={previewUrl}
+                      fileName={result.name}
+                      isDark={viewerDark}
+                      onIsDarkChange={setViewerDark}
+                      showUpload={false}
+                    />
+                  )}
+                  {viewerKind === "pptx" && previewUrl && (
+                    <PptxViewerPreview src={previewUrl} fileName={result.name} showUpload={false} />
+                  )}
+                  {viewerKind === "pdf" && previewUrl && (
+                    <PDFViewer src={previewUrl} fileName={result.name} showUpload={false} />
+                  )}
                   <MarkdownEditor
                     value={result.rawMarkdown}
                     findings={findings}

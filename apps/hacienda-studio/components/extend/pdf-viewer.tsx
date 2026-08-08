@@ -1195,7 +1195,10 @@ function setPdfViewerRef<T>(ref: React.Ref<T> | undefined, value: T | null) {
   if (typeof ref === "function") {
     ref(value)
   } else {
-    ref.current = value
+    // React's public `RefObject.current` is typed readonly (only React's internals are
+    // meant to assign it); this callback intentionally forwards to a caller-supplied ref
+    // object, same pattern React itself uses when merging refs. ~keep
+    ;(ref as React.MutableRefObject<T | null>).current = value
   }
 }
 
