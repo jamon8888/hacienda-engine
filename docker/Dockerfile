@@ -3,19 +3,23 @@
 
 # 1. PLANNER - cargo-chef for cache
 # 1.78 (this image's prior pin) can no longer `cargo install cargo-chef`: current
-# cargo-chef releases declare `edition = "2024"`, which needs Cargo's edition2024
-# support, stabilized in 1.85 — 1.78 refuses with "the Cargo feature called
-# `edition2024`... is not stabilized in this version of Cargo". Caught by
-# ci-docker.yaml's validate-main job actually building the image for the first time
-# (previously `docker buildx build --check ... || true` never ran a real build).
-FROM rust:1.85-slim AS planner
+# cargo-chef releases declare `edition = "2024"` (needs 1.85+), and cargo-chef's own
+# dependency graph (cargo-platform, cargo_metadata, guppy, target-spec) needs 1.86-1.88
+# on top of that — 1.85 alone still isn't enough, confirmed by the same "rustc N.NN is
+# not supported by the following packages" error one version pin at a time. 1.90 gives
+# headroom past the highest individual requirement seen (cargo-platform's 1.88) rather
+# than re-chasing this one point release at a time again next time a dependency bumps
+# its own MSRV. Caught by ci-docker.yaml's validate-main job actually building the
+# image for the first time (previously `docker buildx build --check ... || true` never
+# ran a real build).
+FROM rust:1.90-slim AS planner
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY . .
 RUN cargo chef prepare --workspace --recipe-path recipe.json
 
 # 2. BUILDER - Compile deps (cached)
-FROM rust:1.85-slim AS builder
+FROM rust:1.90-slim AS builder
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
