@@ -16,14 +16,18 @@ FROM rust:1.90-slim AS planner
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY . .
-RUN cargo chef prepare --workspace --recipe-path recipe.json
+# No `--workspace` flag: current cargo-chef's `prepare`/`cook` don't accept one (`error:
+# unexpected argument '--workspace' found`) — they operate on the whole workspace by
+# default from whatever manifest `recipe.json` is generated against, unlike plain
+# `cargo build`, which does need `--workspace` to not default to just the root package.
+RUN cargo chef prepare --recipe-path recipe.json
 
 # 2. BUILDER - Compile deps (cached)
 FROM rust:1.90-slim AS builder
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --workspace --recipe-path recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
 RUN cargo build --release --workspace --bin hacienda
