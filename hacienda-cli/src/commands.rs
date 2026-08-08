@@ -860,7 +860,7 @@ pub async fn run_serve(
     let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
     let auth_enabled = config.auth.enabled;
 
-    let facade = Arc::new(HaciendaFacade::new(config).context("building the facade")?);
+    let facade = Arc::new(build_facade(config).context("building the facade")?);
     let jobs = InMemoryJobStore::new().into_arc();
     // In-memory by default, same precedent as `jobs` above: durable is a caller
     // decision (embed a `PgVectorStore` instead), not this command's to make.
