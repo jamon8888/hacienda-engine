@@ -44,8 +44,8 @@ impl ApiKeyStore for PostgresApiKeyStore {
         tenant: &TenantId,
         capabilities: Vec<Capability>,
     ) -> Result<ApiKey, ApiKeyError> {
-        let capabilities_json = serde_json::to_value(&capabilities)
-            .map_err(|e| ApiKeyError::Verification(e.to_string()))?;
+        let capabilities_json =
+            serde_json::to_value(&capabilities).map_err(ApiKeyError::CapabilitySerialization)?;
         let tenant_str = tenant.as_str();
 
         let row = sqlx::query!(

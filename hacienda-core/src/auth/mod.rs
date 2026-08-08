@@ -284,6 +284,11 @@ pub enum AuthzError {
     TokenExpired,
     #[error("issuer not trusted: {0}")]
     UntrustedIssuer(String),
+    /// An authenticated principal (`Caller::Principal`) tried to act on a tenant other
+    /// than its own — e.g. issuing or revoking an API key scoped to `requested` while
+    /// authenticated into `own`. `Caller::Trusted` callers are exempt: they may specify
+    /// an explicit tenant to bootstrap one. Callers should surface this as 403, not 404
+    /// — the principal is authenticated and has a real tenant, it just isn't this one.
     #[error(
         "principal {principal} cannot operate on tenant {requested} outside its own tenant {own}"
     )]

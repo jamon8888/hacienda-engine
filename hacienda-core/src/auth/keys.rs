@@ -38,6 +38,13 @@ pub enum ApiKeyError {
 
     #[error("invalid key format: expected hcd_<prefix>_<base62>")]
     InvalidFormat,
+
+    /// The requested capability set could not be serialized to JSON for storage. Retains
+    /// the `serde_json::Error` as its source rather than flattening it to a string, since
+    /// `Capability` is a plain enum — a failure here points at a bug in `Capability`'s
+    /// `Serialize` impl, not bad input, and the source error is the useful diagnostic.
+    #[error("failed to serialize API key capabilities: {0}")]
+    CapabilitySerialization(#[source] serde_json::Error),
 }
 
 /// A generated API key pair: the raw key (shown once) and its stored hashes.
