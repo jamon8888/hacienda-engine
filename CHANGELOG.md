@@ -39,7 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the real env vars (`HACIENDA_PSEUDONYM_ACTIVE_KEY`/`HACIENDA_PSEUDONYM_KEY_<ID>`,
   not the previously-documented `HACIENDA_JWT_SECRET`/`HACIENDA_FPE_KEY`/etc., none of
   which this codebase reads).
-
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
