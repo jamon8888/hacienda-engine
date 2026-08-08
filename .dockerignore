@@ -6,8 +6,14 @@ target/
 Dockerfile*
 docker-compose*
 *.md
-*.toml
-*.lock
+# Deliberately no `*.toml`/`*.lock` line here (unlike the rest of this file's blanket
+# extension excludes): every crate's Cargo.toml plus the workspace Cargo.lock must
+# survive into the build context, or `cargo chef prepare`/`cargo build` fail with
+# "could not find Cargo.toml in /app or any parent directory". A previous version of
+# this file excluded them unconditionally (Cargo.toml is itself a `.toml` file), which
+# meant no Dockerfile in this repo could ever have produced a working build.
+# `config/production.toml` (COPY'd separately into the runtime stage) needs the same
+# exception for the same reason - it would otherwise silently be an empty COPY.
 *.json
 *.yaml
 *.yml
