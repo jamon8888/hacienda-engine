@@ -27,11 +27,14 @@ COPY config/production.toml /app/config/production.toml
 
 USER nonroot:nonroot
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["/app/hacienda", "health-check"]
-
+# No Docker-level HEALTHCHECK: the distroless runtime has no shell and no curl to run a
+# probe command with, and there is no `hacienda health-check` subcommand — this crate's
+# CLI surface is deliberately closed rather than carrying stubbed commands (see
+# hacienda-cli/src/cli.rs's module doc). `GET /health` (public, no auth required) already
+# exists and works — point your orchestrator's own probe (Kubernetes `httpGet`, ECS
+# health check, etc.) at it instead.
 ENTRYPOINT ["/app/hacienda"]
-CMD ["serve", "http", "--config", "/app/config/production.toml"]
+CMD ["serve", "--config", "/app/config/production.toml", "--bind", "0.0.0.0:8787"]
 
 LABEL org.opencontainers.image.title="hacienda" \
       org.opencontainers.image.description="xberg + PII/Compliance Distribution — GDPR/DORA/AI Act compliant document intelligence" \

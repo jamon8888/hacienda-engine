@@ -23,13 +23,46 @@ on:
       - "hacienda-core/**"
 
 jobs:
-  validate:
+  # `docker/Dockerfile` is the image the README/docker-compose.yml/docs/configuration.md
+  # tell an operator to run, so it gets a real build — not `--check` (a lint pass that
+  # never executes a single RUN/COPY) piped into `|| true` (which swallows the exit code
+  # regardless). That combination previously meant this job could never fail red no
+  # matter how broken the Dockerfile was — it shipped a CMD invoking a CLI subcommand
+  # that doesn't exist, a HEALTHCHECK calling a subcommand that doesn't exist, and a
+  # COPY of a config file that wasn't in the repo, all silently.
+  validate-main:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate Dockerfiles
+      - name: Build docker/Dockerfile
+        run: docker buildx build -f docker/Dockerfile -t hacienda:ci-check .
+      - name: Smoke-test the image starts and serves /health
         run: |
-          for f in docker/Dockerfile docker/Dockerfile.musl-build docker/Dockerfile.musl-ffi docker/Dockerfile.musl-node docker/Dockerfile.musl-rustler; do
+          docker run -d --name hacienda-smoke -p 18787:8787 \
+            -v "$(pwd)/config/production.toml:/app/config/production.toml:ro" \
+            hacienda:ci-check
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:18787/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::hacienda did not answer /health within 10s"
+          docker logs hacienda-smoke
+          exit 1
+
+  # The musl/FFI variants are not what the README/docker-compose point at and are not
+  # exercised elsewhere, so they stay `--check`-only (a real build for each would add
+  # meaningfully to CI time for images nothing currently depends on) — `--check` still
+  # catches Dockerfile syntax errors, just not a build failure partway through. Revisit
+  # if any of these becomes the image an operator is actually told to run.
+  validate-other:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate remaining Dockerfiles (syntax check only, see comment above)
+        run: |
+          for f in docker/Dockerfile.musl-build docker/Dockerfile.musl-ffi docker/Dockerfile.musl-node docker/Dockerfile.musl-rustler; do
             echo "Validating $f..."
-            docker buildx build --check -f "$f" . 2>&1 || true
+            docker buildx build --check -f "$f" .
           done

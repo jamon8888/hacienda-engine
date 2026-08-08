@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`docker/Dockerfile` now actually starts.** `CMD` invoked `serve http --config ...` —
+  `http` is not a valid subcommand/positional (`ServeArgs` takes only `--bind`; `--config`
+  is a global flag). `HEALTHCHECK` called `hacienda health-check`, a subcommand that has
+  never existed (this CLI's surface is deliberately closed rather than carrying stubbed
+  commands). `COPY config/production.toml` referenced a file that wasn't in the repo, so
+  the image build itself failed before either of the above could even matter. Fixed:
+  `CMD` now reads `serve --config /app/config/production.toml --bind 0.0.0.0:8787`
+  (verified against the real CLI parser), `HEALTHCHECK` is removed entirely — the
+  distroless runtime has no shell/curl to run a probe command with, so orchestrators
+  should point their own health check at the already-existing, already-public `GET
+  /health` instead — and `config/production.toml` is a new, minimal, schema-accurate
+  starting config (`[auth] enabled = true` with a placeholder static token, required
+  since the image binds `0.0.0.0` and `check_bind_policy` refuses that without auth).
+  `.github/workflows/ci-docker.yaml`'s `validate` job ran `docker buildx build --check`
+  piped into `|| true`, which meant it could never fail red regardless of how broken the
+  Dockerfile was — none of the above was ever caught. Split into `validate-main` (a real
+  `docker build` of `docker/Dockerfile` plus a smoke test that the container starts and
+  answers `/health`) and `validate-other` (the musl/FFI variants, still `--check`-only
+  since nothing currently depends on them, but no longer `|| true`-guarded).
+- **`docs/configuration.md` matched no real schema.** Documented `[server]`,
+  `[security]`, `[models]`, `[observability]` sections, CLI subcommands (`hacienda pii
+  scan`, `compliance report`, `review list`, `model list`, ...) that don't exist, a
+  fictional `HaciendaFacadeConfig` Rust type, and Kubernetes/Prometheus manifests
+  referencing endpoints (`/metrics`, `/live`, `/ready`) nothing serves — a config file or
+  deployment manifest written against it would fail to load or silently do nothing.
+  Rewritten to the real `HaciendaConfig` schema (verified end-to-end: every example in
+  the new document round-trips through `hacienda config show`), the real CLI surface,
+  and the real env vars (`HACIENDA_PSEUDONYM_ACTIVE_KEY`/`HACIENDA_PSEUDONYM_KEY_<ID>`,
+  not the previously-documented `HACIENDA_JWT_SECRET`/`HACIENDA_FPE_KEY`/etc., none of
+  which this codebase reads).
+
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
