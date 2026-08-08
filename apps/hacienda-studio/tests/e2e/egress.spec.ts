@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
 import { mockNerModelAssets, skipOnboarding } from "./fixtures";
+
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
 /**
  * Hosts the app is permitted to contact. Everything else is a compliance
@@ -52,6 +56,49 @@ test.describe("network egress", () => {
       buffer: Buffer.from(CONTRACT),
     });
     await download;
+
+    expect(external).toEqual([]);
+  });
+
+  // Track K regression guard: `DocxViewerPreview`/`PDFViewer` pull in large,
+  // previously-unaudited third-party packages (`@extend-ai/react-docx`,
+  // `@embedpdf/*`) — this proves their rendering path (including the pdfium
+  // WASM fetch) stays on `'self'`/blob: and never reaches a CDN like
+  // jsdelivr, closing the Gate 1 egress loop end-to-end.
+  test("contacts no host outside the allowlist while previewing docx/pdf documents", async ({
+    page,
+  }) => {
+    // Two full uploads (worker extraction + viewer bundle load) back to back, on a dev
+    // server that cold-optimizes each viewer's worker dependency on first use —
+    // comfortably exceeds the suite's default 120s per-test timeout on a slow/first run.
+    test.setTimeout(240000);
+    const external = recordExternalRequests(page);
+
+    await skipOnboarding(page);
+    await page.goto("/");
+    await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
+
+    const docxBuffer = await readFile(path.join(FIXTURES_DIR, "note.docx"));
+    const docxDownload = page.waitForEvent("download");
+    await page.setInputFiles('input[type="file"]', {
+      name: "note.docx",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: docxBuffer,
+    });
+    await docxDownload;
+    await expect(page.locator('[aria-label="Open DOCX actions"]')).toBeVisible({
+      timeout: 15000,
+    });
+
+    const pdfBuffer = await readFile(path.join(FIXTURES_DIR, "note.pdf"));
+    const pdfDownload = page.waitForEvent("download");
+    await page.setInputFiles('input[type="file"]', {
+      name: "note.pdf",
+      mimeType: "application/pdf",
+      buffer: pdfBuffer,
+    });
+    await pdfDownload;
+    await expect(page.locator('[data-slot="pdf-viewer"]')).toBeVisible({ timeout: 15000 });
 
     expect(external).toEqual([]);
   });
