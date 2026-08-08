@@ -50,6 +50,13 @@ Tous dans `superpowers/specs/`.
 PR #42/#43 dont elles prolongent les mesures), E1–E5 (attendent P1 livré et éprouvé par E0).
 Elles restent définies par le programme. Voir son §2 bis.
 
+### Durcissement opérationnel (hors découpage P/S/E)
+
+| Document | Rôle |
+| --- | --- |
+| [`2026-08-08-production-readiness-hardening.md`](../../superpowers/specs/2026-08-08-production-readiness-hardening.md) | Quatre écarts entre ce qui est documenté/déployé et ce que le code fait réellement : mode pseudonymize cassé sur `hacienda serve`, chemin de déploiement Docker non fonctionnel, tests d'audit Postgres isolés en CI, absence de télémétrie réelle malgré `docker-compose.yml` |
+| [`2026-08-08-production-readiness-hardening-implementation.md`](../../superpowers/plans/2026-08-08-production-readiness-hardening-implementation.md) | Plan d'implémentation en quatre PR indépendantes |
+
 ### Specs antérieures dont ce travail dépend
 
 | Document | Ce qu'il apporte |
