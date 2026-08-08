@@ -19,9 +19,15 @@ const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
  * numbers, which group in pairs from a leading 0 (`01 23 45 67 89`) rather
  * than 3-3-4 — the first alternative alone never matched a French fixture's
  * phone number at all (Track D2).
+ *
+ * The leading `(?<![A-Za-z0-9])` guards both alternatives against starting a
+ * match mid-token: `\b` only exists at a token's true start/end, so without
+ * this a long digit run embedded in a larger alphanumeric token (e.g. an
+ * IBAN's BBAN digits) could still yield a spurious trailing "phone" match
+ * ending at the token's real end-of-run `\b` (issue #67).
  */
 const PHONE_PATTERN =
-  /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|\b0\d(?:[-.\s]?\d{2}){4}\b/g;
+  /(?<![A-Za-z0-9])(?:(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|0\d(?:[-.\s]?\d{2}){4}\b)/g;
 const URL_PATTERN = /https?:\/\/[^\s]+/g;
 /**
  * compromise's date extraction lives in the separate compromise-dates plugin,
