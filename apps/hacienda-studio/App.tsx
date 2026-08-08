@@ -4,6 +4,7 @@ import { ConfigPanel } from "./components/ConfigPanel";
 import { ProgressBar } from "./components/ProgressBar";
 import { PiiPanel } from "./components/PiiPanel";
 import { MarkdownEditor } from "./components/MarkdownEditor";
+import { RedactedEditor } from "./components/RedactedEditor";
 import { FileBrowser, buildFileRows } from "./components/FileBrowser";
 import { FileUpload } from "./components/extend/file-upload";
 import { DocxViewerPreview } from "./components/extend/docx-viewer";
@@ -109,6 +110,15 @@ export function App() {
   const [previewUrls, setPreviewUrls] = useState<Map<string, string>>(new Map());
   // A single viewer-scoped dark toggle — this app has no app-wide dark mode.
   const [viewerDark, setViewerDark] = useState(false);
+  // Track K1: which result (if any) is expanded into the side-by-side split view, opened
+  // via a FileBrowser row click. Only one at a time — the split view is a focused reading
+  // mode, not another always-stacked list.
+  const [openResultName, setOpenResultName] = useState<string | null>(null);
+  // Track K2: the redacted pane's free-text buffer per result, keyed by `ProcessedFile.name`.
+  // Seeded lazily from `renderAnnotatedMarkdown` the first time a result's split view opens
+  // (see `redactedDraftFor` below); once present, edits here are independent of
+  // `piiFindings`/`entities` offsets, same scope cut as `MarkdownEditor`'s own edit model.
+  const [redactedDrafts, setRedactedDrafts] = useState<Map<string, string>>(new Map());
 
   const workerRef = useRef<Worker | null>(null);
   const configRef = useRef(config);
@@ -370,6 +380,19 @@ export function App() {
     downloadText(result.name, reExportMarkdown(result, findingsFor(result)));
   }
 
+  // Track K2: the split view's right pane starts as the same redacted rendering the export
+  // path produces, then diverges once the user edits it (see `redactedDrafts`' own comment).
+  function redactedDraftFor(result: ProcessedFile): string {
+    const existing = redactedDrafts.get(result.name);
+    if (existing !== undefined) return existing;
+    const docPath = "documents/" + result.name;
+    return renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findingsFor(result), docPath);
+  }
+
+  function handleRedactedChange(result: ProcessedFile, next: string): void {
+    setRedactedDrafts((prev) => new Map(prev).set(result.name, next));
+  }
+
   // `progress` is keyed by whatever name the worker was sent — the folder-relative path
   // for a directory upload, the basename otherwise — so lookups have to use the same key,
   // not `file.name`, or every folder-uploaded file's progress card silently never appears.
@@ -492,6 +515,8 @@ export function App() {
               new Set(editedFindings.keys()),
               new Map(results.map((r) => [r.name, findingsFor(r)] as const)),
             )}
+            openName={openResultName}
+            onOpen={(name) => setOpenResultName((current) => (current === name ? null : name))}
           />
         )}
 
@@ -505,6 +530,63 @@ export function App() {
               const edited = editedFindings.has(result.name);
               const viewerKind = getViewerKind(result.frontmatter.source);
               const previewUrl = previewUrls.get(result.name);
+              // `openResultName` is set from `FileBrowser`'s row name, which is the original
+              // input file name (`frontmatter.source`, e.g. "note.docx") — not `result.name`,
+              // which is the output markdown's own name (e.g. "note.md"). Comparing against
+              // `result.name` here would never match and the split view would never open.
+              const isOpen = openResultName === result.frontmatter.source;
+
+              if (isOpen && viewerKind && previewUrl) {
+                return (
+                  <div key={result.name} className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-medium">{result.name}</span>
+                      <button
+                        type="button"
+                        className="close-split-view rounded-md bg-muted px-2 py-1 text-xs text-foreground hover:bg-primary hover:text-primary-foreground"
+                        onClick={() => setOpenResultName(null)}
+                      >
+                        ✕ Close
+                      </button>
+                    </div>
+                    <div className="split-view grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div className="min-w-0">
+                        {viewerKind === "docx" && (
+                          <DocxViewerPreview
+                            src={previewUrl}
+                            fileName={result.name}
+                            isDark={viewerDark}
+                            onIsDarkChange={setViewerDark}
+                            showUpload={false}
+                          />
+                        )}
+                        {viewerKind === "xlsx" && (
+                          <XlsxViewerPreview
+                            src={previewUrl}
+                            fileName={result.name}
+                            isDark={viewerDark}
+                            onIsDarkChange={setViewerDark}
+                            showUpload={false}
+                          />
+                        )}
+                        {viewerKind === "pptx" && (
+                          <PptxViewerPreview src={previewUrl} fileName={result.name} showUpload={false} />
+                        )}
+                        {viewerKind === "pdf" && (
+                          <PDFViewer src={previewUrl} fileName={result.name} showUpload={false} />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <RedactedEditor
+                          value={redactedDraftFor(result)}
+                          onChange={(next) => handleRedactedChange(result, next)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <div key={result.name} className="flex flex-col gap-2">
                   <div className="flex items-center justify-between text-sm">

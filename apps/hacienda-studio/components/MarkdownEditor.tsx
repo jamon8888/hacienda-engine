@@ -38,15 +38,7 @@ import type { ReactCodeMirrorRef, ViewUpdate } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import type { PiiEntity } from "../lib/pii-engine";
 import { piiHighlightExtension } from "../lib/pii-decorations";
-
-const ADDABLE_CATEGORIES = [
-  "person",
-  "email",
-  "phone",
-  "address",
-  "organization",
-  "other",
-];
+import { ADDABLE_CATEGORIES } from "../lib/pii-categories";
 
 // Module-level, not inline in the JSX below: `@uiw/react-codemirror`'s internal
 // reconfigure effect depends on this prop's *identity* (like `extensions` per the
