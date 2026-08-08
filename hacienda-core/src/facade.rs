@@ -391,7 +391,8 @@ impl HaciendaFacade {
         let store = self.api_key_store.as_ref().ok_or_else(|| {
             crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
         })?;
-        store.revoke(key_id).await?;
+        let tenant = caller.tenant_ctx().tenant;
+        store.revoke(key_id, &tenant).await?;
         Ok(())
     }
 
@@ -2843,6 +2844,51 @@ mod tests {
         assert!(
             resolved_after_revoke.is_none(),
             "a revoked key must not authenticate"
+        );
+    }
+
+    /// D-S1-1/D-S1-6: `revoke_key_with_auth` must scope the revocation to the caller's
+    /// own tenant, not just check the `AuthManage` capability. Before this test existed,
+    /// any `AuthManage` principal could revoke any key in any tenant by guessing its id.
+    #[tokio::test]
+    async fn should_not_let_a_principal_revoke_another_tenants_key() {
+        let (facade, store) = facade_with_key_store();
+
+        let tenant_a = crate::tenancy::TenantId::new("tenant-a");
+        let (pair_a, record_a) = facade
+            .issue_key_with_auth(
+                Caller::Trusted,
+                "owner-a",
+                Some(&tenant_a),
+                vec![Capability::DocumentsProcess],
+            )
+            .await
+            .expect("bootstrap issuance for tenant-a must succeed");
+
+        let ctx_b = crate::auth::AuthContext::with_tenant(
+            "test-principal-b",
+            crate::tenancy::TenantId::new("tenant-b"),
+            crate::auth::CapabilitySet::new([Capability::AuthManage]),
+        );
+        let caller_b = Caller::Principal(&ctx_b);
+
+        // Tenant B's admin "succeeds" (silent no-op, same anti-enumeration-oracle shape
+        // as revoking an unknown id) but must not actually touch tenant A's key.
+        facade
+            .revoke_key_with_auth(caller_b, record_a.id)
+            .await
+            .expect("revoke must not error even when the id belongs to another tenant");
+
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(
+            Arc::clone(&store) as Arc<dyn ApiKeyStore>
+        );
+        let still_resolves = resolver
+            .resolve(&pair_a.raw_key)
+            .await
+            .expect("resolve must not error");
+        assert!(
+            still_resolves.is_some(),
+            "a cross-tenant revoke attempt must not revoke the key"
         );
     }
 

@@ -345,8 +345,15 @@ pub trait ApiKeyStore: Send + Sync {
         lookup_hash: &str,
     ) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError>;
 
-    /// Revoke an API key by ID.
-    async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError>;
+    /// Revoke an API key by ID, scoped to `tenant`. A key that exists but belongs to a
+    /// different tenant is left untouched — this is a silent no-op, not an error, so the
+    /// caller cannot use the response to distinguish "wrong tenant" from "unknown id"
+    /// (the same anti-enumeration-oracle property the HTTP handler already documents).
+    async fn revoke(
+        &self,
+        id: uuid::Uuid,
+        tenant: &TenantId,
+    ) -> Result<(), crate::auth::keys::ApiKeyError>;
 
     /// List API keys for an owner within a tenant. Never returns another tenant's keys,
     /// even if `owner` happens to collide across tenants.
@@ -407,9 +414,16 @@ impl ApiKeyStore for InMemoryApiKeyStore {
         Ok(self.keys.lock().unwrap().get(lookup_hash).cloned())
     }
 
-    async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError> {
+    async fn revoke(
+        &self,
+        id: uuid::Uuid,
+        tenant: &TenantId,
+    ) -> Result<(), crate::auth::keys::ApiKeyError> {
         let mut keys = self.keys.lock().unwrap();
-        if let Some(key) = keys.values_mut().find(|k| k.id == id) {
+        if let Some(key) = keys
+            .values_mut()
+            .find(|k| k.id == id && k.tenant == *tenant)
+        {
             key.revoked_at = Some(chrono::Utc::now());
         }
         Ok(())

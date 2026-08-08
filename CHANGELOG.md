@@ -112,9 +112,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not just a convention — while in-process callers (`Caller::Trusted`: bootstrap, CLI)
   can specify an explicit tenant to provision a brand-new one.
   `POST /v1/auth/keys`'s response now echoes the issued key's `tenant`; the request
-  body gained no `tenant` field, by design. No store beyond `ApiKeyStore` enforces
-  tenant scoping yet — that is tracked as follow-up work (`AuditStore`/`ReviewStore`,
-  then `JobStore`/`PresetStore`/`UsageStore`/`DocumentVersionStore`/`ObjectStore`).
+  body gained no `tenant` field, by design. `ApiKeyStore::revoke` and
+  `HaciendaFacade::revoke_key_with_auth` are likewise tenant-scoped now — before this,
+  revocation checked only the `auth:manage` capability, so any admin could revoke any
+  key by id in any tenant; a cross-tenant revoke attempt is now a silent no-op (same
+  idempotent-204 shape as an unknown id, so it stays anti-enumeration) rather than
+  succeeding. No store beyond `ApiKeyStore` enforces tenant scoping yet — that is
+  tracked as follow-up work (`AuditStore`/`ReviewStore`, then
+  `JobStore`/`PresetStore`/`UsageStore`/`DocumentVersionStore`/`ObjectStore`).
 - **Server-side chunking for RAG document upsert.** `POST /v1/rag/collections/{name}/documents`
   previously required the caller to submit pre-chunked, pre-embedded `chunks` — `full_text` was
   stored for search only, never chunked. When `chunks` is omitted, the server now splits

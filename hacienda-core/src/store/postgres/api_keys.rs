@@ -101,12 +101,18 @@ impl ApiKeyStore for PostgresApiKeyStore {
         }))
     }
 
-    async fn revoke(&self, id: Uuid) -> Result<(), ApiKeyError> {
+    async fn revoke(&self, id: Uuid, tenant: &TenantId) -> Result<(), ApiKeyError> {
         let now = Utc::now();
-        sqlx::query!("UPDATE api_keys SET revoked_at = $1 WHERE id = $2", now, id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_err)?;
+        let tenant_str = tenant.as_str();
+        sqlx::query!(
+            "UPDATE api_keys SET revoked_at = $1 WHERE id = $2 AND tenant_id = $3",
+            now,
+            id,
+            tenant_str
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
         Ok(())
     }
 
@@ -206,7 +212,24 @@ mod tests {
                 "a key must never be visible from a different tenant, even with the same owner"
             );
 
-            store.revoke(created.id).await.expect("revoke failed");
+            store
+                .revoke(created.id, &other_tenant)
+                .await
+                .expect("revoke must not error even for another tenant's key id");
+            let not_revoked = store
+                .get_by_lookup_hash(&lookup_hash)
+                .await
+                .expect("get_by_lookup_hash failed")
+                .expect("key must still exist after a cross-tenant revoke attempt");
+            assert!(
+                not_revoked.revoked_at.is_none(),
+                "a cross-tenant revoke attempt must not revoke the key"
+            );
+
+            store
+                .revoke(created.id, &tenant)
+                .await
+                .expect("revoke failed");
             let revoked = store
                 .get_by_lookup_hash(&lookup_hash)
                 .await
