@@ -1,0 +1,13 @@
+# wasm-pack's `--target web` output for apps/hacienda-studio's `hacienda-wasm`
+# file: dependency. This directory is NOT rebuilt at Vercel deploy time (no Rust
+# toolchain in Vercel's build image) — the files below are intentionally committed
+# and must be regenerated + recommitted (`task build:wasm`) whenever
+# crates/hacienda-wasm/** or hacienda-core/** changes. CI enforces freshness —
+# see .github/workflows/ci-wasm-freshness.yaml.
+*
+!.gitignore
+!package.json
+!hacienda_wasm.js
+!hacienda_wasm.d.ts
+!hacienda_wasm_bg.wasm
+!hacienda_wasm_bg.wasm.d.ts

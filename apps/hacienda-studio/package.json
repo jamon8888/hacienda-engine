@@ -10,6 +10,7 @@
     "prebuild": "npm run build:wasm",
     "dev": "vite",
     "build": "vite build",
+    "build:vercel": "vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",

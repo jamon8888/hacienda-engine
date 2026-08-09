@@ -1,0 +1,58 @@
+name: CI - WASM Freshness
+
+# Guards against deploying stale hacienda-wasm/pkg/ output: Vercel's build never
+# runs wasm-pack (no Rust toolchain in its build image — see
+# apps/hacienda-studio/vercel.json and its README's Vercel deployment section), so
+# the committed pkg/ output is trusted as-is at deploy time. For a PII
+# detection/redaction engine, silently shipping stale WASM logic is a
+# correctness/compliance risk — this job rebuilds from source and fails if the
+# committed output has drifted.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/hacienda-wasm/**"
+      - "hacienda-core/**"
+      - "Cargo.toml"
+      - ".github/workflows/ci-wasm-freshness.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/hacienda-wasm/**"
+      - "hacienda-core/**"
+      - "Cargo.toml"
+      - ".github/workflows/ci-wasm-freshness.yaml"
+
+concurrency:
+  group: ci-wasm-freshness-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Rebuild hacienda-wasm/pkg from source
+        run: wasm-pack build --target web --no-default-features crates/hacienda-wasm
+
+      - name: Fail if committed pkg/ output is stale
+        run: |
+          if ! git diff --exit-code -- crates/hacienda-wasm/pkg/; then
+            echo "::error::crates/hacienda-wasm/pkg/ is stale. Run 'task build:wasm' locally, commit the result, and push again. Vercel trusts this committed output as-is and never rebuilds it."
+            exit 1
+          fi

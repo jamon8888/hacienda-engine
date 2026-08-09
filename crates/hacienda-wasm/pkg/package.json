@@ -1,0 +1,17 @@
+{
+  "name": "hacienda-wasm",
+  "type": "module",
+  "description": "wasm32 bindings for hacienda-core's pii/redaction pipeline",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "files": [
+    "hacienda_wasm_bg.wasm",
+    "hacienda_wasm.js",
+    "hacienda_wasm.d.ts"
+  ],
+  "main": "hacienda_wasm.js",
+  "types": "hacienda_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
