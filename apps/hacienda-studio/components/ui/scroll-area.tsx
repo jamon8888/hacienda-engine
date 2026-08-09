@@ -6,21 +6,43 @@ import { cn } from "@/lib/utils"
 function ScrollArea({
   className,
   children,
+  orientation = "vertical",
+  scrollFade = false,
+  scrollbarGutter = false,
+  viewportClassName,
+  viewportProps,
+  viewportRef,
   ...props
-}: React.ComponentProps<typeof ScrollAreaPrimitive.Root>) {
+}: React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
+  orientation?: "vertical" | "horizontal"
+  /** Cosmetic edge-fade affordance requested by Extend UI's viewer sidebars; accepted for API
+   * compatibility, not rendered (no gradient mask implementation here). */
+  scrollFade?: boolean
+  scrollbarGutter?: boolean
+  viewportClassName?: string
+  viewportProps?: React.ComponentPropsWithoutRef<"div">
+  viewportRef?: React.Ref<HTMLDivElement>
+}) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
+      data-scroll-fade={scrollFade || undefined}
       className={cn("relative", className)}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
+        ref={viewportRef}
         data-slot="scroll-area-viewport"
-        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1"
+        className={cn(
+          "size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1",
+          scrollbarGutter && "[scrollbar-gutter:stable]",
+          viewportClassName
+        )}
+        {...viewportProps}
       >
         {children}
       </ScrollAreaPrimitive.Viewport>
-      <ScrollBar />
+      <ScrollBar orientation={orientation} />
       <ScrollAreaPrimitive.Corner />
     </ScrollAreaPrimitive.Root>
   )

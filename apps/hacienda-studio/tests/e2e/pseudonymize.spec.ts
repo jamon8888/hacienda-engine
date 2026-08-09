@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
-import { visitFresh } from "./fixtures";
+import { visitFresh, waitForFileRowDone } from "./fixtures";
 
 /**
  * Track F1/F2: `redactionMode: "pseudonymize"` end to end — minting in the worker
@@ -28,13 +28,15 @@ test.describe("redactionMode: pseudonymize (Track F1/F2)", () => {
     await visitFresh(page);
     await enablePseudonymizeMode(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
+    await waitForFileRowDone(page, "protocole.txt");
 
+    const download = page.waitForEvent("download");
+    await page.click("button.download-zip");
     const zip = await JSZip.loadAsync(await readFile(await (await download).path()));
     const markdown = await zip.file("documents/protocole.md")!.async("string");
 
@@ -51,13 +53,14 @@ test.describe("redactionMode: pseudonymize (Track F1/F2)", () => {
     await visitFresh(page);
     await enablePseudonymizeMode(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
-    await download;
+    await waitForFileRowDone(page, "protocole.txt");
+    // The findings panel now lives behind the click-to-open detail screen (Track K1/Phase 1).
+    await page.locator('[data-file-row="protocole.txt"]').click();
 
     const trigger = page.locator(".pii-finding-trigger").first();
     await expect(trigger).toBeVisible();
@@ -80,13 +83,14 @@ test.describe("redactionMode: pseudonymize (Track F1/F2)", () => {
     await visitFresh(page);
     await enablePseudonymizeMode(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
-    await download;
+    await waitForFileRowDone(page, "protocole.txt");
+    // The findings panel now lives behind the click-to-open detail screen (Track K1/Phase 1).
+    await page.locator('[data-file-row="protocole.txt"]').click();
 
     await page.locator(".pii-finding-trigger").first().click();
     await page.getByPlaceholder("Key id (default: session)").fill("session");
@@ -121,13 +125,15 @@ test.describe("G1: entity linking survives pseudonymization (no orphaned links)"
     const CARD_NUMBER = "4111111111111111";
     const note = `Card number ${CARD_NUMBER} on file.`;
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "card.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(note),
     });
+    await waitForFileRowDone(page, "card.txt");
 
+    const download = page.waitForEvent("download");
+    await page.click("button.download-zip");
     const zip = await JSZip.loadAsync(await readFile(await (await download).path()));
     const markdown = await zip.file("documents/card.md")!.async("string");
     const registry = await zip.file("entities-registry.json")!.async("string");

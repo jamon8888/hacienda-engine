@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
-import { mockNerModelAssets, skipOnboarding } from "./fixtures";
+import { mockNerModelAssets, skipOnboarding, waitForFileRowDone } from "./fixtures";
 
 const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -49,13 +49,12 @@ test.describe("network egress", () => {
     // WASM module, and the input is disabled until the handshake lands.
     await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(CONTRACT),
     });
-    await download;
+    await waitForFileRowDone(page, "protocole.txt");
 
     expect(external).toEqual([]);
   });
@@ -79,25 +78,31 @@ test.describe("network egress", () => {
     await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
     const docxBuffer = await readFile(path.join(FIXTURES_DIR, "note.docx"));
-    const docxDownload = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.docx",
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       buffer: docxBuffer,
     });
-    await docxDownload;
+    await waitForFileRowDone(page, "note.docx");
+    // The viewer now renders inside the click-to-open detail screen (Track K1/Phase 1),
+    // not inline on upload.
+    await page.locator('[data-file-row="note.docx"]').click();
     await expect(page.locator('[aria-label="Open DOCX actions"]')).toBeVisible({
       timeout: 15000,
     });
+    await page.locator(".close-split-view").click();
+    // Back on the file-browser screen; the upload dropzone lives on its own screen now
+    // (Track K1/Phase 1), reached via "Add more files".
+    await page.locator(".add-more-files").click();
 
     const pdfBuffer = await readFile(path.join(FIXTURES_DIR, "note.pdf"));
-    const pdfDownload = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.pdf",
       mimeType: "application/pdf",
       buffer: pdfBuffer,
     });
-    await pdfDownload;
+    await waitForFileRowDone(page, "note.pdf");
+    await page.locator('[data-file-row="note.pdf"]').click();
     await expect(page.locator('[data-slot="pdf-viewer"]')).toBeVisible({ timeout: 15000 });
 
     expect(external).toEqual([]);
@@ -144,13 +149,15 @@ test.describe("PII redaction export contract", () => {
     );
     await page.keyboard.press("Escape");
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(CONTRACT),
     });
+    await waitForFileRowDone(page, "protocole.txt");
 
+    const download = page.waitForEvent("download");
+    await page.click("button.download-zip");
     const zip = await JSZip.loadAsync(
       await readFile(await (await download).path()),
     );

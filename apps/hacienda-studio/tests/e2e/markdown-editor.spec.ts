@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { visitFresh } from "./fixtures";
+import { visitFresh, waitForFileRowDone } from "./fixtures";
 
 /**
  * Track F3: CodeMirror renders in the real app with a PII span decorated, and — the
@@ -13,13 +13,14 @@ test.describe("MarkdownEditor PII decorations (Track F3)", () => {
   test("renders the document with the detected PII span highlighted", async ({ page }) => {
     await visitFresh(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
-    await download;
+    await waitForFileRowDone(page, "note.txt");
+    // The editor now lives behind the click-to-open detail screen (Track K1/Phase 1).
+    await page.locator('[data-file-row="note.txt"]').click();
 
     const pill = page.locator(".cm-pii-pill").first();
     await expect(pill).toBeVisible();
@@ -32,13 +33,14 @@ test.describe("MarkdownEditor PII decorations (Track F3)", () => {
   }) => {
     await visitFresh(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
-    await download;
+    await waitForFileRowDone(page, "note.txt");
+    // The editor now lives behind the click-to-open detail screen (Track K1/Phase 1).
+    await page.locator('[data-file-row="note.txt"]').click();
 
     const editor = page.locator(".cm-pii-editor .cm-content");
     await expect(page.locator(".cm-pii-pill").first()).toBeVisible();

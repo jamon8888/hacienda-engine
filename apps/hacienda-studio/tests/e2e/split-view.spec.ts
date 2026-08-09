@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect, type Page } from "@playwright/test";
-import { visitFresh } from "./fixtures";
+import { visitFresh, waitForFileRowDone } from "./fixtures";
 
 /**
  * Track K1/K2: clicking a viewer-compatible `FileBrowser` row opens a side-by-side split
@@ -20,9 +20,8 @@ async function uploadFixture(
   mimeType: string,
 ): Promise<void> {
   const buffer = await readFile(path.join(FIXTURES_DIR, fileName));
-  const download = page.waitForEvent("download");
   await page.setInputFiles('input[type="file"]', { name: fileName, mimeType, buffer });
-  await download;
+  await waitForFileRowDone(page, fileName);
 }
 
 /** Selects `.cm-redacted-editor`'s content by character offset, same technique as

@@ -94,12 +94,18 @@
   }
 }
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+/* Must stay inside `@layer base`: CSS cascade layers give unlayered rules
+ * priority over ALL layered rules regardless of specificity, so an unlayered
+ * `margin: 0; padding: 0;` here silently wins over every Tailwind spacing
+ * utility (`mx-auto`, `px-3`, `mt-4`, ...) app-wide. ~keep */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 }
 
 :root {

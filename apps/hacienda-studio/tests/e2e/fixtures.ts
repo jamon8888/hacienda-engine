@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 /**
  * The default e2e suite must never fetch the real GLiNER2 model over the network: it is a
@@ -44,4 +44,22 @@ export async function visitFresh(page: Page): Promise<void> {
   await skipOnboarding(page);
   await page.goto("/");
   await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
+}
+
+/**
+ * Waits for a file's `FileBrowser` row to reach "Done" — the processing-complete signal
+ * most specs actually want, as opposed to `waitForEvent("download")`, which today happens
+ * to fire at the same moment only because the batch zip still auto-downloads on completion.
+ * `fileName` must match `data-file-row`, i.e. `effectiveFileName(file)` (the input file's
+ * own name, not `frontmatter.source`).
+ *
+ * 60s timeout, not the `waitForEvent("download")` this replaces: that relied on Playwright's
+ * 120s per-test default with no explicit budget of its own. The full extract→ner→pii pipeline
+ * measurably exceeds a naive 15s on this CPU-constrained host under parallel worker contention
+ * (see office-viewers/pseudonymize flakes during Phase 0 migration) — 60s matches the existing
+ * PBKDF2-derivation wait in pseudonymize.spec.ts for the same reason.
+ */
+export async function waitForFileRowDone(page: Page, fileName: string): Promise<void> {
+  const row = page.locator(`[data-file-row="${fileName}"]`);
+  await expect(row).toContainText("Done", { timeout: 60000 });
 }

@@ -37,24 +37,38 @@ import {
   loadVerticalTaxonomy,
   VerticalEntityMetadata,
 } from "../lib/verticals/index";
-import { BatchEntityRegistry, type RegistryEntity } from "../lib/registry";
-import { KGExporter } from "../lib/kg-export";
+import { BatchEntityRegistry } from "../lib/registry";
 import { WhisperBridge } from "../lib/transcription/whisper-bridge";
 import type { TranscriptionResult } from "../lib/transcription/types";
 import {
-  entityFileName,
   relativeEntityLink,
-  relativeDocLink,
   renderAnnotatedMarkdown,
 } from "../lib/annotate";
+import {
+  assembleZip,
+  buildEntityFile,
+  buildGlossaryIndex,
+  type ZipBatch,
+} from "../lib/zip-export";
 
 // Track I4: re-exported unchanged so nothing importing these from "./pipeline" (the
 // vitest suite included) needs to know they now live in lib/annotate.ts — see that
 // file's header for why the split exists (App.tsx needs them without this module's
 // top-level `self.onmessage =`).
 export { relativeEntityLink, renderAnnotatedMarkdown };
+// Track K/Phase 2: same re-export pattern, now for lib/zip-export.ts — see that
+// file's header for why the split exists (the worker needs a "build-zip" round trip
+// that runs independently of processFiles(), not just once at the end of it).
+export { buildEntityFile, buildGlossaryIndex };
 
 let wasmReady: Promise<void> | null = null;
+
+// Track K/Phase 2: the most recently completed batch's state, retained so the
+// on-demand "build-zip" message (self.onmessage below) can call assembleZip()
+// without processFiles() needing to build the zip eagerly. Concurrent batches
+// aren't supported (see the plan's risk notes) — a second "process" message
+// mid-batch would overwrite this before the first batch's zip request lands.
+let lastBatch: ZipBatch | null = null;
 
 // Track B1/B2: `createNerBackend()` targets xberg-wasm's neural `NerModel` — multilingual,
 // PII-specific, and already the model the onboarding screen downloads. `null` means the
@@ -179,60 +193,6 @@ entities: ${JSON.stringify(entityMeta)}
 ---`;
 }
 
-/**
- * Track G3: without this, a Claude Desktop session that opens the zip sees a
- * pile of markdown files, a JSON registry and a `kg-export/` folder with no
- * explanation — nothing tells it the registry and KG files exist to answer
- * cross-document questions the prose alone can't (which entities appear in
- * multiple files, how they relate), so a session would only ever read the
- * prose. `fileCount`/`entityCount` are computed by the caller, which already
- * has `results`/`registry` in scope; this function only formats.
- */
-function buildBundleReadme(fileCount: number, entityCount: number): string {
-  const documents = fileCount === 1 ? "document" : "documents";
-  const entities = entityCount === 1 ? "entity" : "entities";
-  return `# Hacienda Studio export
-
-This bundle was produced entirely in-browser (Hacienda Studio) — no document
-left the device it was processed on. It contains ${fileCount} processed
-${documents} and ${entityCount} distinct ${entities} across them.
-
-## What's in here
-
-- **\`documents/\`** — one markdown file per source document, at the same
-  relative path it was uploaded from. Each has YAML frontmatter (source name,
-  type, processing time, PII count) followed by the extracted content, with
-  named entities linked to their file under \`entities/\`, and a local
-  \`## Entities\` summary at the bottom.
-- **\`entities/\`** — one file per distinct entity across the whole batch:
-  type, vertical, roles, aliases, and a backlink to every document that
-  mentions it. This is what makes the bundle RAG-ready rather than merely
-  readable — open \`entities/organization-acme-sas.md\` and find every
-  document naming Acme SAS, without reading every file in \`documents/\`.
-- **\`GLOSSARY.md\`** — the index into \`entities/\`, grouped by type. Start
-  here for "what entities does this bundle know about".
-- **\`_manifest.json\`** — the file list for this batch, with per-file entity
-  counts.
-- **\`entities-registry.json\`** — every entity across the whole batch, with
-  which document(s) it appears in and inferred relationships between
-  entities. Use this, not just the prose, to answer questions that span more
-  than one document — an entity mentioned in three files only has one row
-  here, not three.
-- **\`kg-export/\`** — the same registry as a knowledge graph, in three
-  formats: \`neo4j.cypher\` (importable into Neo4j), \`networkx.json\`
-  (Python's NetworkX), and \`rdf.ttl\` (RDF/Turtle). Prefer these over
-  re-deriving relationships from the prose.
-
-## Reading this bundle
-
-For cross-document questions (shared entities, relationships between
-documents), start from \`GLOSSARY.md\`, \`entities/\`, \`entities-registry.json\`
-or \`kg-export/\`, not by reading every file in \`documents/\`. For a single
-document's content, its own \`.md\` file is self-contained — frontmatter,
-prose, and local entity summary together.
-`;
-}
-
 function buildGlossary(entities: Entity[], docPath: string): string {
   if (entities.length === 0) return "";
   let md = "\n## Entities\n\n";
@@ -240,65 +200,6 @@ function buildGlossary(entities: Entity[], docPath: string): string {
     const verticalInfo =
       e.vertical && e.vertical !== "shared" ? ` [${e.vertical}]` : "";
     md += `- [${e.name}](${relativeEntityLink(docPath, e)}) \`${e.type.charAt(0).toUpperCase() + e.type.slice(1)}${verticalInfo}\` — mentioned ${e.count} time${e.count > 1 ? "s" : ""}\n`;
-  }
-  return md;
-}
-
-/**
- * Track I2: "one file per entity, with backlinks." `docLinks` are already
- * `documents/...` paths (see `processFiles`'s `docPaths` map) — sorted by
- * the caller so file output is deterministic across runs.
- */
-export function buildEntityFile(
-  entity: RegistryEntity,
-  docLinks: string[],
-): string {
-  const typeLabel = entity.type.charAt(0).toUpperCase() + entity.type.slice(1);
-  const lines = [`# ${entity.display_name}`, "", `- **Type:** ${typeLabel}`];
-  if (entity.vertical) lines.push(`- **Vertical:** ${entity.vertical}`);
-  if (entity.sector) lines.push(`- **Sector:** ${entity.sector}`);
-  if (entity.roles.length) lines.push(`- **Roles:** ${entity.roles.join(", ")}`);
-  if (entity.aliases.length)
-    lines.push(`- **Aliases:** ${entity.aliases.join(", ")}`);
-  lines.push(
-    `- **Mentions:** ${entity.mention_count} across ${docLinks.length} document${docLinks.length === 1 ? "" : "s"}`,
-  );
-  lines.push("", "## Appears in", "");
-  for (const docPath of docLinks) {
-    lines.push(`- [${docPath.replace(/^documents\//, "")}](${relativeDocLink(docPath)})`);
-  }
-  return lines.join("\n") + "\n";
-}
-
-/**
- * Track I2: "GLOSSARY.md is the entry point" — the global index into
- * `entities/`, grouped by type and sorted for deterministic output.
- */
-export function buildGlossaryIndex(entities: RegistryEntity[]): string {
-  if (entities.length === 0) {
-    return "# Glossary\n\nNo entities were detected in this batch.\n";
-  }
-  const byType = new Map<string, RegistryEntity[]>();
-  for (const e of entities) {
-    const list = byType.get(e.type) ?? [];
-    list.push(e);
-    byType.set(e.type, list);
-  }
-  let md =
-    "# Glossary\n\nEvery entity detected across this batch. Open an entry " +
-    "for its full detail and backlinks into the documents that mention it.\n";
-  for (const type of Array.from(byType.keys()).sort()) {
-    const typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
-    md += `\n## ${typeLabel}\n\n`;
-    const sorted = byType
-      .get(type)!
-      .sort((a, b) => a.display_name.localeCompare(b.display_name));
-    for (const e of sorted) {
-      const verticalInfo =
-        e.vertical && e.vertical !== "shared" ? ` — ${e.vertical}` : "";
-      const docCount = e.source_documents.length;
-      md += `- [${e.display_name}](entities/${entityFileName(e)})${verticalInfo}, mentioned ${e.mention_count} time${e.mention_count > 1 ? "s" : ""} across ${docCount} document${docCount === 1 ? "" : "s"}\n`;
-    }
   }
   return md;
 }
@@ -662,68 +563,13 @@ async function processFiles(
       });
     }
   }
-  console.log("[Worker] All files processed, creating zip...");
-  const JSZip = (await import("jszip")).default;
-  const zip = new JSZip();
-  for (const r of results) {
-    zip.file("documents/" + r.name, r.markdown);
-  }
-  const manifest = {
-    files: results.map((r) => ({
-      name: r.name,
-      entityCount: r.entities.length,
-    })),
-    generated: new Date().toISOString(),
-  };
-  zip.file("_manifest.json", JSON.stringify(manifest, null, 2));
-
-  // Add entities registry to zip
-  const registryJson = {
-    ...registry.toJSON(),
-    ...(config.enableTranscription && {
-      transcription: {
-        model: config.transcriptionModel,
-        language: config.transcriptionLanguage,
-        enabled: true,
-      },
-    }),
-  };
-  zip.file("entities-registry.json", JSON.stringify(registryJson, null, 2));
-  zip.file(
-    "README.md",
-    buildBundleReadme(
-      results.length,
-      registryJson.entity_registry.entities.length,
-    ),
-  );
-
-  // Track I2: one file per entity with backlinks, plus the global index.
-  const entitiesFolder = zip.folder("entities");
-  for (const entity of registry.getEntities()) {
-    const docLinks = entity.source_documents
-      .map((docId) => docPaths.get(docId))
-      .filter((p): p is string => !!p)
-      .sort();
-    entitiesFolder?.file(
-      entityFileName(entity),
-      buildEntityFile(entity, docLinks),
-    );
-  }
-  zip.file("GLOSSARY.md", buildGlossaryIndex(registry.getEntities()));
-
-  // Add KG exports
-  const kgExporter = new KGExporter(registry);
-  const kgFolder = zip.folder("kg-export");
-  kgFolder?.file("neo4j.cypher", kgExporter.toCypher());
-  kgFolder?.file(
-    "networkx.json",
-    JSON.stringify(kgExporter.toNetworkX(), null, 2),
-  );
-  kgFolder?.file("rdf.ttl", kgExporter.toRDF());
-
-  const blob = await zip.generateAsync({ type: "blob" });
-  console.log("[Worker] Zip created, sending batch-complete");
-  self.postMessage({ type: "batch-complete", zip: blob });
+  console.log("[Worker] All files processed");
+  // Track K/Phase 2: the zip is no longer built here — retained so a later on-demand
+  // "build-zip" message (see self.onmessage below) can call assembleZip() without
+  // re-deriving the registry/docPaths/config that only this function's scope has.
+  // batch-complete is now a pure queue->browser signal, no zip field.
+  lastBatch = { results, registry, docPaths, config };
+  self.postMessage({ type: "batch-complete" });
 }
 
 self.onmessage = async (event: MessageEvent) => {
@@ -743,5 +589,17 @@ self.onmessage = async (event: MessageEvent) => {
     console.log("[Worker] About to call processFiles");
     await processFiles(files, config);
     console.log("[Worker] processFiles returned");
+    return;
+  }
+
+  if (type === "build-zip") {
+    if (!lastBatch) {
+      console.error("[Worker] build-zip requested with no completed batch");
+      return;
+    }
+    console.log("[Worker] Building zip on demand...");
+    const zip = await assembleZip(lastBatch, event.data.overrides);
+    console.log("[Worker] Zip built, sending zip-ready");
+    self.postMessage({ type: "zip-ready", zip });
   }
 };

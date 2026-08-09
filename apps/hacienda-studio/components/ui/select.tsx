@@ -5,8 +5,15 @@ import { Select as SelectPrimitive } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 function Select({
+  modal: _modal,
   ...props
-}: React.ComponentProps<typeof SelectPrimitive.Root>) {
+}: React.ComponentProps<typeof SelectPrimitive.Root> & {
+  // The installed @radix-ui/react-select (2.3.7) predates the `modal` prop —
+  // accepted and dropped for API compatibility with Extend UI's viewer
+  // toolbars, which always pass `modal={false}` (non-modal zoom/sheet
+  // selects layered over a scrollable document). ~keep
+  modal?: boolean
+}) {
   return <SelectPrimitive.Root data-slot="select" {...props} />
 }
 
@@ -53,8 +60,14 @@ function SelectContent({
   children,
   position = "item-aligned",
   align = "center",
+  alignItemWithTrigger: _alignItemWithTrigger,
   ...props
-}: React.ComponentProps<typeof SelectPrimitive.Content>) {
+}: React.ComponentProps<typeof SelectPrimitive.Content> & {
+  // Same rationale as `Select`'s `modal` above: not supported by the installed
+  // Radix version, accepted and dropped so callers don't need a version-aware
+  // branch. ~keep
+  alignItemWithTrigger?: boolean
+}) {
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
