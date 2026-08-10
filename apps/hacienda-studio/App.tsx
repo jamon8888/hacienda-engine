@@ -237,6 +237,9 @@ export function App() {
           }, 1000);
           break;
         case "error":
+          console.error("[App] Worker error received:", data);
+          console.error("[App] Error file:", data.file);
+          console.error("[App] Error message:", data.message);
           setError(`${data.file}: ${data.message}`);
           setFileErrors((prev) => new Map(prev).set(data.file, data.message));
           break;

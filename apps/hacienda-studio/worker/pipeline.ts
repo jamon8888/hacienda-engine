@@ -145,7 +145,20 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
       map.set(key, e);
     }
   }
-  return Array.from(map.values()).sort((a, b) => b.count - a.count);
+
+  // Filter overlapping spans within each entity to prevent nested links
+  return Array.from(map.values())
+    .map((e) => ({
+      ...e,
+      spans: e.spans
+        .sort((a, b) => a.start - b.start)
+        .filter((span, i, arr) => {
+          // Keep only non-overlapping spans
+          if (i === 0) return true;
+          return span.start >= arr[i - 1].end;
+        }),
+    }))
+    .sort((a, b) => b.count - a.count);
 }
 
 /**
@@ -232,6 +245,7 @@ async function processFile(
    * `"pseudonymize"` and a passphrase was given. */
   pseudonymKeyHex: string | null,
 ): Promise<ProcessedFile> {
+  console.log(`[Worker] processFile START: ${input.name} (${input.type}, ${input.bytes.byteLength} bytes)`);
   postProgress({ file: input.name, stage: "extract", percent: 10 });
 
   // Track I2: every document lives under `documents/` in the exported vault,
@@ -265,55 +279,92 @@ async function processFile(
       `[Worker] Transcription complete: ${markdown.substring(0, 100)}...`,
     );
   } else {
-    const extractInput = WasmExtractInput.fromBytes(
-      new Uint8Array(input.bytes),
-      input.type,
-      input.name,
-    );
+    console.log(`[Worker] Extracting content from ${input.name}...`);
+    try {
+      const extractInput = WasmExtractInput.fromBytes(
+        new Uint8Array(input.bytes),
+        input.type,
+        input.name,
+      );
 
-    const extractConfig = WasmExtractionConfig.default();
-    extractConfig.outputFormat = WasmOutputFormat.Markdown;
-    extractConfig.chunking = WasmChunkingConfig.default();
-    extractConfig.chunking.maxCharacters = config.chunkSize;
-    extractConfig.ocr = WasmOcrConfig.default();
-    extractConfig.ocr.backend = "tesseract-wasm";
-    extractConfig.ocr.language = ["eng"];
+      const extractConfig = WasmExtractionConfig.default();
+      extractConfig.outputFormat = WasmOutputFormat.Markdown;
+      extractConfig.chunking = WasmChunkingConfig.default();
+      extractConfig.chunking.maxCharacters = config.chunkSize;
+      extractConfig.ocr = WasmOcrConfig.default();
+      extractConfig.ocr.backend = "tesseract-wasm";
+      extractConfig.ocr.language = ["eng"];
 
-    const nerConfig = WasmNerConfig.default();
-    nerConfig.backend = WasmNerBackendKind.Onnx;
-    nerConfig.categories = config.nerCategories;
-    extractConfig.ner = nerConfig;
+      const nerConfig = WasmNerConfig.default();
+      nerConfig.backend = WasmNerBackendKind.Onnx;
+      nerConfig.categories = config.nerCategories;
+      extractConfig.ner = nerConfig;
 
-    const engine = new XbergEngine(
-      { bridgeTimeoutMs: 30000 },
-      { ner: { ner: selectNerBridge(nerRuntime) } },
-    );
+      const engine = new XbergEngine(
+        { bridgeTimeoutMs: 30000 },
+        { ner: { ner: selectNerBridge(nerRuntime) } },
+      );
 
-    const result = await engine.extract(extractInput, extractConfig);
-    postProgress({ file: input.name, stage: "extract", percent: 50 });
+      console.log(`[Worker] Calling engine.extract for ${input.name}...`);
+      const extractStart = performance.now();
+      const result = await engine.extract(extractInput, extractConfig);
+      const extractMs = performance.now() - extractStart;
+      console.log(`[Worker] engine.extract completed in ${extractMs.toFixed(0)}ms for ${input.name}`);
+      postProgress({ file: input.name, stage: "extract", percent: 50 });
 
-    if (!result.results[0]?.content) {
-      throw new Error("No content extracted");
+      if (!result.results[0]?.content) {
+        console.error(`[Worker] No content extracted from ${input.name}. Result:`, result);
+        throw new Error("No content extracted");
+      }
+
+      markdown = result.results[0].content;
+      console.log(`[Worker] Extracted ${markdown.length} chars from ${input.name}`);
+    } catch (extractError) {
+      console.error(`[Worker] EXTRACTION FAILED for ${input.name}:`, extractError);
+      console.error("[Worker] Extraction error type:", typeof extractError);
+      console.error("[Worker] Extraction error constructor:", extractError?.constructor?.name);
+      if (extractError instanceof Error) {
+        console.error("[Worker] Extraction error name:", extractError.name);
+        console.error("[Worker] Extraction error message:", extractError.message);
+        console.error("[Worker] Extraction error stack:", extractError.stack);
+      } else {
+        console.error("[Worker] Raw extraction error:", JSON.stringify(extractError));
+      }
+      throw extractError;
     }
-
-    markdown = result.results[0].content;
   }
 
   postProgress({ file: input.name, stage: "ner", percent: 60 });
 
   // Run NER on the markdown (works for both transcription and extraction)
-  const nerEngine = new XbergEngine(
-    { bridgeTimeoutMs: 30000 },
-    { ner: { ner: selectNerBridge(nerRuntime) } },
-  );
+  console.log(`[Worker] Running NER on ${input.name}...`);
+  let nerResults: any[] = [];
+  try {
+    const nerEngine = new XbergEngine(
+      { bridgeTimeoutMs: 30000 },
+      { ner: { ner: selectNerBridge(nerRuntime) } },
+    );
 
-  const nerResults = await nerEngine.ner(markdown, {
-    categories: config.nerCategories,
-  });
-  console.log(
-    "[Worker] Engine NER results:",
-    JSON.stringify(nerResults, null, 2),
-  );
+    nerResults = await nerEngine.ner(markdown, {
+      categories: config.nerCategories,
+    });
+    console.log(
+      "[Worker] Engine NER results:",
+      JSON.stringify(nerResults, null, 2),
+    );
+  } catch (nerError) {
+    console.error(`[Worker] NER FAILED for ${input.name}:`, nerError);
+    console.error("[Worker] NER error type:", typeof nerError);
+    console.error("[Worker] NER error constructor:", nerError?.constructor?.name);
+    if (nerError instanceof Error) {
+      console.error("[Worker] NER error name:", nerError.name);
+      console.error("[Worker] NER error message:", nerError.message);
+      console.error("[Worker] NER error stack:", nerError.stack);
+    } else {
+      console.error("[Worker] Raw NER error:", JSON.stringify(nerError));
+    }
+    throw nerError;
+  }
 
   const xbergEntities = nerResults || [];
   console.log(
@@ -347,12 +398,31 @@ async function processFile(
   let piiEntitiesFound = 0;
   let piiFindings: PiiEntity[] = [];
   if (config.enablePiiDetection) {
+    console.log(`[Worker] Running PII detection on ${input.name}...`);
     postProgress({ file: input.name, stage: "pii", percent: 82 });
-    const piiResult = config.redactPiiInOutput
-      ? await redactPii(markdown)
-      : await scanForPii(markdown);
-    piiFindings = piiResult.entities;
-    piiEntitiesFound = piiFindings.length;
+    try {
+      const piiStart = performance.now();
+      const piiResult = config.redactPiiInOutput
+        ? await redactPii(markdown)
+        : await scanForPii(markdown);
+      const piiMs = performance.now() - piiStart;
+      console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
+      piiFindings = piiResult.entities;
+      piiEntitiesFound = piiFindings.length;
+      console.log(`[Worker] Found ${piiEntitiesFound} PII entities in ${input.name}`);
+    } catch (piiError) {
+      console.error(`[Worker] PII DETECTION FAILED for ${input.name}:`, piiError);
+      console.error("[Worker] PII error type:", typeof piiError);
+      console.error("[Worker] PII error constructor:", piiError?.constructor?.name);
+      if (piiError instanceof Error) {
+        console.error("[Worker] PII error name:", piiError.name);
+        console.error("[Worker] PII error message:", piiError.message);
+        console.error("[Worker] PII error stack:", piiError.stack);
+      } else {
+        console.error("[Worker] Raw PII error:", JSON.stringify(piiError));
+      }
+      throw piiError;
+    }
 
     // Track F1/F2: `redactionMode: "pseudonymize"` replaces each finding's
     // `redact_template` — the string `renderAnnotatedMarkdown` splices into the body — with
@@ -446,6 +516,8 @@ async function processFile(
 
   postProgress({ file: input.name, stage: "complete", percent: 100 });
 
+  console.log(`[Worker] processFile DONE: ${input.name} → ${input.name.replace(/\.[^.]+$/, ".md")}, ${deduped.length} entities, ${piiEntitiesFound} PII`);
+
   return {
     name: input.name.replace(/\.[^.]+$/, ".md"),
     markdown: finalMarkdown,
@@ -531,15 +603,18 @@ async function processFiles(
   // entries themselves use, so the two can never disagree.
   const docPaths = new Map<string, string>();
 
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     try {
       console.log(
-        "[Worker] processing:",
+        `[Worker] === FILE ${i + 1}/${files.length} ===`,
         file.name,
         file.type,
         file.bytes.byteLength,
+        "bytes",
       );
       const docId = `doc-${String(++docCounter).padStart(3, "0")}`;
+      const startTime = performance.now();
       const processed = await processFile(
         file,
         config,
@@ -549,17 +624,43 @@ async function processFiles(
         whisperBridge,
         pseudonymKeyHex,
       );
+      const elapsed = performance.now() - startTime;
+      console.log(
+        `[Worker] ✓ FILE ${i + 1}/${files.length} COMPLETE:`,
+        file.name,
+        `(${elapsed.toFixed(0)}ms)`,
+        `entities:${processed.entities.length}`,
+        `pii:${processed.piiFindings.length}`,
+      );
       // Infer relationships for this document
       registry.inferRelationships(docId);
       docPaths.set(docId, "documents/" + processed.name);
       results.push(processed);
       self.postMessage({ type: "file-complete", ...processed });
     } catch (error) {
-      console.error("[Worker] error processing", file.name, error);
+      console.error(`[Worker] ✗ FILE ${i + 1}/${files.length} FAILED:`, file.name, error);
+      console.error("[Worker] Error type:", typeof error);
+      console.error("[Worker] Error constructor:", error?.constructor?.name);
+      if (error instanceof Error) {
+        console.error("[Worker] Error name:", error.name);
+        console.error("[Worker] Error message:", error.message);
+        console.error("[Worker] Error stack:", error.stack);
+      } else {
+        console.error("[Worker] Raw error value:", JSON.stringify(error));
+      }
+      // Try to extract a meaningful message from any error type
+      let errorMessage = "Unknown error";
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === "string") {
+        errorMessage = error;
+      } else if (error && typeof error === "object") {
+        errorMessage = JSON.stringify(error);
+      }
       self.postMessage({
         type: "error",
         file: file.name,
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: errorMessage,
       });
     }
   }
@@ -598,8 +699,17 @@ self.onmessage = async (event: MessageEvent) => {
       return;
     }
     console.log("[Worker] Building zip on demand...");
-    const zip = await assembleZip(lastBatch, event.data.overrides);
-    console.log("[Worker] Zip built, sending zip-ready");
-    self.postMessage({ type: "zip-ready", zip });
+    try {
+      const zip = await assembleZip(lastBatch, event.data.overrides);
+      console.log("[Worker] Zip built, sending zip-ready");
+      self.postMessage({ type: "zip-ready", zip });
+    } catch (zipError) {
+      console.error("[Worker] Zip build failed:", zipError);
+      self.postMessage({
+        type: "error",
+        file: "zip",
+        message: zipError instanceof Error ? zipError.message : String(zipError),
+      });
+    }
   }
 };

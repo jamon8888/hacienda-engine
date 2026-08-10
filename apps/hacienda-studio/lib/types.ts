@@ -57,7 +57,7 @@ export interface ProcessedFile {
 
 export interface ProgressUpdate {
   file: string;
-  stage: "extract" | "ner" | "pii" | "link" | "complete" | "error";
+  stage: "queued" | "extract" | "ner" | "pii" | "link" | "complete" | "error";
   percent: number;
   message?: string;
 }

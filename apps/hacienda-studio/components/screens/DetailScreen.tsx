@@ -118,6 +118,15 @@ export function DetailScreen({
                 showUpload={false}
               />
             )}
+            {viewerKind === "doc" && (
+              <DocxViewerPreview
+                src={previewUrl}
+                fileName={result.name}
+                isDark={viewerDark}
+                onIsDarkChange={onViewerDarkChange}
+                showUpload={false}
+              />
+            )}
             {viewerKind === "xlsx" && (
               <XlsxViewerPreview
                 src={previewUrl}
@@ -127,7 +136,19 @@ export function DetailScreen({
                 showUpload={false}
               />
             )}
+            {viewerKind === "xls" && (
+              <XlsxViewerPreview
+                src={previewUrl}
+                fileName={result.name}
+                isDark={viewerDark}
+                onIsDarkChange={onViewerDarkChange}
+                showUpload={false}
+              />
+            )}
             {viewerKind === "pptx" && (
+              <PptxViewerPreview src={previewUrl} fileName={result.name} showUpload={false} />
+            )}
+            {viewerKind === "ppt" && (
               <PptxViewerPreview src={previewUrl} fileName={result.name} showUpload={false} />
             )}
             {viewerKind === "pdf" && <PDFViewer src={previewUrl} fileName={result.name} showUpload={false} />}

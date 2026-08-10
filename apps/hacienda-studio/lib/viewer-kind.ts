@@ -1,10 +1,16 @@
-export type ViewerKind = "pdf" | "docx" | "xlsx" | "pptx" | null;
+export type ViewerKind = "pdf" | "docx" | "doc" | "xlsx" | "xls" | "pptx" | "ppt" | "odt" | "ods" | "odp" | null;
 
 const EXTENSION_VIEWER_KIND: Record<string, ViewerKind> = {
   pdf: "pdf",
   docx: "docx",
+  doc: "doc",
   xlsx: "xlsx",
+  xls: "xls",
   pptx: "pptx",
+  ppt: "ppt",
+  odt: "odt",
+  ods: "ods",
+  odp: "odp",
 };
 
 /**

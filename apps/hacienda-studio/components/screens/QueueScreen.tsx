@@ -25,8 +25,14 @@ export function QueueScreen({
         {files.map((file) => {
           const key = effectiveFileName(file);
           const update = progress.get(key);
-          if (!update) return null;
-          return <ProgressBar key={key} file={{ name: key }} update={update} />;
+          // Show all files: queued files get a "Queued" placeholder, active files show progress
+          return (
+            <ProgressBar
+              key={key}
+              file={{ name: key }}
+              update={update || { file: key, stage: "queued", percent: 0 }}
+            />
+          );
         })}
       </section>
     </section>
