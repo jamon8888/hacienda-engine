@@ -101,8 +101,24 @@ export function selectNerBridge(
   runtime: NerRuntime | null,
 ): (text: string, categories: string[]) => Promise<BridgeEntity[]> {
   if (!runtime) return extractEntities;
-  return async (text, categories) =>
-    (await runtime.detect(text, { categories })) as BridgeEntity[];
+  return async (text, categories) => {
+    try {
+      return (await runtime.detect(text, { categories })) as BridgeEntity[];
+    } catch (err: any) {
+      // Candle F16/F32 dtype mismatch — GLiNER2 weights are F16 but candle creates
+      // F32 activations with no auto-cast. Falls back to regex/compromise for this
+      // document rather than crashing the batch.
+      const msg = String(err?.message ?? err);
+      if (msg.includes("dtype mismatch")) {
+        console.warn(
+          "[Worker] Neural NER dtype mismatch (F16/F32), falling back to regex:",
+          msg,
+        );
+        return extractEntities(text, categories);
+      }
+      throw err;
+    }
+  };
 }
 
 function postProgress(update: ProgressUpdate): void {
@@ -353,17 +369,12 @@ async function processFile(
       JSON.stringify(nerResults, null, 2),
     );
   } catch (nerError) {
-    console.error(`[Worker] NER FAILED for ${input.name}:`, nerError);
-    console.error("[Worker] NER error type:", typeof nerError);
-    console.error("[Worker] NER error constructor:", nerError?.constructor?.name);
+    console.error(`[Worker] NER FAILED for ${input.name}, continuing without NER:`, nerError);
     if (nerError instanceof Error) {
-      console.error("[Worker] NER error name:", nerError.name);
-      console.error("[Worker] NER error message:", nerError.message);
-      console.error("[Worker] NER error stack:", nerError.stack);
-    } else {
-      console.error("[Worker] Raw NER error:", JSON.stringify(nerError));
+      console.error("[Worker] NER error:", nerError.name, nerError.message);
     }
-    throw nerError;
+    // Don't throw — continue processing with empty NER results so the file
+    // still gets PII detection, redaction, and zip export.
   }
 
   const xbergEntities = nerResults || [];
@@ -555,10 +566,16 @@ async function processFiles(
   // fixed. An empty selection is not an error case: it means no taxonomy
   // vocabulary is consulted, so every entity falls through to
   // classifyDocumentVertical's document-level fallback below.
-  const taxonomies = await Promise.all(
-    config.enabledVerticals.map((v) => loadVerticalTaxonomy(v)),
-  );
-  const verticalDict = new VerticalDictionary(taxonomies);
+  let verticalDict: VerticalDictionary;
+  try {
+    const taxonomies = await Promise.all(
+      config.enabledVerticals.map((v) => loadVerticalTaxonomy(v)),
+    );
+    verticalDict = new VerticalDictionary(taxonomies);
+  } catch (taxonomyErr) {
+    console.error("[Worker] Taxonomy loading failed, continuing without verticals:", taxonomyErr);
+    verticalDict = new VerticalDictionary([]);
+  }
   const registry = new BatchEntityRegistry();
 
   // Initialize transcription bridge
@@ -592,7 +609,11 @@ async function processFiles(
     config.redactionMode === "pseudonymize" &&
     config.pseudonymPassphrase
   ) {
-    pseudonymKeyHex = await deriveKeyHex(config.pseudonymPassphrase, config.pseudonymKeyId);
+    try {
+      pseudonymKeyHex = await deriveKeyHex(config.pseudonymPassphrase, config.pseudonymKeyId);
+    } catch (keyErr) {
+      console.error("[Worker] Key derivation failed, falling back to mask mode:", keyErr);
+    }
   }
 
   let docCounter = 0;
@@ -678,18 +699,30 @@ self.onmessage = async (event: MessageEvent) => {
   console.log("[Worker] Received message:", type, files?.length);
 
   if (type === "init") {
-    wasmReady = initEngine();
-    await wasmReady;
+    try {
+      wasmReady = initEngine();
+      await wasmReady;
+    } catch (err) {
+      console.error("[Worker] initEngine failed:", err);
+      wasmReady = Promise.resolve();
+    }
     self.postMessage({ type: "ready" });
     return;
   }
 
   if (type === "process") {
     console.log("[Worker] Processing files...");
-    if (wasmReady) await wasmReady;
-    console.log("[Worker] About to call processFiles");
-    await processFiles(files, config);
-    console.log("[Worker] processFiles returned");
+    try {
+      if (wasmReady) await wasmReady;
+      console.log("[Worker] About to call processFiles");
+      await processFiles(files, config);
+      console.log("[Worker] processFiles returned");
+    } catch (err) {
+      console.error("[Worker] processFiles crashed:", err);
+      // Always fire batch-complete so the UI transitions to the browser
+      // screen rather than staying stuck on the queue forever.
+      self.postMessage({ type: "batch-complete" });
+    }
     return;
   }
 

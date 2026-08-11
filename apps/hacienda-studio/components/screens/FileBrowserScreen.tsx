@@ -6,18 +6,21 @@
  * more used to just mean dropping onto the same still-visible drop zone).
  */
 import { FileBrowser, type FileRow } from "../FileBrowser";
+import type { ProcessedFile } from "../../lib/types";
 
 export function FileBrowserScreen({
   rows,
   onOpen,
   onAddMore,
   onDownloadZip,
+  onDownloadFile,
   previewUrls,
 }: {
   rows: FileRow[];
   onOpen: (name: string) => void;
   onAddMore: () => void;
   onDownloadZip: () => void;
+  onDownloadFile: (result: ProcessedFile) => void;
   previewUrls: Map<string, string>;
 }) {
   // Only files that finished processing have content worth zipping — matches
@@ -45,7 +48,7 @@ export function FileBrowserScreen({
           </button>
         </div>
       </div>
-      <FileBrowser rows={rows} openName={null} onOpen={onOpen} previewUrls={previewUrls} />
+      <FileBrowser rows={rows} openName={null} onOpen={onOpen} onDownloadFile={onDownloadFile} previewUrls={previewUrls} />
     </section>
   );
 }

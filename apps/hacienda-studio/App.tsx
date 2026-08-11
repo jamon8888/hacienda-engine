@@ -125,7 +125,11 @@ export function App() {
         const file = files.find(
           (f) => effectiveFileName(f) === result.frontmatter.source,
         );
-        if (!file) continue;
+        if (!file) {
+          console.warn(`[App] No matching file for result ${result.name} (source: ${result.frontmatter.source}). files:`, files.map(f => effectiveFileName(f)));
+          continue;
+        }
+        console.log(`[App] Creating preview URL for ${result.name} from file ${file.name}`);
         next.set(result.name, URL.createObjectURL(file));
         changed = true;
       }
@@ -404,6 +408,19 @@ export function App() {
     workerRef.current!.postMessage({ type: "build-zip", overrides });
   }
 
+  function handleDownloadFile(result: ProcessedFile): void {
+    const content = resolveExportContent(result, redactedDrafts, editedFindings);
+    const blob = new Blob([content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = result.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   // Track K2: the split view's right pane starts as the same redacted rendering the export
   // path produces, then diverges once the user edits it (see `redactedDrafts`' own comment).
   function redactedDraftFor(result: ProcessedFile): string {
@@ -550,6 +567,7 @@ export function App() {
             onOpen={(name) => setScreen({ kind: "detail", inputName: name })}
             onAddMore={() => setScreen({ kind: "upload" })}
             onDownloadZip={handleDownloadZip}
+            onDownloadFile={handleDownloadFile}
             previewUrls={previewUrls}
           />
         )}
@@ -581,6 +599,7 @@ export function App() {
                 }
                 onRemoveFinding={(i) => handleRemoveFinding(result, i)}
                 onExportEdited={() => handleExportEdited(result)}
+                onDownloadZip={handleDownloadZip}
                 onBack={() => setScreen({ kind: "browser" })}
               />
             );

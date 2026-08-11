@@ -1,23 +1,15 @@
 /**
- * Track I3: a Finder-like per-file list — status (extracting/done/error), entity and PII
- * counts once a file finishes, and an "edited" badge once Track I4 editing has touched a
- * file's findings. Deliberately not a port of hacienda-private's `file-system.tsx`: that
- * component is ~4,600 lines built on `@base-ui/react` + Tailwind v4 (see
- * `components/ui/README.md` for why that toolkit generation isn't compatible with this
- * app's classic Radix-based shadcn setup), and porting it would mean rewriting a file
- * browser's worth of tree/selection/virtualization logic that this app's actual use case —
- * one flat batch of files per run, not a persistent project tree — doesn't need. This is
- * the scoped equivalent: the same per-file state the plan asks for, in a list this app
- * already had the pieces for (`ProgressBar`'s `progress` map, `results`, the new I4 edit
- * state), not a vendored subtree.
+ * Track I3: Finder-style file grid — uses Extend UI's FileThumbnail, Hugeicons,
+ * and @pierre/trees icon resolver for consistent file-type rendering.
  */
 import { useEffect, useState } from "react";
+import { createFileTreeIconResolver, getBuiltInSpriteSheet } from "@pierre/trees";
 import { Badge } from "./ui/badge";
 import { ScrollArea } from "./ui/scroll-area";
 import { effectiveFileName } from "../lib/file-filter";
-import { FILE_ICON_SPRITE_SHEET, resolveFileIcon } from "../lib/file-icons";
 import { renderPdfThumbnailUrl } from "../lib/pdf-thumbnail-utils";
 import { getViewerKind } from "../lib/viewer-kind";
+import { FileThumbnail } from "./extend/file-thumbnail";
 import type { ProcessedFile, ProgressUpdate } from "../lib/types";
 import type { PiiEntity } from "../lib/pii-engine";
 
@@ -28,12 +20,6 @@ export interface FileRow {
   error: string | undefined;
   edited: boolean;
   piiCount: number;
-  // Any completed result is openable — not just ones with a native Extend UI viewer.
-  // `DetailScreen` renders a split view (native viewer + RedactedEditor) when a viewer
-  // exists, and a findings-only fallback (MarkdownEditor + PiiPanel, Track I4) otherwise —
-  // gating this on `getViewerKind(...) !== null` would make plain-text/unsupported-viewer
-  // files permanently unreachable once findings-editing lives behind a click-to-open
-  // screen instead of always being rendered inline.
   openable: boolean;
 }
 
@@ -66,45 +52,75 @@ export function buildFileRows(
   });
 }
 
-function statusLabel(row: FileRow): string {
-  if (row.error) return row.error;
-  if (row.result) return "Done";
-  if (row.update) return `${row.update.stage} (${row.update.percent}%)`;
-  return "Queued";
-}
+const stageLabels: Record<string, string> = {
+  queued: "Queued",
+  extract: "Extracting",
+  ner: "Finding entities",
+  pii: "Scanning PII",
+  link: "Linking",
+  complete: "Done",
+  error: "Error",
+};
 
-/** Renders the `@pierre/trees` sprite once per page — `<use href="#...">` below
- * resolves against it regardless of which row rendered first. */
-function FileIconSpriteSheet() {
-  return (
-    <span
-      aria-hidden="true"
-      className="hidden"
-      dangerouslySetInnerHTML={{ __html: FILE_ICON_SPRITE_SHEET }}
-    />
-  );
-}
+/** Sprite sheet for @pierre/trees file-type icons. */
+const FILE_ICON_SPRITE_SHEET = getBuiltInSpriteSheet("complete");
+const { resolveIcon } = createFileTreeIconResolver({ set: "complete", colored: false });
 
-function FileTypeIcon({ fileName }: { fileName: string }) {
-  const icon = resolveFileIcon(fileName);
+/** File-type icon using @pierre/trees icon resolver. */
+function FileTypeIcon({
+  fileName,
+  className,
+}: {
+  fileName: string;
+  className?: string;
+}) {
+  const icon = resolveIcon("file-tree-icon-file", fileName);
   return (
     <svg
       aria-hidden="true"
       viewBox={icon.viewBox ?? "0 0 16 16"}
-      className="size-5 shrink-0 text-muted-foreground"
+      className={`shrink-0 text-muted-foreground ${className ?? ""}`}
+      style={
+        icon.token
+          ? { color: `var(--fs-file-icon-${icon.token}, var(--color-muted-foreground))` }
+          : undefined
+      }
     >
       <use href={`#${icon.name}`} />
     </svg>
   );
 }
 
-/**
- * Real page-1 thumbnail for PDFs (the pdfium machinery `pdf-viewer.tsx`'s own sidebar
- * already uses — see `lib/pdf-thumbnail-utils.ts`), falling back to the plain file-type
- * icon while the render is in flight or if it fails. Per the plan's scope decision,
- * non-PDF viewer-capable types (docx/xlsx/pptx) get the icon only, no thumbnail.
- */
-function FileThumbnail({ fileName, previewUrl }: { fileName: string; previewUrl: string | undefined }) {
+/** Extract extension label from filename. */
+function fileExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf(".");
+  if (dot < 0) return "";
+  return fileName.slice(dot + 1).toUpperCase();
+}
+
+/** Generic preview for files without a native viewer — icon + extension badge. */
+function FileGenericPreview({ fileName }: { fileName: string }) {
+  const ext = fileExtension(fileName);
+  return (
+    <div className="flex size-full flex-col items-center justify-center gap-1.5 bg-muted/50">
+      <FileTypeIcon fileName={fileName} className="size-1/3 min-h-6 min-w-6" />
+      {ext && (
+        <span className="rounded bg-muted px-1.5 py-0.5 text-[min(0.625rem,18cqw)] font-semibold tracking-wide uppercase text-muted-foreground">
+          {ext}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** PDF thumbnail via pdfium, falling back to FileGenericPreview. */
+function FilePreview({
+  fileName,
+  previewUrl,
+}: {
+  fileName: string;
+  previewUrl: string | undefined;
+}) {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
   const isPdf = getViewerKind(fileName) === "pdf";
 
@@ -114,7 +130,7 @@ function FileThumbnail({ fileName, previewUrl }: { fileName: string; previewUrl:
       return;
     }
     let cancelled = false;
-    renderPdfThumbnailUrl({ url: previewUrl, pageIndex: 0, width: 40 })
+    renderPdfThumbnailUrl({ url: previewUrl, pageIndex: 0, width: 120 })
       .then((url) => {
         if (!cancelled) setThumbnailUrl(url);
       })
@@ -126,20 +142,66 @@ function FileThumbnail({ fileName, previewUrl }: { fileName: string; previewUrl:
     };
   }, [isPdf, previewUrl]);
 
-  if (thumbnailUrl) {
-    return (
-      <img
-        src={thumbnailUrl}
-        alt=""
-        aria-hidden="true"
-        className="h-8 w-6 shrink-0 rounded-sm border border-border object-cover"
-      />
-    );
-  }
   return (
-    <span className="flex size-5 shrink-0 items-center justify-center">
-      <FileTypeIcon fileName={fileName} />
-    </span>
+    <FileThumbnail
+      file={{ name: fileName, type: "" }}
+      previewImageUrl={thumbnailUrl}
+      previewContent={!thumbnailUrl ? <FileGenericPreview fileName={fileName} /> : undefined}
+      className="h-full w-full"
+      previewClassName="aspect-[4/3]"
+    />
+  );
+}
+
+/** Mini progress bar shown under each file card during processing. */
+function MiniProgress({ update }: { update: ProgressUpdate }) {
+  if (update.stage === "complete") return null;
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>{stageLabels[update.stage] ?? update.stage}</span>
+        <span>{update.percent}%</span>
+      </div>
+      <div
+        className="h-1 overflow-hidden rounded-full bg-muted"
+        role="progressbar"
+        aria-valuenow={update.percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <div
+          className="h-full rounded-full bg-primary transition-[width] duration-300 ease-out"
+          style={{ width: `${update.percent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Entity + PII count badges shown after processing completes. */
+function FileStats({
+  result,
+  piiCount,
+  edited,
+}: {
+  result: ProcessedFile;
+  piiCount: number;
+  edited: boolean;
+}) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <Badge variant="secondary" size="sm">
+        {result.entities.length} {result.entities.length === 1 ? "entity" : "entities"}
+      </Badge>
+      <Badge variant={piiCount > 0 ? "warning" : "secondary"} size="sm">
+        {piiCount} PII
+      </Badge>
+      {edited && (
+        <Badge variant="info" size="sm" className="file-edited-badge">
+          edited
+        </Badge>
+      )}
+    </div>
   );
 }
 
@@ -147,86 +209,129 @@ export function FileBrowser({
   rows,
   openName,
   onOpen,
+  onDownloadFile,
   previewUrls,
 }: {
   rows: FileRow[];
   openName?: string | null;
   onOpen?: (name: string) => void;
-  /** Keyed by `ProcessedFile.name` (the `.md` output name) — same map `App.tsx` threads
-   * into `DetailScreen`'s viewer, reused here for PDF thumbnails. */
+  onDownloadFile?: (result: ProcessedFile) => void;
   previewUrls?: Map<string, string>;
 }) {
   if (rows.length === 0) return null;
+
   return (
-    <section className="file-browser mt-6 overflow-hidden rounded-md border border-border">
-      <FileIconSpriteSheet />
-      <ScrollArea className="max-h-[60vh]">
-        <ul>
+    <section className="file-browser mt-6 overflow-hidden rounded-lg border border-border bg-background">
+      <span aria-hidden="true" className="hidden" dangerouslySetInnerHTML={{ __html: FILE_ICON_SPRITE_SHEET }} />
+      <ScrollArea className="max-h-[65vh]">
+        <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
           {rows.map((row) => {
             const clickable = row.openable && !!onOpen;
             const isOpen = openName === row.name;
+            const isProcessing = !!row.update && row.update.stage !== "complete" && row.update.stage !== "error";
+            const isDone = !!row.result;
+            const isError = !!row.error;
+
             return (
-              <li
+              <button
                 key={row.name}
+                type="button"
                 data-file-row={row.name}
-                role={clickable ? "button" : undefined}
-                tabIndex={clickable ? 0 : undefined}
-                aria-pressed={clickable ? isOpen : undefined}
+                disabled={!clickable}
                 onClick={clickable ? () => onOpen(row.name) : undefined}
-                onKeyDown={
-                  clickable
-                    ? (e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onOpen(row.name);
-                        }
-                      }
-                    : undefined
-                }
                 className={
-                  "flex items-center justify-between gap-3 border-b border-border px-3 py-2 text-sm last:border-b-0" +
-                  (clickable ? " cursor-pointer hover:bg-muted" : "") +
-                  (isOpen ? " bg-muted" : "")
+                  "group flex flex-col rounded-lg border bg-card p-2 text-left transition-[border-color,background-color,box-shadow] " +
+                  (clickable
+                    ? "cursor-pointer hover:border-primary/50 hover:bg-accent/50 hover:shadow-sm"
+                    : "cursor-default opacity-70") +
+                  (isOpen ? " border-primary ring-1 ring-primary/20" : " border-border")
                 }
               >
-                <div className="flex min-w-0 items-center gap-2">
-                  {row.error ? (
-                    <span aria-hidden="true">⚠️</span>
-                  ) : row.result ? (
-                    <FileThumbnail
+                {/* Thumbnail area */}
+                <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-muted">
+                  {row.result ? (
+                    <FilePreview
                       fileName={row.name}
                       previewUrl={previewUrls?.get(row.result.name)}
                     />
-                  ) : row.update ? (
-                    <span aria-hidden="true">⏳</span>
+                  ) : isError ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-1.5">
+                      <span className="text-3xl" aria-hidden="true">⚠️</span>
+                      <span className="text-[10px] text-destructive">Failed</span>
+                    </div>
+                  ) : isProcessing ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-2">
+                      <FileTypeIcon fileName={row.name} className="size-1/3 min-h-6 min-w-6" />
+                      <div className="w-3/4">
+                        <div className="h-1 overflow-hidden rounded-full bg-muted">
+                          <div
+                            className="h-full rounded-full bg-primary transition-[width] duration-300"
+                            style={{ width: `${row.update?.percent ?? 0}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
                   ) : (
-                    <span aria-hidden="true">⋯</span>
+                    <FileGenericPreview fileName={row.name} />
                   )}
-                  <span className="truncate font-medium">{row.name}</span>
-                </div>
-                <div className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
-                  <span>{statusLabel(row)}</span>
-                  {row.result && (
-                    <>
-                      <span>
-                        {row.result.entities.length}{" "}
-                        {row.result.entities.length === 1 ? "entity" : "entities"}
+
+                  {/* Download overlay on hover */}
+                  {isDone && onDownloadFile && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-background/60 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        title="Download this file"
+                        className="rounded-full bg-primary p-2 text-primary-foreground shadow-md hover:bg-primary/90"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDownloadFile(row.result!);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onDownloadFile(row.result!);
+                          }
+                        }}
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
                       </span>
-                      <Badge variant={row.piiCount > 0 ? "warning" : "secondary"} size="sm">
-                        {row.piiCount} PII
-                      </Badge>
-                    </>
-                  )}
-                  {row.edited && (
-                    <Badge variant="info" size="sm" className="file-edited-badge">
-                      edited
-                    </Badge>
+                    </div>
                   )}
                 </div>
-              </li>
+
+                {/* File name */}
+                <div className="mt-2 min-w-0">
+                  <p className="truncate text-xs font-medium" title={row.name}>
+                    {row.name}
+                  </p>
+                </div>
+
+                {/* Progress bar (during processing) */}
+                {isProcessing && row.update && (
+                  <MiniProgress update={row.update} />
+                )}
+
+                {/* Error message */}
+                {isError && (
+                  <p className="mt-1 truncate text-[10px] text-destructive" title={row.error}>
+                    {row.error}
+                  </p>
+                )}
+
+                {/* Stats (after processing) */}
+                {isDone && (
+                  <FileStats result={row.result!} piiCount={row.piiCount} edited={row.edited} />
+                )}
+              </button>
             );
           })}
-        </ul>
+        </div>
       </ScrollArea>
     </section>
   );

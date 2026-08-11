@@ -4,7 +4,9 @@
  * screen, reachable from asset-loading on first run and from the file-browser screen's
  * "Add more files" button on subsequent batches.
  */
+import * as React from "react";
 import { FileUpload } from "../extend/file-upload";
+import { pickFolder, supportsDirectoryPicker } from "../../lib/folder-picker";
 
 const UPLOAD_ACCEPT =
   ".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html,.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv";
@@ -20,6 +22,26 @@ export function UploadScreen({
   onToggleFolderMode: (event: React.MouseEvent) => void;
   onFilesAccepted: (files: File[]) => void;
 }) {
+  const [folderPicking, setFolderPicking] = React.useState(false);
+
+  const handleFolderPick = React.useCallback(async () => {
+    if (!workerReady || folderPicking) return;
+    setFolderPicking(true);
+    try {
+      const result = await pickFolder();
+      if (result && result.files.length > 0) {
+        onFilesAccepted(result.files);
+      }
+    } catch (err) {
+      console.error("[UploadScreen] Folder pick failed:", err);
+    } finally {
+      setFolderPicking(false);
+    }
+  }, [workerReady, folderPicking, onFilesAccepted]);
+
+  // Use the native showDirectoryPicker on Chromium, webkitdirectory fallback elsewhere
+  const useNativeFolderPicker = supportsDirectoryPicker();
+
   return (
     <section aria-label="Upload documents" className="mx-auto w-full max-w-[800px] flex-1 px-6 py-12">
       <FileUpload
@@ -30,8 +52,9 @@ export function UploadScreen({
         filterAccept={false}
         showFileList={false}
         showBorderBeam={workerReady}
-        webkitdirectory={folderMode}
-        accept={folderMode ? undefined : UPLOAD_ACCEPT}
+        // Only use webkitdirectory when NOT using the native picker
+        webkitdirectory={useNativeFolderPicker ? false : folderMode}
+        accept={folderMode && !useNativeFolderPicker ? undefined : UPLOAD_ACCEPT}
         inputAriaLabel={folderMode ? "Choose a folder" : "Choose files"}
         title={
           workerReady
@@ -46,10 +69,14 @@ export function UploadScreen({
       <button
         type="button"
         className="mode-toggle mx-auto mt-4 block w-fit bg-transparent text-xs text-muted-foreground underline hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
-        disabled={!workerReady}
-        onClick={onToggleFolderMode}
+        disabled={!workerReady || folderPicking}
+        onClick={useNativeFolderPicker ? handleFolderPick : onToggleFolderMode}
       >
-        {folderMode ? "or choose individual files" : "or choose a folder"}
+        {folderPicking
+          ? "Opening folder picker…"
+          : folderMode
+            ? "or choose individual files"
+            : "or choose a folder"}
       </button>
     </section>
   );

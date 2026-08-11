@@ -44,6 +44,7 @@ export function DetailScreen({
   onAddFinding,
   onRemoveFinding,
   onExportEdited,
+  onDownloadZip,
   onBack,
 }: {
   result: ProcessedFile;
@@ -59,6 +60,7 @@ export function DetailScreen({
   onAddFinding: (start: number, end: number, category: string) => void;
   onRemoveFinding: (index: number) => void;
   onExportEdited: () => void;
+  onDownloadZip: () => void;
   onBack: () => void;
 }) {
   const hasViewer = !!(viewerKind && previewUrl);
@@ -93,11 +95,20 @@ export function DetailScreen({
             </span>
           )}
         </span>
-        {!hasViewer && (
-          <span className="text-muted-foreground">
-            {result.entities.length} {result.entities.length === 1 ? "entity" : "entities"}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {!hasViewer && (
+            <span className="text-muted-foreground">
+              {result.entities.length} {result.entities.length === 1 ? "entity" : "entities"}
+            </span>
+          )}
+          <button
+            type="button"
+            className="download-zip rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground hover:bg-primary/90"
+            onClick={onDownloadZip}
+          >
+            Download zip
+          </button>
+        </div>
       </div>
 
       {hasViewer ? (
