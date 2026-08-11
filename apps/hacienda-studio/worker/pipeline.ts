@@ -29,6 +29,7 @@ import {
   initPiiEngine,
   redactPii,
   scanForPii,
+  loadPiiNerModel,
   type PiiEntity,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
@@ -69,6 +70,24 @@ async function initNerBackend(): Promise<void> {
     const { model, tokenizer, encoderConfig } = await loadNerModel();
     nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
     console.log("[Worker] Neural NER backend loaded");
+
+    // Feeds the same already-fetched bytes into hacienda-wasm's own PII pipeline so
+    // `redactPii`/`scanForPii` (below) detect with the real model instead of regex
+    // alone — no second download. This is a separate try/catch on purpose: a build of
+    // `hacienda-wasm` without the `ner-candle-wasm` feature doesn't export
+    // `loadNerModel` at all, and that must not take down the entity-glossary NER pass
+    // above, which is otherwise unrelated. Accepted cost: the model now runs twice per
+    // document — once here for the entity glossary, once inside hacienda-wasm's own
+    // pipeline for PII redaction — sharing the fetched bytes but not the inference call.
+    try {
+      await loadPiiNerModel(model, tokenizer, encoderConfig);
+      console.log("[Worker] hacienda-wasm PII NER backend loaded");
+    } catch (e) {
+      console.warn(
+        "[Worker] hacienda-wasm PII NER backend unavailable, PII detection stays regex-only:",
+        e,
+      );
+    }
   } catch (e) {
     console.warn(
       "[Worker] Neural NER backend unavailable, using regex/compromise fallback:",

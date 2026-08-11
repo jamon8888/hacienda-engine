@@ -9,6 +9,10 @@ license.workspace = true
 default = ["jobs"]
 # Enables the Candle GLiNER2 NER backend (with LoRA adapter support) through xberg.
 ner-candle = ["xberg/ner-candle"]
+# wasm32 sibling of `ner-candle`: loads the same Candle GLiNER2 backend from in-memory
+# bytes (`NerDetector::from_candle_bytes`) instead of a filesystem model directory —
+# there's no disk to read from in a browser.
+ner-candle-wasm = ["xberg/ner-candle-wasm"]
 # Async job tracking seam for Phase 4's HTTP endpoints. On by default.
 jobs = []
 # Postgres store backend (Phase 9). Off by default so wasm32 and non-Postgres
