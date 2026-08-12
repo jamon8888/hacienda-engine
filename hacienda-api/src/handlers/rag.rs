@@ -394,10 +394,14 @@ pub async fn migrate_embeddings(
     let caller = caller_from_arc(&ctx);
     let owner = caller.principal_id().map(str::to_owned);
 
-    let job = state.jobs.create(owner).await.map_err(|e| {
-        tracing::error!(error = %e, "failed to create migrate-embeddings job");
-        ApiError::internal()
-    })?;
+    let job = state
+        .jobs
+        .create(&caller.tenant_ctx(), owner)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to create migrate-embeddings job");
+            ApiError::internal()
+        })?;
     let job_id = job.id.clone();
 
     let task_store = Arc::clone(store);
