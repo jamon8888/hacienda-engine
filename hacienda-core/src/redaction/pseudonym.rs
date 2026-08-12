@@ -4,10 +4,12 @@
 //! `superpowers/specs/2026-07-28-hacienda-cli-api-integration-design.md`.
 
 use crate::pii::types::PiiCategory;
+use crate::tenancy::{TenantCtx, TenantId, DEFAULT_TENANT};
 use aes_siv::siv::Aes256Siv;
 use aes_siv::{Key, KeyInit};
 use data_encoding::{BASE32_NOPAD, HEXLOWER_PERMISSIVE};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
@@ -204,10 +206,43 @@ impl KeyId {
         &self.0
     }
 
-    /// Name of the environment variable expected to hold this key's material.
-    fn env_var(&self) -> String {
-        format!("{KEY_VAR_PREFIX}{}", self.0.to_uppercase())
+    /// Name of the environment variable expected to hold this key's material, for
+    /// `tenant`.
+    ///
+    /// The default tenant keeps the pre-S1, unsuffixed name so an existing
+    /// single-tenant deployment's environment does not need to change. Any other
+    /// tenant gets an explicit suffix — see [`sanitize_env_suffix`].
+    fn env_var(&self, tenant: &TenantId) -> String {
+        if tenant.as_str() == DEFAULT_TENANT {
+            format!("{KEY_VAR_PREFIX}{}", self.0.to_uppercase())
+        } else {
+            format!(
+                "{KEY_VAR_PREFIX}{}__{}",
+                self.0.to_uppercase(),
+                sanitize_env_suffix(tenant.as_str())
+            )
+        }
     }
+}
+
+/// Deterministically fold a tenant id into a legal environment-variable-name suffix:
+/// uppercase, with every byte outside `[A-Z0-9_]` replaced by `_`.
+///
+/// Lossy by construction — this resolver is documented as dev/test-only once a
+/// KMS-backed resolver ships (S2). Two tenant ids that fold to the same suffix would
+/// collide here, which is an acceptable limitation for local development, never for
+/// production key material.
+fn sanitize_env_suffix(tenant: &str) -> String {
+    tenant
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 impl std::fmt::Display for KeyId {
@@ -285,21 +320,24 @@ impl std::fmt::Debug for PseudonymKey {
 /// `Send + Sync` is required: the facade holding a resolver is shared across the async
 /// runtime.
 pub trait KeyResolver: Send + Sync {
-    /// The key that new tokens are minted under.
+    /// The key that new tokens are minted under, for `ctx.tenant` (S1 spec §4).
     ///
     /// # Errors
     ///
-    /// [`PseudonymError::NoActiveKey`] if none is configured. This must never fall back
-    /// to a default or generated key: a per-process random key would produce tokens that
-    /// no other node agrees with and that nothing can ever reveal.
-    fn active(&self) -> Result<PseudonymKey, PseudonymError>;
+    /// [`PseudonymError::NoActiveKey`] if none is configured for that tenant. This must
+    /// never fall back to a default or generated key: a per-process random key would
+    /// produce tokens that no other node agrees with and that nothing can ever reveal.
+    /// It must also never fall back to another tenant's key — see decision D-S1-3: each
+    /// tenant's material is independent, never derived from a shared master.
+    fn active(&self, ctx: &TenantCtx) -> Result<PseudonymKey, PseudonymError>;
 
-    /// The key with a given id, for revealing tokens minted before a rotation.
+    /// The key with a given id, for revealing tokens minted before a rotation, scoped to
+    /// `ctx.tenant`.
     ///
     /// # Errors
     ///
-    /// [`PseudonymError::KeyNotFound`] if the id is not configured.
-    fn resolve(&self, id: &KeyId) -> Result<PseudonymKey, PseudonymError>;
+    /// [`PseudonymError::KeyNotFound`] if the id is not configured for that tenant.
+    fn resolve(&self, ctx: &TenantCtx, id: &KeyId) -> Result<PseudonymKey, PseudonymError>;
 }
 
 /// How [`EnvKeyResolver`] reads a named value; `None` means "not configured".
@@ -352,13 +390,14 @@ impl std::fmt::Debug for EnvKeyResolver {
 }
 
 impl KeyResolver for EnvKeyResolver {
-    fn active(&self) -> Result<PseudonymKey, PseudonymError> {
-        let id = (self.lookup)(ACTIVE_KEY_VAR).ok_or(PseudonymError::NoActiveKey)?;
-        self.resolve(&KeyId::new(id.trim())?)
+    fn active(&self, ctx: &TenantCtx) -> Result<PseudonymKey, PseudonymError> {
+        let variable = active_key_var(&ctx.tenant);
+        let id = (self.lookup)(&variable).ok_or(PseudonymError::NoActiveKey)?;
+        self.resolve(ctx, &KeyId::new(id.trim())?)
     }
 
-    fn resolve(&self, id: &KeyId) -> Result<PseudonymKey, PseudonymError> {
-        let variable = id.env_var();
+    fn resolve(&self, ctx: &TenantCtx, id: &KeyId) -> Result<PseudonymKey, PseudonymError> {
+        let variable = id.env_var(&ctx.tenant);
         let encoded = (self.lookup)(&variable).ok_or_else(|| PseudonymError::KeyNotFound {
             id: id.0.clone(),
             variable,
@@ -374,6 +413,18 @@ impl KeyResolver for EnvKeyResolver {
                 .map_err(|_| PseudonymError::MalformedKeyMaterial { id: id.0.clone() })?,
         );
         PseudonymKey::from_bytes(id.clone(), &material)
+    }
+}
+
+/// Name of the environment variable holding the active key's id, for `tenant`.
+///
+/// Same backward-compatibility rule as [`KeyId::env_var`]: the default tenant keeps the
+/// unsuffixed [`ACTIVE_KEY_VAR`] name.
+fn active_key_var(tenant: &TenantId) -> String {
+    if tenant.as_str() == DEFAULT_TENANT {
+        ACTIVE_KEY_VAR.to_string()
+    } else {
+        format!("{ACTIVE_KEY_VAR}__{}", sanitize_env_suffix(tenant.as_str()))
     }
 }
 
@@ -421,23 +472,33 @@ pub(crate) fn category_label(category: &PiiCategory) -> Result<String, Pseudonym
 /// personal data, and anyone holding the key can reverse the whole corpus offline. Do not
 /// treat a pseudonymised document as safe to publish.
 pub struct Pseudonymiser {
+    /// The tenant this instance was resolved for (S1). Not itself a secret — kept only
+    /// so [`Pseudonymiser::key`]'s error can name the environment variable a missing
+    /// key would need, and so [`Debug`] can show which tenant a cached instance belongs
+    /// to without exposing key material.
+    tenant: TenantId,
     active: PseudonymKey,
     retired: HashMap<KeyId, PseudonymKey>,
 }
 
 impl Pseudonymiser {
-    /// Load the active key and any retired keys still needed to read old tokens.
+    /// Load the active key and any retired keys still needed to read old tokens, for
+    /// `ctx.tenant`.
     ///
-    /// All keys are resolved eagerly. Discovering at startup that a retired key is
+    /// All keys are resolved eagerly. Discovering at admission that a retired key is
     /// unreadable is a configuration error someone can fix; discovering it when a data
-    /// subject exercises a right of access is an incident.
+    /// subject exercises a right of access is an incident (decision D-S1-4).
     ///
     /// # Errors
     ///
     /// [`PseudonymError::NoActiveKey`] or [`PseudonymError::KeyNotFound`] if any listed
     /// key is missing, and the parse errors above if any is malformed.
-    pub fn new(resolver: &dyn KeyResolver, retired: &[KeyId]) -> Result<Self, PseudonymError> {
-        Self::from_keys(resolver.active()?, resolver, retired)
+    pub fn new(
+        ctx: &TenantCtx,
+        resolver: &dyn KeyResolver,
+        retired: &[KeyId],
+    ) -> Result<Self, PseudonymError> {
+        Self::from_keys(ctx, resolver.active(ctx)?, resolver, retired)
     }
 
     /// As [`Pseudonymiser::new`], but with the active key named explicitly.
@@ -451,15 +512,17 @@ impl Pseudonymiser {
     ///
     /// As [`Pseudonymiser::new`], with [`PseudonymError::KeyNotFound`] for `active` too.
     pub fn with_active(
+        ctx: &TenantCtx,
         resolver: &dyn KeyResolver,
         active: KeyId,
         retired: &[KeyId],
     ) -> Result<Self, PseudonymError> {
-        let active = resolver.resolve(&active)?;
-        Self::from_keys(active, resolver, retired)
+        let active = resolver.resolve(ctx, &active)?;
+        Self::from_keys(ctx, active, resolver, retired)
     }
 
     fn from_keys(
+        ctx: &TenantCtx,
         active: PseudonymKey,
         resolver: &dyn KeyResolver,
         retired: &[KeyId],
@@ -469,9 +532,13 @@ impl Pseudonymiser {
             // The active key is already held; listing it as retired too is harmless
             // configuration noise, not an error worth refusing to start over.
             .filter(|id| **id != *active.id())
-            .map(|id| Ok((id.clone(), resolver.resolve(id)?)))
+            .map(|id| Ok((id.clone(), resolver.resolve(ctx, id)?)))
             .collect::<Result<HashMap<_, _>, PseudonymError>>()?;
-        Ok(Self { active, retired })
+        Ok(Self {
+            tenant: ctx.tenant.clone(),
+            active,
+            retired,
+        })
     }
 
     /// Mint the token for `text` in `category`, under the active key.
@@ -553,7 +620,7 @@ impl Pseudonymiser {
             .get(id)
             .ok_or_else(|| PseudonymError::KeyNotFound {
                 id: id.to_string(),
-                variable: id.env_var(),
+                variable: id.env_var(&self.tenant),
             })
     }
 
@@ -569,14 +636,100 @@ impl Pseudonymiser {
     }
 }
 
-/// Names the keys held, never their material.
+/// Names the tenant and keys held, never key material.
 impl std::fmt::Debug for Pseudonymiser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut retired: Vec<&str> = self.retired.keys().map(KeyId::as_str).collect();
         retired.sort_unstable();
         f.debug_struct("Pseudonymiser")
+            .field("tenant", &self.tenant)
             .field("active", &self.active.id())
             .field("retired", &retired)
+            .finish()
+    }
+}
+
+/// Per-tenant cache of resolved [`Pseudonymiser`]s.
+///
+/// A [`Pseudonymiser`] eagerly resolves and caches all its key material at construction
+/// (decision D-S1-4: fail at admission, never at first use). Multi-tenancy widens
+/// "construction" from "process startup" to "tenant admission" — this registry is where
+/// that admission happens, once per tenant, so a request never pays a resolver
+/// round-trip and a tenant with broken key configuration is refused before it can
+/// process any content, not discovered mid-request.
+#[derive(Default)]
+pub struct TenantPseudonymiserRegistry {
+    by_tenant: RwLock<HashMap<TenantId, Arc<Pseudonymiser>>>,
+}
+
+impl TenantPseudonymiserRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve and cache `ctx.tenant`'s pseudonymiser.
+    ///
+    /// Idempotent, and safe to call again for an already-admitted tenant — the existing
+    /// entry is replaced with a freshly resolved one. That is the path a key rotation
+    /// takes (see P3): re-admit the tenant after the resolver reports a new active key.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `resolver` returns for a missing or malformed key — see
+    /// [`Pseudonymiser::new`] / [`Pseudonymiser::with_active`].
+    pub fn admit(
+        &self,
+        ctx: &TenantCtx,
+        resolver: &dyn KeyResolver,
+        active: Option<KeyId>,
+        retired: &[KeyId],
+    ) -> Result<(), PseudonymError> {
+        let pseudonymiser = match active {
+            Some(id) => Pseudonymiser::with_active(ctx, resolver, id, retired)?,
+            None => Pseudonymiser::new(ctx, resolver, retired)?,
+        };
+        self.by_tenant
+            .write()
+            .expect("pseudonymiser registry lock poisoned")
+            .insert(ctx.tenant.clone(), Arc::new(pseudonymiser));
+        Ok(())
+    }
+
+    /// The admitted pseudonymiser for `tenant`, if any.
+    ///
+    /// `None` means the tenant was never admitted (or its last admission attempt
+    /// failed and nothing was cached) — a caller must treat this the same as
+    /// "pseudonymization is not configured for this tenant", never invent a key.
+    pub fn get(&self, tenant: &TenantId) -> Option<Arc<Pseudonymiser>> {
+        self.by_tenant
+            .read()
+            .expect("pseudonymiser registry lock poisoned")
+            .get(tenant)
+            .cloned()
+    }
+
+    /// Whether `tenant` has been admitted.
+    pub fn contains(&self, tenant: &TenantId) -> bool {
+        self.by_tenant
+            .read()
+            .expect("pseudonymiser registry lock poisoned")
+            .contains_key(tenant)
+    }
+}
+
+/// Names the admitted tenants, never key material.
+impl std::fmt::Debug for TenantPseudonymiserRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut tenants: Vec<String> = self
+            .by_tenant
+            .read()
+            .expect("pseudonymiser registry lock poisoned")
+            .keys()
+            .map(TenantId::to_string)
+            .collect();
+        tenants.sort_unstable();
+        f.debug_struct("TenantPseudonymiserRegistry")
+            .field("admitted_tenants", &tenants)
             .finish()
     }
 }
@@ -683,6 +836,11 @@ mod padding_tests {
 #[cfg(test)]
 mod key_tests {
     use super::{EnvKeyResolver, KeyId, KeyResolver, PseudonymError, PseudonymKey, KEY_BYTES};
+    use crate::tenancy::{ActorId, TenantCtx};
+
+    fn ctx() -> TenantCtx {
+        TenantCtx::default_tenant(ActorId::new("test"))
+    }
 
     #[test]
     fn should_reject_a_key_id_that_would_break_token_parsing() {
@@ -710,7 +868,7 @@ mod key_tests {
         let resolver = EnvKeyResolver::with_lookup(|_| None);
         let id = KeyId::new("absent").unwrap();
         assert!(matches!(
-            resolver.resolve(&id),
+            resolver.resolve(&ctx(), &id),
             Err(PseudonymError::KeyNotFound { .. })
         ));
     }
@@ -719,7 +877,7 @@ mod key_tests {
     fn should_report_a_missing_active_key_rather_than_inventing_one() {
         let resolver = EnvKeyResolver::with_lookup(|_| None);
         assert!(matches!(
-            resolver.active(),
+            resolver.active(&ctx()),
             Err(PseudonymError::NoActiveKey)
         ));
     }
@@ -741,7 +899,7 @@ mod key_tests {
         });
         let id = KeyId::new("k1").unwrap();
         assert!(matches!(
-            resolver.resolve(&id),
+            resolver.resolve(&ctx(), &id),
             Err(PseudonymError::MalformedKeyMaterial { .. })
         ));
     }
@@ -754,9 +912,39 @@ mod key_tests {
             "HACIENDA_PSEUDONYM_KEY_K1" => Some(hex.clone()),
             _ => None,
         });
-        let active = resolver.active().unwrap();
+        let active = resolver.active(&ctx()).unwrap();
         assert_eq!(active.id().as_str(), "k1");
         assert_eq!(active.material(), &[7u8; KEY_BYTES]);
+    }
+
+    #[test]
+    fn should_resolve_a_non_default_tenant_from_its_suffixed_environment_variable() {
+        let hex = "07".repeat(KEY_BYTES);
+        let resolver = EnvKeyResolver::with_lookup(move |name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__ACME" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__ACME" => Some(hex.clone()),
+            _ => None,
+        });
+        let ctx = TenantCtx::new(crate::tenancy::TenantId::new("acme"), ActorId::new("u"));
+        let active = resolver.active(&ctx).unwrap();
+        assert_eq!(active.id().as_str(), "k1");
+    }
+
+    #[test]
+    fn default_tenant_and_non_default_tenant_read_different_environment_variables() {
+        // A deployment migrating a single pre-existing tenant to `default` (spec §8)
+        // must keep working against its existing, unsuffixed env vars.
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        assert!(resolver.active(&ctx()).is_ok());
+        let other = TenantCtx::new(crate::tenancy::TenantId::new("acme"), ActorId::new("u"));
+        assert!(matches!(
+            resolver.active(&other),
+            Err(PseudonymError::NoActiveKey)
+        ));
     }
 
     #[test]
@@ -778,6 +966,11 @@ mod pseudonymiser_tests {
         KEY_VAR_PREFIX,
     };
     use crate::pii::types::PiiCategory;
+    use crate::tenancy::{ActorId, TenantCtx};
+
+    fn ctx() -> TenantCtx {
+        TenantCtx::default_tenant(ActorId::new("test"))
+    }
 
     /// A resolver holding `k1` and `k2` with distinct material, active id as given.
     fn resolver(active: &'static str) -> EnvKeyResolver {
@@ -795,7 +988,7 @@ mod pseudonymiser_tests {
 
     fn built(active: &'static str, retired: &[&str]) -> Pseudonymiser {
         let retired: Vec<KeyId> = retired.iter().map(|r| k(r)).collect();
-        Pseudonymiser::new(&resolver(active), &retired).unwrap()
+        Pseudonymiser::new(&ctx(), &resolver(active), &retired).unwrap()
     }
 
     #[test]
@@ -882,6 +1075,7 @@ mod pseudonymiser_tests {
             .token(&PiiCategory::Email, "a@b.io")
             .unwrap();
         let impostor = Pseudonymiser::new(
+            &ctx(),
             &EnvKeyResolver::with_lookup(|name| match name {
                 ACTIVE_KEY_VAR => Some("k1".to_string()),
                 "HACIENDA_PSEUDONYM_KEY_K1" => Some("5c".repeat(KEY_BYTES)),
@@ -1048,7 +1242,7 @@ mod pseudonymiser_tests {
     fn should_fail_to_build_when_no_active_key_is_configured() {
         let empty = EnvKeyResolver::with_lookup(|_| None);
         assert!(matches!(
-            Pseudonymiser::new(&empty, &[]),
+            Pseudonymiser::new(&ctx(), &empty, &[]),
             Err(PseudonymError::NoActiveKey)
         ));
     }
@@ -1058,9 +1252,44 @@ mod pseudonymiser_tests {
         // Starting up with an unreadable retired key would mean discovering the corpus is
         // partly irreversible only when someone exercises a right of access.
         assert!(matches!(
-            Pseudonymiser::new(&resolver("k1"), &[k("gone")]),
+            Pseudonymiser::new(&ctx(), &resolver("k1"), &[k("gone")]),
             Err(PseudonymError::KeyNotFound { .. })
         ));
+    }
+
+    #[test]
+    fn two_tenants_admitted_from_the_same_env_resolver_get_independent_keys() {
+        // Registry-level analogue of S1 spec §9's
+        // `two_tenants_same_value_get_different_tokens`: two tenants pointed at the
+        // same resolver still end up with distinct key material, because each supplies
+        // its own suffixed env vars.
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_A" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_A" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_B" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_B" => Some("a9".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let ctx_a = TenantCtx::new(crate::tenancy::TenantId::new("tenant_a"), ActorId::new("u"));
+        let ctx_b = TenantCtx::new(crate::tenancy::TenantId::new("tenant_b"), ActorId::new("u"));
+        registry.admit(&ctx_a, &resolver, None, &[]).unwrap();
+        registry.admit(&ctx_b, &resolver, None, &[]).unwrap();
+
+        let a = registry.get(&ctx_a.tenant).unwrap();
+        let b = registry.get(&ctx_b.tenant).unwrap();
+        assert_ne!(
+            a.token(&PiiCategory::Email, "same@value.io").unwrap(),
+            b.token(&PiiCategory::Email, "same@value.io").unwrap()
+        );
+    }
+
+    #[test]
+    fn registry_get_is_none_for_a_tenant_that_was_never_admitted() {
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let unknown = crate::tenancy::TenantId::new("ghost");
+        assert!(registry.get(&unknown).is_none());
+        assert!(!registry.contains(&unknown));
     }
 
     #[test]

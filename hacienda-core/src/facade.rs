@@ -13,6 +13,7 @@ use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineR
 use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionError};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
+use crate::tenancy::{ActorId, TenantCtx};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
@@ -173,9 +174,14 @@ impl HaciendaFacade {
             .map(KeyId::new)
             .transpose()
             .map_err(key_error)?;
+        // S1 (tenancy) has not yet been threaded through the facade's PII pipeline — this
+        // constructor keeps today's single-tenant behavior exactly, resolving under the
+        // default tenant. A per-tenant pipeline is a larger change than the `KeyResolver`
+        // signature update alone (see the Vague 2 plan's S1 task #6 note).
+        let ctx = TenantCtx::default_tenant(ActorId::new("facade"));
         let pseudonymiser = match configured {
-            Some(id) => Pseudonymiser::with_active(resolver, id, retired),
-            None => Pseudonymiser::new(resolver, retired),
+            Some(id) => Pseudonymiser::with_active(&ctx, resolver, id, retired),
+            None => Pseudonymiser::new(&ctx, resolver, retired),
         }
         .map_err(key_error)?;
         Self::build(config, Some(Arc::new(pseudonymiser)), None, None, None)
@@ -1522,7 +1528,8 @@ mod tests {
         assert!(content.contains("[EMAIL:k1:"), "{content}");
 
         // The whole point of the mode: the value is recoverable by a key holder.
-        let pseudonymiser = Pseudonymiser::new(&key_resolver(), &[]).unwrap();
+        let ctx = TenantCtx::default_tenant(ActorId::new("test"));
+        let pseudonymiser = Pseudonymiser::new(&ctx, &key_resolver(), &[]).unwrap();
         assert_eq!(
             pseudonymiser.reveal(token_in(content)).unwrap(),
             "bob@example.com"
