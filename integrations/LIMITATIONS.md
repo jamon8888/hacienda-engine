@@ -54,10 +54,13 @@ in `hacienda-core/src/facade.rs`. No wrapper needed in this package.
 
 Verified end-to-end against a live `hacienda serve` instance (both languages) —
 `push_documents` → `HaciendaRetriever.invoke()` round-trips real content in both the
-no-embeddings and supplied-embeddings paths. Operational details below were all
-confirmed live, not assumed from reading the Rust source alone — two of them
-(`RetrieveMode`'s exact wire values, and the `embedding_dim: 0` requirement) turned
-out different from what the source comments alone suggested.
+no-embeddings and supplied-embeddings paths. **Both live round trips used
+`mode="vector"` with a manually-supplied `query_vector`**, not the retriever's
+`"fulltext"` default — the live server was the in-memory `RagStore` backend, which
+(see below) rejects `"fulltext"`. Operational details below were all confirmed live,
+not assumed from reading the Rust source alone — two of them (`RetrieveMode`'s exact
+wire values, and the `embedding_dim: 0` requirement) turned out different from what
+the source comments alone suggested.
 
 - **`RetrieveMode`'s wire values have no underscore.** `#[serde(rename_all =
   "lowercase")]` on `hacienda_rag::RetrieveMode` — the values are `"vector"`

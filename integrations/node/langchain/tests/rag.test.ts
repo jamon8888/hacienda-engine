@@ -1,25 +1,34 @@
 import { describe, it, expect, vi } from "vitest";
 import { Document } from "@langchain/core/documents";
-import { HaciendaApiError } from "@hacienda-engine/sdk";
+import { HaciendaApiError, type HaciendaClient } from "@hacienda-engine/sdk";
 import { HaciendaLoaderError } from "../src/loader.js";
 import { HaciendaRetriever, pushDocuments } from "../src/rag.js";
 
+type UpsertCall = [collection: string, body: { document: Record<string, unknown>; chunks?: unknown }];
+type RetrieveCall = [collection: string, body: Record<string, unknown>];
+
+/**
+ * A minimal stand-in for `HaciendaClient` exposing only the `rag` namespace these
+ * tests exercise. Cast through `unknown` (not `never`) at call sites — `never` would
+ * silently accept a fake shaped nothing like the real client, `unknown` still forces
+ * an explicit, visible cast.
+ */
 function fakeRagClient(opts: {
   upsertResponse?: unknown;
   retrieveResponse?: unknown;
   error?: Error;
 } = {}) {
-  const upsertCalls: unknown[] = [];
-  const retrieveCalls: unknown[] = [];
+  const upsertCalls: UpsertCall[] = [];
+  const retrieveCalls: RetrieveCall[] = [];
   return {
     rag: {
       upsertDocument: vi.fn(async (collection: string, body: unknown) => {
-        upsertCalls.push([collection, body]);
+        upsertCalls.push([collection, body as UpsertCall[1]]);
         if (opts.error) throw opts.error;
         return opts.upsertResponse;
       }),
       retrieve: vi.fn(async (collection: string, body: unknown) => {
-        retrieveCalls.push([collection, body]);
+        retrieveCalls.push([collection, body as RetrieveCall[1]]);
         if (opts.error) throw opts.error;
         return opts.retrieveResponse;
       }),
@@ -29,6 +38,10 @@ function fakeRagClient(opts: {
   };
 }
 
+function asClient(fake: ReturnType<typeof fakeRagClient>): HaciendaClient {
+  return fake as unknown as HaciendaClient;
+}
+
 describe("pushDocuments", () => {
   it("sends full_text and metadata without chunks by default", async () => {
     const client = fakeRagClient({ upsertResponse: { document_id: "doc-1" } });
@@ -36,10 +49,11 @@ describe("pushDocuments", () => {
       new Document({ pageContent: "hello redacted", metadata: { source: "a.txt", pii_entities_found: 0 } }),
     ];
 
-    const ids = await pushDocuments("my-collection", docs, { client: client as never });
+    const ids = await pushDocuments("my-collection", docs, { client: asClient(client) });
 
     expect(ids).toEqual(["doc-1"]);
-    const [collection, body] = client.upsertCalls[0] as [string, { document: Record<string, unknown>; chunks?: unknown }];
+    expect(client.upsertCalls).toHaveLength(1);
+    const [collection, body] = client.upsertCalls[0];
     expect(collection).toBe("my-collection");
     expect(body.document.full_text).toBe("hello redacted");
     expect(body.document.source_uri).toBe("a.txt");
@@ -51,9 +65,10 @@ describe("pushDocuments", () => {
     const client = fakeRagClient({ upsertResponse: { document_id: "doc-2" } });
     const docs = [new Document({ pageContent: "vectorizable text" })];
 
-    await pushDocuments("coll", docs, { embeddings: [[0.1, 0.2, 0.3]], client: client as never });
+    await pushDocuments("coll", docs, { embeddings: [[0.1, 0.2, 0.3]], client: asClient(client) });
 
-    const [, body] = client.upsertCalls[0] as [string, { chunks: unknown }];
+    expect(client.upsertCalls).toHaveLength(1);
+    const [, body] = client.upsertCalls[0];
     expect(body.chunks).toEqual([{ ordinal: 0, content: "vectorizable text", embedding: [0.1, 0.2, 0.3] }]);
   });
 
@@ -62,7 +77,7 @@ describe("pushDocuments", () => {
     const docs = [new Document({ pageContent: "a" }), new Document({ pageContent: "b" })];
 
     await expect(
-      pushDocuments("coll", docs, { embeddings: [[0.1]], client: client as never }),
+      pushDocuments("coll", docs, { embeddings: [[0.1]], client: asClient(client) }),
     ).rejects.toThrow(/same length/i);
   });
 
@@ -70,7 +85,7 @@ describe("pushDocuments", () => {
     const client = fakeRagClient({ upsertResponse: { document_id: "doc-x" } });
     const docs = [new Document({ pageContent: "a" }), new Document({ pageContent: "b" })];
 
-    const ids = await pushDocuments("coll", docs, { client: client as never });
+    const ids = await pushDocuments("coll", docs, { client: asClient(client) });
 
     expect(ids).toEqual(["doc-x", "doc-x"]);
     expect(client.upsertCalls).toHaveLength(2);
@@ -79,7 +94,7 @@ describe("pushDocuments", () => {
   it("wraps API errors", async () => {
     const client = fakeRagClient({ error: new HaciendaApiError(403, "forbidden", "no rag:write") });
     await expect(
-      pushDocuments("coll", [new Document({ pageContent: "x" })], { client: client as never }),
+      pushDocuments("coll", [new Document({ pageContent: "x" })], { client: asClient(client) }),
     ).rejects.toThrow(HaciendaLoaderError);
   });
 });
@@ -102,18 +117,20 @@ describe("HaciendaRetriever", () => {
         primary_latency_ms: 3,
       },
     });
-    const retriever = new HaciendaRetriever({ collection: "my-collection", client: client as never });
+    const retriever = new HaciendaRetriever({ collection: "my-collection", client: asClient(client) });
 
     const docs = await retriever.invoke("acme contract");
 
     expect(docs).toHaveLength(1);
-    expect(docs[0].pageContent).toBe("Contract text");
-    expect(docs[0].metadata.score).toBe(0.87);
-    expect(docs[0].metadata.document_id).toBe("doc-1");
-    expect(docs[0].metadata.chunk_id).toBe("doc-1:0");
-    expect(docs[0].metadata.heading).toBe("Intro");
+    const [doc] = docs;
+    expect(doc.pageContent).toBe("Contract text");
+    expect(doc.metadata.score).toBe(0.87);
+    expect(doc.metadata.document_id).toBe("doc-1");
+    expect(doc.metadata.chunk_id).toBe("doc-1:0");
+    expect(doc.metadata.heading).toBe("Intro");
 
-    const [collection, body] = client.retrieveCalls[0] as [string, Record<string, unknown>];
+    expect(client.retrieveCalls).toHaveLength(1);
+    const [collection, body] = client.retrieveCalls[0];
     expect(collection).toBe("my-collection");
     expect(body.mode).toBe("fulltext");
     expect(body.query_text).toBe("acme contract");
@@ -123,7 +140,7 @@ describe("HaciendaRetriever", () => {
 
   it("returns no documents for an empty result", async () => {
     const client = fakeRagClient({ retrieveResponse: { mode: "vector", chunks: [], primary_latency_ms: 1 } });
-    const retriever = new HaciendaRetriever({ collection: "coll", client: client as never });
+    const retriever = new HaciendaRetriever({ collection: "coll", client: asClient(client) });
 
     const docs = await retriever.invoke("nothing matches");
 
@@ -136,12 +153,13 @@ describe("HaciendaRetriever", () => {
       collection: "coll",
       mode: "vector",
       topK: 3,
-      client: client as never,
+      client: asClient(client),
     });
 
     await retriever.invoke("q");
 
-    const [, body] = client.retrieveCalls[0] as [string, Record<string, unknown>];
+    expect(client.retrieveCalls).toHaveLength(1);
+    const [, body] = client.retrieveCalls[0];
     expect(body.mode).toBe("vector");
     expect(body.top_k).toBe(3);
   });
@@ -151,20 +169,29 @@ describe("HaciendaRetriever", () => {
     const retriever = new HaciendaRetriever({
       collection: "coll",
       mode: "vector",
-      client: client as never,
+      client: asClient(client),
       retrieveExtra: { query_vector: [0.1, 0.2] },
     });
 
     await retriever.invoke("q");
 
-    const [, body] = client.retrieveCalls[0] as [string, Record<string, unknown>];
+    expect(client.retrieveCalls).toHaveLength(1);
+    const [, body] = client.retrieveCalls[0];
     expect(body.query_vector).toEqual([0.1, 0.2]);
   });
 
   it("wraps API errors", async () => {
     const client = fakeRagClient({ error: new HaciendaApiError(400, "invalid_request", "bad query") });
-    const retriever = new HaciendaRetriever({ collection: "coll", client: client as never });
+    const retriever = new HaciendaRetriever({ collection: "coll", client: asClient(client) });
 
     await expect(retriever.invoke("q")).rejects.toThrow(HaciendaLoaderError);
+  });
+
+  it("wraps a malformed response (non-array chunks) as HaciendaLoaderError", async () => {
+    const client = fakeRagClient({ retrieveResponse: { mode: "vector", chunks: "not-an-array" } });
+    const retriever = new HaciendaRetriever({ collection: "coll", client: asClient(client) });
+
+    await expect(retriever.invoke("q")).rejects.toThrow(HaciendaLoaderError);
+    await expect(retriever.invoke("q")).rejects.toThrow(/malformed/i);
   });
 });

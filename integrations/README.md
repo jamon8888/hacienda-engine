@@ -4,8 +4,10 @@ First-party integrations that connect **hacienda-engine's redacting, audited doc
 pipeline** to popular AI and data frameworks. Modeled on
 [xberg's own `integrations/` folder](https://github.com/xberg-io/xberg/tree/main/integrations)
 (hacienda's `xberg` dependency — see the root `Cargo.toml`) — same layout, same
-per-language conventions — but every adapter here calls `hacienda-api`
-(`POST /v1/documents`, `/v1/pii/*`, `/v1/rag/*`) instead of raw xberg extraction.
+per-language conventions — but every **implemented** adapter here calls
+`hacienda-api` (`POST /v1/documents`, `/v1/pii/*`, `/v1/rag/*`) instead of raw xberg
+extraction. ("Implemented" vs. "Planned" is tracked in the status table below —
+planned packages are manifests/READMEs only, no adapter code yet.)
 
 ## Why this is not just "xberg's integrations, renamed"
 
@@ -15,8 +17,8 @@ store or LLM context, with a cryptographically verifiable audit trail of what wa
 redacted and when**." `POST /v1/documents` always returns already-redacted content
 (per the caller's configured PII pipeline — see `hacienda-api/src/handlers/documents.rs`),
 alongside the detected `entities` (category, span, confidence — never raw text unless
-`pii:reveal` is granted) and the batch's `audit_chain_tip`. Every adapter in this folder
-surfaces that as first-class metadata on whatever object its host framework uses
+`pii:reveal` is granted) and the batch's `audit_chain_tip`. Every implemented adapter
+in this folder surfaces that as first-class metadata on whatever object its host framework uses
 (LangChain `Document.metadata`, etc.) rather than discarding it, so a chunk sitting in a
 vector store can always be traced back to the audited extraction that produced it.
 
@@ -47,11 +49,13 @@ place, so it doesn't need restating per package.
   owning its own lockfile — not uv-workspace members, to avoid cross-framework resolver
   conflicts (same reasoning as xberg's `integrations/README.md`). Work on one with
   `cd integrations/python/<name> && uv sync --all-extras`.
-- **Node** packages are standalone TypeScript packages. For the implemented ones
-  (`node/langchain`): `npm ci && npm run build`. Planned/scaffold Node packages
-  (`node/n8n-nodes-hacienda`) deliberately have no `build` script yet — see the
-  status table above — so `turbo run build` at the repo root skips them rather than
-  failing.
+- **Node** packages are root npm workspace members (`integrations/node/*` in the root
+  `package.json`'s `workspaces` array) — there is no per-package lockfile, only the
+  root `package-lock.json`. Install and build from the repo root:
+  `npm ci && npm run build --workspace=@hacienda-engine/langchain-hacienda`. Planned/
+  scaffold Node packages (`node/n8n-nodes-hacienda`) deliberately have no `build`
+  script yet — see the status table above — so `turbo run build` at the repo root
+  skips them rather than failing.
 - **Java** (`java/spring-ai`) is a Maven project.
 
 ## Dependencies

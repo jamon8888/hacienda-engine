@@ -185,22 +185,33 @@ export class HaciendaRetriever extends BaseRetriever {
       ...this.retrieveExtra,
     };
 
-    let result: { chunks?: RetrievedChunk[] } | undefined;
+    let chunks: RetrievedChunk[];
     try {
       // `retrieve`'s TS type is `unknown` (its OpenAPI response schema is empty —
       // see `../../LIMITATIONS.md`'s "bug found and fixed" note about the Python SDK's
       // equivalent break; openapi-fetch itself still returns the real body here, just
-      // weakly typed) — cast after a runtime shape check, not blindly.
+      // weakly typed). Validate the one field this method reads (`chunks` must be an
+      // array, or absent) before touching it, rather than casting straight to the
+      // expected shape — a malformed backend response should surface as a
+      // HaciendaLoaderError, not a native TypeError from `.map()` on a non-array.
       const raw = await client.rag.retrieve(this.collection, body);
-      result = raw as { chunks?: RetrievedChunk[] } | undefined;
+      const rawChunks = (raw as { chunks?: unknown } | undefined)?.chunks;
+      if (rawChunks !== undefined && !Array.isArray(rawChunks)) {
+        throw new HaciendaLoaderError(
+          `hacienda-engine returned a malformed retrieve response: 'chunks' was ${typeof rawChunks}, expected an array.`,
+        );
+      }
+      chunks = (rawChunks as RetrievedChunk[] | undefined) ?? [];
     } catch (error) {
+      if (error instanceof HaciendaLoaderError) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       throw new HaciendaLoaderError(`hacienda-engine request failed: ${message}`, {
         cause: error,
       });
     }
 
-    const chunks = result?.chunks ?? [];
     return chunks.map((chunk) => {
       const metadata: Record<string, unknown> = {
         score: chunk.score,
