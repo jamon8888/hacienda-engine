@@ -22,6 +22,17 @@ for (const entity of result.entities) {
 Every method is a `Promise` — there is no separate sync client the way the Python
 package has one, since JavaScript has no synchronous HTTP call to wrap.
 
+## Async jobs
+
+`documents.processDocumentsBackground(...)` resolves with a job id immediately; poll it
+yourself via `jobs.getJobResult(...)`, or use `extractAndWait(...)` / `waitForJob(...)` /
+`waitForJobs(...)` on the client, which poll for you and throw `JobTimeoutError` if the
+job hasn't finished within `timeoutMs`:
+
+```ts
+const result = await client.extractAndWait(body, { pollIntervalMs: 1000, timeoutMs: 300_000 });
+```
+
 ## Retries
 
 The client retries a request on `429`, `502`, `503`, and `504` (configurable via

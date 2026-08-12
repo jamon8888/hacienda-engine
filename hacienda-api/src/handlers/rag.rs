@@ -3,9 +3,12 @@
 //! Create/get/delete a collection, upsert a document, retrieve, list collections,
 //! list a collection's documents, and kick off (plus poll) an async
 //! `migrate-embeddings` job — every method `RagStore`
-//! (crates/hacienda-rag/src/store.rs) exposes now has a route. All routes require
-//! `documents:process` and are 400 (`ApiError::invalid_request`) when no store is
-//! configured (`ApiState::rag_store` is `None`).
+//! (crates/hacienda-rag/src/store.rs) exposes now has a route. `reindex_document`
+//! is the one route with no dedicated `RagStore` method: it composes
+//! `get_document_chunks` and `upsert_document`, both of which already have routes
+//! of their own. All routes require `documents:process` and are 400
+//! (`ApiError::invalid_request`) when no store is configured (`ApiState::rag_store`
+//! is `None`).
 
 use axum::{
     extract::{Path, State},
@@ -13,7 +16,7 @@ use axum::{
     Json,
 };
 use hacienda_core::jobs::JobStatus;
-use hacienda_rag::{CollectionSpec, RetrieveOutput, RetrieveQuery};
+use hacienda_rag::{CollectionSpec, DocumentId, RetrieveOutput, RetrieveQuery};
 use std::sync::Arc;
 
 use crate::{
@@ -192,6 +195,76 @@ pub async fn upsert_document(
         StatusCode::CREATED,
         Json(UpsertDocumentResponse { document_id }),
     ))
+}
+
+/// `POST /v1/rag/collections/{name}/documents/{id}/reindex` — re-derive an
+/// existing document's chunks from its already-stored `full_text`, without the
+/// caller resubmitting content.
+///
+/// Hacienda-only addition closing the xberg-sdks `reindex_rag_document` gap
+/// (platform-parity design spec §3.1/§4.1). No new `RagStore` method needed:
+/// this reuses `get_document_chunks` (fetch) and the same `chunk_full_text`
+/// path `upsert_document` already runs when `chunks` is omitted, then
+/// re-upserts under the document's own identity.
+///
+/// Requires the document to have been upserted with `external_id` set.
+/// `RagStore::upsert_document`'s identity rule is "match by `external_id` when
+/// present, otherwise insert as a new document" — silently re-upserting a
+/// record that has no `external_id` would not update it in place, it would
+/// create a duplicate. Returns 400 for that case rather than doing that
+/// silently.
+#[utoipa::path(
+    post,
+    path = "/v1/rag/collections/{name}/documents/{id}/reindex",
+    tag = "rag",
+    operation_id = "reindexDocument",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "Collection name"),
+        ("id" = String, Path, description = "Document id")
+    ),
+    responses(
+        (status = 200, description = "Document re-chunked and re-upserted", body = UpsertDocumentResponse),
+        (status = 400, description = "RAG is not enabled on this server, or the document has no external_id to reindex against"),
+        (status = 404, description = "No such collection or document")
+    )
+)]
+pub async fn reindex_document(
+    State(state): State<ApiState>,
+    Path((name, id)): Path<(String, String)>,
+) -> Result<Json<UpsertDocumentResponse>, ApiError> {
+    let store = require_store(&state)?;
+    let document_id = DocumentId(id);
+
+    let (document, _existing_chunks) = store
+        .get_document_chunks(&name, &document_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(ApiError::not_found)?;
+
+    if document.external_id.is_none() {
+        return Err(ApiError::invalid_request(
+            "this document has no external_id, so it cannot be reindexed in place: \
+             RagStore::upsert_document matches existing documents by external_id, and \
+             re-upserting one without it would create a duplicate rather than update it.",
+        ));
+    }
+
+    let full_text = document.full_text.clone();
+    let chunks = tokio::task::spawn_blocking(move || {
+        let config = hacienda_rag::ChunkingConfig::default();
+        hacienda_rag::chunk_full_text(&full_text, &config)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(ApiError::from)?;
+
+    let document_id = store
+        .upsert_document(&name, &document, &chunks)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(UpsertDocumentResponse { document_id }))
 }
 
 /// `POST /v1/rag/collections/{name}/retrieve`.

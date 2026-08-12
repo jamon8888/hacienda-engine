@@ -96,6 +96,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SDK parity pass against `xberg-sdks`.** Both `sdks/python` and `sdks/typescript` had
+  fallen behind hacienda-api's own route table: the audit API was restored to 5 endpoints
+  (this changelog's "full 5-endpoint audit API is live again" entry, below) but only
+  `get_audit`/`verify_audit` ever got hand-wrapper methods, and `sdks/typescript` never got a
+  wrapper for the RAG streaming-answer route at all. Closed both gaps and added the last
+  well-grounded xberg-sdks operation hacienda didn't have a route for:
+  - `audit.audit_entries()` / `audit.getAuditEntries()`, `audit.audit_seals()` /
+    `audit.getAuditSeals()`, `audit.audit_export()` / `audit.exportAudit()`,
+    `audit.audit_tip()` / `audit.getAuditTip()` — wrapping `GET /v1/audit/{entries,seals,export,tip}`
+    in both SDKs.
+  - `rag.answer()` on `sdks/typescript` (Python already had it) — wrapping the streaming
+    `POST /v1/rag/collections/{name}/answer`. Neither client parses the `text/event-stream`
+    body into typed SSE events yet; both hand back the raw response, same limitation on both
+    sides now.
+  - `extract_and_wait` / `wait_for_job` / `wait_for_jobs` (Python) and `extractAndWait` /
+    `waitForJob` / `waitForJobs` (TypeScript) — client-side polling convenience over the
+    existing `/v1/jobs/*` endpoints, mirroring xberg-sdks' `extract_and_wait`/`wait_for_job(s)`.
+    No server changes; raises/throws `JobTimeoutError` if the job hasn't reached a terminal
+    state within the configurable timeout.
+  - **`POST /v1/rag/collections/{name}/documents/{id}/reindex`** (new route) plus
+    `rag.reindex_document()` / `rag.reindexDocument()` in both SDKs — closes the
+    `reindex_rag_document` gap noted in the platform-parity design spec §3.1. Re-derives a
+    document's chunks from its already-stored `full_text` (same `chunk_full_text` path
+    `upsert_document` uses when `chunks` is omitted) and re-upserts under the document's own
+    identity; no new `RagStore` method needed. Refuses (400) to reindex a document with no
+    `external_id`, since `RagStore::upsert_document` matches existing documents by
+    `external_id` — reindexing one without it would silently create a duplicate rather than
+    update it in place.
+
+  Deliberately **not** built as part of this pass: `GET/PUT /v1/rag/config` (xberg-sdks has
+  a per-tenant RAG config group, but hacienda has no tenant concept anywhere in its auth
+  model to hang per-tenant config off of — building it would mean inventing tenant scoping
+  as a side effect of SDK parity work, not doing SDK parity work) and Go/Dart SDK packages
+  or the `target: "device"` axis (out of scope; see `sdks/README.md`'s `Target` section and
+  the platform-parity design spec §8's language-scope note).
 - **Server-side chunking for RAG document upsert.** `POST /v1/rag/collections/{name}/documents`
   previously required the caller to submit pre-chunked, pre-embedded `chunks` — `full_text` was
   stored for search only, never chunked. When `chunks` is omitted, the server now splits
