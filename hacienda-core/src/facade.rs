@@ -340,7 +340,13 @@ impl HaciendaFacade {
         })?;
         let pair = crate::auth::keys::generate_key()?;
         let key = store
-            .create(&pair.key_hash, &pair.lookup_hash, owner, capabilities)
+            .create(
+                &caller.tenant_ctx(),
+                &pair.key_hash,
+                &pair.lookup_hash,
+                owner,
+                capabilities,
+            )
             .await?;
         Ok((pair, key))
     }
@@ -363,7 +369,7 @@ impl HaciendaFacade {
         let store = self.api_key_store.as_ref().ok_or_else(|| {
             crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
         })?;
-        store.revoke(key_id).await?;
+        store.revoke(&caller.tenant_ctx(), key_id).await?;
         Ok(())
     }
 
@@ -2751,6 +2757,48 @@ mod tests {
         assert!(
             resolved_after_revoke.is_none(),
             "a revoked key must not authenticate"
+        );
+    }
+
+    /// S1: a caller in one tenant must not be able to revoke a key issued under a
+    /// different tenant, even though both hold `auth:manage` — closes the gap where
+    /// `ApiKeyStore::revoke` used to take only an id, with no tenant (or owner) check at
+    /// all. The revoke call itself must not error (same idempotent-no-op contract as
+    /// revoking an unknown id — see `ApiKeyStore::revoke`'s doc comment), and the key
+    /// must keep authenticating afterwards.
+    #[tokio::test]
+    async fn a_caller_cannot_revoke_a_different_tenants_key() {
+        let (facade, store) = facade_with_key_store();
+        let acme_ctx = AuthContext::with_tenant(
+            "acme-admin",
+            crate::tenancy::TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([Capability::AuthManage]),
+        );
+        let acme_caller = Caller::Principal(&acme_ctx);
+
+        let (pair, record) = facade
+            .issue_key_with_auth(acme_caller, "owner-1", vec![Capability::DocumentsProcess])
+            .await
+            .expect("issue must succeed");
+
+        let globex_ctx = AuthContext::with_tenant(
+            "globex-admin",
+            crate::tenancy::TenantId::new("globex"),
+            crate::auth::CapabilitySet::new([Capability::AuthManage]),
+        );
+        let globex_caller = Caller::Principal(&globex_ctx);
+
+        facade
+            .revoke_key_with_auth(globex_caller, record.id)
+            .await
+            .expect("cross-tenant revoke must not error — same no-op contract as an unknown id");
+
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(
+            Arc::clone(&store) as Arc<dyn ApiKeyStore>
+        );
+        assert!(
+            resolver.resolve(&pair.raw_key).await.unwrap().is_some(),
+            "a different tenant's revoke call must not revoke this key"
         );
     }
 

@@ -7,6 +7,7 @@
 
 use crate::auth::keys::ApiKeyError;
 use crate::auth::{ApiKey, ApiKeyStore, Capability};
+use crate::tenancy::TenantCtx;
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::PgPool;
@@ -37,6 +38,7 @@ fn map_sqlx_err(e: sqlx::Error) -> ApiKeyError {
 impl ApiKeyStore for PostgresApiKeyStore {
     async fn create(
         &self,
+        ctx: &TenantCtx,
         key_hash: &str,
         lookup_hash: &str,
         owner: &str,
@@ -44,17 +46,19 @@ impl ApiKeyStore for PostgresApiKeyStore {
     ) -> Result<ApiKey, ApiKeyError> {
         let capabilities_json = serde_json::to_value(&capabilities)
             .map_err(|e| ApiKeyError::Verification(e.to_string()))?;
+        let tenant_id = ctx.tenant.to_string();
 
         let row = sqlx::query!(
             r#"
-            INSERT INTO api_keys (key_hash, lookup_hash, owner, capabilities)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at
+            INSERT INTO api_keys (key_hash, lookup_hash, owner, capabilities, tenant_id)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at, tenant_id
             "#,
             key_hash,
             lookup_hash,
             owner,
-            capabilities_json
+            capabilities_json,
+            tenant_id
         )
         .fetch_one(&self.pool)
         .await
@@ -68,13 +72,14 @@ impl ApiKeyStore for PostgresApiKeyStore {
             capabilities: row.capabilities,
             created_at: row.created_at,
             revoked_at: row.revoked_at,
+            tenant_id: row.tenant_id,
         })
     }
 
     async fn get_by_lookup_hash(&self, lookup_hash: &str) -> Result<Option<ApiKey>, ApiKeyError> {
         let row = sqlx::query!(
             r#"
-            SELECT id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at
+            SELECT id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at, tenant_id
             FROM api_keys
             WHERE lookup_hash = $1
             "#,
@@ -92,27 +97,36 @@ impl ApiKeyStore for PostgresApiKeyStore {
             capabilities: row.capabilities,
             created_at: row.created_at,
             revoked_at: row.revoked_at,
+            tenant_id: row.tenant_id,
         }))
     }
 
-    async fn revoke(&self, id: Uuid) -> Result<(), ApiKeyError> {
+    async fn revoke(&self, ctx: &TenantCtx, id: Uuid) -> Result<(), ApiKeyError> {
         let now = Utc::now();
-        sqlx::query!("UPDATE api_keys SET revoked_at = $1 WHERE id = $2", now, id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_err)?;
+        let tenant_id = ctx.tenant.to_string();
+        sqlx::query!(
+            "UPDATE api_keys SET revoked_at = $1 WHERE id = $2 AND tenant_id = $3",
+            now,
+            id,
+            tenant_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
         Ok(())
     }
 
-    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, ApiKeyError> {
+    async fn list(&self, ctx: &TenantCtx, owner: &str) -> Result<Vec<ApiKey>, ApiKeyError> {
+        let tenant_id = ctx.tenant.to_string();
         let rows = sqlx::query!(
             r#"
-            SELECT id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at
+            SELECT id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at, tenant_id
             FROM api_keys
-            WHERE owner = $1
+            WHERE owner = $1 AND tenant_id = $2
             ORDER BY created_at DESC
             "#,
-            owner
+            owner,
+            tenant_id
         )
         .fetch_all(&self.pool)
         .await
@@ -128,6 +142,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
                 capabilities: row.capabilities,
                 created_at: row.created_at,
                 revoked_at: row.revoked_at,
+                tenant_id: row.tenant_id,
             })
             .collect())
     }
@@ -137,6 +152,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
 mod tests {
     use super::*;
     use crate::store::postgres::test_support;
+    use crate::tenancy::ActorId;
 
     // Ignored by default — shares one Postgres instance with the other postgres-feature
     // test modules (see `test_support::shared`), so needs `--test-threads=1`. Run with:
@@ -148,18 +164,23 @@ mod tests {
         PostgresApiKeyStore::new(pool)
     }
 
+    fn ctx(tenant: &str) -> TenantCtx {
+        TenantCtx::new(crate::tenancy::TenantId::new(tenant), ActorId::new("test"))
+    }
+
     #[test]
     #[ignore]
     fn should_round_trip_create_get_list_and_revoke() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            let ctx = ctx("default");
             let owner = format!("owner-{}", Uuid::new_v4());
             let key_hash = format!("hash-{}", Uuid::new_v4());
             let lookup_hash = format!("lookup-{}", Uuid::new_v4());
             let capabilities = vec![Capability::DocumentsProcess, Capability::AuditRead];
 
             let created = store
-                .create(&key_hash, &lookup_hash, &owner, capabilities.clone())
+                .create(&ctx, &key_hash, &lookup_hash, &owner, capabilities.clone())
                 .await
                 .expect("create failed");
             assert_eq!(created.owner, owner);
@@ -174,16 +195,62 @@ mod tests {
                 .expect("key must exist");
             assert_eq!(by_lookup_hash.id, created.id);
 
-            let listed = store.list(&owner).await.expect("list failed");
+            let listed = store.list(&ctx, &owner).await.expect("list failed");
             assert!(listed.iter().any(|k| k.id == created.id));
 
-            store.revoke(created.id).await.expect("revoke failed");
+            store.revoke(&ctx, created.id).await.expect("revoke failed");
             let revoked = store
                 .get_by_lookup_hash(&lookup_hash)
                 .await
                 .expect("get_by_lookup_hash failed")
                 .expect("key must still exist after revoke");
             assert!(revoked.revoked_at.is_some());
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn should_not_revoke_or_list_another_tenants_key() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
+            let owner = format!("owner-{}", Uuid::new_v4());
+            let key_hash = format!("hash-{}", Uuid::new_v4());
+            let lookup_hash = format!("lookup-{}", Uuid::new_v4());
+
+            let created = store
+                .create(
+                    &ctx("acme"),
+                    &key_hash,
+                    &lookup_hash,
+                    &owner,
+                    vec![Capability::DocumentsProcess],
+                )
+                .await
+                .expect("create failed");
+
+            let other_tenant = ctx("globex");
+            let listed = store
+                .list(&other_tenant, &owner)
+                .await
+                .expect("list failed");
+            assert!(
+                !listed.iter().any(|k| k.id == created.id),
+                "a key must not be listable from a different tenant"
+            );
+
+            store
+                .revoke(&other_tenant, created.id)
+                .await
+                .expect("revoke must not error even across tenants");
+            let unrevoked = store
+                .get_by_lookup_hash(&lookup_hash)
+                .await
+                .expect("get_by_lookup_hash failed")
+                .expect("key must still exist");
+            assert!(
+                unrevoked.revoked_at.is_none(),
+                "a different tenant's revoke call must not revoke this key"
+            );
         });
     }
 }
