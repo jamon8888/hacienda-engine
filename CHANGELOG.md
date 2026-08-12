@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`xberg` dependency no longer fails to fetch at all.** Every release tag from
+  `v1.0.2` (the pin this repo used) through at least `v1.0.14` has a `.gitmodules`
+  gitlink for its `test_documents` submodule (xberg's own test fixtures — nothing
+  this repo calls touches it) pointing at a commit that no longer resolves in
+  `xberg-io/test_documents`: that repo's history has been rewritten since each tag
+  was cut, orphaning every historical pin. Cargo populates every submodule of a git
+  dependency unconditionally before building anything from it, with no per-submodule
+  opt-out, so `cargo build`/`cargo test`/CI failed outright on a clean checkout —
+  confirmed on GitHub Actions' own runners, not a local proxy/cache artifact.
+  Re-pinned `xberg` to an exact commit SHA on its unreleased `main` branch
+  (`9178ad3987ede9aab59d0ffac7388df2b3183244`, xberg `v1.1.0`), the one ref currently
+  known to fetch cleanly, in both `Cargo.toml` (native) and `hacienda-core/Cargo.toml`
+  (wasm32 target) — see the comment on the workspace root's `xberg` entry for the full
+  investigation and how to re-pin to a proper release tag once xberg-io fixes this
+  upstream. Verified no breaking API changes crossing `v1.0.2` → `v1.1.0`: full
+  workspace build, `cargo test --workspace --features "ner-candle"` (366 passed, 0
+  newly failing — the 5 failures observed in one sandbox were pre-existing
+  environment artifacts: root-user permission tests and a Docker-less
+  `testcontainers` test, unrelated to this change and not expected to fail in CI's
+  non-root, Docker-enabled runners), and `cargo clippy --workspace --all-targets
+  --features "ner-candle" -D warnings` all clean.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
