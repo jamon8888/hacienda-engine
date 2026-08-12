@@ -47,7 +47,13 @@ classifiers = [
 # hacienda-sdk is this repo's own sdks/python package (PyPI: hacienda-sdk) — see
 # ../../README.md's "Dependencies" section for why adapters go through it rather than
 # calling hacienda-api directly.
-dependencies = ["langchain-core>=0.3,<1.0", "hacienda-sdk>=0.1.0,<1"]
+#
+# langchain-core floor is 1.2.22, not 0.3 — every 0.3.x release has two known CVEs
+# (path traversal in the legacy load_prompt hub-loading functions: PYSEC-2026-2193 /
+# CVE-2026-34070, fixed_in 1.2.22; PYSEC-2026-2562 / CVE-2026-26013, fixed_in 1.2.11),
+# confirmed via PyPI's per-release vulnerability data — there is no patched 0.3.x to
+# pin to instead. Flagged by Sourcery's security scan against the lockfile.
+dependencies = ["langchain-core>=1.2.22,<2", "hacienda-sdk>=0.1.0,<1"]
 
 [dependency-groups]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "pytest-cov>=5.0", "mypy>=1.11"]
