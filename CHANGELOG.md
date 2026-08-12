@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command, `cargo check --manifest-path crates/hacienda-rag/Cargo.toml
   --no-default-features --features postgres`, and a full `cargo build --workspace
   --features "ner-candle,postgres"`.
+- **`postgres-integration-tests`'s service container healthcheck no longer fails with
+  `role "root" does not exist`.** `--health-cmd pg_isready` execs inside the
+  container with no `-U`/`PGUSER`, so it defaulted to the container's exec user
+  (`root`) rather than a real Postgres role — a known GitHub Actions
+  service-container gotcha, unrelated to any application code. Fixed by making the
+  role explicit: `--health-cmd "pg_isready -U postgres"`.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
