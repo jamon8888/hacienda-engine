@@ -1,0 +1,21 @@
+{
+  "name": "@hacienda-engine/n8n-nodes-hacienda",
+  "version": "0.1.0",
+  "private": true,
+  "description": "n8n community node for hacienda-engine — PLANNED, not yet implemented. See README.md.",
+  "license": "Apache-2.0",
+  "keywords": ["n8n-community-node-package"],
+  "homepage": "https://github.com/jamon8888/hacienda-engine/tree/main/integrations/node/n8n-nodes-hacienda",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamon8888/hacienda-engine.git",
+    "directory": "integrations/node/n8n-nodes-hacienda"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "dependencies": {
+    "@hacienda-engine/sdk": "*"
+  }
+}

@@ -1,0 +1,20 @@
+[project]
+name = "txtai-hacienda"
+version = "0.1.0"
+description = "txtai pipeline for hacienda-engine — PLANNED, not yet implemented. See README.md."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "hacienda-engine", email = "contact@hacienda.dev" }]
+dependencies = ["txtai>=7.0", "hacienda-sdk>=0.1.0,<1"]
+
+[project.urls]
+Homepage = "https://github.com/jamon8888/hacienda-engine/tree/main/integrations/python/txtai"
+Repository = "https://github.com/jamon8888/hacienda-engine/tree/main/integrations/python/txtai"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+hacienda-sdk = { path = "../../../sdks/python" }

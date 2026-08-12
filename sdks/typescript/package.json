@@ -26,6 +26,7 @@
     "generate": "bash scripts/generate.sh",
     "prebuild": "npm run generate",
     "build": "tsc -p tsconfig.build.json",
+    "postbuild": "mkdir -p dist/_generated && cp src/_generated/api.d.ts dist/_generated/api.d.ts",
     "prepack": "npm run build",
     "lint": "eslint . && tsc --noEmit",
     "lint:fix": "eslint . --fix",
