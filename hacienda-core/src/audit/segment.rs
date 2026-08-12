@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::audit::chain::AuditChain;
 use crate::audit::entry::{AuditEntry, AuditEntryInput};
 use crate::audit::error::AuditError;
+use crate::tenancy::TenantId;
 
 // ── NodeId ────────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,13 @@ fn resolve_hostname() -> String {
 pub struct Segment {
     /// uuid v4 string — unique per segment, stored in the seal for reference.
     segment_id: String,
+    /// The tenant this segment belongs to (S1 spec §5: segments are named `(tenant,
+    /// node)`, not just `node`). Defaults to the pre-S1 `default` tenant via
+    /// [`open`](Self::open) — real per-tenant construction goes through
+    /// [`open_for_tenant`](Self::open_for_tenant), unused until the stores that build
+    /// `Segment`s are themselves threaded with a real `TenantCtx` (tracked separately;
+    /// see the Vague 2 plan's S1 task notes).
+    tenant_id: TenantId,
     node_id: NodeId,
     config_hash: String,
     /// Seal hash of the immediately preceding segment on this node, or `None` for the
@@ -140,8 +148,24 @@ impl Segment {
         config_hash: impl Into<String>,
         prev_seal_hash: Option<String>,
     ) -> Self {
+        Self::open_for_tenant(
+            TenantId::default_tenant(),
+            node_id,
+            config_hash,
+            prev_seal_hash,
+        )
+    }
+
+    /// As [`open`](Self::open), scoped to an explicit tenant (S1 spec §5).
+    pub fn open_for_tenant(
+        tenant_id: TenantId,
+        node_id: NodeId,
+        config_hash: impl Into<String>,
+        prev_seal_hash: Option<String>,
+    ) -> Self {
         Self::open_with_id(
             Uuid::new_v4().to_string(),
+            tenant_id,
             node_id,
             config_hash,
             prev_seal_hash,
@@ -156,6 +180,7 @@ impl Segment {
     /// mint a new uuid v4, which would not match the file the entries came from.
     pub(crate) fn open_with_id(
         segment_id: impl Into<String>,
+        tenant_id: TenantId,
         node_id: NodeId,
         config_hash: impl Into<String>,
         prev_seal_hash: Option<String>,
@@ -163,6 +188,7 @@ impl Segment {
         let config_hash = config_hash.into();
         Self {
             segment_id: segment_id.into(),
+            tenant_id,
             node_id,
             chain: AuditChain::new(config_hash.clone()),
             config_hash,
@@ -186,11 +212,13 @@ impl Segment {
         let sealed_at = Utc::now().to_rfc3339();
         let sealed_tip = self.chain.tip().to_owned();
         let entry_count = self.chain.len() as u64;
+        let tenant_id_str = self.tenant_id.as_str().to_owned();
         let node_id_str = self.node_id.as_str().to_owned();
 
         let seal_hash = compute_seal_hash(
             self.prev_seal_hash.as_deref(),
             &self.segment_id,
+            &tenant_id_str,
             &node_id_str,
             &self.config_hash,
             &sealed_tip,
@@ -201,6 +229,7 @@ impl Segment {
 
         SegmentSeal {
             segment_id: self.segment_id,
+            tenant_id: tenant_id_str,
             node_id: node_id_str,
             config_hash: self.config_hash,
             prev_seal_hash: self.prev_seal_hash,
@@ -220,6 +249,11 @@ impl Segment {
     /// The node that owns this segment.
     pub fn node_id(&self) -> &NodeId {
         &self.node_id
+    }
+
+    /// The tenant this segment belongs to.
+    pub fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
     }
 
     /// Chain hash of the most recent entry, or `GENESIS_HASH` when empty.
@@ -292,6 +326,10 @@ impl Segment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentSeal {
     pub segment_id: String,
+    /// The tenant this segment belongs to (S1 spec §5). Always `"default"` until the
+    /// store that produced this seal is itself threaded with a real tenant context —
+    /// see [`Segment::tenant_id`]'s doc comment.
+    pub tenant_id: String,
     pub node_id: String,
     pub config_hash: String,
     /// Seal hash of the immediately preceding segment on this node, or `None` for the
@@ -324,13 +362,14 @@ pub struct SegmentSeal {
 /// The field order and encoding here is the canonical definition of the seal hash for
 /// this crate. Changing either breaks all stored seals.
 ///
-/// The eight arguments map one-to-one to the eight `SegmentSeal` fields that the hash
+/// The nine arguments map one-to-one to the nine `SegmentSeal` fields that the hash
 /// covers. Wrapping them in a struct would force callers to construct one just to call this
 /// function; keeping them flat is both more legible and consistent with `compute_chain_hash`.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_seal_hash(
     prev_seal_hash: Option<&str>,
     segment_id: &str,
+    tenant_id: &str,
     node_id: &str,
     config_hash: &str,
     sealed_tip: &str,
@@ -354,6 +393,7 @@ pub fn compute_seal_hash(
     }
 
     hash_str(&mut hasher, segment_id);
+    hash_str(&mut hasher, tenant_id);
     hash_str(&mut hasher, node_id);
     hash_str(&mut hasher, config_hash);
     hash_str(&mut hasher, sealed_tip);
@@ -412,6 +452,7 @@ fn check_seal_integrity(seal: &SegmentSeal) -> Result<(), AuditError> {
     let expected = compute_seal_hash(
         seal.prev_seal_hash.as_deref(),
         &seal.segment_id,
+        &seal.tenant_id,
         &seal.node_id,
         &seal.config_hash,
         &seal.sealed_tip,
@@ -531,6 +572,38 @@ mod tests {
         }
         let seal = seg.seal();
         assert_eq!(seal.entry_count, 3);
+    }
+
+    #[test]
+    fn should_default_new_segments_to_the_default_tenant() {
+        let seg = Segment::open(node(), config(), None);
+        assert_eq!(seg.tenant_id(), &crate::tenancy::TenantId::default_tenant());
+        assert_eq!(seg.seal().tenant_id, "default");
+    }
+
+    #[test]
+    fn should_scope_a_segment_to_an_explicit_tenant() {
+        let seg = Segment::open_for_tenant(
+            crate::tenancy::TenantId::new("acme"),
+            node(),
+            config(),
+            None,
+        );
+        assert_eq!(seg.seal().tenant_id, "acme");
+    }
+
+    /// S1 spec §5: segments are named `(tenant, node)`, not just `node` — the seal
+    /// hash must commit to `tenant_id` so that relabelling a segment onto a different
+    /// tenant after the fact is detected exactly like any other seal tamper.
+    #[test]
+    fn should_detect_a_seal_relabelled_onto_a_different_tenant() {
+        let (mut seals, _) = build_seal_chain(1);
+        seals[0].tenant_id = "attacker-tenant".to_owned();
+        let err = verify_seal_chain(&seals).expect_err("relabelled tenant_id must be rejected");
+        assert!(
+            matches!(err, AuditError::SegmentIntegrity { .. }),
+            "expected SegmentIntegrity, got {err:?}"
+        );
     }
 
     #[test]

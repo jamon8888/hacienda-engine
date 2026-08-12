@@ -1041,7 +1041,13 @@ fn replay_segment(
         .and_then(|s| s.to_str())
         .unwrap_or("unknown-segment");
 
-    let mut segment = Segment::open_with_id(segment_id, node_id, config_hash, prev_seal_hash);
+    let mut segment = Segment::open_with_id(
+        segment_id,
+        crate::tenancy::TenantId::default_tenant(),
+        node_id,
+        config_hash,
+        prev_seal_hash,
+    );
 
     for entry in entries {
         segment.append(entry)?;

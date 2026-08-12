@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT segment_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL FOR UPDATE",
+  "query": "SELECT segment_id, tenant_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -10,21 +10,26 @@
       },
       {
         "ordinal": 1,
-        "name": "node_id",
+        "name": "tenant_id",
         "type_info": "Text"
       },
       {
         "ordinal": 2,
-        "name": "config_hash",
+        "name": "node_id",
         "type_info": "Text"
       },
       {
         "ordinal": 3,
+        "name": "config_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
         "name": "entry_count",
         "type_info": "Int8"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -37,8 +42,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "60e4a914742e11743031035a9a0b8652af280de891584a9175c42d64f0db5b1c"
+  "hash": "bc96c99e849f50bf24c0024928116a0bcfa99442186029acc20ab62911abf5f5"
 }
