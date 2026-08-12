@@ -30,6 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `testcontainers` test, unrelated to this change and not expected to fail in CI's
   non-root, Docker-enabled runners), and `cargo clippy --workspace --all-targets
   --features "ner-candle" -D warnings` all clean.
+- **`hacienda-rag --features postgres` no longer fails to compile with two conflicting
+  `sqlx-core` versions in the graph.** `crates/hacienda-rag/Cargo.toml`'s `pgvector`
+  dependency was unpinned (`"0.4"`); a fresh dependency resolution (needed by the
+  `xberg` re-pin above) let it float to `pgvector 0.4.2`, whose own `sqlx` requirement
+  is `0.9` — incompatible with the `sqlx 0.8` this repo pins directly, so cargo carried
+  both versions simultaneously and `pgvector::Vector`'s `sqlx::Type`/`Decode` impls no
+  longer matched what `hacienda-rag`'s own code asked for. Not a consequence of the
+  `xberg` bump itself (verified: the previously-committed lockfile already pinned
+  `pgvector 0.4.2` too, just via an older resolution that happened to keep it on
+  `sqlx 0.8`) — only surfaced because re-resolving the lock gave the resolver freedom
+  to prefer `pgvector`'s newer, `sqlx`-incompatible patch release. Pinned
+  `pgvector = "=0.4.1"` (last patch on `sqlx 0.8`) to fix it and to stop it from
+  drifting back on a future `cargo update`. Verified via the exact `feature-matrix` CI
+  command, `cargo check --manifest-path crates/hacienda-rag/Cargo.toml
+  --no-default-features --features postgres`, and a full `cargo build --workspace
+  --features "ner-candle,postgres"`.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres

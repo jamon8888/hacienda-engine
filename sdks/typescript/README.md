@@ -30,7 +30,10 @@ yourself via `jobs.getJobResult(...)`, or use `extractAndWait(...)` / `waitForJo
 job hasn't finished within `timeoutMs`:
 
 ```ts
-const result = await client.extractAndWait(body, { pollIntervalMs: 1000, timeoutMs: 300_000 });
+const result = await client.extractAndWait(body, {
+  pollIntervalMs: 1000,
+  timeoutMs: 300_000,
+});
 ```
 
 ## Retries

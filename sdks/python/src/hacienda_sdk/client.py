@@ -395,9 +395,7 @@ class _AuditNamespaceAsync:
 
     async def audit_export(self, format: str | Unset = UNSET):
         """Async twin of `_AuditNamespaceSync.audit_export`."""
-        return _unwrap(
-            await export_audit.asyncio_detailed(client=self._client, format_=format)
-        )
+        return _unwrap(await export_audit.asyncio_detailed(client=self._client, format_=format))
 
     async def audit_tip(self):
         """Async twin of `_AuditNamespaceSync.audit_tip`."""

@@ -174,7 +174,9 @@ export class HaciendaClient {
      * schema. Callers requesting `csv` may need to read the raw response
      * text rather than relying on this being parsed JSON.
      */
-    exportAudit(query?: { format?: "json" | "jsonl" | "csv" }): Promise<unknown>;
+    exportAudit(query?: {
+      format?: "json" | "jsonl" | "csv";
+    }): Promise<unknown>;
     /** `GET /v1/audit/tip` — the current head of this node's chain. */
     getAuditTip(): Promise<Schemas["AuditTipResponse"]>;
   };
@@ -433,12 +435,9 @@ export class HaciendaClient {
         ),
       reindexDocument: async (name, id) =>
         unwrap(
-          await api.POST(
-            "/v1/rag/collections/{name}/documents/{id}/reindex",
-            {
-              params: { path: { name, id } },
-            },
-          ),
+          await api.POST("/v1/rag/collections/{name}/documents/{id}/reindex", {
+            params: { path: { name, id } },
+          }),
         ),
       retrieve: async (name, body) =>
         unwrap(

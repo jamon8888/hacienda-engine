@@ -70,6 +70,4 @@ class JobTimeoutError(Exception):
     def __init__(self, job_id: str, timeout: float) -> None:
         self.job_id = job_id
         self.timeout = timeout
-        super().__init__(
-            f"job {job_id!r} did not reach a terminal state within {timeout:.1f}s"
-        )
+        super().__init__(f"job {job_id!r} did not reach a terminal state within {timeout:.1f}s")
