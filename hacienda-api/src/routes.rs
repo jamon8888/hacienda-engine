@@ -1084,8 +1084,18 @@ pub(crate) mod tests {
         let document_id: hacienda_rag::DocumentId =
             serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
 
+        // The API scopes collection names by tenant (S1) before they reach `RagStore` —
+        // an unauthenticated caller resolves to the default tenant, so the store holds
+        // this collection under "default:c1", not the caller-facing "c1". See
+        // `handlers::rag::scope_collection_name`.
+        let scoped_name = crate::handlers::rag::scope_collection_name(
+            &hacienda_core::tenancy::TenantCtx::default_tenant(
+                hacienda_core::tenancy::ActorId::new("test"),
+            ),
+            "c1",
+        );
         let (_document, chunks) = store
-            .get_document_chunks("c1", &document_id)
+            .get_document_chunks(&scoped_name, &document_id)
             .await
             .expect("get_document_chunks")
             .expect("document must exist");
