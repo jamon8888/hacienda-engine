@@ -31,10 +31,12 @@ mod dto;
 mod error;
 mod extract;
 mod handlers;
+mod quota;
 mod routes;
 mod state;
 
 pub use error::{ApiError, ApiErrorCode};
+pub use quota::{InMemoryQuotaStore, QuotaLimits};
 pub use state::{ApiLimits, ApiState};
 
 /// Build the axum router for hacienda.

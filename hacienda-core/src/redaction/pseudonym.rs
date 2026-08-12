@@ -1284,6 +1284,68 @@ mod pseudonymiser_tests {
         );
     }
 
+    /// S1 spec §9: `retired_key_of_one_tenant_reveals_nothing_of_another`.
+    #[test]
+    fn retired_key_of_one_tenant_reveals_nothing_of_another() {
+        // Two tenants each name a key "k1", but with independent material via separate
+        // suffixed env vars — a shared key *id* must never imply shared key *material*
+        // across tenants. Tenant A's token, minted under k1 and still revealable after
+        // k1 is retired in favour of k2, must stay unreadable to tenant B even though B
+        // also has a key literally named k1.
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_A" => Some("k2".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_A" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_PSEUDONYM_KEY_K2__TENANT_A" => Some("11".repeat(KEY_BYTES)),
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_B" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_B" => Some("a9".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        let ctx_a = TenantCtx::new(crate::tenancy::TenantId::new("tenant_a"), ActorId::new("u"));
+        let ctx_b = TenantCtx::new(crate::tenancy::TenantId::new("tenant_b"), ActorId::new("u"));
+
+        // Mint under k1 while it is (explicitly) the minting key, then build a second
+        // instance where k1 has been retired in favour of k2 — rotation is additive, so
+        // the token must still be revealable by tenant A.
+        let a_minting = Pseudonymiser::with_active(&ctx_a, &resolver, k("k1"), &[]).unwrap();
+        let token = a_minting.token(&PiiCategory::Email, "a@b.io").unwrap();
+        let a_after_rotation = Pseudonymiser::new(&ctx_a, &resolver, &[k("k1")]).unwrap();
+        assert_eq!(a_after_rotation.reveal(&token).unwrap(), "a@b.io");
+
+        // Tenant B has a key with the same id "k1", but it is a different key: different
+        // material, resolved from tenant B's own suffixed env vars.
+        let b = Pseudonymiser::new(&ctx_b, &resolver, &[]).unwrap();
+        assert!(
+            b.reveal(&token).is_err(),
+            "tenant B must not be able to reveal a token minted under tenant A's key material"
+        );
+    }
+
+    /// S1 spec §9: `missing_tenant_key_fails_admission_not_first_request` (D-S1-4).
+    #[test]
+    fn missing_tenant_key_fails_admission_not_first_request() {
+        // A tenant admitted with unresolvable key material must fail at admission time,
+        // not surface only when the first token()/reveal() call for that tenant happens
+        // — discovering a corpus is unreadable at the moment of a right-of-access request
+        // is exactly the failure mode D-S1-4 forbids.
+        let empty = EnvKeyResolver::with_lookup(|_| None);
+        let ctx = TenantCtx::new(
+            crate::tenancy::TenantId::new("ghost_tenant"),
+            ActorId::new("u"),
+        );
+
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let result = registry.admit(&ctx, &empty, None, &[]);
+
+        assert!(
+            result.is_err(),
+            "admission must fail immediately when the tenant's key material cannot be resolved"
+        );
+        assert!(
+            !registry.contains(&ctx.tenant),
+            "a failed admission must not leave a usable (or partially usable) entry behind"
+        );
+    }
+
     #[test]
     fn registry_get_is_none_for_a_tenant_that_was_never_admitted() {
         let registry = super::TenantPseudonymiserRegistry::new();
