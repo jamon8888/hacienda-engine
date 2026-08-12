@@ -10,8 +10,28 @@
 //! Only [`TenantId`] is a security boundary. [`ProjectId`] organizes; it does not
 //! cloister (decision D-S1-2) — treating it as a boundary would create a second,
 //! weaker, invisible authorization layer.
+//!
+//! The types on this page ([`TenantId`], [`ActorId`], [`ProjectId`], [`TenantCtx`]) are
+//! plain `String` newtypes with no native-only dependencies, so they compile for
+//! `wasm32` — `redaction::pseudonym`, which is explicitly wasm-safe, depends on
+//! [`TenantCtx`]. [`store`] (the [`TenantStore`](store::TenantStore) trait and its
+//! backends) is server-side only and gated accordingly.
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod store;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod types;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use error::TenantError;
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::{InMemoryTenantStore, TenantStore};
+#[cfg(not(target_arch = "wasm32"))]
+pub use types::Tenant;
 
 /// The identifier every store-level cloisonnement check keys off.
 ///
