@@ -2231,6 +2231,7 @@ pub(crate) mod tests {
                 decided_by: None,
                 decided_at: None,
                 comment: None,
+                tenant_id: "default".to_string(),
             })
             .await
             .expect("submit failed");

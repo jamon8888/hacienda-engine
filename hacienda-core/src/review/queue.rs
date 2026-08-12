@@ -20,6 +20,7 @@ use crate::review::types::{
     Priority, QueueStats, ReviewConfig, ReviewDecision, ReviewQueueItem, ReviewRequest,
     ReviewStatus,
 };
+use crate::tenancy::TenantCtx;
 
 /// Policy wrapper around a [`ReviewStore`].
 ///
@@ -74,6 +75,19 @@ impl ReviewQueue {
     /// that never reached the store is an item no reviewer will ever see, and reporting
     /// that as success would hide a compliance failure behind a clean return value.
     pub async fn submit(&self, request: ReviewRequest) -> Result<ReviewQueueItem, ReviewError> {
+        self.submit_for_tenant(
+            &TenantCtx::default_tenant(crate::tenancy::ActorId::new("queue")),
+            request,
+        )
+        .await
+    }
+
+    /// As [`submit`](Self::submit), scoped to an explicit tenant (S1).
+    pub async fn submit_for_tenant(
+        &self,
+        ctx: &TenantCtx,
+        request: ReviewRequest,
+    ) -> Result<ReviewQueueItem, ReviewError> {
         let deadline = self
             .config
             .deadline_hours
@@ -97,6 +111,7 @@ impl ReviewQueue {
             decided_by: None,
             decided_at: None,
             comment: None,
+            tenant_id: ctx.tenant.to_string(),
         };
 
         self.store.submit(item).await
@@ -218,6 +233,27 @@ mod tests {
         let item = queue.submit(request(0.4)).await.expect("submit");
         assert_eq!(item.status, ReviewStatus::Pending);
         assert_eq!(queue.stats().await.expect("stats").pending, 1);
+    }
+
+    #[tokio::test]
+    async fn should_default_submit_to_the_default_tenant() {
+        let queue = ReviewQueue::default();
+        let item = queue.submit(request(0.4)).await.expect("submit");
+        assert_eq!(item.tenant_id, "default");
+    }
+
+    #[tokio::test]
+    async fn should_stamp_the_submitting_tenant_onto_the_item() {
+        let queue = ReviewQueue::default();
+        let ctx = TenantCtx::new(
+            crate::tenancy::TenantId::new("acme"),
+            crate::tenancy::ActorId::new("test"),
+        );
+        let item = queue
+            .submit_for_tenant(&ctx, request(0.4))
+            .await
+            .expect("submit");
+        assert_eq!(item.tenant_id, "acme");
     }
 
     #[tokio::test]

@@ -28,8 +28,8 @@ impl ReviewStore for PostgresReviewStore {
 
         sqlx::query!(
             r#"
-            INSERT INTO review_items (id, text_snippet, category, start_pos, end_pos, confidence, source, status, priority, deadline)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            INSERT INTO review_items (id, text_snippet, category, start_pos, end_pos, confidence, source, status, priority, deadline, tenant_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
             item.id,
             item.text_snippet,
@@ -40,7 +40,8 @@ impl ReviewStore for PostgresReviewStore {
             item.source,
             item.status.to_string(),
             item.priority.to_string(),
-            deadline
+            deadline,
+            item.tenant_id
         )
         .execute(&self.pool)
         .await?;
@@ -57,7 +58,7 @@ impl ReviewStore for PostgresReviewStore {
             WHERE id = $2 AND status = 'pending'
             RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                       priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,
-                      decision, comment
+                      decision, comment, tenant_id
             "#,
             reviewer,
             id
@@ -103,7 +104,7 @@ impl ReviewStore for PostgresReviewStore {
             WHERE id = $6 AND decision IS NULL
             RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                       priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,
-                      decision, comment
+                      decision, comment, tenant_id
             "#,
             status.to_string(),
             reviewer,
@@ -137,7 +138,7 @@ impl ReviewStore for PostgresReviewStore {
                 r#"
                 SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                        priority, assigned_reviewer, decided_by, decided_at, decision, comment,
-                       deadline, created_at
+                       deadline, created_at, tenant_id
                 FROM review_items
                 WHERE status = $1
                 ORDER BY created_at
@@ -155,7 +156,7 @@ impl ReviewStore for PostgresReviewStore {
                 r#"
                 SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                        priority, assigned_reviewer, decided_by, decided_at, decision, comment,
-                       deadline, created_at
+                       deadline, created_at, tenant_id
                 FROM review_items
                 ORDER BY created_at
                 "#
@@ -176,7 +177,7 @@ impl ReviewStore for PostgresReviewStore {
             r#"
             SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                    priority, assigned_reviewer, decided_by, decided_at, decision, comment,
-                   deadline, created_at
+                   deadline, created_at, tenant_id
             FROM review_items
             WHERE id = $1
             "#,
@@ -239,6 +240,7 @@ struct ReviewItemRow {
     comment: Option<String>,
     deadline: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
+    tenant_id: String,
 }
 
 fn row_to_item(row: ReviewItemRow) -> Result<ReviewQueueItem, ReviewError> {
@@ -269,6 +271,7 @@ fn row_to_item(row: ReviewItemRow) -> Result<ReviewQueueItem, ReviewError> {
         decided_by: row.decided_by,
         decided_at: row.decided_at.map(|d| d.to_rfc3339()),
         comment: row.comment,
+        tenant_id: row.tenant_id,
     })
 }
 
@@ -314,6 +317,7 @@ mod tests {
             decided_by: None,
             decided_at: None,
             comment: None,
+            tenant_id: "default".to_owned(),
         }
     }
 

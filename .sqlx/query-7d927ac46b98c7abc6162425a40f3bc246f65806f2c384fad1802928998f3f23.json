@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                       priority, assigned_reviewer, decided_by, decided_at, decision, comment,\n                       deadline, created_at\n                FROM review_items\n                WHERE status = $1\n                ORDER BY created_at\n                ",
+  "query": "\n            UPDATE review_items\n            SET status = 'in_review', assigned_reviewer = $1\n            WHERE id = $2 AND status = 'pending'\n            RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                      priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,\n                      decision, comment, tenant_id\n            ",
   "describe": {
     "columns": [
       {
@@ -55,37 +55,43 @@
       },
       {
         "ordinal": 10,
-        "name": "decided_by",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 11,
-        "name": "decided_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 12,
-        "name": "decision",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 13,
-        "name": "comment",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 14,
         "name": "deadline",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 15,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "decided_by",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "decided_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "decision",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "comment",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "tenant_id",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -101,6 +107,7 @@
       false,
       true,
       true,
+      false,
       true,
       true,
       true,
@@ -108,5 +115,5 @@
       false
     ]
   },
-  "hash": "24478f1e59a09b742551dca8797488f7e8f1c0c253f8bc9dca6d174056c04f04"
+  "hash": "7d927ac46b98c7abc6162425a40f3bc246f65806f2c384fad1802928998f3f23"
 }

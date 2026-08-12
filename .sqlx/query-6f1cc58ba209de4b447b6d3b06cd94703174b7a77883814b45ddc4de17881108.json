@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE review_items\n            SET status = 'in_review', assigned_reviewer = $1\n            WHERE id = $2 AND status = 'pending'\n            RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                      priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,\n                      decision, comment\n            ",
+  "query": "\n                SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                       priority, assigned_reviewer, decided_by, decided_at, decision, comment,\n                       deadline, created_at, tenant_id\n                FROM review_items\n                ORDER BY created_at\n                ",
   "describe": {
     "columns": [
       {
@@ -55,40 +55,42 @@
       },
       {
         "ordinal": 10,
-        "name": "deadline",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 11,
-        "name": "created_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 12,
         "name": "decided_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 13,
+        "ordinal": 11,
         "name": "decided_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 14,
+        "ordinal": 12,
         "name": "decision",
         "type_info": "Text"
       },
       {
-        "ordinal": 15,
+        "ordinal": 13,
         "name": "comment",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "deadline",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "tenant_id",
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Left": [
-        "Text",
-        "Text"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -102,12 +104,13 @@
       false,
       true,
       true,
+      true,
+      true,
+      true,
+      true,
       false,
-      true,
-      true,
-      true,
-      true
+      false
     ]
   },
-  "hash": "bf7333518cefd50d0c2a2e64c4c7ddc70a32d37caaf3c00ec152310164609b3c"
+  "hash": "6f1cc58ba209de4b447b6d3b06cd94703174b7a77883814b45ddc4de17881108"
 }
