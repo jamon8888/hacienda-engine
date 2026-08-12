@@ -20,8 +20,10 @@ pip install langchain-hacienda
 ```python
 from langchain_hacienda import HaciendaLoader
 
-loader = HaciendaLoader(file_path="contract.pdf", api_key="hac_...")
-docs = loader.load()
+# HaciendaLoader owns and closes its client deterministically as a context manager
+# when you don't pass client=... yourself (see "Reuse an existing client" below).
+with HaciendaLoader(file_path="contract.pdf", api_key="hac_...") as loader:
+    docs = loader.load()
 
 docs[0].page_content       # already-redacted text
 docs[0].metadata["pii_entities_found"]  # e.g. 3
@@ -44,13 +46,15 @@ loader = HaciendaLoader(data=raw_bytes, mime_type="application/pdf", api_key="ha
 ```
 
 Reuse an existing `hacienda_sdk.HaciendaClient` (connection pooling across loaders, or a
-non-default `base_url`):
+non-default `base_url`). A caller-supplied client is never closed by the loader — you
+own its lifecycle:
 
 ```python
 from hacienda_sdk import HaciendaClient
 
-client = HaciendaClient(base_url="https://hacienda.example.com", api_key="hac_...")
-loader = HaciendaLoader(file_path="contract.pdf", client=client)
+with HaciendaClient(base_url="https://hacienda.example.com", api_key="hac_...") as client:
+    loader = HaciendaLoader(file_path="contract.pdf", client=client)
+    docs = loader.load()
 ```
 
 Enable server-side document versioning (single-file loads only — see
@@ -59,6 +63,47 @@ Enable server-side document versioning (single-file loads only — see
 ```python
 loader = HaciendaLoader(file_path="contract.pdf", document_id=my_uuid, api_key="hac_...")
 ```
+
+## RAG collections
+
+`push_documents` and `HaciendaRetriever` ingest into / retrieve from a hacienda RAG
+collection (`/v1/rag/collections/*`) — a completely separate part of the API from the
+loader above. The collection must already exist (provisioning one is a deployment
+decision, not something either function makes for you):
+
+```python
+from langchain_hacienda import HaciendaLoader, HaciendaRetriever, push_documents
+
+with HaciendaLoader(file_path="./contracts/", api_key="hac_...") as loader:
+    docs = loader.load()  # already redacted
+
+# No embeddings supplied: naive server-side full-text chunking. Only works against a
+# collection provisioned with embedding_dim: 0 — see "Known gaps" below.
+push_documents("contracts", docs, api_key="hac_...")
+
+retriever = HaciendaRetriever(collection="contracts", api_key="hac_...")
+results = retriever.invoke("indemnification clause")
+```
+
+With your own embeddings (e.g. from a LangChain `Embeddings` model) — required for a
+real, `embedding_dim > 0` vector-searchable collection:
+
+```python
+vectors = my_embeddings_model.embed_documents([d.page_content for d in docs])
+push_documents("contracts", docs, embeddings=vectors, api_key="hac_...")
+
+retriever = HaciendaRetriever(
+    collection="contracts",
+    mode="vector",
+    api_key="hac_...",
+    retrieve_kwargs={"query_vector": my_embeddings_model.embed_query("indemnification")},
+)
+```
+
+Neither function ever computes an embedding itself — see
+[`../../LIMITATIONS.md`](../../LIMITATIONS.md) for exactly what that implies
+(`embedding_dim: 0` requirement, `mode="fulltext"`'s backend requirement, `RetrieveMode`'s
+exact wire values).
 
 ### Config
 
@@ -78,6 +123,13 @@ loader = HaciendaLoader(file_path="contract.pdf", document_id=my_uuid, api_key="
 | `audit_chain_tip` | auditing enabled server-side | this batch's blake3 chain tip |
 | `document_id`, `version_sequence` | `document_id=...` was passed | echoes the server-assigned version |
 | `processing_time_ms` | always | server-side processing time for the whole batch |
+
+### Known gaps
+
+See [`../../LIMITATIONS.md`](../../LIMITATIONS.md) — no per-request redaction mode
+(mask vs. pseudonymize), and no tables/pages/chunking/rich metadata like xberg's own
+`XbergLoader` exposes. Both are server-side (`hacienda-api`) limitations, not fixable
+in this package.
 
 ## Development
 

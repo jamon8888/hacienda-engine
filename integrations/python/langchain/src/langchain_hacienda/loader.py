@@ -288,6 +288,23 @@ class HaciendaLoader(BaseLoader):
                 audit_chain_tip=audit_chain_tip,
             )
 
-    def __del__(self) -> None:
+    def close(self) -> None:
+        """Close the underlying client, but only if this loader constructed it.
+
+        A caller-supplied ``client=`` is never closed here — it may be shared with
+        other loaders or used after this one goes out of scope. Idempotent: safe to
+        call more than once (``HaciendaClient.close()`` itself is idempotent).
+        """
         if getattr(self, "_owns_client", False):
             self._client.close()
+
+    def __enter__(self) -> HaciendaLoader:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Best-effort fallback only — `__del__` timing is not guaranteed. Prefer
+        # `close()` or the context manager for deterministic cleanup.
+        self.close()

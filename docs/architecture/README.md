@@ -89,10 +89,10 @@ sa licence, son mode de distribution et sa gouvernance.
 
 **Exception temporaire à « ne doit jamais entrer dans le graphe de dépendances » (2026-08-08).**
 Le sous-module git `test_documents` du commit `xberg-io/xberg` épinglé par `tag = "v1.0.2"`
-(`9dcc864d`) pointe vers un commit qui n'existe plus sur `xberg-io/test_documents` — vérifié par
+(`9dcc864d`) pointe vers un commit qui n’existe plus sur `xberg-io/test_documents` — vérifié par
 un `git fetch <sha>` direct, qui renvoie « not our ref », et vrai de **chaque** tag `xberg-io/xberg`
-de v1.0.2 à v1.0.14 : ce n'est pas réparable en changeant de version. `cargo` récupère
-inconditionnellement les sous-modules d'une dépendance git lors de la résolution, donc ceci casse
+de v1.0.2 à v1.0.14 : ce n’est pas réparable en changeant de version. `cargo` récupère
+inconditionnellement les sous-modules d’une dépendance git lors de la résolution, donc ceci casse
 `cargo build` pour tout le workspace, sur `main` comme sur toute branche. Le workaround adopté :
 `jamon8888/xberg@fix/test-documents-submodule-pin` — arbre identique au commit `9dcc864d`, avec
 uniquement ce gitlink repointé vers le HEAD valide actuel de `test_documents`. `Cargo.toml` et

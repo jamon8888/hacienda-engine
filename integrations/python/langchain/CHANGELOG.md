@@ -1,5 +1,5 @@
 # CHANGELOG
 
 ## [Unreleased]
-- Initial release: `HaciendaLoader`.
 
+- Initial release: `HaciendaLoader`.

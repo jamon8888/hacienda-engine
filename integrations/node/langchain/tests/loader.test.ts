@@ -156,6 +156,21 @@ describe("HaciendaLoader", () => {
     expect(client.calls).toHaveLength(1);
   });
 
+  it("rejects documentId for a directory once load() resolves it as a batch", async () => {
+    await writeFile(join(dir, "a.txt"), "a");
+    await writeFile(join(dir, "b.txt"), "b");
+
+    // Unlike an explicit list of paths (rejected in the constructor, see above), a
+    // directory's batch-ness is only known after load() resolves it via fastGlob —
+    // this is the separate runtime check in load() itself.
+    const loader = new HaciendaLoader({
+      filePath: dir,
+      documentId: "00000000-0000-0000-0000-000000000000",
+      client: fakeClient() as never,
+    });
+    await expect(loader.load()).rejects.toThrow(/directory/i);
+  });
+
   it("wraps API errors", async () => {
     const path = join(dir, "x.txt");
     await writeFile(path, "x");

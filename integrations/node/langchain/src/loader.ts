@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { BaseDocumentLoader } from "@langchain/core/document_loaders/base";
 import { Document } from "@langchain/core/documents";
-import { HaciendaClient, type HaciendaApiError } from "@hacienda-engine/sdk";
+import { HaciendaClient } from "@hacienda-engine/sdk";
 import fastGlob from "fast-glob";
 import mimeTypes from "mime-types";
 
@@ -132,8 +132,12 @@ export class HaciendaLoader extends BaseDocumentLoader {
       response = await this.client.documents.processDocuments({ documents });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // `cause` is kept as `unknown` (via HaciendaLoaderError's `{ cause?: unknown }`
+      // option) rather than narrowed to HaciendaApiError — processDocuments can throw
+      // other error types (network failure, etc.), and narrowing past that would be
+      // misleading to a caller inspecting `.cause`.
       throw new HaciendaLoaderError(`hacienda-engine request failed: ${message}`, {
-        cause: error as HaciendaApiError,
+        cause: error,
       });
     }
 
@@ -169,10 +173,17 @@ export class HaciendaLoader extends BaseDocumentLoader {
     batch: boolean;
   }> {
     if (this.data !== undefined) {
-      const source = `bytes://${this.mimeType}`;
+      // The constructor already requires mimeType whenever data is set — guarded here
+      // (rather than asserted past) so a future change to that invariant fails loudly
+      // instead of silently sending `mime_type: undefined` to the API.
+      const mimeType = this.mimeType;
+      if (mimeType === undefined) {
+        throw new HaciendaLoaderError("'mimeType' is required when using 'data'.");
+      }
+      const source = `bytes://${mimeType}`;
       const input: DocumentInput = {
         content_base64: Buffer.from(this.data).toString("base64"),
-        mime_type: this.mimeType as string,
+        mime_type: mimeType,
         filename: this.filename ?? null,
         document_id: this.documentId ?? null,
       };

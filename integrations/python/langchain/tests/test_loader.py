@@ -148,5 +148,60 @@ def test_document_id_accepts_str_and_uuid(tmp_path, fake_client_factory):
     client = fake_client_factory(response=make_response([result]))
 
     loader = HaciendaLoader(file_path=path, document_id=str(doc_id), client=client)
-    assert loader._document_id == doc_id
-    assert isinstance(loader._document_id, UUID)
+    docs = loader.load()
+
+    # A string document_id is converted to a UUID before being sent — checked via the
+    # public request/response surface, not the loader's private state.
+    assert docs[0].metadata["document_id"] == str(doc_id)
+    sent = client.documents.calls[0]
+    assert sent.documents[0].document_id == doc_id
+    assert isinstance(sent.documents[0].document_id, UUID)
+
+
+def test_glob_filters_files_in_a_directory(tmp_path, fake_client_factory):
+    (tmp_path / "a.pdf").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    (tmp_path / "c.pdf").write_text("c")
+
+    results = [make_result("a redacted"), make_result("c redacted")]
+    client = fake_client_factory(response=make_response(results))
+
+    loader = HaciendaLoader(file_path=tmp_path, glob="*.pdf", client=client)
+    docs = loader.load()
+
+    assert len(docs) == 2
+    sent = client.documents.calls[0]
+    sent_filenames = {doc.filename for doc in sent.documents}
+    assert sent_filenames == {"a.pdf", "c.pdf"}
+
+
+def test_context_manager_closes_owned_client(monkeypatch, tmp_path, fake_client_factory):
+    path = tmp_path / "note.txt"
+    path.write_text("hi")
+    monkeypatch.setenv("HACIENDA_API_KEY", "test-key")
+
+    # No client= passed, so the loader constructs (and must own/close) its own —
+    # substitute a fake so closure is observable, since the real HaciendaClient
+    # exposes no "closed" state to assert on.
+    fake_client = fake_client_factory(response=make_response([make_result("hi redacted")]))
+    monkeypatch.setattr(
+        "langchain_hacienda.loader.HaciendaClient", lambda *a, **kw: fake_client
+    )
+
+    with HaciendaLoader(file_path=path) as loader:
+        assert loader._owns_client is True
+        assert fake_client.closed is False
+        loader.load()
+
+    assert fake_client.closed is True
+
+
+def test_close_does_not_close_a_caller_supplied_client(tmp_path, fake_client_factory):
+    path = tmp_path / "note.txt"
+    path.write_text("hi")
+    client = fake_client_factory(response=make_response([make_result("hi redacted")]))
+
+    with HaciendaLoader(file_path=path, client=client) as loader:
+        loader.load()
+
+    assert client.closed is False

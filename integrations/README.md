@@ -22,8 +22,8 @@ vector store can always be traced back to the audited extraction that produced i
 
 | Integration | Path | Status |
 |-------------|------|--------|
-| LangChain (Python) | `python/langchain` | **Implemented** — `HaciendaLoader` |
-| LangChain (Node) | `node/langchain` | **Implemented** — `HaciendaLoader` |
+| LangChain (Python) | `python/langchain` | **Implemented** — `HaciendaLoader`, `HaciendaRetriever`, `push_documents` |
+| LangChain (Node) | `node/langchain` | **Implemented** — `HaciendaLoader`, `HaciendaRetriever`, `pushDocuments` |
 | LlamaIndex (reader) | `python/llama-index` | Planned |
 | CrewAI | `python/crewai` | Planned |
 | txtai | `python/txtai` | Planned |
@@ -36,13 +36,22 @@ not-yet-released packages) and a README describing the intended shape, but no ad
 code yet — see each one's README for what porting it from xberg's equivalent would
 involve.
 
+**Before assuming feature parity with xberg's loaders, read
+[`LIMITATIONS.md`](./LIMITATIONS.md)** — it tracks every confirmed gap (server-side
+limitations an integration package can't close, and deliberate scope decisions) in one
+place, so it doesn't need restating per package.
+
 ## Layout
 
 - **Python** packages are standalone [uv](https://docs.astral.sh/uv/) projects, each
   owning its own lockfile — not uv-workspace members, to avoid cross-framework resolver
   conflicts (same reasoning as xberg's `integrations/README.md`). Work on one with
   `cd integrations/python/<name> && uv sync --all-extras`.
-- **Node** packages are standalone TypeScript packages (`npm ci && npm run build`).
+- **Node** packages are standalone TypeScript packages. For the implemented ones
+  (`node/langchain`): `npm ci && npm run build`. Planned/scaffold Node packages
+  (`node/n8n-nodes-hacienda`) deliberately have no `build` script yet — see the
+  status table above — so `turbo run build` at the repo root skips them rather than
+  failing.
 - **Java** (`java/spring-ai`) is a Maven project.
 
 ## Dependencies

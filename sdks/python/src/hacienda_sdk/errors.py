@@ -58,3 +58,29 @@ def _unwrap(response: Any) -> Any:
         pass
 
     raise HaciendaApiError(status_code=status, code=code, message=message)
+
+
+def _unwrap_json(response: Any) -> Any:
+    """Like `_unwrap`, but for routes whose OpenAPI response schema is `serde_json::Value`.
+
+    `hacienda-api/src/handlers/rag.rs`'s `retrieve`, `create_collection`, and
+    `get_collection` all declare their 200/201 response as `body = serde_json::Value`
+    in their `#[utoipa::path]` annotation (their `CollectionSpec`/`RetrieveOutput`
+    types aren't `utoipa::ToSchema`-registered) — this resolves to an empty `{}`
+    schema in the generated OpenAPI document. Given nothing to construct a typed
+    object from, `openapi-python-client`'s generated `_parse_response` for these
+    routes unconditionally returns `None` on success, discarding the real response
+    body entirely — confirmed by reading both the generated
+    `_generated/api/rag/{retrieve,create_collection,get_collection}.py` and the raw
+    OpenAPI document's `"schema": {}` for these routes. `response.content` (the raw
+    bytes) is still populated correctly; only `.parsed` is lost. This falls back to
+    parsing `response.content` directly whenever `.parsed` came back empty on a 2xx,
+    and behaves exactly like `_unwrap` for every other route/status.
+    """
+    status = int(response.status_code)
+    if 200 <= status < 300:
+        if response.parsed is not None:
+            return response.parsed
+        return json.loads(response.content) if response.content else None
+
+    return _unwrap(response)

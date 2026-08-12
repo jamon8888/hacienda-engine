@@ -205,8 +205,16 @@ describe("loadTessdata", () => {
   afterEach(async () => {
     vi.unstubAllGlobals();
     const db = await openDB("xberg-studio-assets", 1);
-    await db.clear("tessdata");
-    db.close();
+    try {
+      // Guards against a DB opened (by this very call, absent an upgrade callback) with
+      // no "tessdata" store yet — possible if a test's own setup throws before ever
+      // calling loadTessdata (which creates both stores). clear() would throw
+      // NotFoundError in that case; without the try/finally that would also skip
+      // db.close(), leaking the connection into the next test.
+      await db.clear("tessdata");
+    } finally {
+      db.close();
+    }
   });
 
   it("fetches and caches the language file on a cache miss", async () => {

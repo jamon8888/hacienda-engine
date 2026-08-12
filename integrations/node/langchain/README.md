@@ -50,6 +50,46 @@ const client = new HaciendaClient({ baseUrl: "https://hacienda.example.com", api
 const loader = new HaciendaLoader({ filePath: "contract.pdf", client });
 ```
 
+## RAG collections
+
+`pushDocuments` and `HaciendaRetriever` ingest into / retrieve from a hacienda RAG
+collection (`/v1/rag/collections/*`) — a completely separate part of the API from the
+loader above. The collection must already exist:
+
+```typescript
+import { HaciendaLoader, HaciendaRetriever, pushDocuments } from "@hacienda-engine/langchain-hacienda";
+
+const loader = new HaciendaLoader({ filePath: "./contracts", apiKey: "hac_..." });
+const docs = await loader.load(); // already redacted
+
+// No embeddings supplied: naive server-side full-text chunking. Only works against a
+// collection provisioned with embeddingDim: 0 — see "Known gaps" below.
+await pushDocuments("contracts", docs, { apiKey: "hac_..." });
+
+const retriever = new HaciendaRetriever({ collection: "contracts", apiKey: "hac_..." });
+const results = await retriever.invoke("indemnification clause");
+```
+
+With your own embeddings — required for a real, `embeddingDim > 0` vector-searchable
+collection:
+
+```typescript
+const vectors = await myEmbeddingsModel.embedDocuments(docs.map((d) => d.pageContent));
+await pushDocuments("contracts", docs, { embeddings: vectors, apiKey: "hac_..." });
+
+const retriever = new HaciendaRetriever({
+  collection: "contracts",
+  mode: "vector",
+  apiKey: "hac_...",
+  retrieveExtra: { query_vector: await myEmbeddingsModel.embedQuery("indemnification") },
+});
+```
+
+Neither function ever computes an embedding itself — see
+[`../../LIMITATIONS.md`](../../LIMITATIONS.md) for exactly what that implies
+(`embeddingDim: 0` requirement, `mode: "fulltext"`'s backend requirement, `RetrieveMode`'s
+exact wire values).
+
 ### Config
 
 | Option | Env var fallback | Default |
@@ -61,6 +101,13 @@ const loader = new HaciendaLoader({ filePath: "contract.pdf", client });
 
 Same fields as `langchain-hacienda` (the Python package) — see
 `../../python/langchain/README.md`'s table.
+
+### Known gaps
+
+See [`../../LIMITATIONS.md`](../../LIMITATIONS.md) — no per-request redaction mode
+(mask vs. pseudonymize), and no tables/pages/chunking/rich metadata like xberg's own
+`XbergLoader` exposes. Both are server-side (`hacienda-api`) limitations, not fixable
+in this package.
 
 ## Development
 
