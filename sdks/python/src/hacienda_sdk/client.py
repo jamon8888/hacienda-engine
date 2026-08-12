@@ -72,6 +72,7 @@ from hacienda_sdk._generated.models.answer_request import AnswerRequest
 from hacienda_sdk._generated.models.confirm_upload_request import ConfirmUploadRequest
 from hacienda_sdk._generated.models.create_preset_request import CreatePresetRequest
 from hacienda_sdk._generated.models.issue_key_request import IssueKeyRequest
+from hacienda_sdk._generated.models.job_result_response import JobResultResponse
 from hacienda_sdk._generated.models.migrate_embeddings_request import MigrateEmbeddingsRequest
 from hacienda_sdk._generated.models.presign_upload_request import PresignUploadRequest
 from hacienda_sdk._generated.models.process_documents_request import ProcessDocumentsRequest
@@ -768,7 +769,7 @@ class HaciendaClient:
         *,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         timeout: float = _DEFAULT_JOB_TIMEOUT,
-    ):
+    ) -> JobResultResponse:
         """Poll `GET /v1/jobs/{id}/result` until `job_id` reaches a terminal state.
 
         Mirrors xberg-sdks' `wait_for_job`. Returns the terminal
@@ -793,7 +794,7 @@ class HaciendaClient:
         *,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         timeout: float = _DEFAULT_JOB_TIMEOUT,
-    ) -> dict[str, Any]:
+    ) -> dict[str, JobResultResponse]:
         """`wait_for_job` for several jobs at once, sharing one deadline.
 
         Returns a dict keyed by job id, same jobs as `job_ids`. Raises
@@ -801,7 +802,7 @@ class HaciendaClient:
         before every job reaches a terminal state.
         """
         deadline = time.monotonic() + timeout
-        results: dict[str, Any] = {}
+        results: dict[str, JobResultResponse] = {}
         pending = list(job_ids)
         while pending:
             still_pending = []
@@ -825,7 +826,7 @@ class HaciendaClient:
         *,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         timeout: float = _DEFAULT_JOB_TIMEOUT,
-    ):
+    ) -> JobResultResponse:
         """Submit `body` to `POST /v1/documents/async` and poll until it finishes.
 
         Convenience composing `documents.process_documents_background` and
@@ -902,7 +903,7 @@ class AsyncHaciendaClient:
         *,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         timeout: float = _DEFAULT_JOB_TIMEOUT,
-    ):
+    ) -> JobResultResponse:
         """Async twin of `HaciendaClient.wait_for_job` — see its docstring."""
         import asyncio
 
@@ -921,12 +922,12 @@ class AsyncHaciendaClient:
         *,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         timeout: float = _DEFAULT_JOB_TIMEOUT,
-    ) -> dict[str, Any]:
+    ) -> dict[str, JobResultResponse]:
         """Async twin of `HaciendaClient.wait_for_jobs` — see its docstring."""
         import asyncio
 
         deadline = time.monotonic() + timeout
-        results: dict[str, Any] = {}
+        results: dict[str, JobResultResponse] = {}
         pending = list(job_ids)
         while pending:
             still_pending = []
@@ -950,7 +951,7 @@ class AsyncHaciendaClient:
         *,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         timeout: float = _DEFAULT_JOB_TIMEOUT,
-    ):
+    ) -> JobResultResponse:
         """Async twin of `HaciendaClient.extract_and_wait` — see its docstring."""
         job = await self.documents.process_documents_background(body)
         return await self.wait_for_job(job.job_id, poll_interval=poll_interval, timeout=timeout)

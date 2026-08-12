@@ -99,7 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SDK parity pass against `xberg-sdks`.** Both `sdks/python` and `sdks/typescript` had
   fallen behind hacienda-api's own route table: the audit API was restored to 5 endpoints
   (this changelog's "full 5-endpoint audit API is live again" entry, below) but only
-  `get_audit`/`verify_audit` ever got hand-wrapper methods, and `sdks/typescript` never got a
+  `get_audit`/`verify_audit` ever got hand-written wrapper methods, and `sdks/typescript` never got a
   wrapper for the RAG streaming-answer route at all. Closed both gaps and added the last
   well-grounded xberg-sdks operation hacienda didn't have a route for:
   - `audit.audit_entries()` / `audit.getAuditEntries()`, `audit.audit_seals()` /
