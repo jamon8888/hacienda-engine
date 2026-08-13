@@ -9561,7 +9561,7 @@ dependencies = [
 [[package]]
 name = "xberg"
 version = "1.0.2"
-source = "git+https://github.com/xberg-io/xberg.git?tag=v1.0.2#9dcc864d8591d30f8039266e0bb3e82ec3918556"
+source = "git+https://github.com/jamon8888/xberg.git?rev=9bfbc10acca5c1648547a4d861153d2f5c363340#9bfbc10acca5c1648547a4d861153d2f5c363340"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -9657,7 +9657,7 @@ dependencies = [
 [[package]]
 name = "xberg-gliner"
 version = "1.0.2"
-source = "git+https://github.com/xberg-io/xberg.git?tag=v1.0.2#9dcc864d8591d30f8039266e0bb3e82ec3918556"
+source = "git+https://github.com/jamon8888/xberg.git?rev=9bfbc10acca5c1648547a4d861153d2f5c363340#9bfbc10acca5c1648547a4d861153d2f5c363340"
 dependencies = [
  "candle-core",
  "candle-nn",
