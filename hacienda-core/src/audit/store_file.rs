@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::audit::cursor::{page_from, AuditCursor, AuditPage};
 use crate::audit::entry::{AuditEntry, AuditEntryInput};
 use crate::audit::error::AuditError;
 use crate::audit::segment::{verify_seal_chain, NodeId, Segment, SegmentSeal};
@@ -490,6 +491,68 @@ impl AuditStore for FileAuditStore {
             .as_ref()
             .map(|s| s.entries().to_vec())
             .unwrap_or_default())
+    }
+
+    /// Sealed segments come off disk; the open segment comes out of `state.open`.
+    ///
+    /// # The open segment must never be read from its file
+    ///
+    /// `read_jsonl` is a *mutating* read: `discard_unterminated_tail` calls `set_len` on
+    /// the file to drop a partial record, because a fragment left in place would be welded
+    /// onto the next append. Applied to the live file that is exactly wrong — a concurrent
+    /// `append` mid-write is *not* a crash remnant, and truncating it would destroy a
+    /// record the writer is about to complete and report as durable. `verify` already
+    /// serves the open segment from memory for the same reason.
+    ///
+    /// # Why `io_order` is not taken
+    ///
+    /// It is a write-ordering lock. Holding it here would stall every `append` for the
+    /// duration of an O(n) disk read, and it could not help anyway: a lock cannot span the
+    /// two HTTP requests that fetch two consecutive pages. Correct paging comes from the
+    /// cursor being immutable, not from excluding writers. Every other read — `entries`,
+    /// `tip`, `seals`, `verify` — takes `state` alone, and so does this one.
+    ///
+    /// The sealed files are read inline rather than on a blocking thread, matching
+    /// `verify`. A page reads at most the segments it needs, where `verify` reads all of
+    /// them, so this is the cheaper of the two paths already on that footing.
+    async fn history(
+        &self,
+        after: Option<&AuditCursor>,
+        limit: usize,
+    ) -> Result<AuditPage, AuditError> {
+        self.check_not_poisoned()?;
+
+        // Snapshot under `state`, then read without holding it — the same shape as
+        // `verify`. The open segment's entries come along in the snapshot precisely so
+        // that no later step needs its file.
+        let (sealed, open) = {
+            let state = self.state();
+            let open = state
+                .open
+                .as_ref()
+                .map(|segment| (segment.id().to_owned(), segment.entries().to_vec()));
+            (state.sealed.clone(), open)
+        };
+
+        let mut extents: Vec<(&str, u64)> = sealed
+            .iter()
+            .map(|seal| (seal.segment_id.as_str(), seal.entry_count))
+            .collect();
+        if let Some((segment_id, entries)) = &open {
+            extents.push((segment_id.as_str(), entries.len() as u64));
+        }
+
+        page_from(&extents, after, limit, |position| {
+            match sealed.get(position) {
+                Some(seal) => read_jsonl(&jsonl_path(&self.node_dir, &seal.segment_id)),
+                // Past the sealed run, so this is the open segment — from memory, never
+                // from its file. See the `read_jsonl` note above.
+                None => Ok(open
+                    .as_ref()
+                    .map(|(_, entries)| entries.clone())
+                    .unwrap_or_default()),
+            }
+        })
     }
 
     async fn tip(&self) -> Result<String, AuditError> {
@@ -1455,6 +1518,287 @@ mod tests {
         let seals = reopened.seals().await.expect("seals");
         let total: u64 = seals.iter().map(|s| s.entry_count).sum();
         assert_eq!(total, (TASKS * PER_TASK) as u64);
+    }
+
+    // ── history() tests ──────────────────────────────────────────────────────
+
+    /// Page through the whole history with `limit` per page and collect the entry ids.
+    ///
+    /// Stops on the first empty page, which is what [`AuditPage::next`] documents as the
+    /// end of the currently-recorded history. Bounded so a `history` that failed to
+    /// advance its cursor fails the test instead of hanging the suite.
+    async fn drain_history(store: &FileAuditStore, limit: usize) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut cursor: Option<AuditCursor> = None;
+
+        for _ in 0..1_000 {
+            let page = store
+                .history(cursor.as_ref(), limit)
+                .await
+                .expect("history must succeed");
+            if page.entries.is_empty() {
+                return ids;
+            }
+            ids.extend(page.entries.iter().map(|entry| entry.id.clone()));
+            cursor = page.next;
+            assert!(
+                cursor.is_some(),
+                "a non-empty page must hand back a resumable cursor"
+            );
+        }
+
+        panic!("history did not terminate after 1000 pages; collected {ids:?}");
+    }
+
+    /// The reason `history` exists: `entries()` reports the open segment only, so after two
+    /// rotations it accounts for a fraction of what the store holds. An auditor reading
+    /// that fraction would conclude that events which are on disk never happened.
+    #[tokio::test]
+    async fn should_return_every_entry_in_chain_order_across_two_rotations() {
+        let dir = TempDir::new("history-two-rotations");
+        let store = make_store(&dir);
+
+        store
+            .append(vec![make_input("s1-a"), make_input("s1-b")])
+            .await
+            .expect("append into the first segment");
+        store.rotate().await.expect("rotate 1");
+        store
+            .append(vec![make_input("s2-a")])
+            .await
+            .expect("append into the second segment");
+        store.rotate().await.expect("rotate 2");
+        store
+            .append(vec![make_input("s3-a"), make_input("s3-b")])
+            .await
+            .expect("append into the open segment");
+
+        let expected = vec!["s1-a", "s1-b", "s2-a", "s3-a", "s3-b"];
+
+        assert_eq!(
+            store.entries().await.expect("entries").len(),
+            2,
+            "entries() sees the open segment only — this is the gap history() closes"
+        );
+
+        assert_eq!(drain_history(&store, 100).await, expected);
+
+        // One entry per page crosses both segment boundaries with a cursor in hand, which
+        // a single oversized page never exercises.
+        assert_eq!(drain_history(&store, 1).await, expected);
+
+        // A page size that divides neither segment lands mid-segment on every boundary.
+        assert_eq!(drain_history(&store, 2).await, expected);
+    }
+
+    /// Paging while a writer is appending must neither skip nor duplicate an entry.
+    ///
+    /// An offset would fail this: every append shifts nothing at the tail but a reader
+    /// that resumed by counting would still be correct only by luck once a rotation moved
+    /// the boundary. A cursor names a position that growth cannot move, so the reader sees
+    /// the writer's exact order, with the entries written after it passed simply arriving
+    /// on a later page.
+    ///
+    /// The writer rotates midway on purpose: that is the moment the segment the reader's
+    /// cursor points into stops being the open one and becomes a sealed file. The cursor
+    /// has to keep resolving across that transition.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_neither_skip_nor_duplicate_entries_while_a_concurrent_append_runs() {
+        const TOTAL: usize = 60;
+
+        let dir = TempDir::new("history-concurrent-append");
+        let store = Arc::new(make_store(&dir));
+
+        let writer = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                for i in 0..TOTAL {
+                    store
+                        .append(vec![make_input(&format!("w{i:03}"))])
+                        .await
+                        .expect("concurrent append must succeed");
+                    if i == TOTAL / 2 {
+                        store.rotate().await.expect("mid-run rotate");
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut cursor: Option<AuditCursor> = None;
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        while collected.len() < TOTAL {
+            assert!(
+                Instant::now() < deadline,
+                "reader never caught up with the writer; collected {} of {TOTAL}",
+                collected.len()
+            );
+
+            let page = store
+                .history(cursor.as_ref(), 3)
+                .await
+                .expect("history must succeed while an append is in flight");
+
+            collected.extend(page.entries.iter().map(|entry| entry.id.clone()));
+            if page.next.is_some() {
+                cursor = page.next;
+            } else {
+                // Caught up for the moment; let the writer make progress.
+                tokio::task::yield_now().await;
+            }
+        }
+
+        writer.await.expect("writer must not panic");
+
+        let expected: Vec<String> = (0..TOTAL).map(|i| format!("w{i:03}")).collect();
+        assert_eq!(
+            collected, expected,
+            "the reader must observe the writer's order exactly, once each"
+        );
+
+        // And nothing was left behind: a final drain sees the same run.
+        assert_eq!(drain_history(&store, 7).await, expected);
+    }
+
+    /// After `close` there is no open segment, and `entries()` therefore reports nothing
+    /// at all (`store_file.rs`'s `unwrap_or_default`). `history` must not inherit that:
+    /// the final segment was sealed and written, and a shut-down store that claimed to
+    /// hold no record would be indistinguishable from one that lost it.
+    #[tokio::test]
+    async fn should_still_return_the_final_segment_from_disk_after_close() {
+        let dir = TempDir::new("history-after-close");
+        let store = make_store(&dir);
+
+        store
+            .append(vec![make_input("c1"), make_input("c2")])
+            .await
+            .expect("append");
+        store.rotate().await.expect("rotate");
+        store
+            .append(vec![make_input("c3")])
+            .await
+            .expect("append into the final segment");
+        store.close().await.expect("close");
+
+        assert!(
+            store.entries().await.expect("entries").is_empty(),
+            "entries() reports the open segment, and close left none"
+        );
+
+        assert_eq!(
+            drain_history(&store, 100).await,
+            vec!["c1", "c2", "c3"],
+            "the final segment must still be reachable after close"
+        );
+
+        // Including from a process that only ever saw the files.
+        drop(store);
+        let reopened = FileAuditStore::open(dir.path(), NodeId::new(NODE), CONFIG).expect("reopen");
+        let ids = drain_history(&reopened, 100).await;
+        assert_eq!(ids, vec!["c1", "c2", "c3"]);
+    }
+
+    /// An unresolvable cursor must be an error, never a restart from the beginning.
+    ///
+    /// Restarting is the silent failure this whole design exists to avoid: the caller
+    /// would receive every entry it already holds a second time and have no way to tell
+    /// the duplicate run from new activity.
+    #[tokio::test]
+    async fn should_reject_an_unknown_cursor_rather_than_restarting_from_the_beginning() {
+        let dir = TempDir::new("history-unknown-cursor");
+        let store = make_store(&dir);
+
+        store
+            .append(vec![make_input("k1"), make_input("k2")])
+            .await
+            .expect("append");
+
+        // A segment this store has never held.
+        let foreign = AuditCursor {
+            segment_id: "00000000-0000-4000-8000-000000000000".into(),
+            index: 0,
+        };
+        let err = store
+            .history(Some(&foreign), 10)
+            .await
+            .expect_err("an unknown segment must not be served as a fresh start");
+        assert!(
+            matches!(err, AuditError::UnresolvableCursor { .. }),
+            "expected UnresolvableCursor, got {err:?}"
+        );
+
+        // A real segment, but an index past its end.
+        let open_segment = store.state().open.as_ref().unwrap().id().to_owned();
+        let past_end = AuditCursor {
+            segment_id: open_segment,
+            index: 99,
+        };
+        let err = store
+            .history(Some(&past_end), 10)
+            .await
+            .expect_err("an out-of-range index must not be served as a fresh start");
+        assert!(
+            matches!(err, AuditError::UnresolvableCursor { .. }),
+            "expected UnresolvableCursor, got {err:?}"
+        );
+
+        // The store is not left in a bad state by the refusal.
+        assert_eq!(drain_history(&store, 10).await, vec!["k1", "k2"]);
+    }
+
+    /// `history` must never let [`read_jsonl`] touch the open segment's live file.
+    ///
+    /// `read_jsonl` truncates an unterminated tail with `set_len` — correct at recovery,
+    /// destructive here, because on a live file that tail is a concurrent `append`
+    /// mid-write, not a crash remnant. Losing it would lose a record the writer is about
+    /// to fsync and report as durable.
+    ///
+    /// A partial line is written by hand so the check is deterministic rather than a race
+    /// this suite would only lose occasionally: if `history` ever reads the open file, the
+    /// bytes disappear and this fails every time.
+    #[tokio::test]
+    async fn should_not_truncate_the_open_segment_file_while_serving_history() {
+        const PARTIAL: &[u8] = b"{\"id\":\"mid-write\",\"category\":\"Em";
+
+        let dir = TempDir::new("history-no-live-truncate");
+        let store = make_store(&dir);
+
+        store
+            .append(vec![make_input("p1"), make_input("p2")])
+            .await
+            .expect("append");
+
+        let node_dir = dir.path().join(NODE);
+        let open_segment = store.state().open.as_ref().unwrap().id().to_owned();
+        let jsonl = jsonl_path(&node_dir, &open_segment);
+
+        // Stand in for an append that has written some bytes but not yet its newline.
+        {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&jsonl)
+                .expect("open the live segment file");
+            file.write_all(PARTIAL).expect("write the partial record");
+            file.sync_data().expect("sync");
+        }
+
+        let page = store.history(None, 100).await.expect("history");
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p1", "p2"],
+            "the open segment is served from memory, so the partial record is not visible"
+        );
+
+        let raw = fs::read(&jsonl).expect("read the live segment file back");
+        assert!(
+            raw.ends_with(PARTIAL),
+            "history must not truncate the open segment's file — the in-flight write was lost"
+        );
     }
 
     // ── Write-failure / poison tests ─────────────────────────────────────────

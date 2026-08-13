@@ -236,7 +236,7 @@ impl AuditEntry {
 /// above exists to avoid. Narrowing visibility instead of adding a constructor keeps
 /// that guarantee intact without giving external crates a way to build one at all.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ChainHashFields<'a> {
+pub struct ChainHashFields<'a> {
     pub id: &'a str,
     pub category: &'a str,
     pub action: &'a RedactionAction,
@@ -261,11 +261,7 @@ const VERTICAL_PRESENT_TAG: u8 = 0xff;
 /// Compute the chain hash linking an entry to its predecessor.
 ///
 /// The timestamp is deliberately excluded so verification is reproducible.
-pub(crate) fn compute_chain_hash(
-    prev_chain_hash: &str,
-    seq: u64,
-    fields: ChainHashFields<'_>,
-) -> String {
+pub fn compute_chain_hash(prev_chain_hash: &str, seq: u64, fields: ChainHashFields<'_>) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(prev_chain_hash.as_bytes());
     hasher.update(&seq.to_le_bytes());

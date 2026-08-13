@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use std::sync::Mutex;
 
+use crate::audit::cursor::{page_from, AuditCursor, AuditPage};
 use crate::audit::entry::{AuditEntry, AuditEntryInput};
 use crate::audit::error::AuditError;
 use crate::audit::segment::verify_seal_chain;
@@ -54,6 +55,41 @@ pub trait AuditStore: Send + Sync {
     /// re-reading a file backend's JSONL files. Keeping the open segment separate
     /// makes the common case (recent activity) cheap without loading all history.
     async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError>;
+
+    /// One page of the entries of every sealed segment, then of the open one, oldest
+    /// first — **for this node**.
+    ///
+    /// This is the method that answers "what has this store recorded"; [`entries`] answers
+    /// only "what has it recorded since the last rotation". An API that offered the latter
+    /// under the former's name would let an auditor conclude that events which exist never
+    /// happened, which is a worse outcome than offering no history at all.
+    ///
+    /// # Scope: this node, not this deployment
+    ///
+    /// Segments are per-writer and there is no total order between writers — a
+    /// [`FileAuditStore`](crate::audit::FileAuditStore) sees only its own `node_id`
+    /// directory. What comes back is therefore *this node's* history. Anything presenting
+    /// it as the deployment's history repeats, one level up, the exact mistake this method
+    /// exists to close.
+    ///
+    /// # Paging
+    ///
+    /// `after` is an opaque [`AuditCursor`] this method previously returned — never an
+    /// offset, never an entry id. A cursor that cannot be resolved is an error
+    /// ([`AuditError::UnresolvableCursor`]), never a silent restart from the beginning.
+    /// `limit` caps the page; `0` yields an empty page. See [`AuditPage::next`] for when
+    /// paging stops.
+    ///
+    /// Entries appended while a caller pages appear on a later page rather than shifting
+    /// the ones already served: the chain grows at the end, and a cursor names a position
+    /// that growth does not move.
+    ///
+    /// [`entries`]: Self::entries
+    async fn history(
+        &self,
+        after: Option<&AuditCursor>,
+        limit: usize,
+    ) -> Result<AuditPage, AuditError>;
 
     /// The current head of this store's hash chain.
     ///
@@ -221,6 +257,44 @@ impl AuditStore for InMemoryAuditStore {
             .as_ref()
             .map(|segment| segment.entries().to_vec())
             .unwrap_or_default())
+    }
+
+    /// The whole history is already in memory, so the guard is simply held for the
+    /// duration — the page is assembled from borrowed state and nothing is awaited inside.
+    /// Snapshotting first, as `verify` does, would copy every entry ever written just to
+    /// hand back at most `limit` of them.
+    ///
+    /// Sealed extents are taken from each **seal**'s `entry_count`, not from the length of
+    /// the vector beside it. The seal is the immutable record; disagreement between the
+    /// two is exactly what [`AuditError::SegmentEntryCount`] reports, and reading the
+    /// length would define that discrepancy out of existence.
+    async fn history(
+        &self,
+        after: Option<&AuditCursor>,
+        limit: usize,
+    ) -> Result<AuditPage, AuditError> {
+        let state = self.state();
+
+        let mut extents: Vec<(&str, u64)> = state
+            .sealed
+            .iter()
+            .map(|(seal, _)| (seal.segment_id.as_str(), seal.entry_count))
+            .collect();
+        if let Some(segment) = state.open.as_ref() {
+            extents.push((segment.id(), segment.len() as u64));
+        }
+
+        page_from(&extents, after, limit, |position| {
+            Ok(match state.sealed.get(position) {
+                Some((_, entries)) => entries.clone(),
+                // Past the sealed run, so this is the open segment.
+                None => state
+                    .open
+                    .as_ref()
+                    .map(|segment| segment.entries().to_vec())
+                    .unwrap_or_default(),
+            })
+        })
     }
 
     async fn tip(&self) -> Result<String, AuditError> {
@@ -595,6 +669,79 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, "open-1");
         assert_eq!(entries[1].id, "open-2");
+    }
+
+    /// The in-memory backend is the facade's default, so the gap `history` closes is the
+    /// same one here: `entries()` reports the open segment, and after two rotations plus a
+    /// close it reports nothing at all while the store still holds the whole run.
+    #[tokio::test]
+    async fn should_return_every_entry_across_rotations_and_after_close() {
+        let store = make_store();
+
+        store
+            .append(vec![make_input("m1"), make_input("m2")])
+            .await
+            .expect("append");
+        store.rotate().await.expect("rotate 1");
+        store.append(vec![make_input("m3")]).await.expect("append");
+        store.rotate().await.expect("rotate 2");
+        store.append(vec![make_input("m4")]).await.expect("append");
+
+        let expected = vec!["m1", "m2", "m3", "m4"];
+
+        let ids = |page: &AuditPage| -> Vec<String> {
+            page.entries.iter().map(|entry| entry.id.clone()).collect()
+        };
+
+        let page = store.history(None, 100).await.expect("history");
+        assert_eq!(ids(&page), expected);
+
+        // Paging one at a time crosses every segment boundary with a cursor in hand.
+        let mut collected = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = store.history(cursor.as_ref(), 1).await.expect("history");
+            if page.entries.is_empty() {
+                break;
+            }
+            collected.extend(ids(&page));
+            cursor = page.next;
+        }
+        assert_eq!(collected, expected);
+
+        store.close().await.expect("close");
+        assert!(
+            store.entries().await.expect("entries").is_empty(),
+            "entries() reports the open segment, and close left none"
+        );
+        let page = store.history(None, 100).await.expect("history after close");
+        assert_eq!(
+            ids(&page),
+            expected,
+            "closing seals the final segment; it must not disappear from the history"
+        );
+    }
+
+    /// An unresolvable cursor is an error here too — a silent restart would hand the
+    /// caller every entry it already holds a second time, indistinguishable from new
+    /// activity.
+    #[tokio::test]
+    async fn should_reject_a_cursor_this_store_cannot_resolve() {
+        let store = make_store();
+        store.append(vec![make_input("u1")]).await.expect("append");
+
+        let foreign = crate::audit::AuditCursor {
+            segment_id: "00000000-0000-4000-8000-000000000000".into(),
+            index: 0,
+        };
+        let err = store
+            .history(Some(&foreign), 10)
+            .await
+            .expect_err("an unknown segment must not be served as a fresh start");
+        assert!(
+            matches!(err, AuditError::UnresolvableCursor { .. }),
+            "expected UnresolvableCursor, got {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, rag_stream, uploads,
-        usage, versions,
+        audit, audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, rag_stream,
+        uploads, usage, versions,
     },
     state::ApiState,
 };
@@ -123,6 +123,17 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         make_router: || get(pii::pii_config),
     },
     // ── audit:read endpoints (Phase 10) ─────────────────────────────────────────
+    // `/v1/audit` is the coarse Phase 10 shape (`AuditResponse`, open segment only) —
+    // kept as-is because `sdks/typescript/src/client.ts`'s hand-written
+    // `audit.getAudit()` is typed against it, and `/v1/audit/entries` below covers the
+    // same ground with cursor pagination for anyone who wants the fuller surface.
+    // `/v1/audit/verify` now uses the richer `handlers::audit::audit_verify`
+    // (broken-chain-as-200, names the offending entry/seal) instead of Phase 10's
+    // `audit_review::verify_audit` (valid: bool only) — restoring the behaviour
+    // documented in `hacienda-api/README.md` and covered by `handlers::audit`'s own
+    // test suite. `sdks/typescript/src/client.ts`'s `audit.verifyAudit()` return type
+    // was updated to match (`Schemas["VerifyResponse"]`); `audit_review::verify_audit`
+    // itself is kept, `#[allow(dead_code)]`, as a smaller reference implementation.
     RouteSpec {
         path: "/v1/audit",
         access: Access::Capability(Capability::AuditRead),
@@ -131,7 +142,27 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
     RouteSpec {
         path: "/v1/audit/verify",
         access: Access::Capability(Capability::AuditRead),
-        make_router: || get(audit_review::verify_audit),
+        make_router: || get(audit::audit_verify),
+    },
+    RouteSpec {
+        path: "/v1/audit/entries",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit::audit_entries),
+    },
+    RouteSpec {
+        path: "/v1/audit/seals",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit::audit_seals),
+    },
+    RouteSpec {
+        path: "/v1/audit/export",
+        access: Access::Capability(Capability::AuditExport),
+        make_router: || get(audit::audit_export),
+    },
+    RouteSpec {
+        path: "/v1/audit/tip",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(audit::audit_tip),
     },
     RouteSpec {
         path: "/v1/review",
@@ -429,7 +460,7 @@ pub(crate) mod tests {
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
     /// `{param}` segment with a placeholder.
-    fn substitute_path_parameters(pattern: &str) -> String {
+    pub(crate) fn substitute_path_parameters(pattern: &str) -> String {
         pattern
             .split('/')
             .map(|segment| {
@@ -590,6 +621,62 @@ pub(crate) mod tests {
             response.status().as_u16(),
             403,
             "documents:process alone must authorise a scan with include_text absent"
+        );
+    }
+
+    /// `process_documents` used to zip `result.extraction.results` with `result.pii`
+    /// three ways with `body.documents` — `Iterator::zip` truncates to the shortest
+    /// input, and `result.pii` is empty whenever no PII pipeline is configured, so the
+    /// whole zip silently produced zero documents regardless of what was submitted.
+    /// Pins the fix: extraction still runs and is returned even with PII disabled,
+    /// each document simply carries no entities.
+    #[tokio::test]
+    async fn process_documents_returns_extraction_when_pii_is_not_configured() {
+        use data_encoding::BASE64;
+
+        let app = build_router(test_state_no_auth());
+
+        let body_content = BASE64.encode(b"hello world");
+        let request_body = format!(
+            r#"{{"documents":[{{"filename":"a.txt","mime_type":"text/plain","content_base64":"{body_content}"}}]}}"#
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let documents = json["documents"]
+            .as_array()
+            .expect("documents must be an array");
+
+        assert_eq!(
+            documents.len(),
+            1,
+            "one submitted document must yield one result even with PII disabled, got {json}"
+        );
+        assert_eq!(
+            documents[0]["content"],
+            serde_json::json!("hello world"),
+            "the extracted content must be the submitted content, not an empty stand-in"
+        );
+        assert_eq!(
+            documents[0]["entities"],
+            serde_json::json!([]),
+            "no PII pipeline configured means no entities, not a missing document"
         );
     }
 
@@ -950,6 +1037,66 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(get_after_delete.status().as_u16(), 404);
+    }
+
+    /// Upserting a document with `full_text` set and no `chunks` field must succeed by
+    /// chunking server-side (`hacienda_rag::chunk_full_text`), not by rejecting the
+    /// request or silently storing zero chunks. Uses an `embedding_dim: 0` collection
+    /// (full-text/keyword only) because the server-side chunker leaves `embedding`
+    /// empty — a caller wanting embedded chunks still submits `chunks` itself or
+    /// re-embeds afterward, per `handlers::rag::upsert_document`'s doc comment.
+    ///
+    /// Asserts on the stored chunks directly via `get_document_chunks` (bypassing HTTP,
+    /// which has no chunk-returning read path) rather than only checking the document
+    /// exists — a store that silently kept zero chunks would still pass a
+    /// document-exists-only check.
+    #[tokio::test]
+    async fn upsert_document_without_chunks_is_chunked_server_side() {
+        use hacienda_rag::{InMemoryVectorStore, RagStore};
+        let store = Arc::new(InMemoryVectorStore::new("test"));
+        let rag_store: Arc<dyn RagStore> = store.clone();
+        let app = build_router(test_state_no_auth().with_rag_store(rag_store));
+
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let long_text = "Sentence one. ".repeat(50);
+        let upsert_body = serde_json::json!({
+            "document": {"external_id": "doc-1", "full_text": long_text},
+        });
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            upsert.status().as_u16(),
+            201,
+            "upsert without chunks must succeed by chunking full_text server-side"
+        );
+        let upsert = json_body(upsert).await;
+        let document_id: hacienda_rag::DocumentId =
+            serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
+
+        let (_document, chunks) = store
+            .get_document_chunks("c1", &document_id)
+            .await
+            .expect("get_document_chunks")
+            .expect("document must exist");
+        assert!(
+            !chunks.is_empty(),
+            "full_text must have been split into at least one chunk"
+        );
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.ordinal, i as u32, "chunks must be stored in order");
+            assert!(!chunk.content.is_empty());
+        }
     }
 
     /// `GET` on a collection that was never created must be 404, not 500 or 200
@@ -1668,12 +1815,11 @@ pub(crate) mod tests {
             hacienda_core::store::postgres::versions::PostgresDocumentVersionStore::new(pool),
         );
 
-        // `process_documents` zips `result.extraction.results` with `result.pii` — with
-        // no PII pipeline configured, `result.pii` is empty and the zip yields zero
-        // documents regardless of what was submitted (a separate, pre-existing bug in
-        // `documents.rs`, not something this test should paper over). Enable PII with
-        // the default `Mask` mode (needs no key resolver) so the response is populated
-        // and this test actually exercises the versioning path.
+        // PII enabled with the default `Mask` mode (needs no key resolver) — not required
+        // for `process_documents` to return a populated response any more (see
+        // `process_documents_returns_extraction_when_pii_is_not_configured`), but this
+        // test is about the versioning path, and exercising it with entities present is
+        // marginally more representative of a real deployment.
         let pii_config = hacienda_core::pii::PipelineConfig::default();
         let config = hacienda_core::HaciendaConfig::default().with_pii(pii_config);
         let facade = Arc::new(hacienda_core::HaciendaFacade::new(config).unwrap());
@@ -2155,7 +2301,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["valid"], serde_json::Value::Bool(true));
+        assert_eq!(json["verified"], serde_json::Value::Bool(true));
 
         // GET /v1/review — the seeded item comes back pending. `list(None)` returns the
         // whole table, shared with every other test that submits to this database, so

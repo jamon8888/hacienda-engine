@@ -15,7 +15,7 @@ d'extraction Rust `xberg`.
 
 ```text
 détection PII → fusion de spans → rédaction → chaîne d'audit
-```text
+```
 
 Cet ordre de pipeline est fixe et ne doit jamais être inversé (rédiger avant fusion
 corrompt les offsets de caractères des entités qui se chevauchent).
@@ -31,7 +31,7 @@ Cargo.toml → members = [
   "crates/hacienda-wasm",  # même moteur compilé wasm32, consommé par Studio
   "crates/hacienda-rag",   # couche RAG (collections, retrieval, scoring)
 ]
-```text
+```
 
 Règle de dépendance stricte : **la logique de pipeline vit dans `hacienda-core`**, jamais
 dans `hacienda` (façade) ni dans `hacienda-api`/`hacienda-cli`. Si vous devez ajouter un
@@ -84,7 +84,7 @@ hacienda extract <INPUT...> [--mode mask|hash|pseudonymize] [--no-redact --i-acc
 hacienda scan <INPUT...> [--threshold F32] [--format text|json]   # détection seule, jamais de texte de document
 hacienda config show [--format text|json]
 hacienda serve [--bind ADDR]   # défaut 127.0.0.1:8787, loopback only
-```text
+```
 
 - `extract` n'a **pas** de mode de rédaction par défaut — `--mode` doit être choisi
   explicitement, jamais silencieusement décidé pour l'utilisateur.
@@ -121,7 +121,7 @@ capacité `Capability::DocumentsProcess`. Familles de routes actuelles :
 /v1/rag/collections, /v1/rag/collections/{name},
   /v1/rag/collections/{name}/documents, /v1/rag/collections/{name}/retrieve
 /v1/presets, /v1/presets/{id}
-```text
+```
 
 Toute nouvelle route doit être ajoutée au test de réflexion "guarded-routes", pas
 seulement à la table de routes — sinon rien ne garantit qu'elle exige la bonne capacité.

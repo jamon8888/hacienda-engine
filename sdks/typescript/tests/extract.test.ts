@@ -9,15 +9,12 @@ describe("documents", () => {
     client = new HaciendaClient({ baseUrl: getTestBaseUrl(), apiKey: "test" });
   });
 
-  it("processDocuments against a PII-disabled server returns no documents", async () => {
-    // Known, already-documented pre-existing bug (CHANGELOG.md, Phase 13 Task
-    // 3): `process_documents` zips extraction results with `result.pii`,
-    // which is an empty Vec whenever no PII pipeline is configured (this
-    // fixture's default `hacienda serve`) — so it silently returns
-    // `documents: []` regardless of what was submitted. Pinned here (same as
-    // the Python package's equivalent test) so a future fix updates this
-    // assertion deliberately, rather than the SDK silently starting to
-    // disagree with the API it wraps.
+  it("processDocuments against a PII-disabled server still returns extraction results", async () => {
+    // `process_documents` used to zip extraction results with `result.pii`, which is
+    // an empty Vec whenever no PII pipeline is configured (this fixture's default
+    // `hacienda serve`) — the zip silently dropped every document regardless of what
+    // was submitted. Fixed server-side; this asserts the corrected behaviour: the
+    // document is still returned, just with no entities.
     const content = Buffer.from("hello world, no PII here").toString("base64");
     const result = await client.documents.processDocuments({
       documents: [
@@ -29,7 +26,9 @@ describe("documents", () => {
       ],
     });
 
-    expect(result.documents).toEqual([]);
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].content).toBe("hello world, no PII here");
+    expect(result.documents[0].entities).toEqual([]);
   });
 
   it("processDocumentsBackground returns a pollable job", async () => {

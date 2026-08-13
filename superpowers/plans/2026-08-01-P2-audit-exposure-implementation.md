@@ -98,7 +98,7 @@ Deux constats supplémentaires, non bloquants mais structurants :
 ## Tâche 1 — Lecture de l'histoire complète
 
 - [x] **Étape 1.1** — Investigation faite. Voir la section ci-dessus.
-- [ ] **Étape 1.2** — Ajouter les types de curseur dans `hacienda-core/src/audit/` :
+- [x] **Étape 1.2** — Ajouter les types de curseur dans `hacienda-core/src/audit/` :
 
       ```rust
       /// Position immuable dans la chaîne : l'entrée à `index` dans le segment `segment_id`.
@@ -110,7 +110,7 @@ Deux constats supplémentaires, non bloquants mais structurants :
       pub struct AuditPage { pub entries: Vec<AuditEntry>, pub next: Option<AuditCursor> }
       ```
 
-- [ ] **Étape 1.3** — Ajouter au trait `AuditStore` :
+- [x] **Étape 1.3** — Ajouter au trait `AuditStore` :
 
       ```rust
       /// Entrées des segments scellés puis du segment ouvert, plus anciennes d'abord,
@@ -130,27 +130,27 @@ Deux constats supplémentaires, non bloquants mais structurants :
       Le trait doit rester **objet-safe** — propriété épinglée par
       `should_construct_arc_dyn_audit_store` (`store.rs:497-502`).
 
-- [ ] **Étape 1.4** — Implémenter pour les trois backends. Pour `FileAuditStore` :
+- [x] **Étape 1.4** — Implémenter pour les trois backends. Pour `FileAuditStore` :
       **segments scellés depuis le disque, segment ouvert depuis `state.open`** — jamais
       `read_jsonl` sur le fichier vivant (constat 1).
-- [ ] **Étape 1.5** — Ne **pas** prendre `io_order` en lecture : cela bloquerait tous les
+- [x] **Étape 1.5** — Ne **pas** prendre `io_order` en lecture : cela bloquerait tous les
       `append` pendant une lecture disque O(n), et un verrou ne peut de toute façon pas couvrir
       deux requêtes HTTP. La correction de la pagination vient de l'immuabilité du curseur, pas
       d'un verrou.
-- [ ] **Étape 1.6** — Test : forcer deux rotations, vérifier que `history` rend **toutes** les
+- [x] **Étape 1.6** — Test : forcer deux rotations, vérifier que `history` rend **toutes** les
       entrées, dans l'ordre, à travers les segments scellés.
-- [ ] **Étape 1.7** — Test : paginer pendant qu'un `append` concurrent tourne ; aucune entrée
+- [x] **Étape 1.7** — Test : paginer pendant qu'un `append` concurrent tourne ; aucune entrée
       sautée ni dupliquée. Les entrées ajoutées après la frappe du curseur apparaissent
       simplement sur une page ultérieure — croissance, pas dérive.
-- [ ] **Étape 1.8** — Test : après `close()`, `history` rend le segment final depuis le disque.
+- [x] **Étape 1.8** — Test : après `close()`, `history` rend le segment final depuis le disque.
       `entries()` rend vide dans cet état (`store_file.rs:488-492`) ; `history` **ne doit pas**
       hériter de ce comportement.
-- [ ] **Étape 1.9** — Un curseur inconnu rend une erreur explicite, jamais un redémarrage
+- [x] **Étape 1.9** — Un curseur inconnu rend une erreur explicite, jamais un redémarrage
       silencieux depuis le début — qui dupliquerait.
 
 ## Tâche 2 — Export depuis un store
 
-- [ ] **Étape 2.1** — **Fonction libre, cfg-gatée**, décidée par le constat 2 :
+- [x] **Étape 2.1** — **Fonction libre, cfg-gatée**, décidée par le constat 2 :
 
       ```rust
       #[cfg(not(target_arch = "wasm32"))]
@@ -167,9 +167,9 @@ Deux constats supplémentaires, non bloquants mais structurants :
       mémoire ») — une chaîne de conformité multi-mois excéderait la mémoire disponible si elle
       était bufferisée. Le handler HTTP fournit un writer branché sur le corps de réponse
       streamé d'`axum`.
-- [ ] **Étape 2.2** — **Ne pas router par `AuditChain`** (constat 3). Construire l'enveloppe
+- [x] **Étape 2.2** — **Ne pas router par `AuditChain`** (constat 3). Construire l'enveloppe
       directement depuis `history()` et `seals()`.
-- [ ] **Étape 2.3** — L'enveloppe porte **entrées et sceaux ensemble** (décision D-P2-5),
+- [x] **Étape 2.3** — L'enveloppe porte **entrées et sceaux ensemble** (décision D-P2-5),
       désormais obligatoire et non plus souhaitable : sans les sceaux, une histoire
       multi-segments n'a aucune continuité vérifiable.
 ### Décision D-P2-6 — séparer l'enveloppe de preuve de l'extraction tabulaire
@@ -199,11 +199,11 @@ lecteur :
 
 **Décision, en trois points :**
 
-- [ ] **Étape 2.4a** — **L'enveloppe de preuve est JSON/JSONL, groupée par segment, sceaux
+- [x] **Étape 2.4a** — **L'enveloppe de preuve est JSON/JSONL, groupée par segment, sceaux
       inclus.** Le groupement n'est pas cosmétique : c'est lui qui rend `seq` et la
       réinitialisation de `prev` recouvrables, donc la vérification possible. Code neuf, aucune
       rupture.
-- [ ] **Étape 2.4b** — **Ajouter `principal` au CSV** — non pour le rendre vérifiable, il ne
+- [x] **Étape 2.4b** — **Ajouter `principal` au CSV** — non pour le rendre vérifiable, il ne
       peut pas l'être, mais parce que **retirer silencieusement l'attribution d'un extrait
       d'audit est un défaut en soi** : « qui a révélé cette valeur » est précisément la question
       à laquelle l'extrait sert à répondre, et le champ est couvert par `chain_hash`
@@ -213,7 +213,7 @@ lecteur :
       **aucun appelant dans le dépôt** (seulement le ré-export `mod.rs:35`) ; et en 0.x SemVer
       autorise la rupture sur montée mineure. Corriger maintenant coûte ~zéro et le coût croît
       avec chaque consommateur. Entrée `CHANGELOG.md` sous `### Changed`, avec la raison.
-- [ ] **Étape 2.4c** — **L'API doit rendre la distinction impossible à manquer.** Un appelant
+- [x] **Étape 2.4c** — **L'API doit rendre la distinction impossible à manquer.** Un appelant
       qui demande `?format=csv` reçoit une réponse indiquant explicitement qu'il ne s'agit pas
       d'une enveloppe vérifiable. Laisser un utilisateur remettre un CSV à un régulateur en le
       croyant probant est le mode d'échec que toute cette spec existe pour fermer.
@@ -221,14 +221,34 @@ lecteur :
 **Ce qui est délibérément écarté :** ajouter `segment_id` et `seq` en colonnes pour rendre le CSV
 vérifiable. Cela transformerait une table en demi-enveloppe, mal taillée pour les deux usages —
 illisible en tableur, et toujours sans les sceaux nécessaires à la chaîne inter-segments.
-- [ ] **Étape 2.5** — Test : exporter après deux rotations, puis vérifier la chaîne **hors du
+- [x] **Étape 2.5** — Test : exporter après deux rotations, puis vérifier la chaîne **hors du
       serveur** à partir du seul export, sceaux compris.
+
+## Contrat hérité de la tâche 1 — à respecter en tâche 3
+
+Trois décisions prises à l'implémentation que le plan ne couvrait pas. Elles engagent le
+contrat HTTP.
+
+1. **`AuditPage::next` est `Some` dès que la page est non vide ; `None` seulement quand la page
+   est vide.** Le contrat client est donc « paginer jusqu'à recevoir une page vide », pas
+   « paginer jusqu'à ce que `next_cursor` soit nul ». Raison : une chaîne d'audit ne fait que
+   croître, et un appelant arrivé au bout doit garder un curseur reprenable pour suivre les
+   entrées suivantes. L'alternative le laisserait sans point de reprise, donc contraint à
+   relire depuis le début en dédupliquant — précisément ce que le curseur existe pour éviter.
+   Coût : un aller-retour supplémentaire pour vider l'histoire.
+2. **`limit == 0` rend une page vide avec `next: None`**, sans erreur côté core. Avec la
+   sémantique ci-dessus, un client ne peut pas la distinguer de « à jour ». **Le handler HTTP
+   doit donc rejeter ou borner `limit == 0`**, et ne pas laisser passer.
+3. **Les fichiers scellés sont lus en ligne, pas sur `spawn_blocking`** — même exposition que
+   `verify()` aujourd'hui. Un handler appelant `history()` bloque donc un worker du runtime sur
+   de l'E/S disque. Ce n'est pas une régression, mais la tâche 3 en hérite : décider
+   explicitement plutôt que de le découvrir sous charge.
 
 ## Tâche 3 — Les cinq routes
 
-- [ ] **Étape 3.1** — Créer `hacienda-api/src/handlers/audit.rs`, en suivant le patron de
+- [x] **Étape 3.1** — Créer `hacienda-api/src/handlers/audit.rs`, en suivant le patron de
       `handlers/pii.rs`.
-- [ ] **Étape 3.2** — Ajouter à `ROUTE_TABLE` :
+- [x] **Étape 3.2** — Ajouter à `ROUTE_TABLE` :
 
       | Chemin | Accès |
       | --- | --- |
@@ -238,39 +258,58 @@ illisible en tableur, et toujours sans les sceaux nécessaires à la chaîne int
       | `/v1/audit/export` | `Capability(AuditExport)` |
       | `/v1/audit/tip` | `Capability(DocumentsProcess)` |
 
-- [ ] **Étape 3.3** — DTO dans `dto.rs` : `AuditEntryDto`, `SegmentSealDto`, `VerifyResponse`,
+- [x] **Étape 3.3** — DTO dans `dto.rs` : `AuditEntryDto`, `SegmentSealDto`, `VerifyResponse`,
       `AuditPage { entries, next_cursor }`.
-- [ ] **Étape 3.4** — `verify` rend 200 avec le résultat, y compris en cas de rupture : une
+- [x] **Étape 3.4** — `verify` rend 200 avec le résultat, y compris en cas de rupture : une
       chaîne rompue est une **réponse**, pas une erreur serveur. Le corps nomme l'entrée ou le
       sceau fautif (décision D-P2-2).
-- [ ] **Étape 3.5** — Vérifier que `every_guarded_route_reflected_in_auth_state` passe toujours
+- [x] **Étape 3.5** — Vérifier que `every_guarded_route_reflected_in_auth_state` passe toujours
       — il balaie la table, donc les nouvelles routes y entrent automatiquement.
 
 ## Tâche 4 — Le test qui compte
 
-- [ ] **Étape 4.1** — `no_endpoint_returns_corpus_plaintext` : traiter un corpus témoin aux
+- [x] **Étape 4.1** — `no_endpoint_returns_corpus_plaintext` : traiter un corpus témoin aux
       valeurs distinctives, puis interroger **chacune** des cinq routes et asserter qu'aucune
       réponse ne contient une de ces valeurs. Balayer la table plutôt que lister les routes à
       la main, pour qu'une route ajoutée plus tard soit couverte d'office.
-- [ ] **Étape 4.2** — `verify_names_the_broken_entry` : altérer une entrée sur disque, appeler
+- [x] **Étape 4.2** — `verify_names_the_broken_entry` : altérer une entrée sur disque, appeler
       `/v1/audit/verify`, asserter un 200 nommant l'entrée — pas un 500 opaque.
-- [ ] **Étape 4.3** — `tip_is_reachable_with_documents_process_alone` : jeton
+- [x] **Étape 4.3** — `tip_is_reachable_with_documents_process_alone` : jeton
       `hcd_documents:process_*`, `/v1/audit/tip` ne rend ni 401 ni 403.
-- [ ] **Étape 4.4** — `export_requires_audit_export_not_audit_read` : un jeton portant
+- [x] **Étape 4.4** — `export_requires_audit_export_not_audit_read` : un jeton portant
       `audit:read` seul reçoit 403 sur `/v1/audit/export`.
+
+## Limite connue, à reprendre hors de P2
+
+**`verify` ne peut pas nommer le *segment* d'une entrée rompue, seulement son index dans ce
+segment.** L'étape 3.4 affirmait « `AuditError` le porte déjà » : c'est vrai à moitié.
+`AuditError::ChainIntegrity` porte `{index, expected, actual}`, et `FileAuditStore::verify`
+boucle sur les sceaux sans propager le segment. `VerifyFailure.segment_id` est donc `null` pour
+les ruptures de chaîne d'entrées — il est renseigné pour les trois ruptures au niveau des sceaux,
+qui le portent.
+
+**Pourquoi c'est acceptable en l'état :** la réponse identifie l'enregistrement par
+`entry_index` **et** `actual_hash`, le hachage de chaîne propre à l'entrée, qui est unique sur
+toute l'histoire. Un auditeur cherche ce hachage dans l'enveloppe de preuve — laquelle est
+groupée par segment (tâche 2) — et le segment devient évident. Le chemin de travail est donc
+complet, sans détour.
+
+**Pourquoi ce n'est pas corrigé ici :** propager le contexte de segment jusqu'à `verify` touche
+le cœur des tâches 1 et 2, déjà fusionnées. À reprendre dans un lot dédié, pas en fin de P2.
+La limite est documentée sur le type plutôt que masquée.
 
 ## Tâche 5 — Documentation
 
-- [ ] **Étape 5.1** — Décrire les cinq routes dans le document OpenAPI. **Si S4 n'est pas encore
+- [x] **Étape 5.1** — Décrire les cinq routes dans le document OpenAPI. **Si S4 n'est pas encore
       livré**, ajouter au moins les chemins ; le schéma complet viendra avec S4.
-- [ ] **Étape 5.2** — Documenter dans le README de l'API **ce que la chaîne prouve** et en quoi
+- [x] **Étape 5.2** — Documenter dans le README de l'API **ce que la chaîne prouve** et en quoi
       elle diffère d'un journal d'activité. C'est l'argument commercial (spec §2), et il doit
       être lisible par un acheteur, pas seulement par un développeur.
-- [ ] **Étape 5.3** — Documenter que `history` rend **l'histoire de ce nœud**, pas celle du
+- [x] **Étape 5.3** — Documenter que `history` rend **l'histoire de ce nœud**, pas celle du
       déploiement : il n'existe pas d'ordre total inter-nœuds (`store_file.rs:116-122`). Dire
       « les entrées d'audit » en pensant « celles de ce nœud » est le mode d'échec que la tâche 1
       existe pour fermer ; le reproduire à l'échelle du déploiement serait la même faute.
-- [ ] **Étape 5.4** — Entrée `CHANGELOG.md` sous `[Unreleased] / Added`.
+- [x] **Étape 5.4** — Entrée `CHANGELOG.md` sous `[Unreleased] / Added`.
 
 ---
 

@@ -89,6 +89,21 @@ impl ApiError {
         }
     }
 
+    /// No audit chain exists on this server, because auditing is not configured.
+    ///
+    /// 404 with an explicit sentence rather than 200 with an empty list. An empty list is
+    /// indistinguishable from "nothing has ever been recorded", and letting an auditor read
+    /// "no entries" when the truth is "this server keeps no chain" is precisely the
+    /// misreading the audit endpoints exist to prevent. The message says which it is.
+    pub fn audit_not_configured() -> Self {
+        Self {
+            code: ApiErrorCode::NotFound,
+            message: "Audit logging is not enabled on this server, so there is no chain to \
+                      read. This is not the same as a chain with no entries."
+                .into(),
+        }
+    }
+
     pub fn payload_too_large() -> Self {
         Self {
             code: ApiErrorCode::PayloadTooLarge,
@@ -350,6 +365,7 @@ impl From<hacienda_rag::RagError> for ApiError {
             RagError::CollectionAlreadyExists(_)
             | RagError::UnsupportedMode { .. }
             | RagError::Core(_)
+            | RagError::Chunking { .. }
             | RagError::Backend(_) => {
                 tracing::error!(error = %err, "rag store error processing request");
                 ApiError::internal()

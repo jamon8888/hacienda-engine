@@ -7,20 +7,15 @@ from hacienda_sdk._generated.models.document_input import DocumentInput
 from hacienda_sdk._generated.models.process_documents_request import ProcessDocumentsRequest
 
 
-def test_process_documents_against_a_pii_disabled_server_returns_no_documents(
+def test_process_documents_against_a_pii_disabled_server_still_returns_extraction(
     client: HaciendaClient,
 ) -> None:
-    # Known, already-documented pre-existing bug (CHANGELOG.md, Phase 13 Task 3):
-    # `process_documents` zips extraction results with `result.pii`, which is an
-    # empty Vec whenever no PII pipeline is configured (this test fixture's
-    # default `hacienda serve`, per conftest.py) — so it silently returns
-    # `documents: []` regardless of how many documents were submitted. Flagged
-    # there as out of scope for that task, not fixed here either: this test
-    # pins the actual current behavior so a future fix updates this assertion
-    # deliberately, rather than the SDK silently start disagreeing with the API
-    # it wraps. The processing_time_ms/audit_chain_tip envelope fields are
-    # still present, which is what the round-trip below (test_jobs.py) relies
-    # on instead of document content.
+    # `process_documents` used to zip extraction results with `result.pii`, which is
+    # an empty Vec whenever no PII pipeline is configured (this test fixture's
+    # default `hacienda serve`, per conftest.py) — the zip silently dropped every
+    # document regardless of how many were submitted. Fixed server-side; this
+    # asserts the corrected behavior: the document is still returned, just with no
+    # entities.
     content = base64.b64encode(b"hello world, no PII here").decode("ascii")
     request = ProcessDocumentsRequest(
         documents=[
@@ -30,7 +25,9 @@ def test_process_documents_against_a_pii_disabled_server_returns_no_documents(
 
     result = client.documents.process_documents(request)
 
-    assert result.documents == []
+    assert len(result.documents) == 1
+    assert result.documents[0].content == "hello world, no PII here"
+    assert result.documents[0].entities == []
 
 
 def test_process_documents_background_returns_a_pollable_job(client: HaciendaClient) -> None:

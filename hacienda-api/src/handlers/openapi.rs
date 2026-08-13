@@ -39,7 +39,11 @@ use crate::state::ApiState;
         crate::handlers::pii::pii_config,
         crate::handlers::pii::reveal_token,
         crate::handlers::audit_review::get_audit,
-        crate::handlers::audit_review::verify_audit,
+        crate::handlers::audit::audit_verify,
+        crate::handlers::audit::audit_entries,
+        crate::handlers::audit::audit_seals,
+        crate::handlers::audit::audit_export,
+        crate::handlers::audit::audit_tip,
         crate::handlers::audit_review::get_review,
         crate::handlers::audit_review::decide_review,
         crate::handlers::audit_review::get_compliance_dpia,
@@ -96,7 +100,15 @@ use crate::state::ApiState;
         crate::dto::AuditEntryDto,
         crate::dto::ReviewItemDto,
         crate::dto::AuditResponse,
-        crate::dto::AuditVerifyResponse,
+        crate::dto::AuditScope,
+        crate::dto::NodeAuditEntryDto,
+        crate::dto::NodeAuditPage,
+        crate::dto::SegmentSealDto,
+        crate::dto::NodeSealsResponse,
+        crate::dto::AuditTipResponse,
+        crate::dto::VerifyFailureKind,
+        crate::dto::VerifyFailure,
+        crate::dto::VerifyResponse,
         crate::dto::ReviewResponse,
         crate::dto::ReviewDecideResponse,
         crate::dto::ReviewDecisionWire,
@@ -288,7 +300,15 @@ mod tests {
         "AuditEntryDto",
         "ReviewItemDto",
         "AuditResponse",
-        "AuditVerifyResponse",
+        "AuditScope",
+        "NodeAuditEntryDto",
+        "NodeAuditPage",
+        "SegmentSealDto",
+        "NodeSealsResponse",
+        "AuditTipResponse",
+        "VerifyFailureKind",
+        "VerifyFailure",
+        "VerifyResponse",
         "ReviewResponse",
         "ReviewDecideResponse",
         "ReviewDecisionWire",
@@ -363,5 +383,41 @@ mod tests {
                  an exact set comparison, not just a one-directional check"
             );
         }
+    }
+
+    /// `/v1/audit/export` returns `Vec<u8>` at the Rust type level for all three
+    /// `?format=` values, which on its own erases the distinction between them. The
+    /// document must still describe each format's actual content type and body shape
+    /// (`application/json`, `application/x-ndjson`, `text/csv`) rather than only the
+    /// generic byte response — see the handler's own doc comment for why the formats
+    /// are not interchangeable.
+    #[test]
+    fn audit_export_response_documents_every_format_content_type() {
+        let doc = build_openapi().expect("static ApiDoc metadata always serialises");
+        let content = doc["paths"]["/v1/audit/export"]["get"]["responses"]["200"]["content"]
+            .as_object()
+            .expect("/v1/audit/export's 200 response must declare a content map");
+
+        // Exact set, not just "contains" — an extra or misspelled content type would
+        // pass a `contains_key`-only check just as easily as a missing one.
+        let actual: std::collections::BTreeSet<&str> = content.keys().map(String::as_str).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["application/json", "application/x-ndjson", "text/csv"].into();
+        assert_eq!(
+            actual, expected,
+            "/v1/audit/export's 200 response content types must be exactly the three \
+             ?format= values, no more, no fewer"
+        );
+
+        // The shape matters as much as the presence: json is an array of entries,
+        // jsonl/csv are opaque strings (see this handler's own doc comment on why
+        // jsonl/csv have no structured schema).
+        assert_eq!(content["application/json"]["schema"]["type"], "array");
+        assert_eq!(
+            content["application/json"]["schema"]["items"]["$ref"],
+            "#/components/schemas/NodeAuditEntryDto"
+        );
+        assert_eq!(content["application/x-ndjson"]["schema"]["type"], "string");
+        assert_eq!(content["text/csv"]["schema"]["type"], "string");
     }
 }

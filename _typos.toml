@@ -11,8 +11,17 @@ extend-exclude = [
   # Same reason, for the same language: `typos` reads "moteur" as "motor", "ressources" as
   # "resources", "amont" as "amount" — corrections that would each make the text wrong.
   # `docs/architecture/` is the French architecture corpus (analysis + index); English
-  # documents belong at the `docs/` root, where they stay checked.
+  # documents belong at the `docs/` root, where they stay checked. Same reasoning for the
+  # two docs/*-ia-fr.md guides.
   "docs/architecture/",
+  "docs/hacienda-guide-ia-fr.md",
+  "docs/setup-harnais-ia-fr.md",
+  # apps/hacienda-studio/components/extend/layout-blocks.tsx embeds verbatim excerpts from
+  # academic papers (as page-builder demo content) plus generated block ids —
+  # hyphenated line-break artifacts ("transfor- mation"), author-name fragments, and random
+  # id substrings read as typos to an English dictionary but are not text anyone here
+  # authored or should "fix".
+  "apps/hacienda-studio/components/extend/layout-blocks.tsx",
 ]
 
 [default.extend-words]
@@ -37,5 +46,8 @@ cahce = "cahce"
 # hacienda-core/tests/ner_eval.rs doc comment: an example of a typo'd fixture label the
 # schema test is designed to catch, not a typo to fix.
 loaction = "loaction"
+# The "mis-" prefix in "mis-scoring"/"mis-counting" (hacienda-core, crates/hacienda-rag,
+# CHANGELOG.md) reads as a truncated "miss"/"mist" to the checker; it is not one.
+mis = "mis"
 
 [default.extend-identifiers]

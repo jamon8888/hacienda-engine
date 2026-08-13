@@ -54,6 +54,8 @@ pub mod redaction;
 pub mod review;
 #[cfg(all(any(feature = "postgres", feature = "s3"), not(target_arch = "wasm32")))]
 pub mod store;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tenancy;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use auth::{AuthContext, AuthzError, Caller, Capability, CapabilitySet};
@@ -65,3 +67,5 @@ pub use error::HaciendaError;
 pub use facade::{
     HaciendaFacade, HaciendaMetadata, HaciendaResult, SpanText, TextRedactResult, TextScanResult,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use tenancy::{ActorId, ProjectId, TenantCtx, TenantId};

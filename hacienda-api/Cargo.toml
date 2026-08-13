@@ -24,7 +24,7 @@ hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres", "s3
 # feature, futures via no extra native toolchain requirement) — no ONNX-style
 # portability risk, so `POST .../answer` (Phase 12 Track 3) needs no opt-in
 # feature the way real re-embedding does.
-hacienda-rag = { path = "../crates/hacienda-rag", features = ["streaming"] }
+hacienda-rag = { path = "../crates/hacienda-rag", features = ["streaming", "chunking"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

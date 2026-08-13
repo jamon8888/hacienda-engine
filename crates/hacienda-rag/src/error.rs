@@ -95,13 +95,32 @@ pub enum RagError {
         mode: String,
     },
 
-    /// An error originating in xberg core (chunking, embeddings, reranking, …).
+    /// An error originating in xberg core (embeddings, reranking, …).
     ///
     /// Boxed because `xberg::XbergError` is large relative to the other
     /// variants — the same reasoning `HaciendaError`/`PiiError` give for
     /// boxing it (`hacienda-core/src/error.rs`, `hacienda-core/src/pii/mod.rs`).
     #[error(transparent)]
     Core(Box<xberg::XbergError>),
+
+    /// Server-side text chunking (`chunk::chunk_full_text`) failed.
+    ///
+    /// A dedicated variant rather than routing through [`Self::Core`] via
+    /// `#[from]`: a bare `RagError::Core` forwarded straight from `xberg::chunk_text`
+    /// gives no indication *which* call produced it once it's crossed into
+    /// `hacienda-api`'s `ApiError` and reached a log line — this variant names the
+    /// operation and how much text was being split (a length, never the content
+    /// itself) alongside the root cause.
+    #[error(
+        "chunking failed ({input_chars} input chars): {source}; suggestion: check the chunking configuration or input size"
+    )]
+    Chunking {
+        /// Length of the input text in `char`s — never the text itself.
+        input_chars: usize,
+        /// The underlying xberg error that caused chunking to fail.
+        #[source]
+        source: Box<xberg::XbergError>,
+    },
 
     /// A backend-specific error from an adapter implementation.
     #[error("backend error: {0}")]

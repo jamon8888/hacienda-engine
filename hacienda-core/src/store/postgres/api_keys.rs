@@ -148,40 +148,42 @@ mod tests {
         PostgresApiKeyStore::new(pool)
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn should_round_trip_create_get_list_and_revoke() {
-        let store = test_store().await;
-        let owner = format!("owner-{}", Uuid::new_v4());
-        let key_hash = format!("hash-{}", Uuid::new_v4());
-        let lookup_hash = format!("lookup-{}", Uuid::new_v4());
-        let capabilities = vec![Capability::DocumentsProcess, Capability::AuditRead];
+    fn should_round_trip_create_get_list_and_revoke() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
+            let owner = format!("owner-{}", Uuid::new_v4());
+            let key_hash = format!("hash-{}", Uuid::new_v4());
+            let lookup_hash = format!("lookup-{}", Uuid::new_v4());
+            let capabilities = vec![Capability::DocumentsProcess, Capability::AuditRead];
 
-        let created = store
-            .create(&key_hash, &lookup_hash, &owner, capabilities.clone())
-            .await
-            .expect("create failed");
-        assert_eq!(created.owner, owner);
-        assert_eq!(created.key_hash, key_hash);
-        assert_eq!(created.lookup_hash, lookup_hash);
-        assert!(created.revoked_at.is_none());
+            let created = store
+                .create(&key_hash, &lookup_hash, &owner, capabilities.clone())
+                .await
+                .expect("create failed");
+            assert_eq!(created.owner, owner);
+            assert_eq!(created.key_hash, key_hash);
+            assert_eq!(created.lookup_hash, lookup_hash);
+            assert!(created.revoked_at.is_none());
 
-        let by_lookup_hash = store
-            .get_by_lookup_hash(&lookup_hash)
-            .await
-            .expect("get_by_lookup_hash failed")
-            .expect("key must exist");
-        assert_eq!(by_lookup_hash.id, created.id);
+            let by_lookup_hash = store
+                .get_by_lookup_hash(&lookup_hash)
+                .await
+                .expect("get_by_lookup_hash failed")
+                .expect("key must exist");
+            assert_eq!(by_lookup_hash.id, created.id);
 
-        let listed = store.list(&owner).await.expect("list failed");
-        assert!(listed.iter().any(|k| k.id == created.id));
+            let listed = store.list(&owner).await.expect("list failed");
+            assert!(listed.iter().any(|k| k.id == created.id));
 
-        store.revoke(created.id).await.expect("revoke failed");
-        let revoked = store
-            .get_by_lookup_hash(&lookup_hash)
-            .await
-            .expect("get_by_lookup_hash failed")
-            .expect("key must still exist after revoke");
-        assert!(revoked.revoked_at.is_some());
+            store.revoke(created.id).await.expect("revoke failed");
+            let revoked = store
+                .get_by_lookup_hash(&lookup_hash)
+                .await
+                .expect("get_by_lookup_hash failed")
+                .expect("key must still exist after revoke");
+            assert!(revoked.revoked_at.is_some());
+        });
     }
 }

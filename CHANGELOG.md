@@ -7,8 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
+  segment-creation race.** These `hacienda-core` Postgres-backed store tests were
+  `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
+  in CI" entry) surfaced two real bugs on first execution. First: the shared
+  `PostgresFixture`'s `PgPool` (a static `OnceCell`) was created once but each
+  `#[tokio::test]` ran on its own throwaway Tokio runtime — sqlx ties a connection's
+  socket to the runtime that established it, so a connection handed across a test-runtime
+  boundary lost its return-to-pool bookkeeping, permanently shrinking the pool's capacity
+  test by test until every later test timed out on `pool.acquire()` regardless of
+  complexity. Fixed by routing every fixture-touching test through one persistent runtime
+  (`test_support::block_on_shared`) instead of a runtime per test. Second:
+  `get_or_create_open_segment`'s `SELECT ... FOR UPDATE` only locks a row that already
+  exists, so when no segment is open it locks nothing — two transactions could both see
+  `None` and both insert their own "open" segment, splitting entries across two competing
+  chains. Fixed with a `pg_advisory_xact_lock`, the same pattern `versions.rs`'s
+  `create_version` already uses for its own check-then-insert race. Also fixed the same
+  job's `postgres-integration-tests`: `sqlx::query!`/`query_as!` verify SQL against a live
+  database at compile time whenever `DATABASE_URL` is set, but that job points
+  `DATABASE_URL` at a database migrated only when the *test binary* runs, not at compile
+  time — forced `SQLX_OFFLINE=true` so both jobs check queries against the committed
+  `.sqlx` cache instead. Five further `hacienda-core::store::postgres::audit` tests still
+  fail on an unrelated, pre-existing `SegmentIntegrity` bug (all five fail on the *same*
+  corrupted seal regardless of what each individually exercises — see the comment above
+  `postgres-store-tests` in `ci-postgres.yaml` and next to the audit test module) and are
+  skipped from CI pending further investigation with a live Postgres session.
+- **`POST /v1/documents` no longer silently drops every document when no PII pipeline is
+  configured.** `process_documents` zipped `body.documents`, `result.extraction.results`,
+  and `result.pii` three ways; `Iterator::zip` truncates to the shortest input, and
+  `result.pii` is an empty `Vec` whenever `HaciendaFacade`'s PII pipeline is unset — so the
+  whole zip produced zero results regardless of how many documents were submitted or
+  extracted successfully. Fixed by iterating `result.extraction.results` (always one entry
+  per submitted document) and pairing each with `result.pii`'s corresponding entry when one
+  exists, defaulting to no entities otherwise — matching the facade-level contract already
+  pinned by `should_extract_without_touching_pii_when_it_is_not_configured`
+  (`hacienda-core/src/facade.rs`). Was previously flagged as a known, unfixed gap (see the
+  "Known gap surfaced" note further down this changelog); the SDK tests that pinned the
+  buggy `documents: []` response (`sdks/typescript/tests/extract.test.ts`,
+  `sdks/python/tests/test_extract.py`) now assert the corrected behavior instead.
+- **`main` build restored.** `hacienda-core` failed to compile (`page_from` re-exported at a
+  wider visibility than its `pub(crate)` definition, plus two knock-on `E0282`s in the new
+  `PostgresAuditStore::history()`), `hacienda-api` had two independent duplicate-definition
+  errors (`AuditEntryDto` declared twice in `dto.rs`, `Query`/`From<QueryRejection>` declared
+  twice in `extract.rs`) left over from the Phase 5/Phase 10 merge, three `AuditStore` test
+  doubles in `hacienda-core/src/facade.rs` were missing the `history` method the trait gained,
+  and the `.sqlx` offline query cache was missing entries for the new Postgres audit queries.
+  CI (`ci-rust.yaml`) had been red on `main` since `00b210b`.
+- **The full 5-endpoint audit API is live again**, not just documented in
+  `hacienda-api/README.md`: `GET /v1/audit/{entries,verify,seals,export,tip}`, cursor-paginated,
+  with the `audit:export` capability gating `/export`. This code
+  (`hacienda-api/src/handlers/audit.rs`) existed since `93c6290` but was orphaned by a later
+  merge — never declared in `handlers/mod.rs`, never wired into `ROUTE_TABLE` — leaving only the
+  coarser Phase 10 `/v1/audit`/`/v1/audit/verify` (`audit_review.rs`) live. Restored
+  `HaciendaFacade::{audit_history_with_auth, audit_seals_with_auth, audit_export_with_auth,
+  audit_enabled}`, which the handlers call and which had been dropped along with the routes.
+  `/v1/audit` stays on `audit_review::get_audit` for `sdks/typescript`'s hand-written
+  `getAudit()`; `/v1/audit/verify` now serves the richer handler (broken-chain-as-200, names
+  the offending entry/seal) — `sdks/typescript/src/client.ts`'s `verifyAudit()` return type
+  updated to match (operation id kept as `verifyAudit` so `sdks/python`'s generated client
+  still exposes a `verify_audit` function under the new handler), `audit_review::verify_audit`
+  kept unrouted as a reference implementation. `/v1/audit/export`'s `json`/`jsonl` formats are a
+  flat, chain-ordered export (verifiable via consecutive `chain_hash` recomputation) — not the
+  segment-grouped, seal-embedding envelope the original design sketched; that richer shape is
+  unimplemented, and the handler's doc comment and this entry now say so rather than overclaim.
+  `PostgresAuditStore::history()` reads its extent counts, open-segment id, and entries inside
+  one `REPEATABLE READ` transaction (previously separate queries, so a concurrent
+  append/rotation could make a legitimate chain look like a `SegmentEntryCount` mismatch), and
+  the RAG upsert path's server-side chunking (below) runs in `spawn_blocking` rather than
+  inline on the async runtime.
+- **README's bindings table no longer claims 14 language bindings that don't exist.** `alef.toml`
+  references six Rust source files that were never written and a `packages/` output tree that
+  was never created; the table's 14 "✅" rows described `cargo-alef`-generated FFI bindings that
+  have never been generated. Replaced with what's real (the REST `sdks/python`/`sdks/typescript`
+  clients, the hand-written `crates/hacienda-wasm`) and an honest note on what's aspirational.
+  `.ai-rulez/skills/{crate-structure,alef-generated-bindings}/SKILL.md` flagged as copied from
+  the upstream `xberg` repo — they describe a crate/package layout that doesn't exist here.
+- **`GET /v1/review` required `review:decide` instead of the route table's declared
+  `audit:read` (Phase 10).** `get_review` and `decide_review` both called
+  `HaciendaFacade::review_queue_with_auth`, which unconditionally required
+  `Capability::ReviewDecide` — so a caller with only `audit:read` passed the route-level
+  guard on `GET /v1/review` and was then rejected by the facade. New
+  `HaciendaFacade::review_queue_read_with_auth` requires `audit:read`, used by `get_review`
+  only; `decide_review` keeps the original `review_queue_with_auth` (`review:decide`).
+  Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
+  (no handler-level test exercised the two capabilities' distinction).
+
 ### Added
 
+- **Server-side chunking for RAG document upsert.** `POST /v1/rag/collections/{name}/documents`
+  previously required the caller to submit pre-chunked, pre-embedded `chunks` — `full_text` was
+  stored for search only, never chunked. When `chunks` is omitted, the server now splits
+  `full_text` itself via a new `hacienda_rag::chunk_full_text` (wrapping xberg's `chunking`
+  feature, pure Rust, no ONNX), producing chunks with `content` set and `embedding` empty for a
+  caller to embed separately or leave unembedded. `hacienda-rag`'s new `chunking` feature is
+  always-on in `hacienda-api` (unlike the ONNX-gated, opt-in `rag-embeddings`).
 - **Python and TypeScript SDKs (`sdks/python`, `sdks/typescript`, Phase 14).** Client
   libraries for the hacienda-engine API, living in this repo (`sdks/`) rather than a
   separate `hacienda-sdks` repo — the session's GitHub App cannot create repositories, and
@@ -96,7 +190,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   afterwards. Materialises a `[glossary]` config section when none was loaded, matching
   `--mode`'s existing materialisation of `[pii]` — without it, `--glossary-out` against a
   config with no `[glossary]` section would silently write an empty array.
-
 - **`POST /v1/pii/reveal` endpoint (Phase 8).** Reverses a pseudonym token
   (`[CATEGORY:key_id:base32_ciphertext]`) back to its normalised plaintext.
   Requires `pii:reveal` capability. Writes a `Reveal` audit entry keyed by
@@ -109,7 +202,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recording the token reveal in the audit chain. `HaciendaFacade` now holds a
   cloned `Arc<Pseudonymiser>` so the de-pseudonymisation path is available
   outside a live pipeline run.
-
 - **Postgres store backend (Phase 9).** `AuditStore`, `ReviewStore`, `JobStore`
   implementations backed by Postgres via `sqlx`, plus new stores for document
   versions, presets, and API keys. All stores share a single `PgPool` injected
@@ -121,7 +213,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three new store types (`DocumentVersionStore`, `PresetStore`, `ApiKeyStore`).
 - `hacienda-core` gains a `postgres` feature flag (off by default) to gate
   `sqlx` dependency for wasm32 and non-Postgres consumers.
-
 - **Phase 5 routes: audit, review, compliance, glossary (Phase 10).** 7 new
   endpoints: `GET /v1/audit`, `GET /v1/audit/verify`, `GET /v1/review`,
   `POST /v1/review/{id}/decide`, `GET /v1/compliance/dpia`,
@@ -148,7 +239,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not `#[non_exhaustive]`, so an embedder who matches on it exhaustively (no wildcard
   arm) fails to compile until they handle the new variant — flagged per this crate's own
   semver policy regardless of the fact that nothing has shipped yet.
-
 - **Deterministic API key lookup and `ApiKeyTokenResolver` (Phase 11 Task 2).**
   Argon2id salts every hash it produces, so `key_hash` alone could never be used to
   look up a stored `ApiKey` from a freshly presented key — only to verify one already
@@ -169,7 +259,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build_token_resolver`, since it needs a live store handle that `AuthConfig`'s
   serializable fields cannot carry — the same reasoning `HaciendaFacade::with_stores`
   already uses for its optional stores.
-
 - **API key management routes (Phase 11 Task 3).** 3 new endpoints, all guarded by
   `auth:manage`: `POST /v1/auth/keys` (issue — the raw key appears exactly once, in
   this response, and is never logged or echoed elsewhere), `DELETE /v1/auth/keys/{id}`
@@ -191,7 +280,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth_config_resolver_reflects_declared_config_not_the_live_resolver` demonstrates
   this rather than papering over it. Fixing it needs an `AuthState` introspection API
   in `hacienda-core`, out of scope here.
-
 - **`GET /v1/jobs`, `GET /v1/jobs/{id}/result` (Phase 13 Task 1).** Both guarded by
   `documents:process`, same as the existing `GET /v1/jobs/{id}`. `list_jobs` filters by
   `?status=`, is tenant-scoped (a principal sees only jobs it owns; a trusted in-process
@@ -206,7 +294,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `extract::Query<T>` extractor mirrors the existing `Json<T>` pattern so a malformed query
   string fails into the `{"error": {...}}` envelope rather than axum's default plain-text
   rejection.
-
 - **`GET/POST /v1/presets`, `GET/DELETE /v1/presets/{id}` (Phase 13 Task 2).** Thin CRUD
   routes over Phase 9's `PresetStore`, guarded by `documents:process` — presets are inert
   config, not part of the audit-bearing pipeline. Opt-in via a new
@@ -224,7 +311,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real Postgres instance; sqlx picks this up automatically with no `DATABASE_URL` or
   `SQLX_OFFLINE` needed. This was never previously exercised by CI on this branch, so it is
   a fix to a pre-existing gap, not a regression.
-
 - **`GET /v1/documents/{id}/versions`, `GET /v1/documents/{id}`, `GET /v1/documents/{id}/diff`,
   `GET /v1/documents/{id}/diff/{diff_job_id}` (Phase 13 Task 3).** Document versioning and
   diffing over Phase 9's `DocumentVersionStore`, guarded by `documents:process` since a
@@ -252,7 +338,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently returns `{"documents":[]}` for any batch when no PII pipeline is configured
   (`result.pii` is empty, so zipping it with `result.extraction.results` yields zero
   entries regardless of extraction success). Pre-existing before this task's changes.
-
 - **`POST /v1/uploads/presign`, `POST /v1/uploads/confirm` (Phase 13 Task 4).** Presigned
   uploads for large documents that should not transit the API server as a base64 body.
   `hacienda_core::store::object::ObjectStore` trait (`presign_put`, `head`) with an
@@ -266,7 +351,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived solely from the server-issued `upload_id`, never from the client-supplied
   `filename` — the SSRF-safety argument this reopens (spec §5) holds because no
   client-supplied URL or path ever reaches `ObjectStore::head`/`presign_put`.
-
 - **`GET /v1/usage` (Phase 13 Task 5).** Per-principal usage metering, derived from the audit
   chain rather than tracked separately (Decision 3): entity count (row count) and byte count
   (`SUM(span_length)`), optionally windowed by `?since=`/`?until=` on `created_at`.
@@ -282,7 +366,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integration test: `span_length` is `BIGINT`, and Postgres's `SUM(BIGINT)` returns `NUMERIC`,
   not `BIGINT`, which failed the runtime column-type check — fixed with an explicit
   `::BIGINT` cast on the aggregate.
-
 - **`hacienda-rag` crate: `RagStore` trait, backend-agnostic IR, in-memory backend (Phase 12
   Task 1).** New workspace member `crates/hacienda-rag`, recovered near-verbatim from xberg's
   own MIT-licensed `xberg-rag` crate (removed from that workspace pre-1.0 in commit
@@ -323,7 +406,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenAPI spec (Phase 12 Task 3 Step 1); answer-synthesis (streaming LLM answers over
   retrieved chunks) was explicitly scoped out of Phase 12 (Task 3 Step 4) — no upstream route
   exists to build a contract against.
-
 - **`/v1/rag/*` HTTP routes (Phase 12 Task 3).** `POST /v1/rag/collections`,
   `GET`/`DELETE /v1/rag/collections/{name}`, `POST /v1/rag/collections/{name}/documents`, and
   `POST /v1/rag/collections/{name}/retrieve` — the 5 of 8 confirmed `/v1/rag/*` routes that map
@@ -349,7 +431,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `retrieve` call over HTTP 500'd. Fixed by giving each variant a named `score` field; no
   existing test had round-tripped a `RetrieveOutput` through `serde_json` before this route
   test did.
-
 - **Real pseudonymisation.** `RedactionMode::Pseudonymize` now emits a keyed, deterministic,
   reversible token — `[EMAIL:k1:MZXW6YTB...]` — built with AES-256-SIV (RFC 5297) over the
   NFKC-normalised value, with the PII category as authenticated associated data. Equal
@@ -520,18 +601,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updated.
 - Hash-chained audit log with blake3
 - JWT authentication for API
-
-### Fixed
-
-- **`GET /v1/review` required `review:decide` instead of the route table's declared
-  `audit:read` (Phase 10).** `get_review` and `decide_review` both called
-  `HaciendaFacade::review_queue_with_auth`, which unconditionally required
-  `Capability::ReviewDecide` — so a caller with only `audit:read` passed the route-level
-  guard on `GET /v1/review` and was then rejected by the facade. New
-  `HaciendaFacade::review_queue_read_with_auth` requires `audit:read`, used by `get_review`
-  only; `decide_review` keeps the original `review_queue_with_auth` (`review:decide`).
-  Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
-  (no handler-level test exercised the two capabilities' distinction).
 
 ## [0.1.0] - 2026-07-28
 
