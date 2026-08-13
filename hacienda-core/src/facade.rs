@@ -14,6 +14,8 @@ use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionError};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
 use xberg::{extract, ExtractInput, ExtractionResult};
@@ -700,6 +702,10 @@ impl HaciendaFacade {
                 review_submitted += self.submit_for_review(&result).await?;
 
                 document.content = result.redacted_text.clone();
+                audit_entries.extend(
+                    self.redact_structured_fields(document, pipeline, caller)
+                        .await?,
+                );
                 pii.push(result);
             }
         }
@@ -1074,6 +1080,301 @@ impl HaciendaFacade {
         Ok(store.append(inputs).await?)
     }
 
+    /// Redact every text-bearing field on `document` beyond `.content`.
+    ///
+    /// P7 (`superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md`) found, by
+    /// reproduction against a live build, that `document.content = result.redacted_text`
+    /// was the *only* rewrite this pipeline performed. xberg's `ExtractedDocument`
+    /// populates several other fields unconditionally for the formats already enabled on
+    /// this workspace (`pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/`archives`),
+    /// not behind an opt-in flag, and every one of them passed through unredacted in every
+    /// transport that serialises an `ExtractedDocument` (REST, CLI, MCP):
+    ///
+    /// - `tables`, and `pages` (which nests a *second* copy of both `content` and
+    ///   `tables`, plus PPTX `speaker_notes`)
+    /// - `formatted_content`
+    /// - `metadata.authors` / `created_by` / `modified_by`
+    /// - `annotations` (PDF comments), `form_fields` (PDF form values), `uris` (extracted
+    ///   links — a `mailto:` URL *is* a plaintext email address)
+    /// - `revisions` (DOCX/PPTX tracked-change author names and content deltas)
+    /// - `children` (archive members — each a complete nested `ExtractedDocument`,
+    ///   redacted recursively via [`Self::redact_document_recursively`])
+    ///
+    /// This method closes that gap the same way `.content` is closed: walk every
+    /// text-bearing field, not just the one most callers think of as "the document text."
+    ///
+    /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
+    /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
+    /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
+    /// silently included by half-measure. Also not covered: fields gated behind
+    /// extraction-config flags or Cargo features this workspace does not yet enable
+    /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
+    /// `chunks`, `extracted_keywords`, `summary`, `translation`, `page_classifications`)
+    /// — see the `2026-08-13-hacienda-xberg-capability-parity-program.md` X1/X2/X3 specs,
+    /// each of which is gated on this method already covering the field it would add.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if detection fails on any field, and
+    /// [`HaciendaError::Audit`] if the audit store rejects an entry — the same errors
+    /// `.content`'s own redaction can already produce, now also possible per structured
+    /// field.
+    async fn redact_structured_fields(
+        &self,
+        document: &mut xberg::ExtractedDocument,
+        pipeline: &Arc<PiiPipeline>,
+        caller: Caller<'_>,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        let mut audit_entries = Vec::new();
+
+        for table in &mut document.tables {
+            self.redact_table(table, pipeline, caller, &mut audit_entries)
+                .await?;
+        }
+
+        if let Some(pages) = &mut document.pages {
+            for page in pages {
+                self.redact_string_field(&mut page.content, pipeline, caller, &mut audit_entries)
+                    .await?;
+
+                // `PageContent::tables` is `Vec<Arc<Table>>` (shared with other pages'
+                // views for memory efficiency, per xberg's own doc comment) — redacting
+                // through the `Arc` in place would either fail (`Arc::get_mut` when a
+                // reference is shared) or silently redact a copy nobody else sees
+                // (`Arc::make_mut`, which clones on write). Replacing each entry with a
+                // freshly built `Arc` sidesteps both: correctness over preserving
+                // whatever sharing existed pre-redaction, which buys nothing once this is
+                // the last step before the result leaves the process.
+                let mut redacted_tables = Vec::with_capacity(page.tables.len());
+                for shared_table in &page.tables {
+                    let mut table = (**shared_table).clone();
+                    self.redact_table(&mut table, pipeline, caller, &mut audit_entries)
+                        .await?;
+                    redacted_tables.push(Arc::new(table));
+                }
+                page.tables = redacted_tables;
+
+                // PPTX presenter notes — as PII-bearing as any other document text (a
+                // presenter's notes routinely name people and give contact details), and
+                // easy to miss because it's a page-level field with no counterpart at the
+                // top level of `ExtractedDocument`.
+                if let Some(notes) = &mut page.speaker_notes {
+                    self.redact_string_field(notes, pipeline, caller, &mut audit_entries)
+                        .await?;
+                }
+            }
+        }
+
+        if let Some(formatted) = &mut document.formatted_content {
+            self.redact_string_field(formatted, pipeline, caller, &mut audit_entries)
+                .await?;
+        }
+
+        if let Some(authors) = &mut document.metadata.authors {
+            for author in authors {
+                self.redact_string_field(author, pipeline, caller, &mut audit_entries)
+                    .await?;
+            }
+        }
+        if let Some(created_by) = &mut document.metadata.created_by {
+            self.redact_string_field(created_by, pipeline, caller, &mut audit_entries)
+                .await?;
+        }
+        if let Some(modified_by) = &mut document.metadata.modified_by {
+            self.redact_string_field(modified_by, pipeline, caller, &mut audit_entries)
+                .await?;
+        }
+
+        // PDF comment/sticky-note text — routinely names people ("per John's request...").
+        if let Some(annotations) = &mut document.annotations {
+            for annotation in annotations {
+                if let Some(content) = &mut annotation.content {
+                    self.redact_string_field(content, pipeline, caller, &mut audit_entries)
+                        .await?;
+                }
+            }
+        }
+
+        // PDF form field values — a filled-in "Name"/"SSN"/"Email" field is exactly the
+        // kind of value this whole pipeline exists to catch, and a form field is no less
+        // reachable than a table cell.
+        for field in &mut document.form_fields {
+            if let Some(value) = &mut field.value {
+                self.redact_string_field(value, pipeline, caller, &mut audit_entries)
+                    .await?;
+            }
+            if let Some(default_value) = &mut field.default_value {
+                self.redact_string_field(default_value, pipeline, caller, &mut audit_entries)
+                    .await?;
+            }
+        }
+
+        // DOCX/PPTX tracked-change history — the author name and the inserted/deleted
+        // text are both exactly as sensitive as the same text appearing in `.content`;
+        // track-changes is often where an *earlier*, unredacted draft's wording survives
+        // even after the visible document was cleaned up.
+        if let Some(revisions) = &mut document.revisions {
+            for revision in revisions {
+                self.redact_revision(revision, pipeline, caller, &mut audit_entries)
+                    .await?;
+            }
+        }
+
+        // Extracted hyperlinks: a `mailto:` URL *is* a plaintext email address, and a
+        // link's display label routinely names a person ("Contact Jane Doe").
+        if let Some(uris) = &mut document.uris {
+            for uri in uris {
+                self.redact_string_field(&mut uri.url, pipeline, caller, &mut audit_entries)
+                    .await?;
+                if let Some(label) = &mut uri.label {
+                    self.redact_string_field(label, pipeline, caller, &mut audit_entries)
+                        .await?;
+                }
+            }
+        }
+
+        // Archive members (`archives` feature): each is a *complete nested
+        // `ExtractedDocument`* (a zip containing a PDF containing PII is exactly as real a
+        // leak as the top-level PDF would be), and archives can nest arbitrarily deep
+        // (a zip inside a zip is legal), hence the recursive call rather than one more
+        // field loop.
+        if let Some(children) = &mut document.children {
+            for child in children {
+                audit_entries.extend(
+                    self.redact_document_recursively(&mut child.result, pipeline, caller)
+                        .await?,
+                );
+            }
+        }
+
+        Ok(audit_entries)
+    }
+
+    /// Redact a nested archive entry's document: its own `.content` (nothing else in the
+    /// pipeline reaches an archive member's content — [`Self::detect_concurrently`] only
+    /// ever sees the top-level documents in `extraction.results`), then everything
+    /// [`Self::redact_structured_fields`] covers for a top-level document, recursively —
+    /// an archive member can itself contain archive members.
+    ///
+    /// Hand-written `Pin<Box<dyn Future>>` return, not a plain `async fn`, because this
+    /// function's own body calls [`Self::redact_structured_fields`], which calls this
+    /// function again for each nested child: an `async fn` that (indirectly) calls itself
+    /// produces an infinitely-sized state-machine type. Boxing breaks the cycle — the
+    /// caller only needs to store a pointer-sized `Pin<Box<dyn Future>>` at the await
+    /// point, not the unbounded concrete future type.
+    fn redact_document_recursively<'a>(
+        &'a self,
+        document: &'a mut xberg::ExtractedDocument,
+        pipeline: &'a Arc<PiiPipeline>,
+        caller: Caller<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AuditEntry>, HaciendaError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut audit_entries = Vec::new();
+            self.redact_string_field(&mut document.content, pipeline, caller, &mut audit_entries)
+                .await?;
+            audit_entries.extend(
+                self.redact_structured_fields(document, pipeline, caller)
+                    .await?,
+            );
+            Ok(audit_entries)
+        })
+    }
+
+    /// Redact a tracked change's author name and its content delta (inserted/deleted
+    /// lines, changed table cells, changed formatting properties).
+    async fn redact_revision(
+        &self,
+        revision: &mut xberg::DocumentRevision,
+        pipeline: &Arc<PiiPipeline>,
+        caller: Caller<'_>,
+        audit_entries: &mut Vec<AuditEntry>,
+    ) -> Result<(), HaciendaError> {
+        if let Some(author) = &mut revision.author {
+            self.redact_string_field(author, pipeline, caller, audit_entries)
+                .await?;
+        }
+        for line in &mut revision.delta.content {
+            let text = match line {
+                xberg::DiffLine::Context(s)
+                | xberg::DiffLine::Added(s)
+                | xberg::DiffLine::Removed(s) => s,
+            };
+            self.redact_string_field(text, pipeline, caller, audit_entries)
+                .await?;
+        }
+        for change in &mut revision.delta.table_changes {
+            self.redact_string_field(&mut change.from, pipeline, caller, audit_entries)
+                .await?;
+            self.redact_string_field(&mut change.to, pipeline, caller, audit_entries)
+                .await?;
+        }
+        // Property changes are usually non-linguistic ("bold", "12pt") and unlikely to
+        // match any PII pattern — run through the same pipeline anyway rather than special
+        // -case them, since a redaction pass over text with nothing to redact is a no-op,
+        // and a special case here is one more place a future property type could be added
+        // without anyone remembering this method exists.
+        for prop in &mut revision.delta.property_changes {
+            if let Some(from) = &mut prop.from {
+                self.redact_string_field(from, pipeline, caller, audit_entries)
+                    .await?;
+            }
+            if let Some(to) = &mut prop.to {
+                self.redact_string_field(to, pipeline, caller, audit_entries)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Redact a table's cells (and header, when present) in place, then regenerate
+    /// `markdown` from the redacted cells.
+    ///
+    /// Regenerating rather than redacting `markdown` independently keeps the two
+    /// representations consistent by construction and avoids writing two audit entries
+    /// for what is the same underlying value rendered twice.
+    async fn redact_table(
+        &self,
+        table: &mut xberg::Table,
+        pipeline: &Arc<PiiPipeline>,
+        caller: Caller<'_>,
+        audit_entries: &mut Vec<AuditEntry>,
+    ) -> Result<(), HaciendaError> {
+        for row in &mut table.cells {
+            for cell in row {
+                self.redact_string_field(cell, pipeline, caller, audit_entries)
+                    .await?;
+            }
+        }
+        if let Some(columns) = &mut table.columns {
+            for column in columns {
+                self.redact_string_field(column, pipeline, caller, audit_entries)
+                    .await?;
+            }
+        }
+        table.markdown = cells_to_markdown(&table.cells);
+        Ok(())
+    }
+
+    /// Run `text` through the PII pipeline and replace it with the redacted result,
+    /// recording audit entries the same way the top-level `content` field's redaction
+    /// already does — one call site for "detect, redact, audit" that every structured
+    /// field above shares, rather than each reimplementing it.
+    async fn redact_string_field(
+        &self,
+        text: &mut String,
+        pipeline: &Arc<PiiPipeline>,
+        caller: Caller<'_>,
+        audit_entries: &mut Vec<AuditEntry>,
+    ) -> Result<(), HaciendaError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let result = pipeline.process(text).await?;
+        audit_entries.extend(self.record_audit(&result, caller).await?);
+        *text = result.redacted_text;
+        Ok(())
+    }
+
     /// Submit every low-confidence detection for human review, returning how many were
     /// accepted by the store.
     ///
@@ -1190,6 +1491,41 @@ async fn extract_all(
         return Ok(extract(input, &config.extraction).await?);
     }
     Ok(xberg::extract_batch(inputs, &config.extraction).await?)
+}
+
+/// Rebuild a table's markdown rendering from its (already redacted) cells.
+///
+/// Deliberately simpler than whatever formatting produced the original `markdown` — no
+/// column-width alignment, no per-format styling heuristics. The goal is a rendering that
+/// says what `cells` now says (post-redaction), not a byte-identical replacement for the
+/// pre-redaction original. The first row is treated as the header, matching every markdown
+/// table renderer's convention and `Table::columns`' own "first row of `cells`" doc comment.
+fn cells_to_markdown(cells: &[Vec<String>]) -> String {
+    let Some(header) = cells.first() else {
+        return String::new();
+    };
+
+    let render_row = |row: &[String]| -> String {
+        let mut line = String::from("|");
+        for cell in row {
+            line.push(' ');
+            line.push_str(&cell.replace('|', "\\|"));
+            line.push_str(" |");
+        }
+        line.push('\n');
+        line
+    };
+
+    let mut out = render_row(header);
+    out.push('|');
+    for _ in header {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+    for row in cells.iter().skip(1) {
+        out.push_str(&render_row(row));
+    }
+    out
 }
 
 /// Recover the guard when a panic poisoned the lock.
@@ -1715,6 +2051,261 @@ mod tests {
         assert_eq!(result.pii.len(), 2);
         for document in &result.extraction.results {
             assert!(!document.content.contains('@'));
+        }
+    }
+
+    // ── P7: structured-field redaction ────────────────────────────────────────
+    // superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md
+
+    /// A control-corpus value that must never survive unredacted anywhere in a
+    /// structured field — distinct from anything else in this test module, so a match is
+    /// a disclosure and never a coincidence.
+    const P7_CORPUS_EMAIL: &str = "zephyrine.quatrebarbes@corpus-temoin.example";
+
+    /// Assert `haystack` does not contain the corpus value, naming `field` on failure.
+    fn assert_field_redacted(field: &str, haystack: &str) {
+        assert!(
+            !haystack.contains(P7_CORPUS_EMAIL),
+            "{field} leaked the corpus value: {haystack}"
+        );
+    }
+
+    /// A minimal, real `ExtractedDocument` to build test fixtures from.
+    ///
+    /// `xberg::ExtractedDocument` carries private fields (`internal_document`,
+    /// `ocr_internal_document`), so it cannot be built via struct-literal syntax from
+    /// outside the crate — `..Default::default()` cannot see them either. The only way to
+    /// obtain one here is `xberg::extract`; every field this test then wants to populate
+    /// is assigned afterward, which is plain field mutation on public fields and needs no
+    /// literal.
+    async fn base_document() -> xberg::ExtractedDocument {
+        xberg::extract(
+            ExtractInput::from_bytes(
+                b"placeholder".to_vec(),
+                "text/plain",
+                Some("doc.txt".into()),
+            ),
+            &xberg::ExtractionConfig::default(),
+        )
+        .await
+        .expect("trivial plain-text extraction must succeed")
+        .results
+        .into_iter()
+        .next()
+        .expect("one result for one input")
+    }
+
+    /// Build an `ExtractedDocument` with the corpus value planted in every field
+    /// [`HaciendaFacade::redact_structured_fields`] covers, one nested archive child deep.
+    async fn document_with_corpus_everywhere() -> xberg::ExtractedDocument {
+        let table = xberg::Table {
+            cells: vec![
+                vec!["Name".to_string(), "Email".to_string()],
+                vec!["Zephyrine".to_string(), P7_CORPUS_EMAIL.to_string()],
+            ],
+            markdown: format!(
+                "| Name | Email |\n| --- | --- |\n| Zephyrine | {P7_CORPUS_EMAIL} |\n"
+            ),
+            page_number: 1,
+            ..Default::default()
+        };
+
+        let page = xberg::PageContent {
+            page_number: 1,
+            content: format!("page content: {P7_CORPUS_EMAIL}"),
+            tables: vec![Arc::new(table.clone())],
+            image_indices: Vec::new(),
+            hierarchy: None,
+            is_blank: None,
+            layout_regions: None,
+            speaker_notes: Some(format!("presenter note: {P7_CORPUS_EMAIL}")),
+            section_name: None,
+            sheet_name: None,
+        };
+
+        let annotation = xberg::PdfAnnotation {
+            annotation_type: xberg::PdfAnnotationType::Text,
+            content: Some(format!("comment: {P7_CORPUS_EMAIL}")),
+            page_number: 1,
+            bounding_box: None,
+        };
+
+        let form_field = xberg::PdfFormField {
+            name: "email".to_string(),
+            full_name: "form1.email".to_string(),
+            field_type: xberg::FormFieldType::Text,
+            value: Some(P7_CORPUS_EMAIL.to_string()),
+            default_value: Some(P7_CORPUS_EMAIL.to_string()),
+            flags: 0,
+            page: None,
+            bbox: None,
+            max_length: None,
+            tooltip: None,
+        };
+
+        let revision = xberg::DocumentRevision {
+            revision_id: "1".to_string(),
+            author: Some(P7_CORPUS_EMAIL.to_string()),
+            timestamp: None,
+            kind: xberg::RevisionKind::Insertion,
+            anchor: None,
+            delta: xberg::RevisionDelta {
+                content: vec![xberg::DiffLine::Added(format!(
+                    "inserted: {P7_CORPUS_EMAIL}"
+                ))],
+                table_changes: vec![xberg::CellChange {
+                    row: 0,
+                    col: 0,
+                    from: String::new(),
+                    to: P7_CORPUS_EMAIL.to_string(),
+                }],
+                ..Default::default()
+            },
+        };
+
+        let uri = xberg::ExtractedUri {
+            url: format!("mailto:{P7_CORPUS_EMAIL}"),
+            label: Some(format!("email {P7_CORPUS_EMAIL}")),
+            page: None,
+            kind: xberg::UriKind::Email,
+        };
+
+        let mut nested = base_document().await;
+        nested.content = format!("nested archive member: {P7_CORPUS_EMAIL}");
+        nested.tables = vec![table.clone()];
+
+        let child = xberg::ArchiveEntry {
+            path: "nested.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            result: Box::new(nested),
+        };
+
+        let mut document = base_document().await;
+        document.content = "top-level content, redacted separately by the outer loop".to_string();
+        document.metadata.authors = Some(vec![P7_CORPUS_EMAIL.to_string()]);
+        document.metadata.created_by = Some(P7_CORPUS_EMAIL.to_string());
+        document.metadata.modified_by = Some(P7_CORPUS_EMAIL.to_string());
+        document.tables = vec![table];
+        document.pages = Some(vec![page]);
+        document.formatted_content = Some(format!("**formatted**: {P7_CORPUS_EMAIL}"));
+        document.annotations = Some(vec![annotation]);
+        document.form_fields = vec![form_field];
+        document.revisions = Some(vec![revision]);
+        document.uris = Some(vec![uri]);
+        document.children = Some(vec![child]);
+        document
+    }
+
+    /// The reproduction P7 was filed against, as an automated test: every structured
+    /// field this method covers must come back redacted, at every depth (top level, page
+    /// level, and one level into a nested archive member).
+    #[tokio::test]
+    async fn redact_structured_fields_covers_every_known_field() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+        let mut document = document_with_corpus_everywhere().await;
+
+        let audit_entries = facade
+            .redact_structured_fields(&mut document, pipeline, Caller::Trusted)
+            .await
+            .unwrap();
+
+        assert!(
+            !audit_entries.is_empty(),
+            "the corpus value must have produced at least one audit entry"
+        );
+
+        for table in &document.tables {
+            for row in &table.cells {
+                for cell in row {
+                    assert_field_redacted("tables[].cells", cell);
+                }
+            }
+            assert_field_redacted("tables[].markdown", &table.markdown);
+        }
+
+        let pages = document.pages.as_ref().expect("pages present");
+        for page in pages {
+            assert_field_redacted("pages[].content", &page.content);
+            assert_field_redacted(
+                "pages[].speaker_notes",
+                page.speaker_notes.as_deref().unwrap_or(""),
+            );
+            for table in &page.tables {
+                for row in &table.cells {
+                    for cell in row {
+                        assert_field_redacted("pages[].tables[].cells", cell);
+                    }
+                }
+                assert_field_redacted("pages[].tables[].markdown", &table.markdown);
+            }
+        }
+
+        assert_field_redacted(
+            "formatted_content",
+            document.formatted_content.as_deref().unwrap_or(""),
+        );
+
+        let authors = document.metadata.authors.as_ref().expect("authors present");
+        for author in authors {
+            assert_field_redacted("metadata.authors", author);
+        }
+        assert_field_redacted(
+            "metadata.created_by",
+            document.metadata.created_by.as_deref().unwrap_or(""),
+        );
+        assert_field_redacted(
+            "metadata.modified_by",
+            document.metadata.modified_by.as_deref().unwrap_or(""),
+        );
+
+        for annotation in document.annotations.as_ref().expect("annotations present") {
+            assert_field_redacted(
+                "annotations[].content",
+                annotation.content.as_deref().unwrap_or(""),
+            );
+        }
+
+        for field in &document.form_fields {
+            assert_field_redacted("form_fields[].value", field.value.as_deref().unwrap_or(""));
+            assert_field_redacted(
+                "form_fields[].default_value",
+                field.default_value.as_deref().unwrap_or(""),
+            );
+        }
+
+        for revision in document.revisions.as_ref().expect("revisions present") {
+            assert_field_redacted(
+                "revisions[].author",
+                revision.author.as_deref().unwrap_or(""),
+            );
+            for line in &revision.delta.content {
+                let text = match line {
+                    xberg::DiffLine::Context(s)
+                    | xberg::DiffLine::Added(s)
+                    | xberg::DiffLine::Removed(s) => s,
+                };
+                assert_field_redacted("revisions[].delta.content", text);
+            }
+            for change in &revision.delta.table_changes {
+                assert_field_redacted("revisions[].delta.table_changes.to", &change.to);
+            }
+        }
+
+        for uri in document.uris.as_ref().expect("uris present") {
+            assert_field_redacted("uris[].url", &uri.url);
+            assert_field_redacted("uris[].label", uri.label.as_deref().unwrap_or(""));
+        }
+
+        let children = document.children.as_ref().expect("children present");
+        let nested = &children[0].result;
+        assert_field_redacted("children[].result.content", &nested.content);
+        for table in &nested.tables {
+            for row in &table.cells {
+                for cell in row {
+                    assert_field_redacted("children[].result.tables[].cells", cell);
+                }
+            }
         }
     }
 

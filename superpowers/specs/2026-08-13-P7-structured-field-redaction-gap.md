@@ -1,13 +1,14 @@
 # P7 — Close the structured-field redaction gap (found empirically, live in shipped code)
 
 **Date:** 2026-08-13
-**Status:** Proposed — **treat as the highest-priority item in either program**, ahead of
-P6 and X1, both numerically later but logically downstream of this
+**Status:** **Fixed** (this revision) — see §8. Design (b), recursive redaction, shipped
+directly rather than as a separate hotfix-then-real-fix pair (§4's two-speed plan), since the
+full fix was tractable in one pass once every field was enumerated.
 **Program:** amends `2026-08-01-P1-redaction-enforcement-point.md` directly, and gates
 `2026-08-13-X1-pure-rust-enrichment-features.md` (its `extracted_keywords` field is the same
-class of bug, about to be introduced again if X1 ships before this does)
-**Severity:** the redaction guarantee the whole product is sold on does not hold today for
-any table-bearing or paginated document. Verified by reproduction, not inferred.
+class of bug, and is now unblocked — see §8)
+**Severity:** the redaction guarantee the whole product is sold on did not hold for any
+table-bearing or paginated document. Verified by reproduction, not inferred.
 
 ---
 
@@ -168,3 +169,58 @@ name-shaped strings pulled straight out of document text.
 - `metadata.authors`/`created_by` scrubbed or redacted the same way; a control-corpus document
   authored by "Zephyrine Quatrebarbes" (as an Office document property, not body text) does
   not surface that name in the response.
+
+## 8. What actually shipped
+
+Enumerating every field for §2's table surfaced four more live gaps in the same
+already-enabled feature set, beyond the `tables`/`pages` pair the reproduction found —
+each checked directly against xberg's source rather than assumed:
+
+| Field | Carries | Why it's live today |
+| --- | --- | --- |
+| `annotations` (`Vec<PdfAnnotation>`) | PDF comment/sticky-note text | `pdf`, already enabled |
+| `form_fields` (`Vec<PdfFormField>`) | Filled-in AcroForm/XFA field values | `pdf`, already enabled |
+| `revisions` (`Vec<DocumentRevision>`) | Tracked-change author names and inserted/deleted text — often an *earlier*, unredacted draft's wording | `office` (DOCX), already enabled |
+| `uris` (`Vec<ExtractedUri>`) | Extracted links — a `mailto:` URL **is** a plaintext email address | Not gated behind a not-yet-enabled feature |
+| `children` (`Vec<ArchiveEntry>`) | Each a **complete nested `ExtractedDocument`** — a zip containing a PDF with PII is exactly as real a leak as the top-level PDF | `archives`, already enabled; recurses arbitrarily deep |
+| `pages[].speaker_notes` | PPTX presenter notes | `office` (PPTX), already enabled |
+
+Implementation landed as design (b) directly (§5) — recursive redaction, not a strip-first
+hotfix — in `hacienda-core/src/facade.rs`:
+
+- `HaciendaFacade::redact_structured_fields` walks tables (top-level and per-page,
+  including the `Arc<Table>` sharing in `PageContent`, resolved by rebuilding a fresh `Arc`
+  per redacted table rather than fighting `Arc::get_mut`/`make_mut`), `formatted_content`,
+  `metadata.authors`/`created_by`/`modified_by`, `annotations`, `form_fields`, `revisions`
+  (author, inserted/deleted lines, changed table cells, changed formatting properties),
+  `uris`, and recurses into `children` via a hand-written `Pin<Box<dyn Future>>`-returning
+  method (`redact_document_recursively`) — required because the recursion is indirect
+  (`redact_structured_fields` → `redact_document_recursively` → `redact_structured_fields`),
+  which a plain `async fn` cannot express (infinite state-machine size).
+- Table markdown is **regenerated from redacted cells** (`cells_to_markdown`) rather than
+  redacted independently, so the two representations can't disagree and the same value
+  doesn't produce two audit entries for what is one redaction.
+- Wired into the existing `process_batch_with_auth` loop, right after the pre-existing
+  `document.content = result.redacted_text.clone()` line — same call site, same audit path
+  (`record_audit`), reused per field via a new `redact_string_field` helper.
+- **Verified against the actual reproduction**: the control-corpus spreadsheet from §1,
+  run through the rebuilt `hacienda extract --mode mask`, now has zero occurrences of the
+  corpus email or IBAN anywhere in the JSON output.
+- **Automated test** (`hacienda-core/src/facade.rs`,
+  `redact_structured_fields_covers_every_known_field`): builds an `ExtractedDocument` with
+  the corpus value planted in every field above, one archive-child deep, and asserts all of
+  them come back redacted. `cargo test -p hacienda-core -p hacienda-api -p hacienda-cli -p
+  hacienda -p hacienda-mcp`: 367 passed (366 baseline + this test), same 4–5 pre-existing
+  environmental failures as before (root-in-container permission tests, no live Postgres),
+  no regressions.
+
+**Still not covered, unchanged from §2/§5's original scope** — `metadata.additional` (open
+`HashMap<_, JSON Value>`, e.g. source file paths) — and fields gated behind extraction-config
+flags or Cargo features this workspace doesn't yet enable (`elements`, `document`'s structure
+tree, `ocr_elements`, `djot_content`, `chunks`, and X1/X2/X3's `extracted_keywords`/`summary`/
+`translation`/`page_classifications`, which is exactly why those specs gate on this one).
+
+**Consequence for X1 (§6), updated:** `keywords` is now unblocked — `extracted_keywords`
+would be covered the same way `annotations`/`form_fields`/etc. are, by extending
+`redact_structured_fields` with one more field when that feature is enabled. Same for
+`summarization`'s `.summary` and, once P6 ships, X3's `.translation`/`.page_classifications`.

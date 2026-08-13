@@ -12,14 +12,16 @@ de sortie.
 
 ---
 
-> **⚠ Alerte urgente (2026-08-13), amendant P1 directement.** `2026-08-13-P7-structured-field-redaction-gap.md`
+> **⚠ Alerte (2026-08-13), amendant P1 directement — corrigée.** `2026-08-13-P7-structured-field-redaction-gap.md`
 > a trouvé, par reproduction, un écart vivant dans du code déjà livré : `POST /v1/documents`,
-> `hacienda extract` et `hacienda-mcp` redigent correctement `ExtractedDocument.content` mais
-> laissent `tables`, `pages[].content` et d'autres champs structurés **en clair** dans la même
-> réponse. P1 ne le couvre pas — son garde porte sur le stockage, pas sur le corps d'une
-> réponse HTTP synchrone. Priorité au-dessus de tout le reste de ce programme, y compris la
-> vague 0. Voir aussi `2026-08-13-hacienda-xberg-capability-parity-program.md` §0, le
-> programme frère qui a découvert ce point en investiguant la parité de capacités xberg.
+> `hacienda extract` et `hacienda-mcp` redigeaient correctement `ExtractedDocument.content` mais
+> laissaient `tables`, `pages[].content` et sept autres champs structurés **en clair** dans la
+> même réponse. P1 ne le couvrait pas — son garde porte sur le stockage, pas sur le corps d'une
+> réponse HTTP synchrone. **Statut : corrigé** — `HaciendaFacade::redact_structured_fields`
+> couvre désormais les dix champs identifiés, récursivement dans les membres d'archives ;
+> reproduction et test automatisé confirment zéro occurrence résiduelle. Voir P7 §8. Voir aussi
+> `2026-08-13-hacienda-xberg-capability-parity-program.md` §0, le programme frère qui a
+> découvert ce point en investiguant la parité de capacités xberg.
 
 ## 1. Objectif et réserve
 

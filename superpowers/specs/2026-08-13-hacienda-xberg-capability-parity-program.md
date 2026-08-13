@@ -18,23 +18,28 @@ path already goes through.
 
 ---
 
-## 0. Urgent finding, discovered while writing this program: read before anything else
+## 0. Urgent finding, discovered while writing this program — now fixed
 
 Investigating X1 (below) surfaced a **live gap in already-shipped code**, verified by
 reproduction, not inferred: `POST /v1/documents`, `hacienda extract`, and `hacienda-mcp`'s
-`documents_process` all redact `ExtractedDocument.content` correctly but **leave `.tables`,
+`documents_process` redacted `ExtractedDocument.content` correctly but **left `.tables`,
 `.pages[].content`, and other structured fields completely unredacted** in the same
-response. A control-corpus spreadsheet with a name/email/IBAN in one row redacts correctly in
-`content` and appears in plaintext, twice more, in `tables` and `pages`. Full reproduction,
-root cause, and fix design: `2026-08-13-P7-structured-field-redaction-gap.md`.
+response. A control-corpus spreadsheet with a name/email/IBAN in one row redacted correctly in
+`content` and appeared in plaintext, twice more, in `tables` and `pages`. Full reproduction,
+root cause, and fix: `2026-08-13-P7-structured-field-redaction-gap.md`.
 
-This is not a hypothetical risk this program is choosing to guard against — it is active in
-the extraction-format features (`pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/`archives`)
-already merged. **P7 is the actual highest-priority item across both this program and the
-existing platform-parity program**, ahead of P6 despite its later spec number, and every
-capability in this program that would add a new structured field
-(`extracted_keywords`, `.summary`, `.translation`, `.page_classifications`, layout's
-structure tree) is blocked on it, not merely related to it.
+**Status: fixed.** `HaciendaFacade::redact_structured_fields` now covers `tables`, `pages`
+(content, tables, PPTX speaker notes), `formatted_content`, `metadata.authors`/`created_by`/
+`modified_by`, PDF `annotations`, `form_fields`, DOCX/PPTX `revisions`, extracted `uris`, and
+recurses into archive `children` — nine fields beyond the one originally reproduced, all
+verified live in the already-enabled `pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/
+`archives` feature set. Automated test and re-run reproduction both confirm zero occurrences
+of the control-corpus value anywhere in the output. See P7 §8 for the full list and what
+remains explicitly out of scope (`metadata.additional`, and fields gated behind
+not-yet-enabled config/features). Every capability in this program that would add a new
+structured field (`extracted_keywords`, `.summary`, `.translation`, `.page_classifications`)
+is unblocked — extending the same, now-proven mechanism with one more field, not building it
+from scratch.
 
 ---
 
@@ -86,8 +91,8 @@ boundary," "every content operation writes an audit entry first," tenant isolati
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│  P7 — Structured-field redaction gap (URGENT — live in shipped code,  │
-│        blocks any new ExtractedDocument field: keywords/summary/...)  │
+│  P7 — Structured-field redaction gap — DONE (§0). Was live in shipped │
+│        code; now covers 10 fields beyond .content, recursively.       │
 └────────────────────────────┬───────────────────────────────────────--┘
                              │
 ┌────────────────────────────┴───────────────────────────────────────--┐
@@ -96,19 +101,20 @@ boundary," "every content operation writes an audit entry first," tenant isolati
                              │ required before any capability calls an LLM
 ┌────────────────────────────┴──────────────────────────────────────────┐
 │  X1 — Pure-Rust enrichment            X2 — ONNX/native-backed         │
-│  (no new infra, keywords/summary      (infra provisioning decision,   │
-│   gated on P7)                         transcription/layout gated too)│
+│  (no new infra, unblocked)             (infra provisioning decision,  │
+│                                         unblocked on the P7 axis)      │
 ├─────────────────────────────────────────────────────────────────────--┤
-│  X3 — LLM-backed enrichment (needs P6 and, for 4 of 5 features, P7)   │
+│  X3 — LLM-backed enrichment (needs P6; unblocked on the P7 axis)      │
 ├─────────────────────────────────────────────────────────────────────--┤
 │  X4 — Presets & diff engine: reuse-vs-reinvent decision                │
 └─────────────────────────────────────────────────────────────────────--┘
 ```
 
-X1/X2/X3/X4 do not depend on each other. **P7 gates every row that populates a new
-`ExtractedDocument` field** (X1's `keywords`/`summarization`, X2's `transcription`/
-`layout-*`, X3's `translation`/`summarization-llm`/`classification`/`structured`) — see each
-child spec's own dependency line; P6 gates only X3 (the LLM-call boundary, a different
+X1/X2/X3/X4 do not depend on each other. **P7 is done**, so the field-coverage question that
+used to gate X1's `keywords`/`summarization`, X2's `transcription`/`layout-*`, and X3's
+`translation`/`summarization-llm`/`classification`/`structured` is closed — adding one of
+those fields is now "extend `redact_structured_fields` with one more field," the same
+proven mechanism, not new design. P6 still gates only X3 (the LLM-call boundary, a different
 concern from P7's field-coverage one). Rows that don't touch either boundary (X1's
 `qr-codes`/`tree-sitter`/`static-embeddings`/`candle-ocr`, X2's retrieval-time
 `embeddings`/`reranker`/`sparse-embeddings`/`late-interaction`, all of X4) are unblocked and
@@ -116,23 +122,23 @@ can proceed immediately.
 
 ---
 
-## 4. P7 — Structured-field redaction gap
+## 4. P7 — Structured-field redaction gap — done
 
 **Full spec:** `2026-08-13-P7-structured-field-redaction-gap.md`. Summarised here because of
-where it sits in the delivery order (§10), not restated in full — see the child spec for the
-reproduction, root cause, and fix design.
+where it sits in the delivery order (§10), not restated in full — see the child spec §8 for
+what actually shipped.
 
-**Problem, in one sentence.** `HaciendaFacade::process_batch_with_auth` redacts exactly one
-field (`ExtractedDocument.content`); every other text-bearing field xberg populates —
-`tables`, `pages` (which nests a *second* copy of both `content` and `tables`),
-`formatted_content`, `metadata.authors`/`created_by`/`additional`, and (once X1/X2/X3 ship)
-`extracted_keywords`, `summary`, `translation`, `page_classifications` — passes through
-unredacted, in every transport (REST, CLI, MCP) that shares `HaciendaResult`.
+**Problem, in one sentence (as found).** `HaciendaFacade::process_batch_with_auth` redacted
+exactly one field (`ExtractedDocument.content`); every other text-bearing field xberg
+populates — `tables`, `pages`, `formatted_content`, `metadata.authors`/`created_by`/
+`modified_by`, PDF `annotations`/`form_fields`, DOCX/PPTX `revisions`, extracted `uris`,
+recursively-nested archive `children` — passed through unredacted, in every transport (REST,
+CLI, MCP) that shares `HaciendaResult`.
 
-**Fix, in one sentence.** Redact every string-bearing field on `ExtractedDocument`
-generically (walk the structure, don't name each field), immediately preceded by a hotfix
-that strips what isn't yet provably safe rather than emitting it — see the child spec §5 for
-the (a)/(b) two-speed design.
+**Fix, in one sentence (as shipped).** `HaciendaFacade::redact_structured_fields` walks and
+redacts every one of those fields generically, including recursing into nested archive
+members via a hand-written `Pin<Box<dyn Future>>` method — the full recursive design, shipped
+in one pass rather than as a strip-first hotfix followed by a later real fix.
 
 ---
 
@@ -356,12 +362,10 @@ correctness/leverage question, not a missing capability.
 
 | Wave | Content | Why |
 | --- | --- | --- |
-| **-1** | **P7 (a), the hotfix** | Urgent — live in shipped code (§0). Strip/null the unredacted structured fields now; (b), the real recursive-redaction fix, follows but should not gate stopping the active leak |
-| **0** | **P7 (b)** and **P6**, in parallel | P7(b) unblocks `keywords`/`summarization`/`transcription`/`layout-*`/4-of-5 X3 features; P6 unblocks X3's LLM calls and closes I5 for the one call site that already exists (`rag_stream`). Independent of each other |
-| **1** | **X1** rows not gated on P7 (`qr-codes`/`tree-sitter`/`static-embeddings`/`candle-ocr`) | Zero new infrastructure, same shape as the already-shipped extraction-format win — highest leverage for the effort; can start immediately, does not wait on wave 0 |
-| **1b** | **X1**'s `keywords`/`summarization` | After P7(b) |
-| **2** | **X2** | Gated on the ORT-strategy decision (§7); retrieval-time rows independent of P7, extraction-time rows (`transcription`/`layout-*`) gated on P7(b) same as X1 |
-| **3** | **X3** | After P6; 4 of 5 features additionally after P7(b); `captioning` specifically waits on an image-redaction answer regardless of both |
+| **0** | **P7 — done.** **P6** remains open | P7 shipped as one pass (recursive redaction, not a strip-first hotfix — see P7 §8); unblocks `keywords`/`summarization`/`transcription`/`layout-*`/4-of-5 X3 features. P6 unblocks X3's LLM calls and closes I5 for the one call site that already exists (`rag_stream`) — independent of P7, still to build |
+| **1** | **X1**, all rows | Zero new infrastructure, same shape as the already-shipped extraction-format win — highest leverage for the effort. `keywords`/`summarization` are no longer separately gated now that P7 is done |
+| **2** | **X2** | Gated on the ORT-strategy decision (§7); extraction-time rows (`transcription`/`layout-*`) no longer separately gated on P7 |
+| **3** | **X3** | After P6; `captioning` specifically waits on an image-redaction answer regardless |
 | **—** | **X4** | No dependency on the others; schedule whenever, lowest priority |
 
 ---

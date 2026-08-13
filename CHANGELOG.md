@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **PII in structured extraction fields (tables, pages, PDF annotations/form fields, DOCX/PPTX
+  tracked changes, extracted links, and nested archive members) is now redacted.** Previously,
+  `HaciendaFacade::process_batch_with_auth` rewrote only `ExtractedDocument.content` —
+  `tables`, `pages` (which nests a *second* copy of both `content` and `tables`, plus PPTX
+  speaker notes), `formatted_content`, `metadata.authors`/`created_by`/`modified_by`, PDF
+  `annotations`, `form_fields`, DOCX/PPTX `revisions` (tracked-change author and inserted/
+  deleted text), extracted `uris` (a `mailto:` URL is a plaintext email address), and archive
+  `children` (each a complete nested `ExtractedDocument`) all passed through **unredacted**, in
+  every transport that shares the type (`POST /v1/documents`, `hacienda extract`,
+  `hacienda-mcp`'s `documents_process`). Found by reproduction with a control-corpus
+  spreadsheet: `content` redacted correctly while the same response's `tables` field carried
+  the same email and IBAN in plaintext. Live in the extraction-format features
+  (`pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/`archives`) added earlier in this
+  changelog's "Added" section. Fixed by a new `HaciendaFacade::redact_structured_fields`,
+  called from the same site `.content`'s own redaction already ran from, covering all ten
+  fields recursively (archive members can nest archive members). Table markdown is
+  regenerated from redacted cells rather than redacted independently, so the two
+  representations can't disagree. See
+  `superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md` for the full
+  reproduction and field-by-field rationale.
+
 ### Fixed
 
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
