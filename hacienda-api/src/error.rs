@@ -204,6 +204,13 @@ impl From<HaciendaError> for ApiError {
                     | PseudonymError::UnsupportedCategory { .. } => {
                         ApiError::invalid_request("Invalid pseudonym token.")
                     }
+                    // Not a client-supplied-token fault — this tenant's id itself
+                    // cannot be resolved to a key (a tenant-provisioning problem, not
+                    // this request's). 500, not 400.
+                    PseudonymError::AmbiguousTenantId { .. } => {
+                        tracing::error!(error = %source, "tenant id cannot be resolved to a pseudonym key");
+                        ApiError::internal()
+                    }
                 }
             }
             HaciendaError::Pii(pii_err) => {
@@ -226,6 +233,10 @@ impl From<HaciendaError> for ApiError {
                             | PseudonymError::UnreadableToken
                             | PseudonymError::UnsupportedCategory { .. } => {
                                 ApiError::invalid_request("Invalid pseudonym token.")
+                            }
+                            PseudonymError::AmbiguousTenantId { .. } => {
+                                tracing::error!(error = %source, "tenant id cannot be resolved to a pseudonym key");
+                                ApiError::internal()
                             }
                         }
                     }

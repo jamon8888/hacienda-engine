@@ -13,7 +13,7 @@
 //! (see that spec's `verify_passes_per_tenant_after_replica_failover` exit criterion, which
 //! this does not meet).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,23 +36,40 @@ pub struct QuotaLimits {
     pub requests_per_minute: u32,
 }
 
-/// One tenant's request count within the current one-minute window.
+/// One tenant's request timestamps within the trailing window, oldest first.
+///
+/// A `VecDeque` rather than a count: a true rolling window (matching
+/// [`QuotaLimits::requests_per_minute`]'s own doc comment) has to know *when* each
+/// request in the window happened, not just how many — a count-and-reset-at-a-fixed-
+/// boundary scheme lets a tenant burst up to 2x the limit across a window edge (all of
+/// its old window's allowance just before the reset, all of the new window's allowance
+/// just after).
 struct Window {
-    started_at: Instant,
-    count: u32,
+    timestamps: VecDeque<Instant>,
 }
 
 /// In-memory, single-process, per-tenant request-rate limiter.
 ///
-/// A fixed one-minute window per tenant, reset lazily on the first request to observe
-/// it has expired — no background sweep, since a tenant with no traffic needs no state
-/// maintained on its behalf.
+/// A rolling one-minute window per tenant: every check prunes timestamps older than
+/// the window before counting, so the limit holds over *any* trailing 60 seconds, not
+/// just calendar-aligned ones — no background sweep, since a tenant with no traffic
+/// needs no state maintained on its behalf, and a pruned-empty entry costs the same as
+/// none.
 pub struct InMemoryQuotaStore {
     limits: QuotaLimits,
     windows: Mutex<HashMap<String, Window>>,
 }
 
+/// Window over which [`QuotaLimits::requests_per_minute`] is enforced.
+const WINDOW: Duration = Duration::from_secs(60);
+
+/// Never advertise a shorter wait than this — even a request that would be accepted a
+/// microsecond from now must not tell a client `Retry-After: 0`.
+const MIN_RETRY_AFTER: Duration = Duration::from_secs(1);
+
 impl InMemoryQuotaStore {
+    /// Build a process-local limiter enforcing `limits` — see the type's own doc
+    /// comment for what "process-local" implies (no cross-replica sharing until S2).
     pub fn new(limits: QuotaLimits) -> Self {
         Self {
             limits,
@@ -64,7 +81,6 @@ impl InMemoryQuotaStore {
     /// `Err(retry_after)` naming how long the caller must wait before its next request
     /// would be accepted.
     fn check_and_record(&self, tenant: &str) -> Result<(), Duration> {
-        const WINDOW: Duration = Duration::from_secs(60);
         let now = Instant::now();
 
         let mut windows = self
@@ -73,23 +89,29 @@ impl InMemoryQuotaStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let window = windows.entry(tenant.to_string()).or_insert_with(|| Window {
-            started_at: now,
-            count: 0,
+            timestamps: VecDeque::new(),
         });
 
-        if now.duration_since(window.started_at) >= WINDOW {
-            window.started_at = now;
-            window.count = 0;
+        // Prune timestamps that have aged out of the trailing window before counting.
+        while let Some(&oldest) = window.timestamps.front() {
+            if now.duration_since(oldest) >= WINDOW {
+                window.timestamps.pop_front();
+            } else {
+                break;
+            }
         }
 
-        if window.count >= self.limits.requests_per_minute {
-            let retry_after = WINDOW.saturating_sub(now.duration_since(window.started_at));
-            // Never advertise a zero-second wait: the window has not rolled over yet, or
-            // this call would not be rejected.
-            return Err(retry_after.max(Duration::from_secs(1)));
+        if window.timestamps.len() as u32 >= self.limits.requests_per_minute {
+            let retry_after = match window.timestamps.front() {
+                Some(&oldest) => WINDOW.saturating_sub(now.duration_since(oldest)),
+                // requests_per_minute == 0: nothing recorded to wait out, but the
+                // tenant must never be let through either.
+                None => WINDOW,
+            };
+            return Err(retry_after.max(MIN_RETRY_AFTER));
         }
 
-        window.count += 1;
+        window.timestamps.push_back(now);
         Ok(())
     }
 }
@@ -132,7 +154,7 @@ pub async fn quota_middleware(
 /// back off correctly, which the JSON body alone does not give it in a machine-readable
 /// form.
 fn rate_limited_response(retry_after: Duration) -> Response {
-    let secs = retry_after.as_secs().max(1);
+    let secs = retry_after.as_secs().max(MIN_RETRY_AFTER.as_secs());
     let mut response = ApiError::rate_limited(format!(
         "Request quota exceeded for this tenant. Retry after {secs} seconds."
     ))
@@ -186,5 +208,50 @@ mod tests {
             .check_and_record("acme")
             .expect_err("zero-quota tenant must be rejected immediately");
         assert!(retry_after >= Duration::from_secs(1));
+    }
+
+    /// A fixed window resetting at a calendar boundary lets a tenant burst up to 2x
+    /// its limit across the reset (its full old-window allowance immediately followed
+    /// by its full new-window allowance). A true rolling window must not allow this:
+    /// once the limit is used, the *oldest* timestamp — not a fixed clock boundary —
+    /// is what has to age out before another request is accepted.
+    #[test]
+    fn a_burst_at_a_fixed_window_boundary_does_not_double_the_effective_limit() {
+        let store = InMemoryQuotaStore::new(QuotaLimits {
+            requests_per_minute: 3,
+        });
+
+        // Exhaust the limit "just before" a would-be fixed-window boundary.
+        assert!(store.check_and_record("acme").is_ok());
+        assert!(store.check_and_record("acme").is_ok());
+        assert!(store.check_and_record("acme").is_ok());
+        assert!(
+            store.check_and_record("acme").is_err(),
+            "a fourth request must still be rejected"
+        );
+
+        // Directly exercise that the oldest timestamp, not a reset counter, is what
+        // gates the next acceptance: manually age the oldest entry out of the window
+        // and confirm exactly one more request is then accepted (not a fresh
+        // allowance of three).
+        {
+            let mut windows = store.windows.lock().unwrap();
+            let window = windows.get_mut("acme").unwrap();
+            let oldest = window.timestamps.pop_front().unwrap();
+            window.timestamps.push_back(oldest - WINDOW);
+            // Restore insertion order (oldest-first) after the manual edit above.
+            let mut ordered: Vec<_> = window.timestamps.drain(..).collect();
+            ordered.sort();
+            window.timestamps.extend(ordered);
+        }
+
+        assert!(
+            store.check_and_record("acme").is_ok(),
+            "exactly one slot must free up once its timestamp ages out"
+        );
+        assert!(
+            store.check_and_record("acme").is_err(),
+            "the freed slot must not reopen the full original allowance"
+        );
     }
 }

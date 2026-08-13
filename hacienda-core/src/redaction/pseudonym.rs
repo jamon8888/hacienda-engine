@@ -59,6 +59,14 @@ pub enum PseudonymError {
 
     #[error("category '{category}' cannot appear in a pseudonym token: {reason}")]
     UnsupportedCategory { category: String, reason: String },
+
+    #[error(
+        "tenant id '{tenant}' contains characters outside [A-Za-z0-9_] and cannot be \
+         resolved to a pseudonym key: folding it to an environment-variable suffix could \
+         collide with a different tenant id (e.g. 'acme-eu' and 'acme_eu' would both fold \
+         to 'ACME_EU')"
+    )]
+    AmbiguousTenantId { tenant: String },
 }
 
 /// Collapse spelling variants of one value onto a single canonical form.
@@ -212,37 +220,47 @@ impl KeyId {
     /// The default tenant keeps the pre-S1, unsuffixed name so an existing
     /// single-tenant deployment's environment does not need to change. Any other
     /// tenant gets an explicit suffix — see [`sanitize_env_suffix`].
-    fn env_var(&self, tenant: &TenantId) -> String {
+    ///
+    /// # Errors
+    ///
+    /// [`PseudonymError::AmbiguousTenantId`] — see [`sanitize_env_suffix`].
+    fn env_var(&self, tenant: &TenantId) -> Result<String, PseudonymError> {
         if tenant.as_str() == DEFAULT_TENANT {
-            format!("{KEY_VAR_PREFIX}{}", self.0.to_uppercase())
+            Ok(format!("{KEY_VAR_PREFIX}{}", self.0.to_uppercase()))
         } else {
-            format!(
+            Ok(format!(
                 "{KEY_VAR_PREFIX}{}__{}",
                 self.0.to_uppercase(),
-                sanitize_env_suffix(tenant.as_str())
-            )
+                sanitize_env_suffix(tenant.as_str())?
+            ))
         }
     }
 }
 
 /// Deterministically fold a tenant id into a legal environment-variable-name suffix:
-/// uppercase, with every byte outside `[A-Z0-9_]` replaced by `_`.
+/// uppercase, every byte already required to be `[A-Za-z0-9_]`.
 ///
-/// Lossy by construction — this resolver is documented as dev/test-only once a
-/// KMS-backed resolver ships (S2). Two tenant ids that fold to the same suffix would
-/// collide here, which is an acceptable limitation for local development, never for
-/// production key material.
-fn sanitize_env_suffix(tenant: &str) -> String {
-    tenant
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
+/// # Errors
+///
+/// [`PseudonymError::AmbiguousTenantId`] if `tenant` contains any byte outside
+/// `[A-Za-z0-9_]`. Folding such a byte to `_` (the previous behavior) is lossy: two
+/// distinct tenant ids — e.g. `acme-eu` and `acme_eu` — could then fold to the same
+/// suffix (`ACME_EU`) and silently resolve to the same key material, defeating tenant
+/// isolation. Failing closed here instead requires every tenant id reaching this
+/// dev/test-only resolver to already be collision-safe. Case-only collisions (e.g.
+/// `Acme_EU` vs `acme_eu`) are not rejected — a narrower, accepted risk for a resolver
+/// documented as dev/test-only ahead of a KMS-backed resolver (S2).
+fn sanitize_env_suffix(tenant: &str) -> Result<String, PseudonymError> {
+    if tenant
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        Ok(tenant.to_ascii_uppercase())
+    } else {
+        Err(PseudonymError::AmbiguousTenantId {
+            tenant: tenant.to_string(),
         })
-        .collect()
+    }
 }
 
 impl std::fmt::Display for KeyId {
@@ -391,13 +409,13 @@ impl std::fmt::Debug for EnvKeyResolver {
 
 impl KeyResolver for EnvKeyResolver {
     fn active(&self, ctx: &TenantCtx) -> Result<PseudonymKey, PseudonymError> {
-        let variable = active_key_var(&ctx.tenant);
+        let variable = active_key_var(&ctx.tenant)?;
         let id = (self.lookup)(&variable).ok_or(PseudonymError::NoActiveKey)?;
         self.resolve(ctx, &KeyId::new(id.trim())?)
     }
 
     fn resolve(&self, ctx: &TenantCtx, id: &KeyId) -> Result<PseudonymKey, PseudonymError> {
-        let variable = id.env_var(&ctx.tenant);
+        let variable = id.env_var(&ctx.tenant)?;
         let encoded = (self.lookup)(&variable).ok_or_else(|| PseudonymError::KeyNotFound {
             id: id.0.clone(),
             variable,
@@ -420,11 +438,18 @@ impl KeyResolver for EnvKeyResolver {
 ///
 /// Same backward-compatibility rule as [`KeyId::env_var`]: the default tenant keeps the
 /// unsuffixed [`ACTIVE_KEY_VAR`] name.
-fn active_key_var(tenant: &TenantId) -> String {
+///
+/// # Errors
+///
+/// [`PseudonymError::AmbiguousTenantId`] — see [`sanitize_env_suffix`].
+fn active_key_var(tenant: &TenantId) -> Result<String, PseudonymError> {
     if tenant.as_str() == DEFAULT_TENANT {
-        ACTIVE_KEY_VAR.to_string()
+        Ok(ACTIVE_KEY_VAR.to_string())
     } else {
-        format!("{ACTIVE_KEY_VAR}__{}", sanitize_env_suffix(tenant.as_str()))
+        Ok(format!(
+            "{ACTIVE_KEY_VAR}__{}",
+            sanitize_env_suffix(tenant.as_str())?
+        ))
     }
 }
 
@@ -616,12 +641,13 @@ impl Pseudonymiser {
         if id == self.active.id() {
             return Ok(&self.active);
         }
-        self.retired
-            .get(id)
-            .ok_or_else(|| PseudonymError::KeyNotFound {
-                id: id.to_string(),
-                variable: id.env_var(&self.tenant),
-            })
+        if let Some(key) = self.retired.get(id) {
+            return Ok(key);
+        }
+        Err(PseudonymError::KeyNotFound {
+            id: id.to_string(),
+            variable: id.env_var(&self.tenant)?,
+        })
     }
 
     /// Build a cipher for one operation.
@@ -657,6 +683,14 @@ impl std::fmt::Debug for Pseudonymiser {
 /// that admission happens, once per tenant, so a request never pays a resolver
 /// round-trip and a tenant with broken key configuration is refused before it can
 /// process any content, not discovered mid-request.
+///
+/// Lock poisoning is recovered from, not propagated as a panic: every access below
+/// takes the guard with `.unwrap_or_else(PoisonError::into_inner)` rather than
+/// `.expect(..)`. A panic while holding this lock can only occur inside a plain
+/// `HashMap` read/insert, which leaves the map itself in a valid state even if some
+/// unrelated code panicked mid-access elsewhere while holding it — so treating poison
+/// as fatal here would only turn one thread's panic into every future tenant lookup
+/// panicking too, for no added safety.
 #[derive(Default)]
 pub struct TenantPseudonymiserRegistry {
     by_tenant: RwLock<HashMap<TenantId, Arc<Pseudonymiser>>>,
@@ -690,7 +724,7 @@ impl TenantPseudonymiserRegistry {
         };
         self.by_tenant
             .write()
-            .expect("pseudonymiser registry lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(ctx.tenant.clone(), Arc::new(pseudonymiser));
         Ok(())
     }
@@ -703,7 +737,7 @@ impl TenantPseudonymiserRegistry {
     pub fn get(&self, tenant: &TenantId) -> Option<Arc<Pseudonymiser>> {
         self.by_tenant
             .read()
-            .expect("pseudonymiser registry lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(tenant)
             .cloned()
     }
@@ -712,7 +746,7 @@ impl TenantPseudonymiserRegistry {
     pub fn contains(&self, tenant: &TenantId) -> bool {
         self.by_tenant
             .read()
-            .expect("pseudonymiser registry lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(tenant)
     }
 }
@@ -723,7 +757,7 @@ impl std::fmt::Debug for TenantPseudonymiserRegistry {
         let mut tenants: Vec<String> = self
             .by_tenant
             .read()
-            .expect("pseudonymiser registry lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .keys()
             .map(TenantId::to_string)
             .collect();
@@ -945,6 +979,29 @@ mod key_tests {
             resolver.active(&other),
             Err(PseudonymError::NoActiveKey)
         ));
+    }
+
+    #[test]
+    fn tenant_ids_that_would_collide_after_folding_fail_closed_instead_of_silently_merging() {
+        // `acme-eu` and `acme_eu` both fold to the env-var suffix `ACME_EU` under the old,
+        // lossy `sanitize_env_suffix` — which would have let both tenants resolve the same
+        // key material, defeating isolation. Each must now fail closed instead.
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__ACME_EU" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__ACME_EU" => Some("07".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        let hyphenated =
+            TenantCtx::new(crate::tenancy::TenantId::new("acme-eu"), ActorId::new("u"));
+        assert!(matches!(
+            resolver.active(&hyphenated),
+            Err(PseudonymError::AmbiguousTenantId { tenant }) if tenant == "acme-eu"
+        ));
+
+        // A tenant id already restricted to [A-Za-z0-9_] is unaffected.
+        let underscored =
+            TenantCtx::new(crate::tenancy::TenantId::new("acme_eu"), ActorId::new("u"));
+        assert!(resolver.active(&underscored).is_ok());
     }
 
     #[test]
@@ -1352,6 +1409,33 @@ mod pseudonymiser_tests {
         let unknown = crate::tenancy::TenantId::new("ghost");
         assert!(registry.get(&unknown).is_none());
         assert!(!registry.contains(&unknown));
+    }
+
+    #[test]
+    fn registry_recovers_from_a_poisoned_lock_instead_of_panicking() {
+        // Simulate a panic elsewhere while holding the write lock, then confirm every
+        // other method still works instead of panicking on the poison flag.
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let ctx = TenantCtx::new(crate::tenancy::TenantId::new("acme"), ActorId::new("u"));
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__ACME" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__ACME" => Some("07".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        registry.admit(&ctx, &resolver, None, &[]).unwrap();
+
+        let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.by_tenant.write().unwrap();
+            panic!("simulated panic while holding the registry lock");
+        }));
+        assert!(poison_result.is_err());
+        assert!(registry.by_tenant.is_poisoned());
+
+        // Every method below must recover, not panic, despite the poisoned lock.
+        assert!(registry.contains(&ctx.tenant));
+        assert!(registry.get(&ctx.tenant).is_some());
+        assert!(registry.admit(&ctx, &resolver, None, &[]).is_ok());
+        let _ = format!("{registry:?}");
     }
 
     #[test]

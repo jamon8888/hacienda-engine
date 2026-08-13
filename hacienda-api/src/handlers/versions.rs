@@ -231,7 +231,10 @@ pub async fn diff_document(
 
     let job = state
         .jobs
-        .create(&caller.tenant_ctx(), None)
+        .create(
+            &caller.tenant_ctx(),
+            caller.principal_id().map(str::to_owned),
+        )
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to create diff job");

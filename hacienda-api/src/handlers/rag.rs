@@ -75,18 +75,46 @@ pub(crate) fn require_store(
 /// named `"contracts"` without colliding or reading each other's data. Every handler
 /// in this module that accepts or returns a collection name must scope it on the way
 /// in and strip it on the way out — never let a scoped name reach a response body.
+///
+/// The default tenant's names are left unprefixed — same backward-compatibility rule
+/// `hacienda_core::redaction::pseudonym::EnvKeyResolver` and
+/// `hacienda_core::audit::segment::compute_seal_hash` both apply elsewhere in S1.
+/// `POST /v1/rag/collections` shipped (unscoped) before this PR, on `main` today — a
+/// deployment upgrading with existing collections must keep reaching them under their
+/// original, unprefixed names, not have this migration make them invisible.
 pub(crate) fn scope_collection_name(ctx: &TenantCtx, name: &str) -> String {
-    format!("{}:{name}", ctx.tenant)
+    if ctx.tenant.as_str() == hacienda_core::tenancy::DEFAULT_TENANT {
+        name.to_owned()
+    } else {
+        format!("{}:{name}", ctx.tenant)
+    }
 }
 
 /// Inverse of [`scope_collection_name`]: strip `ctx`'s tenant prefix from a name
 /// read back from the store, returning `None` if `scoped_name` does not belong to
 /// this tenant (used to filter `RagStore::list_collections`, which has no
 /// tenant-aware filter of its own — see [`scope_collection_name`]'s doc comment).
+///
+/// For the default tenant, a name is its own — unless it contains `:`, treated as
+/// belonging to a non-default tenant's scoped name instead (the only shape
+/// [`scope_collection_name`] ever produces for one). A default-tenant collection
+/// literally named with a `:` in it is the one edge case this cannot distinguish from
+/// another tenant's scoped name — accepted for the same reason
+/// `redaction::pseudonym::sanitize_env_suffix` accepts a narrower case-only collision:
+/// a full reserved-character validation on collection names is a larger, separate
+/// change.
 fn strip_tenant_prefix(ctx: &TenantCtx, scoped_name: &str) -> Option<String> {
-    scoped_name
-        .strip_prefix(&format!("{}:", ctx.tenant))
-        .map(str::to_owned)
+    if ctx.tenant.as_str() == hacienda_core::tenancy::DEFAULT_TENANT {
+        if scoped_name.contains(':') {
+            None
+        } else {
+            Some(scoped_name.to_owned())
+        }
+    } else {
+        scoped_name
+            .strip_prefix(&format!("{}:", ctx.tenant))
+            .map(str::to_owned)
+    }
 }
 
 /// `POST /v1/rag/collections` — create a collection if it does not already exist.
@@ -514,6 +542,7 @@ pub async fn migrate_embeddings(
     let task_jobs = state.jobs.clone();
     let task_job_id = job_id.clone();
     let task_collection = scoped_name.clone();
+    let task_caller_facing_name = name.clone();
     let task_to_source = body.to_source.clone();
     let task_to_version = body.to_version;
 
@@ -523,6 +552,7 @@ pub async fn migrate_embeddings(
             task_jobs,
             task_job_id,
             task_collection,
+            task_caller_facing_name,
             task_to_source,
             task_to_version,
         )
@@ -555,6 +585,7 @@ async fn run_migrate_embeddings_job(
     jobs: Arc<dyn hacienda_core::jobs::JobStore>,
     job_id: String,
     collection: String,
+    caller_facing_name: String,
     to_source: String,
     to_version: u32,
 ) {
@@ -588,7 +619,7 @@ async fn run_migrate_embeddings_job(
                 return;
             }
             let result_json = serde_json::json!({
-                "collection": collection,
+                "collection": caller_facing_name,
                 "to_source": to_source,
                 "to_version": to_version,
             })
@@ -810,6 +841,32 @@ mod tests {
         let acme_scoped = scope_collection_name(&tenant_ctx("acme"), "contracts");
         assert_eq!(
             strip_tenant_prefix(&tenant_ctx("globex"), &acme_scoped),
+            None
+        );
+    }
+
+    /// `POST /v1/rag/collections` shipped (unscoped) before this PR. A deployment
+    /// upgrading with existing default-tenant collections must keep reaching them
+    /// under their original, unprefixed names.
+    #[test]
+    fn default_tenant_collection_names_stay_unprefixed_for_backward_compatibility() {
+        let ctx = tenant_ctx(hacienda_core::tenancy::DEFAULT_TENANT);
+        let scoped = scope_collection_name(&ctx, "contracts");
+        assert_eq!(scoped, "contracts", "must not gain a 'default:' prefix");
+        assert_eq!(
+            strip_tenant_prefix(&ctx, &scoped).as_deref(),
+            Some("contracts")
+        );
+    }
+
+    #[test]
+    fn default_tenant_does_not_see_another_tenants_scoped_collection() {
+        let acme_scoped = scope_collection_name(&tenant_ctx("acme"), "contracts");
+        assert_eq!(
+            strip_tenant_prefix(
+                &tenant_ctx(hacienda_core::tenancy::DEFAULT_TENANT),
+                &acme_scoped
+            ),
             None
         );
     }
