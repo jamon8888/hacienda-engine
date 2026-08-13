@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                       priority, assigned_reviewer, decided_by, decided_at, decision, comment,\n                       deadline, created_at, tenant_id\n                FROM review_items\n                WHERE status = $1\n                ORDER BY created_at\n                ",
+  "query": "\n            UPDATE review_items\n            SET status = 'in_review', assigned_reviewer = $1\n            WHERE id = $2 AND tenant_id = $3 AND status = 'pending'\n            RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                      priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,\n                      decision, comment, tenant_id\n            ",
   "describe": {
     "columns": [
       {
@@ -55,33 +55,33 @@
       },
       {
         "ordinal": 10,
-        "name": "decided_by",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 11,
-        "name": "decided_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 12,
-        "name": "decision",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 13,
-        "name": "comment",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 14,
         "name": "deadline",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 15,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "decided_by",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "decided_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "decision",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "comment",
+        "type_info": "Text"
       },
       {
         "ordinal": 16,
@@ -91,6 +91,8 @@
     ],
     "parameters": {
       "Left": [
+        "Text",
+        "Text",
         "Text"
       ]
     },
@@ -106,13 +108,13 @@
       false,
       true,
       true,
-      true,
-      true,
-      true,
-      true,
       false,
+      true,
+      true,
+      true,
+      true,
       false
     ]
   },
-  "hash": "1e17b2d77c55eb28268d571ac669d60232de6825276d71af3115b241407cd78f"
+  "hash": "daf1b43ad4b53d2a57317cba8c9d9f5c441a725ce6bce5884bf80ea1dd759012"
 }

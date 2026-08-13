@@ -5,6 +5,7 @@ use crate::review::{
     types::{Priority, QueueStats, ReviewDecision, ReviewQueueItem, ReviewStatus},
     ReviewStore,
 };
+use crate::tenancy::TenantCtx;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -49,19 +50,26 @@ impl ReviewStore for PostgresReviewStore {
         Ok(item)
     }
 
-    async fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
+    async fn assign(
+        &self,
+        ctx: &TenantCtx,
+        id: &str,
+        reviewer: &str,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        let tenant_id = ctx.tenant.to_string();
         let row = sqlx::query_as!(
             ReviewItemRow,
             r#"
             UPDATE review_items
             SET status = 'in_review', assigned_reviewer = $1
-            WHERE id = $2 AND status = 'pending'
+            WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
             RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                       priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,
                       decision, comment, tenant_id
             "#,
             reviewer,
-            id
+            id,
+            tenant_id
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -69,9 +77,10 @@ impl ReviewStore for PostgresReviewStore {
         match row {
             Some(row) => row_to_item(row),
             None => {
-                // The item exists but was not `pending`, or it does not exist at all.
-                // Distinguish the two so the caller gets an accurate error.
-                match self.get(id).await? {
+                // The item exists (in this tenant) but was not `pending`, or it does not
+                // exist at all in this tenant — including one that exists in a different
+                // tenant, which must not be distinguished from non-existence (D-S1-6).
+                match self.get(ctx, id).await? {
                     Some(existing) => Err(ReviewError::InvalidTransition {
                         from: existing.status.to_string(),
                         to: ReviewStatus::InReview.to_string(),
@@ -84,6 +93,7 @@ impl ReviewStore for PostgresReviewStore {
 
     async fn decide(
         &self,
+        ctx: &TenantCtx,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
@@ -95,13 +105,14 @@ impl ReviewStore for PostgresReviewStore {
             ReviewDecision::Reject => ReviewStatus::Rejected,
             ReviewDecision::Modify => ReviewStatus::Modified,
         };
+        let tenant_id = ctx.tenant.to_string();
 
         let row = sqlx::query_as!(
             ReviewItemRow,
             r#"
             UPDATE review_items
             SET status = $1, decided_by = $2, decided_at = $3, decision = $4, comment = $5
-            WHERE id = $6 AND decision IS NULL
+            WHERE id = $6 AND tenant_id = $7 AND decision IS NULL
             RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                       priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,
                       decision, comment, tenant_id
@@ -111,7 +122,8 @@ impl ReviewStore for PostgresReviewStore {
             now,
             decision.to_string(),
             comment,
-            id
+            id,
+            tenant_id
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -119,8 +131,9 @@ impl ReviewStore for PostgresReviewStore {
         match row {
             Some(row) => row_to_item(row),
             None => {
-                // Either already decided, or the id does not exist.
-                match self.get(id).await? {
+                // Either already decided, or the id does not exist in this tenant —
+                // including one belonging to a different tenant (D-S1-6).
+                match self.get(ctx, id).await? {
                     Some(_) => Err(ReviewError::AlreadyDecided(id.to_string())),
                     None => Err(ReviewError::NotFound(id.to_string())),
                 }
@@ -130,8 +143,10 @@ impl ReviewStore for PostgresReviewStore {
 
     async fn list(
         &self,
+        ctx: &TenantCtx,
         filter: Option<ReviewStatus>,
     ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
+        let tenant_id = ctx.tenant.to_string();
         let items = if let Some(status) = filter {
             let rows = sqlx::query_as!(
                 ReviewItemRow,
@@ -140,9 +155,10 @@ impl ReviewStore for PostgresReviewStore {
                        priority, assigned_reviewer, decided_by, decided_at, decision, comment,
                        deadline, created_at, tenant_id
                 FROM review_items
-                WHERE status = $1
+                WHERE tenant_id = $1 AND status = $2
                 ORDER BY created_at
                 "#,
+                tenant_id,
                 status.to_string()
             )
             .fetch_all(&self.pool)
@@ -158,8 +174,10 @@ impl ReviewStore for PostgresReviewStore {
                        priority, assigned_reviewer, decided_by, decided_at, decision, comment,
                        deadline, created_at, tenant_id
                 FROM review_items
+                WHERE tenant_id = $1
                 ORDER BY created_at
-                "#
+                "#,
+                tenant_id
             )
             .fetch_all(&self.pool)
             .await?;
@@ -171,7 +189,8 @@ impl ReviewStore for PostgresReviewStore {
         Ok(items)
     }
 
-    async fn get(&self, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
+    async fn get(&self, ctx: &TenantCtx, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
+        let tenant_id = ctx.tenant.to_string();
         let row = sqlx::query_as!(
             ReviewItemRow,
             r#"
@@ -179,9 +198,10 @@ impl ReviewStore for PostgresReviewStore {
                    priority, assigned_reviewer, decided_by, decided_at, decision, comment,
                    deadline, created_at, tenant_id
             FROM review_items
-            WHERE id = $1
+            WHERE id = $1 AND tenant_id = $2
             "#,
-            id
+            id,
+            tenant_id
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -189,7 +209,8 @@ impl ReviewStore for PostgresReviewStore {
         row.map(row_to_item).transpose()
     }
 
-    async fn stats(&self) -> Result<QueueStats, ReviewError> {
+    async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
+        let tenant_id = ctx.tenant.to_string();
         let row = sqlx::query!(
             r#"
             SELECT
@@ -200,7 +221,9 @@ impl ReviewStore for PostgresReviewStore {
                 COUNT(*) FILTER (WHERE status = 'rejected') as rejected,
                 COUNT(*) FILTER (WHERE status = 'modified') as modified
             FROM review_items
-            "#
+            WHERE tenant_id = $1
+            "#,
+            tenant_id
         )
         .fetch_one(&self.pool)
         .await?;
@@ -299,6 +322,10 @@ mod tests {
         PostgresReviewStore::new(test_support::shared().await.pool())
     }
 
+    fn ctx() -> TenantCtx {
+        TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"))
+    }
+
     fn test_item(id: &str) -> ReviewQueueItem {
         ReviewQueueItem {
             id: id.to_owned(),
@@ -332,7 +359,7 @@ mod tests {
             store.submit(item.clone()).await.expect("submit failed");
 
             let fetched = store
-                .get(&id)
+                .get(&ctx(), &id)
                 .await
                 .expect("get failed")
                 .expect("item must exist");
@@ -356,7 +383,7 @@ mod tests {
                 let store = Arc::clone(&store);
                 let id = id.clone();
                 handles.push(tokio::spawn(async move {
-                    store.assign(&id, &format!("reviewer-{i}")).await
+                    store.assign(&ctx(), &id, &format!("reviewer-{i}")).await
                 }));
             }
 
@@ -374,7 +401,7 @@ mod tests {
             assert_eq!(losses, 7);
 
             let final_item = store
-                .get(&id)
+                .get(&ctx(), &id)
                 .await
                 .expect("get failed")
                 .expect("item must exist");
@@ -390,7 +417,7 @@ mod tests {
             let id = uuid::Uuid::new_v4().to_string();
             store.submit(test_item(&id)).await.expect("submit failed");
             store
-                .assign(&id, "reviewer-0")
+                .assign(&ctx(), &id, "reviewer-0")
                 .await
                 .expect("assign failed");
 
@@ -401,6 +428,7 @@ mod tests {
                 handles.push(tokio::spawn(async move {
                     store
                         .decide(
+                            &ctx(),
                             &id,
                             ReviewDecision::Approve,
                             &format!("reviewer-{i}"),
@@ -424,7 +452,7 @@ mod tests {
             assert_eq!(losses, 7);
 
             let final_item = store
-                .get(&id)
+                .get(&ctx(), &id)
                 .await
                 .expect("get failed")
                 .expect("item must exist");

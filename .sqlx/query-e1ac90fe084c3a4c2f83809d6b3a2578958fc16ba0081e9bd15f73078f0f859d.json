@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE review_items\n            SET status = $1, decided_by = $2, decided_at = $3, decision = $4, comment = $5\n            WHERE id = $6 AND decision IS NULL\n            RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                      priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,\n                      decision, comment, tenant_id\n            ",
+  "query": "\n                SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                       priority, assigned_reviewer, decided_by, decided_at, decision, comment,\n                       deadline, created_at, tenant_id\n                FROM review_items\n                WHERE tenant_id = $1\n                ORDER BY created_at\n                ",
   "describe": {
     "columns": [
       {
@@ -55,33 +55,33 @@
       },
       {
         "ordinal": 10,
-        "name": "deadline",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 11,
-        "name": "created_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 12,
         "name": "decided_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 13,
+        "ordinal": 11,
         "name": "decided_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 14,
+        "ordinal": 12,
         "name": "decision",
         "type_info": "Text"
       },
       {
-        "ordinal": 15,
+        "ordinal": 13,
         "name": "comment",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "deadline",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_at",
+        "type_info": "Timestamptz"
       },
       {
         "ordinal": 16,
@@ -91,11 +91,6 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text",
-        "Timestamptz",
-        "Text",
-        "Text",
         "Text"
       ]
     },
@@ -111,13 +106,13 @@
       false,
       true,
       true,
+      true,
+      true,
+      true,
+      true,
       false,
-      true,
-      true,
-      true,
-      true,
       false
     ]
   },
-  "hash": "1c10d959918b19ff5b9d006c27d3495629594fb0caf24301be0e43f88a20cc03"
+  "hash": "e1ac90fe084c3a4c2f83809d6b3a2578958fc16ba0081e9bd15f73078f0f859d"
 }

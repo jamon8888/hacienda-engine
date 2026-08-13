@@ -1374,33 +1374,46 @@ mod tests {
             self.inner.submit(item).await
         }
 
-        async fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.assign(id, reviewer).await
+        async fn assign(
+            &self,
+            ctx: &TenantCtx,
+            id: &str,
+            reviewer: &str,
+        ) -> Result<ReviewQueueItem, ReviewError> {
+            self.inner.assign(ctx, id, reviewer).await
         }
 
         async fn decide(
             &self,
+            ctx: &TenantCtx,
             id: &str,
             decision: ReviewDecision,
             reviewer: &str,
             comment: &str,
         ) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.decide(id, decision, reviewer, comment).await
+            self.inner
+                .decide(ctx, id, decision, reviewer, comment)
+                .await
         }
 
         async fn list(
             &self,
+            ctx: &TenantCtx,
             filter: Option<ReviewStatus>,
         ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
-            self.inner.list(filter).await
+            self.inner.list(ctx, filter).await
         }
 
-        async fn get(&self, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
-            self.inner.get(id).await
+        async fn get(
+            &self,
+            ctx: &TenantCtx,
+            id: &str,
+        ) -> Result<Option<ReviewQueueItem>, ReviewError> {
+            self.inner.get(ctx, id).await
         }
 
-        async fn stats(&self) -> Result<QueueStats, ReviewError> {
-            self.inner.stats().await
+        async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
+            self.inner.stats(ctx).await
         }
 
         async fn close(&self) -> Result<(), ReviewError> {
@@ -1670,7 +1683,7 @@ mod tests {
             facade
                 .review_queue()
                 .expect("review queue is configured")
-                .stats()
+                .stats(&TenantCtx::default_tenant(ActorId::new("test")))
                 .await
                 .expect("stats")
                 .pending,
@@ -1906,7 +1919,13 @@ mod tests {
             item_id = item.id.clone();
 
             queue
-                .decide(&item_id, ReviewDecision::Approve, "amy", "looks right")
+                .decide(
+                    &TenantCtx::default_tenant(ActorId::new("test")),
+                    &item_id,
+                    ReviewDecision::Approve,
+                    "amy",
+                    "looks right",
+                )
                 .await
                 .expect("decide first run");
 
@@ -1930,7 +1949,7 @@ mod tests {
             let item = facade
                 .review_queue()
                 .expect("queue after restart")
-                .get(&item_id)
+                .get(&TenantCtx::default_tenant(ActorId::new("test")), &item_id)
                 .await
                 .expect("get after restart")
                 .expect("the item written in the first run must still exist");
@@ -1994,7 +2013,14 @@ mod tests {
             .await
             .expect("submit must reach the supplied store");
 
-        assert_eq!(queue.stats().await.expect("stats").total, 1);
+        assert_eq!(
+            queue
+                .stats(&TenantCtx::default_tenant(ActorId::new("test")))
+                .await
+                .expect("stats")
+                .total,
+            1
+        );
     }
 
     /// `verify_audit` on a facade with no audit store returns `Ok(())`.
@@ -2799,6 +2825,18 @@ mod tests {
         assert!(
             resolver.resolve(&pair.raw_key).await.unwrap().is_some(),
             "a different tenant's revoke call must not revoke this key"
+        );
+
+        // Positive control: a filter that rejected every revoke unconditionally would
+        // also pass the assertion above. Confirm the issuing tenant can still revoke
+        // its own key, so this test pins both halves of the contract.
+        facade
+            .revoke_key_with_auth(acme_caller, record.id)
+            .await
+            .expect("the issuing tenant must be able to revoke its own key");
+        assert!(
+            resolver.resolve(&pair.raw_key).await.unwrap().is_none(),
+            "the issuing tenant's revoke must take effect"
         );
     }
 
