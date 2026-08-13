@@ -152,6 +152,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
 mod tests {
     use super::*;
     use crate::store::postgres::test_support;
+    use crate::tenancy::store::TenantStore;
     use crate::tenancy::ActorId;
 
     // Ignored by default — shares one Postgres instance with the other postgres-feature
@@ -217,9 +218,27 @@ mod tests {
             let key_hash = format!("hash-{}", Uuid::new_v4());
             let lookup_hash = format!("lookup-{}", Uuid::new_v4());
 
+            // `fk_api_keys_tenant` (hacienda-core/migrations/0008_api_keys_tenant.sql)
+            // requires the tenant to already exist — only the `default` tenant is
+            // seeded by migration, so this test's two non-default tenants must be
+            // created first, exactly as a real deployment would provision them
+            // before issuing any key scoped to them. Unique suffixes avoid colliding
+            // with a previous run against the same shared Postgres instance.
+            let tenants = crate::store::postgres::tenants::PostgresTenantStore::new(
+                test_support::shared().await.pool(),
+            );
+            let acme_tenant = format!("acme-{}", Uuid::new_v4());
+            let globex_tenant = format!("globex-{}", Uuid::new_v4());
+            for tenant_id in [&acme_tenant, &globex_tenant] {
+                tenants
+                    .create(crate::tenancy::TenantId::new(tenant_id), None)
+                    .await
+                    .expect("tenant create failed");
+            }
+
             let created = store
                 .create(
-                    &ctx("acme"),
+                    &ctx(&acme_tenant),
                     &key_hash,
                     &lookup_hash,
                     &owner,
@@ -228,7 +247,7 @@ mod tests {
                 .await
                 .expect("create failed");
 
-            let other_tenant = ctx("globex");
+            let other_tenant = ctx(&globex_tenant);
             let listed = store
                 .list(&other_tenant, &owner)
                 .await
