@@ -10,7 +10,7 @@ use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
 use crate::glossary::{EntityGlossary, GlossaryEntry};
 use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineResult};
-use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionError};
+use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionAuditEntry, RedactionError};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,18 @@ use xberg::{extract, ExtractInput, ExtractionResult};
 
 /// Version recorded on every audit entry so a record can be tied to the code that made it.
 const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Hard ceiling on archive-member nesting [`HaciendaFacade::redact_document_recursively`]
+/// will walk, independent of xberg's own `ExtractionConfig::max_archive_depth` (default 3
+/// — `crates/xberg/src/core/config/extraction/core.rs`). Defense-in-depth, not the primary
+/// control: xberg already refuses to *extract* an archive nested deeper than its own
+/// configured limit, so `document.children` should never carry more levels than that
+/// config allows. This constant only matters if a deployment widens xberg's limit far past
+/// its default, or a future xberg version stops bounding some nesting path the same way —
+/// in either case, redaction should fail closed (an error, per I1: nothing unredacted
+/// crosses the persistence boundary) rather than let an unbounded recursive `async fn`
+/// grow the task's stack without limit.
+pub(crate) const MAX_REDACTION_DEPTH: usize = 64;
 
 pub struct HaciendaFacade {
     config: HaciendaConfig,
@@ -698,14 +710,23 @@ impl HaciendaFacade {
             // audited and reviewed on this task, one at a time, exactly as before.
             for (document, result) in extraction.results.iter_mut().zip(detections) {
                 self.observe_glossary(&document.content, &result);
-                audit_entries.extend(self.record_audit(&result, caller).await?);
                 review_submitted += self.submit_for_review(&result).await?;
 
                 document.content = result.redacted_text.clone();
-                audit_entries.extend(
-                    self.redact_structured_fields(document, pipeline, caller)
-                        .await?,
-                );
+
+                // Collect `.content`'s audit-log entries plus every structured field's
+                // into one batch, so this document produces exactly one `store.append`
+                // call (D3) — not one for `.content` and, before this fix, one more per
+                // redacted table cell/page/revision/etc. See
+                // `redact_structured_fields`'s doc comment.
+                let mut audit_log = result.audit_log.clone();
+                let child_audit_entries = self
+                    .redact_structured_fields(document, pipeline, caller, &mut audit_log, 0)
+                    .await?;
+                let mut appended = self.record_audit_entries(&audit_log, caller).await?;
+                appended.extend(child_audit_entries);
+                audit_entries.extend(appended);
+
                 pii.push(result);
             }
         }
@@ -1043,6 +1064,34 @@ impl HaciendaFacade {
         result: &PipelineResult,
         caller: Caller<'_>,
     ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        self.record_audit_entries(&result.audit_log, caller).await
+    }
+
+    /// The store-append core [`Self::record_audit`] delegates to, generalised to accept a
+    /// pre-collected batch of [`RedactionAuditEntry`] from more than one source.
+    ///
+    /// Structured-field redaction (`redact_structured_fields` and its helpers) needs this
+    /// directly: a document with tables, pages, revisions, form fields, and URIs redacts
+    /// many individual strings, and calling `record_audit` once per string would call
+    /// `store.append` once per string — one `store.append` per field, not per document,
+    /// silently violating the same D3 invariant this method's doc comment states. Every
+    /// structured-field helper therefore only *collects* `RedactionAuditEntry`s (via
+    /// `redact_string_field`'s `audit_log` accumulator); the caller that owns a whole
+    /// document's redaction (the `process_batch_with_auth` loop, or
+    /// `redact_document_recursively` for a nested archive member) calls this once, after
+    /// collecting `.content`'s entries and every structured field's entries into one
+    /// `Vec`, so one document — content and every structured field together — still
+    /// produces exactly one `store.append` call, and (under `SyncPolicy::EveryBatch`) one
+    /// fsync, not one per redacted cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Audit`] if the store rejects the batch.
+    async fn record_audit_entries(
+        &self,
+        audit_log: &[RedactionAuditEntry],
+        caller: Caller<'_>,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
         let Some(store) = &self.audit_store else {
             return Ok(Vec::new());
         };
@@ -1052,8 +1101,7 @@ impl HaciendaFacade {
             .pii_pipeline
             .as_ref()
             .and_then(|p| p.vertical_provenance_id());
-        let inputs: Vec<AuditEntryInput> = result
-            .audit_log
+        let inputs: Vec<AuditEntryInput> = audit_log
             .iter()
             .map(|entry| AuditEntryInput {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -1119,22 +1167,80 @@ impl HaciendaFacade {
     /// [`HaciendaError::Audit`] if the audit store rejects an entry — the same errors
     /// `.content`'s own redaction can already produce, now also possible per structured
     /// field.
+    /// Redact every text-bearing field on `document` beyond `.content`, collecting raw
+    /// audit entries into `audit_log` rather than appending them.
+    ///
+    /// Every helper this method calls (`redact_table`, `redact_revision`,
+    /// `redact_string_field`) only *collects* into `audit_log` — none of them touch the
+    /// audit store. That is deliberate: a document with tables, pages, revisions, form
+    /// fields, and URIs redacts many individual strings, and appending once per string
+    /// would call `store.append` once per string, silently breaking the "one `append` per
+    /// document" invariant `record_audit`'s doc comment states (and, under
+    /// `SyncPolicy::EveryBatch`, turning one request into hundreds of fsyncs). The caller
+    /// that owns this document's whole redaction lifecycle — the `process_batch_with_auth`
+    /// loop for a top-level document, or [`Self::redact_document_recursively`] for a
+    /// nested archive member — collects `.content`'s entries into the same `audit_log`
+    /// this method extends, then calls [`Self::record_audit_entries`] exactly once.
+    ///
+    /// Returns the already-appended [`AuditEntry`] batch from any recursively-redacted
+    /// archive `children` — each nested document gets its own single `append` (via
+    /// [`Self::redact_document_recursively`]), separate from this document's own, so those
+    /// entries are real (chain hash, id) by the time this method returns them, unlike
+    /// everything pushed into `audit_log`.
+    ///
+    /// P7 (`superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md`) found, by
+    /// reproduction against a live build, that `document.content = result.redacted_text`
+    /// was the *only* rewrite this pipeline performed. xberg's `ExtractedDocument`
+    /// populates several other fields unconditionally for the formats already enabled on
+    /// this workspace (`pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/`archives`),
+    /// not behind an opt-in flag, and every one of them passed through unredacted in every
+    /// transport that serialises an `ExtractedDocument` (REST, CLI, MCP):
+    ///
+    /// - `tables`, and `pages` (which nests a *second* copy of both `content` and
+    ///   `tables`, plus PPTX `speaker_notes`)
+    /// - `formatted_content`
+    /// - `metadata.authors` / `created_by` / `modified_by`
+    /// - `annotations` (PDF comments), `form_fields` (PDF form values), `uris` (extracted
+    ///   links — a `mailto:` URL *is* a plaintext email address)
+    /// - `revisions` (DOCX/PPTX tracked-change author names and content deltas)
+    /// - `children` (archive members — each a complete nested `ExtractedDocument`,
+    ///   redacted recursively via [`Self::redact_document_recursively`])
+    ///
+    /// This method closes that gap the same way `.content` is closed: walk every
+    /// text-bearing field, not just the one most callers think of as "the document text."
+    ///
+    /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
+    /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
+    /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
+    /// silently included by half-measure. Also not covered: fields gated behind
+    /// extraction-config flags or Cargo features this workspace does not yet enable
+    /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
+    /// `chunks`, `extracted_keywords`, `summary`, `translation`, `page_classifications`)
+    /// — see the `2026-08-13-hacienda-xberg-capability-parity-program.md` X1/X2/X3 specs,
+    /// each of which is gated on this method already covering the field it would add.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if detection fails on any field,
+    /// [`HaciendaError::Audit`] if a nested archive member's own append fails, and
+    /// [`HaciendaError::RedactionDepthExceeded`] if `depth` (this document's nesting level,
+    /// 0 for a top-level document) reaches [`MAX_REDACTION_DEPTH`] while walking into
+    /// `children`.
     async fn redact_structured_fields(
         &self,
         document: &mut xberg::ExtractedDocument,
         pipeline: &Arc<PiiPipeline>,
         caller: Caller<'_>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
+        depth: usize,
     ) -> Result<Vec<AuditEntry>, HaciendaError> {
-        let mut audit_entries = Vec::new();
-
         for table in &mut document.tables {
-            self.redact_table(table, pipeline, caller, &mut audit_entries)
-                .await?;
+            self.redact_table(table, pipeline, audit_log).await?;
         }
 
         if let Some(pages) = &mut document.pages {
             for page in pages {
-                self.redact_string_field(&mut page.content, pipeline, caller, &mut audit_entries)
+                self.redact_string_field(&mut page.content, pipeline, audit_log)
                     .await?;
 
                 // `PageContent::tables` is `Vec<Arc<Table>>` (shared with other pages'
@@ -1148,8 +1254,7 @@ impl HaciendaFacade {
                 let mut redacted_tables = Vec::with_capacity(page.tables.len());
                 for shared_table in &page.tables {
                     let mut table = (**shared_table).clone();
-                    self.redact_table(&mut table, pipeline, caller, &mut audit_entries)
-                        .await?;
+                    self.redact_table(&mut table, pipeline, audit_log).await?;
                     redacted_tables.push(Arc::new(table));
                 }
                 page.tables = redacted_tables;
@@ -1159,29 +1264,28 @@ impl HaciendaFacade {
                 // easy to miss because it's a page-level field with no counterpart at the
                 // top level of `ExtractedDocument`.
                 if let Some(notes) = &mut page.speaker_notes {
-                    self.redact_string_field(notes, pipeline, caller, &mut audit_entries)
-                        .await?;
+                    self.redact_string_field(notes, pipeline, audit_log).await?;
                 }
             }
         }
 
         if let Some(formatted) = &mut document.formatted_content {
-            self.redact_string_field(formatted, pipeline, caller, &mut audit_entries)
+            self.redact_string_field(formatted, pipeline, audit_log)
                 .await?;
         }
 
         if let Some(authors) = &mut document.metadata.authors {
             for author in authors {
-                self.redact_string_field(author, pipeline, caller, &mut audit_entries)
+                self.redact_string_field(author, pipeline, audit_log)
                     .await?;
             }
         }
         if let Some(created_by) = &mut document.metadata.created_by {
-            self.redact_string_field(created_by, pipeline, caller, &mut audit_entries)
+            self.redact_string_field(created_by, pipeline, audit_log)
                 .await?;
         }
         if let Some(modified_by) = &mut document.metadata.modified_by {
-            self.redact_string_field(modified_by, pipeline, caller, &mut audit_entries)
+            self.redact_string_field(modified_by, pipeline, audit_log)
                 .await?;
         }
 
@@ -1189,7 +1293,7 @@ impl HaciendaFacade {
         if let Some(annotations) = &mut document.annotations {
             for annotation in annotations {
                 if let Some(content) = &mut annotation.content {
-                    self.redact_string_field(content, pipeline, caller, &mut audit_entries)
+                    self.redact_string_field(content, pipeline, audit_log)
                         .await?;
                 }
             }
@@ -1200,11 +1304,10 @@ impl HaciendaFacade {
         // reachable than a table cell.
         for field in &mut document.form_fields {
             if let Some(value) = &mut field.value {
-                self.redact_string_field(value, pipeline, caller, &mut audit_entries)
-                    .await?;
+                self.redact_string_field(value, pipeline, audit_log).await?;
             }
             if let Some(default_value) = &mut field.default_value {
-                self.redact_string_field(default_value, pipeline, caller, &mut audit_entries)
+                self.redact_string_field(default_value, pipeline, audit_log)
                     .await?;
             }
         }
@@ -1215,8 +1318,7 @@ impl HaciendaFacade {
         // even after the visible document was cleaned up.
         if let Some(revisions) = &mut document.revisions {
             for revision in revisions {
-                self.redact_revision(revision, pipeline, caller, &mut audit_entries)
-                    .await?;
+                self.redact_revision(revision, pipeline, audit_log).await?;
             }
         }
 
@@ -1224,11 +1326,10 @@ impl HaciendaFacade {
         // link's display label routinely names a person ("Contact Jane Doe").
         if let Some(uris) = &mut document.uris {
             for uri in uris {
-                self.redact_string_field(&mut uri.url, pipeline, caller, &mut audit_entries)
+                self.redact_string_field(&mut uri.url, pipeline, audit_log)
                     .await?;
                 if let Some(label) = &mut uri.label {
-                    self.redact_string_field(label, pipeline, caller, &mut audit_entries)
-                        .await?;
+                    self.redact_string_field(label, pipeline, audit_log).await?;
                 }
             }
         }
@@ -1237,24 +1338,40 @@ impl HaciendaFacade {
         // `ExtractedDocument`* (a zip containing a PDF containing PII is exactly as real a
         // leak as the top-level PDF would be), and archives can nest arbitrarily deep
         // (a zip inside a zip is legal), hence the recursive call rather than one more
-        // field loop.
+        // field loop. Each child gets its own single `append` — see
+        // `redact_document_recursively` — so its entries are already real `AuditEntry`s,
+        // unlike everything else collected into `audit_log` above.
+        let mut child_audit_entries = Vec::new();
         if let Some(children) = &mut document.children {
+            if !children.is_empty() && depth >= MAX_REDACTION_DEPTH {
+                return Err(HaciendaError::RedactionDepthExceeded {
+                    limit: MAX_REDACTION_DEPTH,
+                });
+            }
             for child in children {
-                audit_entries.extend(
-                    self.redact_document_recursively(&mut child.result, pipeline, caller)
-                        .await?,
+                child_audit_entries.extend(
+                    self.redact_document_recursively(
+                        &mut child.result,
+                        pipeline,
+                        caller,
+                        depth + 1,
+                    )
+                    .await?,
                 );
             }
         }
 
-        Ok(audit_entries)
+        Ok(child_audit_entries)
     }
 
     /// Redact a nested archive entry's document: its own `.content` (nothing else in the
     /// pipeline reaches an archive member's content — [`Self::detect_concurrently`] only
     /// ever sees the top-level documents in `extraction.results`), then everything
     /// [`Self::redact_structured_fields`] covers for a top-level document, recursively —
-    /// an archive member can itself contain archive members.
+    /// an archive member can itself contain archive members. Content and every structured
+    /// field are collected into one `audit_log` and appended in a single
+    /// [`Self::record_audit_entries`] call, so each archive member — like each top-level
+    /// document — produces exactly one `store.append`.
     ///
     /// Hand-written `Pin<Box<dyn Future>>` return, not a plain `async fn`, because this
     /// function's own body calls [`Self::redact_structured_fields`], which calls this
@@ -1262,35 +1379,41 @@ impl HaciendaFacade {
     /// produces an infinitely-sized state-machine type. Boxing breaks the cycle — the
     /// caller only needs to store a pointer-sized `Pin<Box<dyn Future>>` at the await
     /// point, not the unbounded concrete future type.
+    ///
+    /// `depth` is this document's nesting level (0 for a direct child of a top-level
+    /// document, incremented on every further recursion) — see [`MAX_REDACTION_DEPTH`].
     fn redact_document_recursively<'a>(
         &'a self,
         document: &'a mut xberg::ExtractedDocument,
         pipeline: &'a Arc<PiiPipeline>,
         caller: Caller<'a>,
+        depth: usize,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AuditEntry>, HaciendaError>> + Send + 'a>> {
         Box::pin(async move {
-            let mut audit_entries = Vec::new();
-            self.redact_string_field(&mut document.content, pipeline, caller, &mut audit_entries)
+            let mut audit_log = Vec::new();
+            self.redact_string_field(&mut document.content, pipeline, &mut audit_log)
                 .await?;
-            audit_entries.extend(
-                self.redact_structured_fields(document, pipeline, caller)
-                    .await?,
-            );
+            let child_audit_entries = self
+                .redact_structured_fields(document, pipeline, caller, &mut audit_log, depth)
+                .await?;
+
+            let mut audit_entries = self.record_audit_entries(&audit_log, caller).await?;
+            audit_entries.extend(child_audit_entries);
             Ok(audit_entries)
         })
     }
 
     /// Redact a tracked change's author name and its content delta (inserted/deleted
-    /// lines, changed table cells, changed formatting properties).
+    /// lines, changed table cells, changed formatting properties), collecting into
+    /// `audit_log` rather than appending — see [`Self::redact_structured_fields`].
     async fn redact_revision(
         &self,
         revision: &mut xberg::DocumentRevision,
         pipeline: &Arc<PiiPipeline>,
-        caller: Caller<'_>,
-        audit_entries: &mut Vec<AuditEntry>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
     ) -> Result<(), HaciendaError> {
         if let Some(author) = &mut revision.author {
-            self.redact_string_field(author, pipeline, caller, audit_entries)
+            self.redact_string_field(author, pipeline, audit_log)
                 .await?;
         }
         for line in &mut revision.delta.content {
@@ -1299,13 +1422,12 @@ impl HaciendaFacade {
                 | xberg::DiffLine::Added(s)
                 | xberg::DiffLine::Removed(s) => s,
             };
-            self.redact_string_field(text, pipeline, caller, audit_entries)
-                .await?;
+            self.redact_string_field(text, pipeline, audit_log).await?;
         }
         for change in &mut revision.delta.table_changes {
-            self.redact_string_field(&mut change.from, pipeline, caller, audit_entries)
+            self.redact_string_field(&mut change.from, pipeline, audit_log)
                 .await?;
-            self.redact_string_field(&mut change.to, pipeline, caller, audit_entries)
+            self.redact_string_field(&mut change.to, pipeline, audit_log)
                 .await?;
         }
         // Property changes are usually non-linguistic ("bold", "12pt") and unlikely to
@@ -1315,62 +1437,67 @@ impl HaciendaFacade {
         // without anyone remembering this method exists.
         for prop in &mut revision.delta.property_changes {
             if let Some(from) = &mut prop.from {
-                self.redact_string_field(from, pipeline, caller, audit_entries)
-                    .await?;
+                self.redact_string_field(from, pipeline, audit_log).await?;
             }
             if let Some(to) = &mut prop.to {
-                self.redact_string_field(to, pipeline, caller, audit_entries)
-                    .await?;
+                self.redact_string_field(to, pipeline, audit_log).await?;
             }
         }
         Ok(())
     }
 
     /// Redact a table's cells (and header, when present) in place, then regenerate
-    /// `markdown` from the redacted cells.
+    /// `markdown` from the redacted cells — unless `cells` is empty, in which case
+    /// `markdown` is redacted directly: `cells_to_markdown` renders an empty string for no
+    /// rows, and a table that carries a rendered `markdown` without parallel `cells` data
+    /// (an extractor that populates one but not the other) would otherwise lose it rather
+    /// than have it redacted.
     ///
-    /// Regenerating rather than redacting `markdown` independently keeps the two
-    /// representations consistent by construction and avoids writing two audit entries
-    /// for what is the same underlying value rendered twice.
+    /// Regenerating from `cells` when they exist keeps the two representations consistent
+    /// by construction and avoids collecting two audit entries for what is the same
+    /// underlying value rendered twice.
     async fn redact_table(
         &self,
         table: &mut xberg::Table,
         pipeline: &Arc<PiiPipeline>,
-        caller: Caller<'_>,
-        audit_entries: &mut Vec<AuditEntry>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
     ) -> Result<(), HaciendaError> {
         for row in &mut table.cells {
             for cell in row {
-                self.redact_string_field(cell, pipeline, caller, audit_entries)
-                    .await?;
+                self.redact_string_field(cell, pipeline, audit_log).await?;
             }
         }
         if let Some(columns) = &mut table.columns {
             for column in columns {
-                self.redact_string_field(column, pipeline, caller, audit_entries)
+                self.redact_string_field(column, pipeline, audit_log)
                     .await?;
             }
         }
-        table.markdown = cells_to_markdown(&table.cells);
+        if table.cells.is_empty() {
+            self.redact_string_field(&mut table.markdown, pipeline, audit_log)
+                .await?;
+        } else {
+            table.markdown = cells_to_markdown(&table.cells);
+        }
         Ok(())
     }
 
     /// Run `text` through the PII pipeline and replace it with the redacted result,
-    /// recording audit entries the same way the top-level `content` field's redaction
-    /// already does — one call site for "detect, redact, audit" that every structured
-    /// field above shares, rather than each reimplementing it.
+    /// collecting the raw audit-log entries into `audit_log` rather than appending them —
+    /// appending is the caller's job (see [`Self::redact_structured_fields`]'s doc
+    /// comment), so this function alone cannot honour the "one `append` per document"
+    /// invariant and does not try to.
     async fn redact_string_field(
         &self,
         text: &mut String,
         pipeline: &Arc<PiiPipeline>,
-        caller: Caller<'_>,
-        audit_entries: &mut Vec<AuditEntry>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
     ) -> Result<(), HaciendaError> {
         if text.is_empty() {
             return Ok(());
         }
         let result = pipeline.process(text).await?;
-        audit_entries.extend(self.record_audit(&result, caller).await?);
+        audit_log.extend(result.audit_log);
         *text = result.redacted_text;
         Ok(())
     }
@@ -2205,14 +2332,25 @@ mod tests {
         let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
         let mut document = document_with_corpus_everywhere().await;
 
-        let audit_entries = facade
-            .redact_structured_fields(&mut document, pipeline, Caller::Trusted)
+        // `redact_structured_fields` no longer appends its own fields' entries — it
+        // collects them into `audit_log` for the caller to append in one batch (see its
+        // doc comment) — and returns only already-appended entries from recursively
+        // redacted archive children.
+        let mut audit_log = Vec::new();
+        let child_audit_entries = facade
+            .redact_structured_fields(&mut document, pipeline, Caller::Trusted, &mut audit_log, 0)
             .await
             .unwrap();
 
         assert!(
-            !audit_entries.is_empty(),
-            "the corpus value must have produced at least one audit entry"
+            !audit_log.is_empty(),
+            "the corpus value in this document's own fields must have produced at least \
+             one audit-log entry"
+        );
+        assert!(
+            !child_audit_entries.is_empty(),
+            "the corpus value in the nested archive child must have produced at least one \
+             already-appended audit entry"
         );
 
         for table in &document.tables {
@@ -2309,6 +2447,76 @@ mod tests {
         }
     }
 
+    /// Defense-in-depth alongside xberg's own `ExtractionConfig::max_archive_depth`
+    /// (default 3): a document whose nesting has already reached
+    /// [`MAX_REDACTION_DEPTH`] must refuse to redact one level deeper rather than either
+    /// silently skip the child (leaking unredacted text past I1) or recurse without
+    /// bound.
+    #[tokio::test]
+    async fn redact_structured_fields_refuses_to_recurse_past_the_depth_limit() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+        let mut document = document_with_corpus_everywhere().await;
+        assert!(
+            document.children.is_some(),
+            "this test needs an archive child to hit the depth check"
+        );
+
+        let mut audit_log = Vec::new();
+        let error = facade
+            .redact_structured_fields(
+                &mut document,
+                pipeline,
+                Caller::Trusted,
+                &mut audit_log,
+                MAX_REDACTION_DEPTH,
+            )
+            .await
+            .expect_err("depth already at the limit must refuse to recurse into children");
+
+        assert!(
+            matches!(
+                error,
+                HaciendaError::RedactionDepthExceeded { limit } if limit == MAX_REDACTION_DEPTH
+            ),
+            "expected RedactionDepthExceeded, got {error:?}"
+        );
+    }
+
+    /// A table that carries a rendered `markdown` without parallel `cells` data (an
+    /// extractor that populates one but not the other) must have `markdown` redacted
+    /// directly, not silently wiped: `cells_to_markdown` renders an empty string for zero
+    /// rows, and unconditionally assigning that result would lose the rendering entirely.
+    #[tokio::test]
+    async fn redact_table_redacts_markdown_directly_when_cells_are_empty() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+
+        let mut table = xberg::Table {
+            cells: Vec::new(),
+            markdown: format!("contact: {P7_CORPUS_EMAIL}"),
+            page_number: 1,
+            ..Default::default()
+        };
+
+        let mut audit_log = Vec::new();
+        facade
+            .redact_table(&mut table, pipeline, &mut audit_log)
+            .await
+            .unwrap();
+
+        assert!(
+            !table.markdown.is_empty(),
+            "markdown must survive redaction, not be wiped to an empty string"
+        );
+        assert_field_redacted("table.markdown", &table.markdown);
+        assert!(
+            table.markdown.contains("[EMAIL]"),
+            "expected a mask token in: {}",
+            table.markdown
+        );
+    }
+
     // ── New tests for Task 7 ──────────────────────────────────────────────────
 
     /// Exactly one `append` call per document, not one per entity.
@@ -2350,6 +2558,61 @@ mod tests {
             counting_store.append_call_count(),
             2,
             "two documents must produce exactly two append calls"
+        );
+    }
+
+    /// The structured-field counterpart of `should_append_exactly_once_per_document`: a
+    /// document whose PII is spread across tables, pages, metadata, annotations, form
+    /// fields, revisions, and URIs — not just `.content` — must still produce exactly one
+    /// `store.append` call, not one per redacted field.
+    ///
+    /// Before this fix, `redact_string_field` called `record_audit` (one `store.append`)
+    /// on every structured field it touched, so this same document produced many appends —
+    /// silently violating the "one append per document" invariant D3 requires and, under
+    /// `SyncPolicy::EveryBatch`, turning one request into many fsyncs.
+    #[tokio::test]
+    async fn should_append_exactly_once_per_document_with_structured_fields() {
+        let counting_store = Arc::new(CountingAuditStore::new());
+        let facade = HaciendaFacade::with_stores(
+            HaciendaConfig::default().with_pii(pii_config()),
+            Some(Arc::clone(&counting_store) as Arc<dyn AuditStore>),
+            None,
+            None,
+        )
+        .unwrap();
+        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+
+        // No archive children: isolates the "one append per document" claim for a
+        // document's own structured fields from the separate "one append per nested
+        // archive member" behaviour `redact_document_recursively` provides.
+        let mut document = document_with_corpus_everywhere().await;
+        document.children = None;
+
+        let mut audit_log = Vec::new();
+        let child_audit_entries = facade
+            .redact_structured_fields(&mut document, pipeline, Caller::Trusted, &mut audit_log, 0)
+            .await
+            .unwrap();
+        assert!(
+            child_audit_entries.is_empty(),
+            "no archive children were given, so there must be nothing already appended"
+        );
+        assert!(
+            !audit_log.is_empty(),
+            "the corpus value across tables/pages/metadata/etc. must have produced audit-log \
+             entries to append"
+        );
+
+        facade
+            .record_audit_entries(&audit_log, Caller::Trusted)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            counting_store.append_call_count(),
+            1,
+            "one document's worth of structured-field redactions must still produce exactly \
+             one append call, not one per field"
         );
     }
 

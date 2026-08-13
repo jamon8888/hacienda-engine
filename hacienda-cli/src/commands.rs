@@ -866,10 +866,17 @@ pub async fn run_mcp_serve(
     let config = load_config(config_path, config_json, None, None)?;
     let facade = Arc::new(build_facade(config).context("building the facade")?);
 
+    // `serve_stdio` returns `Box<dyn std::error::Error + Send + Sync>`, which does not
+    // itself implement `std::error::Error` (the boxed trait object is unsized, and std's
+    // `impl<T: Error> Error for Box<T>` requires `T: Sized`) — so `anyhow::Error::from`
+    // cannot take it directly. `anyhow!(error)` falls back to its adhoc (`Display`/`Debug`)
+    // constructor instead, which still carries the error's own message, unlike the
+    // hand-written `anyhow!("MCP server error: {e}")` this replaces.
     hacienda_mcp::HaciendaMcp::new(facade)
         .serve_stdio()
         .await
-        .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
+        .map_err(|error| anyhow::anyhow!(error))
+        .context("serving the MCP surface over stdio")
 }
 
 /// Run `hacienda serve` — the HTTP API of the integration design §5.

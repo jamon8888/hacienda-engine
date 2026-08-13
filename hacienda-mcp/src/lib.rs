@@ -37,7 +37,7 @@
 //!
 //! | Tool | Facade method | Mirrors |
 //! | --- | --- | --- |
-//! | `documents_process` | `process_with_auth` | `POST /v1/documents`, `hacienda extract` |
+//! | `documents_process` | `process_batch_with_auth` | `POST /v1/documents`, `hacienda extract` |
 //! | `pii_scan` | `scan_text_with_auth` | `POST /v1/pii/scan` |
 //! | `pii_redact` | `redact_text_with_auth` | `POST /v1/pii/redact` |
 //! | `pii_reveal` | `reveal_token_with_auth` | `POST /v1/pii/reveal`, `hacienda pii reveal` |
@@ -110,7 +110,10 @@ impl HaciendaMcp {
             extract`. Every redacted span is recorded in the audit chain.",
         annotations(
             title = "Process Documents",
-            read_only_hint = true,
+            // Not read-only: it reads arbitrary local files named by the caller and
+            // appends to the audit chain — the same reason `pii_redact` below is
+            // `read_only_hint = false` even though it doesn't touch the filesystem.
+            read_only_hint = false,
             idempotent_hint = true
         )
     )]
@@ -118,18 +121,20 @@ impl HaciendaMcp {
         &self,
         Parameters(params): Parameters<DocumentsProcessParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut results = Vec::with_capacity(params.inputs.len());
-        for input in &params.inputs {
-            let extract_input = ExtractInput::from_uri(input);
-            let result = self
-                .facade
-                .process_with_auth(Caller::Trusted, extract_input)
-                .await
-                .map_err(map_hacienda_error)?;
-            results.push(serde_json::json!({ "input": input, "result": result }));
-        }
-        let dto = serde_json::json!({ "documents": results });
-        json_tool_result(&dto)
+        // One `process_batch_with_auth` call for every input, not one `process_with_auth`
+        // call per input — matching `POST /v1/documents`'s handler exactly
+        // (`hacienda-api/src/handlers/documents.rs`). A per-input loop would give every
+        // document its own audit-chain read and its own glossary/compliance snapshot,
+        // and would run every document's PII detection sequentially instead of under
+        // `PipelineConfig::concurrency`'s bound — this tool's own doc table claims parity
+        // with the REST path, so its behaviour needs to match, not just its shape.
+        let inputs: Vec<ExtractInput> = params.inputs.iter().map(ExtractInput::from_uri).collect();
+        let result = self
+            .facade
+            .process_batch_with_auth(Caller::Trusted, inputs)
+            .await
+            .map_err(map_hacienda_error)?;
+        json_tool_result(&result)
     }
 
     /// Scan raw text for PII, without rewriting it.
@@ -232,13 +237,30 @@ impl HaciendaMcp {
                 None,
             ));
         }
-        let verified = self
-            .facade
-            .verify_audit_with_auth(Caller::Trusted)
-            .await
-            .is_ok();
+        let verdict = self.facade.verify_audit_with_auth(Caller::Trusted).await;
         let tip = self.facade.audit_tip().await.map_err(map_hacienda_error)?;
-        json_tool_result(&serde_json::json!({ "verified": verified, "audit_chain_tip": tip }))
+        match verdict {
+            Ok(()) => json_tool_result(&serde_json::json!({
+                "verified": true,
+                "audit_chain_tip": tip
+            })),
+            Err(hacienda::HaciendaError::Audit(error)) => match classify_verify_failure(&error) {
+                // A tamper-detecting variant: report it in the result body, naming the
+                // offending entry, exactly like `GET /v1/audit/verify`'s
+                // `classify_verify_failure` — not as a tool error, so a caller can tell
+                // "the chain is broken" apart from "the check itself failed to run".
+                Some(detail) => json_tool_result(&serde_json::json!({
+                    "verified": false,
+                    "failure": detail,
+                    "audit_chain_tip": tip
+                })),
+                // Not a tamper verdict — an I/O or serialisation failure. Propagate it as
+                // an error so it lands in the host's error rate rather than being
+                // reported to a caller as tampering.
+                None => Err(map_hacienda_error(hacienda::HaciendaError::Audit(error))),
+            },
+            Err(other) => Err(map_hacienda_error(other)),
+        }
     }
 
     /// Read one page of the audit chain.
@@ -376,8 +398,48 @@ fn json_tool_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, rm
 ///
 /// Every branch keeps the facade's own message — none of these are the pseudonym-reveal
 /// collapse `pii_reveal` handles separately, so there is nothing here that needs hiding.
+///
+/// The split between `invalid_params` and `internal_error` matters to an MCP client the
+/// same way a 4xx/5xx split matters to an HTTP one: `Extraction` (malformed or unsupported
+/// input document), `Authz` (the caller lacks a required capability) and `PiiDisabled` (the
+/// server has no `[pii]` section configured for this call to use) are all things the caller
+/// caused and can act on — a different file, a different key, a different tool. Everything
+/// else (audit/store/review/pseudonym/API-key faults) is this node's own fault; nothing the
+/// caller supplied would change the outcome, so it stays `internal_error`.
 fn map_hacienda_error(error: hacienda::HaciendaError) -> rmcp::ErrorData {
-    rmcp::ErrorData::internal_error(error.to_string(), None)
+    match error {
+        hacienda::HaciendaError::Extraction(_)
+        | hacienda::HaciendaError::Authz(_)
+        | hacienda::HaciendaError::PiiDisabled => {
+            rmcp::ErrorData::invalid_params(error.to_string(), None)
+        }
+        other => rmcp::ErrorData::internal_error(other.to_string(), None),
+    }
+}
+
+/// Map the tamper-detecting [`hacienda_core::audit::AuditError`] variants onto a failure
+/// detail string for [`HaciendaMcp::audit_verify`].
+///
+/// `None` for everything else, which is what keeps I/O and serialisation faults out of the
+/// `verified: false` result — those are reported as tool errors instead (see
+/// `map_hacienda_error`). Mirrors `hacienda-api/src/handlers/audit.rs`'s
+/// `classify_verify_failure`; kept as a plain string here rather than duplicating that
+/// handler's `VerifyFailure` wire DTO, since this tool's result is JSON-serialised ad hoc,
+/// not schema-checked against an OpenAPI spec.
+fn classify_verify_failure(error: &hacienda_core::audit::AuditError) -> Option<String> {
+    use hacienda_core::audit::AuditError;
+    match error {
+        AuditError::ChainIntegrity { .. }
+        | AuditError::ConfigMismatch { .. }
+        | AuditError::SegmentIntegrity { .. }
+        | AuditError::SegmentLink { .. }
+        | AuditError::SegmentEntryCount { .. } => Some(error.to_string()),
+        AuditError::Io { .. }
+        | AuditError::Json(_)
+        | AuditError::StoreClosed { .. }
+        | AuditError::UnresolvableCursor { .. }
+        | AuditError::Backend(_) => None,
+    }
 }
 
 #[cfg(test)]

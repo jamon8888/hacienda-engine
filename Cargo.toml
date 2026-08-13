@@ -96,9 +96,10 @@ web-time = "1"
 #
 # Format coverage: every document-format extractor xberg ships as a pure-Rust feature
 # (no native toolchain, no model download, no ONNX Runtime) is enabled here, so
-# `xberg::extract_batch` — the single call site, `facade.rs`'s `process_batch_inner` —
-# actually handles what a caller sends it instead of erroring on anything but plain
-# text. `pdf` (`pdf_oxide`/`lopdf`), `office` (docx/xlsx/pptx via `zip`/`roxmltree`,
+# `facade.rs`'s `extract_all` — which calls `xberg::extract` for a single input and
+# `xberg::extract_batch` for more than one — actually handles what a caller sends it
+# instead of erroring on anything but plain text. `pdf` (`pdf_oxide`/`lopdf`), `office`
+# (docx/xlsx/pptx via `zip`/`roxmltree`,
 # pulls in `html`/`notebook`), `excel` (`calamine`), `email` (`mail-parser`/
 # `outlook-pst`), `hwp`/`hwpx` (`unhwp`), `iwork` (`zip`/`snap`), `archives`
 # (`zip`/`tar`/`sevenz-rust2`) are all crates.io Rust libraries — confirmed against

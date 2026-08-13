@@ -43,6 +43,12 @@ pub enum HaciendaError {
     /// disclosed.
     #[error("PII detection is not enabled: add a [pii] section to the configuration")]
     PiiDisabled,
+
+    /// Structured-field redaction recursed into a nested archive member deeper than
+    /// [`crate::facade::MAX_REDACTION_DEPTH`] — defense-in-depth alongside xberg's own
+    /// `ExtractionConfig::max_archive_depth`. See that constant's doc comment.
+    #[error("archive nesting exceeds hacienda's redaction depth limit ({limit})")]
+    RedactionDepthExceeded { limit: usize },
 }
 
 impl From<xberg::XbergError> for HaciendaError {
