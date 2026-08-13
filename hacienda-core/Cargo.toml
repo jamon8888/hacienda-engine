@@ -78,10 +78,11 @@ xberg = { workspace = true }
 # Track I needs xberg's extraction on wasm32 and WASI SDK is provisioned in CI.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
-# Same `rev` (not `tag`) and same reason as the workspace root `Cargo.toml`'s `xberg`
-# entry — every release tag's `test_documents` submodule pin is orphaned upstream;
-# see that comment for the full explanation. Keep both `rev`s in sync.
-xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "9178ad3987ede9aab59d0ffac7388df2b3183244", default-features = false, features = [
+# TEMPORARY: same jamon8888/xberg patched-commit workaround as the workspace root
+# Cargo.toml's `xberg` entry — see that entry's comment for why. Must stay in sync with
+# it (same `rev`) or cargo refuses to build with "different source paths depending on
+# the build target".
+xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c1648547a4d861153d2f5c363340", default-features = false, features = [
     "no-ort-target",
     "excel-wasm",
     "layout-tract",

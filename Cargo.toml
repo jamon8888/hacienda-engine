@@ -126,7 +126,22 @@ web-time = "1"
 #
 # To develop xberg and hacienda together, override locally without editing this file:
 #   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml
-xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "9178ad3987ede9aab59d0ffac7388df2b3183244", features = [
+#
+# TEMPORARY: pinned to a patched commit on jamon8888/xberg, not xberg-io/xberg's v1.0.2 tag
+# directly, because that tag's `test_documents` git submodule is pinned to a commit
+# (4ca54bb) that no longer exists on xberg-io/test_documents's remote — confirmed via a
+# direct `git fetch <sha>` ("not our ref"), and true of every xberg-io/xberg tag from
+# v1.0.2 through v1.0.14, so no version bump fixes it. Cargo fetches a git dependency's
+# submodules unconditionally during dependency resolution, so this breaks `cargo build`
+# for the whole workspace regardless of which features are enabled.
+#
+# jamon8888/xberg@fix/test-documents-submodule-pin is otherwise the identical tree to
+# xberg-io/xberg's v1.0.2 tag (commit 9dcc864d) with only that one gitlink repointed to
+# test_documents's current valid HEAD. This is documented as a deliberate, temporary
+# exception to docs/architecture/README.md §3's policy against this fork entering the
+# dependency graph — revert to the upstream tag once xberg-io/xberg or
+# xberg-io/test_documents fixes the submodule pin upstream.
+xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c1648547a4d861153d2f5c363340", features = [
     "redaction",
     "ner",
     "tokio-runtime",

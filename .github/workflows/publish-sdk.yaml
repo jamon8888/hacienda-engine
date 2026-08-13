@@ -43,7 +43,11 @@ jobs:
     environment: npm
     steps:
       - uses: actions/checkout@v4
+      # Pinned date: see ci-rust.yaml's top-of-file comment for why an unpinned
+      # nightly channel broke CI on 2026-08-08.
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-06
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:

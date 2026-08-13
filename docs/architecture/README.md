@@ -87,6 +87,19 @@ noms plausibles sous `xberg-io` n'a rien donné. En revanche **ses specs OpenAPI
 dans `xberg-io/sdks`, ce qui a permis d'en lire toute la surface fonctionnelle. Restent inconnues
 sa licence, son mode de distribution et sa gouvernance.
 
+**Exception temporaire à « ne doit jamais entrer dans le graphe de dépendances » (2026-08-08).**
+Le sous-module git `test_documents` du commit `xberg-io/xberg` épinglé par `tag = "v1.0.2"`
+(`9dcc864d`) pointe vers un commit qui n'existe plus sur `xberg-io/test_documents` — vérifié par
+un `git fetch <sha>` direct, qui renvoie « not our ref », et vrai de **chaque** tag `xberg-io/xberg`
+de v1.0.2 à v1.0.14 : ce n'est pas réparable en changeant de version. `cargo` récupère
+inconditionnellement les sous-modules d'une dépendance git lors de la résolution, donc ceci casse
+`cargo build` pour tout le workspace, sur `main` comme sur toute branche. Le workaround adopté :
+`jamon8888/xberg@fix/test-documents-submodule-pin` — arbre identique au commit `9dcc864d`, avec
+uniquement ce gitlink repointé vers le HEAD valide actuel de `test_documents`. `Cargo.toml` et
+`hacienda-core/Cargo.toml` pointent temporairement là plutôt que sur `xberg-io/xberg` directement ;
+revenir au tag amont dès que `xberg-io` corrige le sous-module. Voir le commentaire au-dessus de
+la dépendance `xberg` dans chacun des deux fichiers pour le détail complet.
+
 ---
 
 ## 4. Registre des décisions
