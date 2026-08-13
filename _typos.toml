@@ -7,6 +7,15 @@
 # papers (as page-builder demo content) plus generated block ids — hyphenated line-break artifacts
 # ("transfor- mation"), author-name fragments, and random id substrings read as typos to an
 # English dictionary but are not text anyone here authored or should "fix".
+#
+# apps/hacienda-studio/public/models/ is vendored model assets (GLiNER2 tokenizer vocabulary,
+# etc.) — subword tokens like "fonction"/"schoo"/"opion" are training-data fragments, not
+# English prose, and aren't meant to satisfy a spell-checker any more than a binary would.
+#
+# crates/hacienda-wasm/pkg/ is wasm-bindgen's own generated JS/TS glue (ci-wasm-freshness.yaml
+# rebuilds and diffs it, so it's trusted as machine output, not hand-authored) — its
+# `__wbg_*_<hash>` export names embed random hex suffixes that occasionally spell real words
+# ("ba", "ede") by coincidence, not typos to fix.
 extend-exclude = [
     "superpowers/",
     ".ai-rulez/",
@@ -17,6 +26,8 @@ extend-exclude = [
     "docs/hacienda-guide-ia-fr.md",
     "docs/setup-harnais-ia-fr.md",
     "apps/hacienda-studio/components/extend/layout-blocks.tsx",
+    "apps/hacienda-studio/public/models/",
+    "crates/hacienda-wasm/pkg/",
 ]
 
 [default.extend-words]
