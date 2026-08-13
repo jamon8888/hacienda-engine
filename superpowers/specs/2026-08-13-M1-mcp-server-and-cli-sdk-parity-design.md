@@ -1,12 +1,73 @@
 # M1 — MCP server, and closing the CLI/SDK parity gap
 
 **Date:** 2026-08-13
-**Status:** Proposed
+**Status:** M1a shipped (this revision) — stdio MCP server, extraction-format parity. See
+§0.
 **Track:** new **Piste M** (MCP), plus a parity slice on the existing CLI surface
 **Program:** `2026-08-01-hacienda-platform-parity-program.md` §9 ("Serveur MCP — chantier
 distinct… à spécifier à part") and §4 S4 (`2026-08-01-S4-api-contract-and-clients.md`)
 **Depends on:** P1, P2, P3, P4, P5, S4 (all already shipped — see §1)
 **Blocks:** nothing in S/E/V — this track is additive
+
+---
+
+## 0. What actually shipped in this revision
+
+The first draft of this spec was written from documentation and the route table alone.
+This revision was written after cloning `jamon8888/xberg` at the pinned commit and reading
+its actual source (`crates/xberg/src/api/`, `crates/xberg/src/mcp/`, `crates/xberg-cli/`) —
+a few corrections and one new finding came out of that, folded in below. Two things are
+now real code, not proposal:
+
+- **Extraction-format parity (new, not in the first draft).** The root `Cargo.toml`'s
+  `xberg` dependency now enables `pdf`, `office`, `excel`, `email`, `hwp`, `hwpx`, `iwork`,
+  `archives` — every xberg extraction format that is pure Rust, needs no native toolchain
+  and no model download. Confirmed against `crates/xberg/Cargo.toml`'s own feature
+  definitions (`pdf_oxide`, `lopdf`, `calamine`, `mail-parser`, `outlook-pst`, `biblatex`,
+  `biblib`, `org`, `dbase`, `roxmltree`, `quick-xml`, `unhwp` are all crates.io Rust
+  libraries). `xberg::extract_batch` is hacienda's single extraction call site
+  (`hacienda-core/src/facade.rs`), so this is a pure feature-flag change — zero xberg
+  source touched — and `cargo check -p hacienda-core -p hacienda-api -p hacienda-cli`
+  passes clean with it. Still deliberately not enabled: `ocr`/`heic`/`wordperfect` (native
+  system libraries) and `embeddings`/`reranking`/`layout-detection`/`ner-onnx`/`candle-ocr`
+  (ONNX Runtime + a HuggingFace model fetch) — those need infrastructure provisioning
+  beyond a Cargo feature; tracked as follow-up, not silently dropped.
+- **`hacienda-mcp` (M1a, new crate).** Implements exactly the architecture §2–§3 below
+  describe: eight tools, each a thin wrapper over an existing `HaciendaFacade` method,
+  stdio transport via `rmcp` (the same MCP SDK xberg itself uses, confirmed at
+  `crates/xberg/Cargo.toml`: `rmcp = "2.2.0"`), wired up as `hacienda mcp serve`. Verified
+  end-to-end by hand over stdio: `initialize` → `tools/list` (all eight, correct schemas)
+  → `tools/call pii_redact` on a value containing a control corpus email and IBAN returns
+  `"contact me at [EMAIL], IBAN [IBAN:****]"` and two audit entries, with the corpus value
+  absent from both the text content block and `structuredContent`. Four automated tests
+  ship with the crate, including the same never-leaks-the-value assertion. §3.6's rmcp
+  spike is therefore resolved: rmcp fit cleanly, no fallback needed.
+- **One correction to §3.2/§3.3 below, from reading the real xberg source instead of the
+  `.ai-rulez` skill doc the first draft leaned on:** that skill doc's MCP tool list
+  (`extract`, `extract_batch`, `get_capabilities`) doesn't match xberg's actual registered
+  tools, which are `extract`, `extract_batch`, `detect_mime_type`, `cache_stats`,
+  `cache_clear`, `cache_manifest`, `cache_warm`, `get_version` (confirmed against
+  `crates/xberg/src/mcp/server.rs`'s own test assertions). Doesn't change this spec's
+  architecture — hacienda's tool set is derived from `ROUTE_TABLE`, not from xberg's tool
+  list, precisely because the two are deliberately different surfaces — but the skill doc
+  itself is now known-stale on this point.
+- **One real finding, out of scope for this spec, flagged rather than fixed:**
+  `hacienda-cli`'s `run_serve` builds its facade with `HaciendaFacade::new(config)`, which
+  uses an **in-memory** audit/review store — not `FileAuditStore` or `PostgresAuditStore`,
+  even though both exist in `hacienda-core`. The only production call site that wires a
+  durable store is `hacienda-api/src/handlers/auth.rs` (for API keys); every
+  `PostgresAuditStore` construction in `hacienda-api/src/routes.rs` is inside its
+  `#[cfg(test)]` module. This means `hacienda serve` today loses its whole audit/review
+  history on restart — a materially different (and worse) claim than "single-node,"
+  which is how S2 currently frames the gap. It is the reason §4's CLI parity slice
+  (`audit entries`/`review`/`compliance` as standalone one-shot commands) is **not** part
+  of this revision: a one-shot CLI command reading an in-memory store that dies with the
+  process it belongs to has nothing durable to show. `hacienda-mcp`'s `audit_entries` /
+  `audit_verify` / `compliance_report` tools cover the live-process case today (proven in
+  the smoke test above); a CLI surface for durable state needs S2's durable-store wiring
+  in `run_serve` first, not just a new subcommand. Filing this precisely so it doesn't get
+  rediscovered as "S2 is slow because of scale" when the actual gap is "the wiring was
+  never done."
 
 ---
 
@@ -201,6 +262,15 @@ prompt; not required for M1's exit criteria, and can ship after the tool surface
 
 ## 4. CLI parity: front doors for API surface that already exists
 
+**Status: blocked on the durable-store finding in §0, not implemented in this revision.**
+`hacienda mcp serve` (§0, §3) now covers the live-process version of everything below —
+`audit_entries`, `audit_verify`, `compliance_report` are real, tested MCP tools today. What
+follows is the original design for a *standalone, one-shot CLI* surface, kept because the
+design itself is still right; it is gated on `run_serve` (or an equivalent long-lived
+process) actually persisting to `FileAuditStore`/`PostgresAuditStore` first, since a
+one-shot command reading an in-memory store that dies with the process producing it has
+nothing to read.
+
 `hacienda-cli/src/cli.rs`'s own doc comment already names the gap precisely: *"`review`,
 `compliance`, the rest of `audit`, `completions`, and the `xberg` passthrough remain deliberately
 absent rather than present and stubbed."* That stance was correct when written — the backing
@@ -259,10 +329,10 @@ It can start immediately, in parallel with whatever the program's waves 2–4 ar
 
 | Slice | Content | Why this order |
 | --- | --- | --- |
-| **M1a** | `hacienda-mcp` crate, `ROUTE_TABLE`-derived tool list, stdio transport only, `hacienda mcp serve` | Smallest slice that's independently useful (Claude Desktop today) and fully exercises the guard (§3.8) before adding a second transport |
+| **M1a** | **Shipped** (§0). `hacienda-mcp` crate, stdio transport, `hacienda mcp serve`. Eight hand-picked tools (`documents_process`, `pii_scan`, `pii_redact`, `pii_reveal`, `audit_verify`, `audit_entries`, `compliance_report`, `get_version`), each proven against a real `HaciendaFacade` call. **Not yet done, and honestly still open against §3.2/§3.8's original design:** the `ROUTE_TABLE`-driven generation and the `mcp_tool_set_equals_route_table` anti-drift test — this revision hand-wrote eight tools rather than deriving all ~40 guarded routes (RAG collections, presets, versions/diff, uploads, usage, auth management are not yet tools). Closing that gap is the next slice of M1a, not a new phase. | Smallest slice that's independently useful (Claude Desktop today) and fully exercises the guard (proven by the redaction/leak tests in `hacienda-mcp/src/lib.rs`) before adding a second transport |
 | **M1b** | HTTP/streamable transport mounted on `hacienda-api` at `/mcp/*` | Additive once M1a's tool-handler logic is proven; reuses the existing `auth_middleware` rather than a new one |
 | **M1c** | Resources (§3.4) and the `extract_and_prove` prompt | Polish, not exit-blocking |
-| **CLI parity** (§4) | `audit {entries,seals,export,tip}`, `review`, `compliance` subcommands | Independent of M1; can land before, after, or interleaved — each command is a few dozen lines against an already-proven facade method |
+| **CLI parity** (§4) | `audit {entries,seals,export,tip}`, `review`, `compliance` subcommands | **Blocked**, not merely independent — see §0's durable-store finding and §4's status line |
 
 No change to the program's existing S/P/E/V wave table (§8 of the program doc) is required — this
 track runs beside it, not inside it.

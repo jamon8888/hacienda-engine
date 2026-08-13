@@ -845,6 +845,33 @@ fn check_bind_policy(bind: SocketAddr, auth_enabled: bool) -> Result<()> {
     )
 }
 
+/// Run `hacienda mcp serve` — the MCP surface (M1a), stdio transport only.
+///
+/// Builds the facade the same way `run_extract`/`run_scan` do: a key resolver is wired
+/// in only when the configured default redaction mode is `pseudonymize` (see
+/// `build_facade`'s own doc comment for why this is conditional). A deployment that
+/// never configures pseudonymisation still gets every other tool; `pii_reveal` alone
+/// returns the facade's `PiiDisabled` error, mapped the same way `hacienda pii reveal`
+/// maps it.
+///
+/// Unlike `run_extract`/`run_scan`, this facade is long-lived — one MCP session can make
+/// many tool calls — so there is no `close_after` here; `hacienda-mcp::HaciendaMcp`
+/// serves until the client disconnects, and there is currently no signal to close the
+/// facade's stores afterwards (the same gap `run_serve` has today: neither shuts down
+/// cleanly on process exit, both rely on OS process teardown).
+pub async fn run_mcp_serve(
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let config = load_config(config_path, config_json, None, None)?;
+    let facade = Arc::new(build_facade(config).context("building the facade")?);
+
+    hacienda_mcp::HaciendaMcp::new(facade)
+        .serve_stdio()
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
+}
+
 /// Run `hacienda serve` — the HTTP API of the integration design §5.
 pub async fn run_serve(
     args: ServeArgs,

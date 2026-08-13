@@ -39,6 +39,11 @@ fn main() -> std::process::ExitCode {
             Command::Audit { command } => match command {
                 cli::AuditCommand::Verify(args) => commands::run_audit_verify(args).await,
             },
+            Command::Mcp(args) => match args.command {
+                cli::McpCommand::Serve => {
+                    commands::run_mcp_serve(cli.config, cli.config_json).await
+                }
+            },
         }
     });
 

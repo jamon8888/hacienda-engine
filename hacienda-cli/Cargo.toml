@@ -27,6 +27,7 @@ hacienda-api = { path = "../hacienda-api" }
 # enables it too; naming it here means this crate does not rely on feature unification
 # with a sibling in order to compile.
 hacienda-core = { path = "../hacienda-core", features = ["jobs", "ner-candle"] }
+hacienda-mcp = { path = "../hacienda-mcp" }
 # `serve` attaches an in-memory RAG store by default, matching the job store's own
 # in-memory-by-default precedent — see `run_serve` in src/commands.rs.
 hacienda-rag = { path = "../crates/hacienda-rag" }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hacienda-rag", "crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
+members = ["crates/hacienda-rag", "crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core", "hacienda-mcp"]
 exclude = ["packages/*"]
 
 [workspace.package]
@@ -94,13 +94,34 @@ uuid = { version = "1", features = ["v4", "serde"] }
 web-time = "1"
 # xberg
 #
-# Feature set is deliberately minimal: hacienda only consumes `xberg::extract_batch`,
-# `xberg::text::ner`, and `xberg::types::entity`. The config types for embeddings,
-# reranking, captioning, and chunking (`EmbeddingConfig`, `RerankerConfig`,
-# `CaptioningConfig`, `ChunkingConfig`) are exported by xberg unconditionally, so those
-# features only gate implementation code we never call. Enabling them pulled ONNX
-# Runtime (`ort`), `ndarray`, `liter-llm`, and the ICU segmenter family into the graph
-# for no benefit. Do not re-add a feature here without a call site to justify it.
+# Format coverage: every document-format extractor xberg ships as a pure-Rust feature
+# (no native toolchain, no model download, no ONNX Runtime) is enabled here, so
+# `xberg::extract_batch` — the single call site, `facade.rs`'s `process_batch_inner` —
+# actually handles what a caller sends it instead of erroring on anything but plain
+# text. `pdf` (`pdf_oxide`/`lopdf`), `office` (docx/xlsx/pptx via `zip`/`roxmltree`,
+# pulls in `html`/`notebook`), `excel` (`calamine`), `email` (`mail-parser`/
+# `outlook-pst`), `hwp`/`hwpx` (`unhwp`), `iwork` (`zip`/`snap`), `archives`
+# (`zip`/`tar`/`sevenz-rust2`) are all crates.io Rust libraries — confirmed against
+# xberg's own `Cargo.toml` — so this is a feature-flag change only, zero xberg source
+# touched. `xml` comes along transitively via `office`.
+#
+# Deliberately still NOT enabled: anything needing a native system library or a
+# model download at runtime — `ocr`/`ocr-wasm` (Tesseract binary), `heic`/
+# `wordperfect` (native C/C++ libs), `embeddings`/`reranking`/`layout-detection`/
+# `auto-rotate`/`ner-onnx`/`candle-ocr`/`paddle-ocr` (ONNX Runtime + HuggingFace
+# model fetch). Those need infrastructure provisioning (`ORT_LIB_LOCATION`, a
+# Tesseract install, a model cache) beyond a Cargo feature, same class of gap the
+# `.ai-rulez` OCR/ONNX skills already document for xberg itself — track separately
+# rather than silently skip. `xberg::extract_batch`'s config types for embeddings,
+# reranking, and captioning stay exported unconditionally regardless (unaffected by
+# this feature set), so hacienda's `ExtractionConfig` passthrough already round-trips
+# them even before those backends are wired in.
+#
+# `mcp` and `api` are deliberately never enabled here: hacienda's MCP server and REST
+# API are built against `HaciendaFacade` directly (the redaction guard), not against
+# xberg's own unredacted server — see `hacienda-mcp` and `hacienda-api`. Enabling
+# xberg's `mcp`/`api` features would pull `rmcp`/`axum` server code hacienda never
+# calls, for a surface this repo intentionally does not re-expose.
 #
 # Pinned to a release tag rather than `path = "../xberg/crates/xberg"`. The sibling
 # checkout is a working tree: it sits on rc.37 and carries uncommitted edits, one of
@@ -129,6 +150,14 @@ xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c16
     "redaction",
     "ner",
     "tokio-runtime",
+    "pdf",
+    "office",
+    "excel",
+    "email",
+    "hwp",
+    "hwpx",
+    "iwork",
+    "archives",
 ] }
 # Key material must not survive a drop. `PseudonymKey` holds the secret that
 # de-pseudonymises an entire corpus.

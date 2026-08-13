@@ -96,6 +96,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`hacienda-mcp` (new crate): an MCP (Model Context Protocol) server for the guarded
+  facade, wired up as `hacienda mcp serve` (stdio transport).** Closes the gap the parity
+  program's own `2026-08-01-hacienda-platform-parity-program.md` §9 flagged as
+  unspecified ("Serveur MCP — chantier distinct… à spécifier à part"). Deliberately **not**
+  xberg's own MCP server (behind its `mcp` cargo feature, never enabled here): that server
+  returns unredacted extraction output with no audit trail, and re-exposing it would let an
+  MCP client read document content through a path the P1 redaction guard was never wired
+  into. Every one of this crate's eight tools (`documents_process`, `pii_scan`,
+  `pii_redact`, `pii_reveal`, `audit_verify`, `audit_entries`, `compliance_report`,
+  `get_version`) instead calls the same `HaciendaFacade` methods `hacienda-api`'s HTTP
+  handlers and `hacienda-cli`'s subcommands already call, as `Caller::Trusted` — the same
+  in-process-trust precedent `hacienda serve`/`hacienda pii reveal` already document. Built
+  on `rmcp = "2.2.0"`, the same MCP SDK xberg itself depends on. See
+  `superpowers/specs/2026-08-13-M1-mcp-server-and-cli-sdk-parity-design.md` for the design
+  and for a real gap this work surfaced: `hacienda serve` builds its audit/review stores
+  as in-memory (`HaciendaFacade::new`, not `with_stores`) in every production code path —
+  `FileAuditStore`/`PostgresAuditStore` exist in `hacienda-core` but nothing wires them into
+  `run_serve` today, so a restart loses the whole chain. Tracked, not fixed, in this change.
+- **xberg extraction-format coverage.** The root `Cargo.toml`'s `xberg` dependency now
+  enables `pdf`, `office`, `excel`, `email`, `hwp`, `hwpx`, `iwork`, `archives` — every
+  format xberg ships as a pure-Rust feature (no native toolchain, no ONNX Runtime, no model
+  download). Before this change hacienda's only enabled xberg features were `redaction`,
+  `ner`, `tokio-runtime` (plus xberg's own defaults `tokio-runtime`/`simd-utf8`), so
+  `xberg::extract_batch` — `HaciendaFacade`'s single extraction call site — could not
+  actually extract a PDF, a Word/Excel/PowerPoint file, an email, or an archive; only
+  whatever format needs none of those feature-gated extractors. A Cargo-feature-only
+  change, confirmed against `crates/xberg/Cargo.toml`'s own feature graph: `pdf_oxide`,
+  `lopdf`, `calamine`, `mail-parser`, `outlook-pst`, `biblatex`, `biblib`, `org`, `dbase`,
+  `roxmltree`, `quick-xml`, `unhwp` are all crates.io Rust libraries. `ocr` (Tesseract
+  binary), `heic`/`wordperfect` (native C/C++ libraries), and
+  `embeddings`/`reranking`/`layout-detection`/`ner-onnx`/`candle-ocr` (ONNX Runtime plus a
+  HuggingFace model fetch) are deliberately still not enabled — those need infrastructure
+  provisioning beyond a feature flag, not a decision to skip them.
 - **Server-side chunking for RAG document upsert.** `POST /v1/rag/collections/{name}/documents`
   previously required the caller to submit pre-chunked, pre-embedded `chunks` — `full_text` was
   stored for search only, never chunked. When `chunks` is omitted, the server now splits
