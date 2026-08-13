@@ -100,8 +100,13 @@ l'ordre ci-dessous (aucune ne bloque une autre — fichiers disjoints).
       (`pii_slo_availability_ratio`, `pii_pipeline_duration_seconds`,
       `pii_model_inference_duration_seconds`, jauges mémoire/disque) dans un bloc clairement
       marqué « non instrumenté — backlog » plutôt que de les supprimer silencieusement.
-- [ ] **Étape 4.6** — Ajuster `docker-compose.yml` si le port de scrape doit changer pour
-      correspondre à l'endroit réel où `/metrics` est servi.
+- [ ] **Étape 4.6** — Corriger `docker-compose.yml` : les services `hacienda` et `prometheus`
+      mappent aujourd'hui tous les deux le port hôte `9090:9090` (lignes 10 et 35), ce qui
+      empêche `docker-compose up` de démarrer les deux conteneurs (« port is already
+      allocated ») indépendamment du travail des étapes 4.1–4.5. Changer l'un des deux mappings
+      hôte (par exemple exposer Prometheus sur `9091:9090`) est requis pour que le critère de
+      sortie « `docker-compose up` fait passer la cible `hacienda` à `UP` dans Prometheus »
+      soit atteignable.
 
 ---
 

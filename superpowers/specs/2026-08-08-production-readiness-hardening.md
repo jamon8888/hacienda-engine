@@ -56,7 +56,7 @@ Trois divergences indépendantes, toutes dans `docker/Dockerfile` et son entoura
 
 Le filet de sécurité censé attraper ceci ne peut pas le faire : `.github/workflows/ci-docker.yaml`
 exécute `docker buildx build --check -f "$f" . 2>&1 || true` — un `--check` (lint, pas de build
-réel) dont l'échec est explicitly avalé par `|| true`. Ce job ne peut jamais passer au rouge.
+réel) dont l'échec est explicitement avalé par `|| true`. Ce job ne peut jamais passer au rouge.
 
 En complément, `docs/configuration.md` documente un schéma de configuration (`[server]`,
 `[security]`, `[observability]`) qui ne correspond à aucune structure réelle — `HaciendaConfig`
@@ -107,6 +107,14 @@ Grafana et Alertmanager, et `monitoring/alerts.yml` référence des métriques
 `monitoring/prometheus.yml` cible `hacienda:9090` — un port sur lequel rien n'écoute. Ce même
 écart est déjà noté dans `docs/architecture/2026-07-31-analyse-architecture-et-pistes-produit.md`
 (registre de risques).
+
+**Collision de port pré-existante, indépendante de ce correctif.** `docker-compose.yml` mappe
+déjà le port hôte `9090:9090` à la fois pour le service `hacienda` (ligne 10) et pour le service
+`prometheus` (ligne 35). Même une fois `GET /metrics` livré sur `hacienda:9090`, `docker-compose
+up` échouera à démarrer les deux conteneurs (« port is already allocated ») tant que l'un des
+deux mappings hôte n'est pas changé — ce correctif de port est donc requis, pas seulement
+conditionnel, pour que le critère de sortie §8 (« docker-compose.yml fournit et scrape avec
+succès une cible réelle ») soit atteignable.
 
 **Décision D-4 — instrumentation minimale réelle, pas la parité complète.** Ajouter
 `TraceLayer`/`TimeoutLayer`, une route `GET /metrics` réelle (compteur de requêtes, histogramme
