@@ -446,7 +446,7 @@ Enterprise des vagues 4 est à rediscuter avant d'engager quinze semaines.
 
 | Exclusion | Raison |
 | --- | --- |
-| Serveur MCP | Chantier distinct : la moitié extraction est une feature `xberg/mcp` à activer (analyse §9.11.1), les outils PII/conformité se greffent dessus. À spécifier à part. |
+| ~~Serveur MCP~~ | **Spécifié à part** par `2026-08-13-M1-mcp-server-and-cli-sdk-parity-design.md`, comme prévu — et à l'inverse de la piste envisagée ici : pas une activation de la feature `xberg/mcp`, qui contournerait le garde P1, mais un serveur propre à hacienda contre `HaciendaFacade`. Cette même spec ferme aussi l'écart CLI/API (`audit`, `review`, `compliance` sans front-end CLI) et documente pourquoi la parité SDK (§4 S4) n'a rien de plus à construire. |
 | ~~Intégrations de frameworks RAG~~ | **Rapatriées dans le programme** par la décision D1, comme spec **E0** en vague 1. |
 | Entraînement d'adaptateurs | PR #35 le couvre, en Python, hors de ce workspace. |
 | Studio | Consomme V1 et P3 ; son évolution propre est hors programme. |
