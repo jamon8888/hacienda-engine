@@ -1,5 +1,13 @@
 name: CI - Rust
 
+# Every dtolnay/rust-toolchain@nightly step below pins `toolchain: nightly-2026-08-06`
+# rather than floating to whatever nightly is current on the day a run fires. An
+# unpinned nightly channel drifted a new clippy::double_must_use lint in on
+# 2026-08-08 that fires on ~38 pre-existing #[async_trait]-decorated trait methods
+# across hacienda-core, turning every Rust-touching PR red for a reason unrelated to
+# its own diff — 2026-08-06 is the last date verified green against this exact
+# workspace (main's last successful ci-rust.yaml run). Re-verify and bump this date
+# periodically rather than leaving it pinned forever; don't remove the pin entirely.
 on:
   push:
     branches: [main]
@@ -21,6 +29,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-06
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --features "ner-candle" -- -D warnings
@@ -33,6 +42,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-06
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --features "ner-candle"
@@ -49,6 +59,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-06
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-hack
@@ -71,6 +82,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-06
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --features "ner-candle" -- --test-threads=1
