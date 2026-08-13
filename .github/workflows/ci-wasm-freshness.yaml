@@ -57,7 +57,14 @@ jobs:
         run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Rebuild hacienda-wasm/pkg from source
-        run: wasm-pack build --target web --no-default-features crates/hacienda-wasm
+        # `wasm-pack build`'s trailing PATH argument only works immediately after
+        # `build`, before flags — with flags first (as apps/hacienda-studio's own
+        # `build:wasm` script avoids entirely, see its `cd ... && wasm-pack build`
+        # form), wasm-pack 0.15.0 silently falls back to the cwd and tries to treat
+        # the workspace root's own Cargo.toml as a package manifest, erroring with
+        # "missing field `package`". `cd` into the crate directory first instead, to
+        # match the one invocation already proven to work.
+        run: cd crates/hacienda-wasm && wasm-pack build --target web --no-default-features
 
       - name: Fail if committed pkg/ output is stale
         run: |
