@@ -94,7 +94,11 @@ xberg = { workspace = true }
 # `docs/superpowers/plans/2026-07-30-hacienda-program-plan.md`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
-xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.0.2", default-features = false, features = [
+# TEMPORARY: same jamon8888/xberg patched-commit workaround as the workspace root
+# Cargo.toml's `xberg` entry — see that entry's comment for why. Must stay in sync with
+# it (same `rev`) or cargo refuses to build with "different source paths depending on
+# the build target".
+xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c1648547a4d861153d2f5c363340", default-features = false, features = [
     "ner",
 ] }
 # `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"
