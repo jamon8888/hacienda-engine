@@ -186,7 +186,19 @@ class HaciendaRetriever(BaseRetriever):
             except HaciendaApiError as exc:
                 raise HaciendaLoaderError(f"hacienda-engine request failed: {exc}") from exc
 
-            chunks = result.get("chunks", []) if result else []
+            raw_chunks = result.get("chunks", []) if result else []
+            # A malformed backend response (`chunks` not a list, or a list of
+            # non-dict items) should surface as a `HaciendaLoaderError`, not an
+            # uncaught `AttributeError`/`TypeError` from `.get()` below — mirrors
+            # the Node implementation's `Array.isArray` guard in `rag.ts`.
+            if not isinstance(raw_chunks, list) or not all(
+                isinstance(chunk, dict) for chunk in raw_chunks
+            ):
+                raise HaciendaLoaderError(
+                    "hacienda-engine returned a malformed retrieve response: "
+                    f"'chunks' was {type(raw_chunks).__name__}, expected a list of objects."
+                )
+            chunks = raw_chunks
             documents: list[Document] = []
             for chunk in chunks:
                 metadata: dict[str, Any] = {

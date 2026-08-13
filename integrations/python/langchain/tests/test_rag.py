@@ -184,3 +184,18 @@ class TestHaciendaRetriever:
         retriever = HaciendaRetriever(collection="coll", client=client)
         with pytest.raises(HaciendaLoaderError, match="hacienda-engine request failed"):
             retriever.invoke("q")
+
+    @pytest.mark.parametrize(
+        "malformed_response",
+        [
+            {"mode": "vector", "chunks": "not-a-list", "primary_latency_ms": 1},
+            {"mode": "vector", "chunks": 5, "primary_latency_ms": 1},
+            {"mode": "vector", "chunks": None, "primary_latency_ms": 1},
+            {"mode": "vector", "chunks": ["not-a-dict"], "primary_latency_ms": 1},
+        ],
+    )
+    def test_wraps_a_malformed_response(self, malformed_response):
+        client = FakeRagClient(retrieve_response=malformed_response)
+        retriever = HaciendaRetriever(collection="coll", client=client)
+        with pytest.raises(HaciendaLoaderError, match="malformed retrieve response"):
+            retriever.invoke("q")

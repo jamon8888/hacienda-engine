@@ -81,6 +81,19 @@ def _unwrap_json(response: Any) -> Any:
     if 200 <= status < 300:
         if response.parsed is not None:
             return response.parsed
-        return json.loads(response.content) if response.content else None
+        if not response.content:
+            return None
+        try:
+            return json.loads(response.content)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Mirror `_unwrap`'s error-path handling: an undecodable body on a
+            # 2xx response (backend bug, mangling proxy, ...) should still
+            # surface as the documented `HaciendaApiError` contract, not a raw
+            # parse exception.
+            raise HaciendaApiError(
+                status_code=status,
+                code=None,
+                message=f"could not parse response body as JSON: {exc}",
+            ) from exc
 
     return _unwrap(response)
