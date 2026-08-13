@@ -12,6 +12,15 @@ de sortie.
 
 ---
 
+> **⚠ Alerte urgente (2026-08-13), amendant P1 directement.** `2026-08-13-P7-structured-field-redaction-gap.md`
+> a trouvé, par reproduction, un écart vivant dans du code déjà livré : `POST /v1/documents`,
+> `hacienda extract` et `hacienda-mcp` redigent correctement `ExtractedDocument.content` mais
+> laissent `tables`, `pages[].content` et d'autres champs structurés **en clair** dans la même
+> réponse. P1 ne le couvre pas — son garde porte sur le stockage, pas sur le corps d'une
+> réponse HTTP synchrone. Priorité au-dessus de tout le reste de ce programme, y compris la
+> vague 0. Voir aussi `2026-08-13-hacienda-xberg-capability-parity-program.md` §0, le
+> programme frère qui a découvert ce point en investiguant la parité de capacités xberg.
+
 ## 1. Objectif et réserve
 
 **Objectif demandé :** que hacienda propose tout ce que fait Xberg Enterprise, **plus** la
@@ -448,6 +457,7 @@ Enterprise des vagues 4 est à rediscuter avant d'engager quinze semaines.
 | --- | --- |
 | ~~Serveur MCP~~ | **Spécifié à part** par `2026-08-13-M1-mcp-server-and-cli-sdk-parity-design.md`, comme prévu — et à l'inverse de la piste envisagée ici : pas une activation de la feature `xberg/mcp`, qui contournerait le garde P1, mais un serveur propre à hacienda contre `HaciendaFacade`. Cette même spec ferme aussi l'écart CLI/API (`audit`, `review`, `compliance` sans front-end CLI) et documente pourquoi la parité SDK (§4 S4) n'a rien de plus à construire. |
 | ~~Intégrations de frameworks RAG~~ | **Rapatriées dans le programme** par la décision D1, comme spec **E0** en vague 1. |
+| Capacités internes du crate `xberg` (OCR, embeddings, reranking, transcription, résumé, traduction, légendage, mots-clés, détection de mise en page) au-delà de l'extraction de formats | **Programme frère** : `2026-08-13-hacienda-xberg-capability-parity-program.md`. Distinct de la piste E ci-dessus, qui vise la parité de *surface REST* avec Xberg Enterprise — celui-ci vise la parité de *capacité pipeline* avec le crate `xberg` lui-même, une couche en-dessous. Contient l'alerte P7 ci-dessus. |
 | Entraînement d'adaptateurs | PR #35 le couvre, en Python, hors de ce workspace. |
 | Studio | Consomme V1 et P3 ; son évolution propre est hors programme. |
 | SSO/SAML, console d'administration, facturation | Nécessaires à une offre SaaS, hors du périmètre demandé. |
