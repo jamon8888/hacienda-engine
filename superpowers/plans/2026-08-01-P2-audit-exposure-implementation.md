@@ -154,12 +154,19 @@ Deux constats supplémentaires, non bloquants mais structurants :
 
       ```rust
       #[cfg(not(target_arch = "wasm32"))]
-      pub async fn export_store(store: &dyn AuditStore, format: ExportFormat)
-          -> Result<Vec<u8>, AuditError>;
+      pub async fn export_store<W: tokio::io::AsyncWrite + Unpin>(
+          store: &dyn AuditStore,
+          format: ExportFormat,
+          writer: &mut W,
+      ) -> Result<(), AuditError>;
       ```
 
       Pas une méthode de trait : `ExportFormat` n'existe pas sur wasm32, où vit
-      `IndexedDbAuditStore`.
+      `IndexedDbAuditStore`. **Écrit dans `writer` au fil de l'itération sur `history()`, ne
+      matérialise jamais l'export entier en mémoire** (spec §5 : « streamé, pas construit en
+      mémoire ») — une chaîne de conformité multi-mois excéderait la mémoire disponible si elle
+      était bufferisée. Le handler HTTP fournit un writer branché sur le corps de réponse
+      streamé d'`axum`.
 - [ ] **Étape 2.2** — **Ne pas router par `AuditChain`** (constat 3). Construire l'enveloppe
       directement depuis `history()` et `seals()`.
 - [ ] **Étape 2.3** — L'enveloppe porte **entrées et sceaux ensemble** (décision D-P2-5),
@@ -259,11 +266,11 @@ illisible en tableur, et toujours sans les sceaux nécessaires à la chaîne int
 - [ ] **Étape 5.2** — Documenter dans le README de l'API **ce que la chaîne prouve** et en quoi
       elle diffère d'un journal d'activité. C'est l'argument commercial (spec §2), et il doit
       être lisible par un acheteur, pas seulement par un développeur.
-- [ ] **Étape 5.4** — Documenter que `history` rend **l'histoire de ce nœud**, pas celle du
+- [ ] **Étape 5.3** — Documenter que `history` rend **l'histoire de ce nœud**, pas celle du
       déploiement : il n'existe pas d'ordre total inter-nœuds (`store_file.rs:116-122`). Dire
       « les entrées d'audit » en pensant « celles de ce nœud » est le mode d'échec que la tâche 1
       existe pour fermer ; le reproduire à l'échelle du déploiement serait la même faute.
-- [ ] **Étape 5.3** — Entrée `CHANGELOG.md` sous `[Unreleased] / Added`.
+- [ ] **Étape 5.4** — Entrée `CHANGELOG.md` sous `[Unreleased] / Added`.
 
 ---
 

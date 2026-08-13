@@ -72,7 +72,8 @@ opérateur que des éléments sont en file alors qu'il n'y a rien ».
 
 ## 4. Échéances et SLA
 
-`ReviewConfig` porte `deadline_hours` et `auto_assign`. La spec y ajoute :
+`ReviewConfig` porte `deadline_hours` (il n'existe pas de champ `auto_assign` : voir le plan
+d'implémentation §note). La spec y ajoute :
 
 - `GET /v1/review/queue?overdue=true` — éléments au-delà de leur échéance ;
 - `QueueStats` étendu d'un `overdue` ;
