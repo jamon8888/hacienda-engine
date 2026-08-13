@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect } from "vitest";
-import { saveDraft, loadDraft } from "./redaction-store";
+import { saveDraft, loadDraft, deleteDraft, pruneDrafts } from "./redaction-store";
 
 /**
  * Each test uses its own content-hash key rather than deleting/clearing the DB between
@@ -24,5 +24,33 @@ describe("redaction-store", () => {
     await saveDraft("hash-overwrite", "first");
     await saveDraft("hash-overwrite", "second");
     await expect(loadDraft("hash-overwrite")).resolves.toBe("second");
+  });
+
+  it("deleteDraft removes a saved draft", async () => {
+    await saveDraft("hash-delete", "to be deleted");
+    await deleteDraft("hash-delete");
+    await expect(loadDraft("hash-delete")).resolves.toBeUndefined();
+  });
+
+  it("deleteDraft on a hash with no saved draft is a no-op", async () => {
+    await expect(deleteDraft("hash-delete-never-saved")).resolves.toBeUndefined();
+  });
+
+  it("pruneDrafts removes only drafts older than maxAgeMs", async () => {
+    const originalNow = Date.now;
+    try {
+      Date.now = () => 1_000_000;
+      await saveDraft("hash-prune-old", "stale");
+      Date.now = () => 1_000_000 + 60_000;
+      await saveDraft("hash-prune-fresh", "recent");
+      Date.now = () => 1_000_000 + 120_000;
+
+      await pruneDrafts(90_000);
+
+      await expect(loadDraft("hash-prune-old")).resolves.toBeUndefined();
+      await expect(loadDraft("hash-prune-fresh")).resolves.toBe("recent");
+    } finally {
+      Date.now = originalNow;
+    }
   });
 });

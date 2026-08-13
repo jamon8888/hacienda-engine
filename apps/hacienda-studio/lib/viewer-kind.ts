@@ -1,5 +1,9 @@
-export type ViewerKind = "pdf" | "docx" | "doc" | "xlsx" | "xls" | "pptx" | "ppt" | "odt" | "ods" | "odp" | null;
+export type ViewerKind = "pdf" | "docx" | "doc" | "xlsx" | "xls" | "pptx" | "ppt" | null;
 
+// `DetailScreen.tsx` has a native-viewer branch for every non-null `ViewerKind` — no
+// branch exists for OpenDocument formats (odt/ods/odp), so they must resolve to `null`
+// here and fall back to the markdown-only split view, not open one whose native-viewer
+// pane silently renders blank.
 const EXTENSION_VIEWER_KIND: Record<string, ViewerKind> = {
   pdf: "pdf",
   docx: "docx",
@@ -8,9 +12,6 @@ const EXTENSION_VIEWER_KIND: Record<string, ViewerKind> = {
   xls: "xls",
   pptx: "pptx",
   ppt: "ppt",
-  odt: "odt",
-  ods: "ods",
-  odp: "odp",
 };
 
 /**

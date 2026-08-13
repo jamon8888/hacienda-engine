@@ -103,6 +103,20 @@ describe("NER bridge", () => {
   });
 
   /**
+   * The compact-IBAN case above is guarded by `PHONE_PATTERN`'s lookbehind
+   * alone. A *formatted* IBAN with spaces between groups is a distinct case:
+   * the space right before a digit group defeats the single-character
+   * lookbehind (it sees a space, not an alphanumeric character), so a
+   * phone-shaped run of digits starting after one of those spaces could still
+   * match without the dedicated IBAN-span exclusion this test guards.
+   */
+  it("does not match a space-formatted IBAN's digit groups", async () => {
+    const text = "IBAN DE89 3704 0044 0532 0130 00";
+    const phones = await extractEntities(text, ["phone"]);
+    expect(phones).toEqual([]);
+  });
+
+  /**
    * Track B1/B2 baseline: this is the failure the neural backend (xberg-wasm's
    * `NerModel`) exists to fix. compromise.js is English-only — it does not
    * recognise "Maître" as a French honorific, so it never resolves "Jean Dupont"

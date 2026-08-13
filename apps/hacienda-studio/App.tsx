@@ -18,7 +18,7 @@ import { renderAnnotatedMarkdown } from "./lib/annotate";
 import { reExportMarkdown, resolveExportContent } from "./lib/export-resolve";
 import { getViewerKind } from "./lib/viewer-kind";
 import { computeContentHash } from "./lib/content-hash";
-import { loadDraft, saveDraft } from "./lib/redaction-store";
+import { loadDraft, saveDraft, pruneDrafts } from "./lib/redaction-store";
 import { DEFAULT_CONFIG } from "./lib/types";
 import type { Screen } from "./lib/screens";
 import type { AppConfig, OnboardingState, ProcessedFile, ProgressUpdate } from "./lib/types";
@@ -436,6 +436,15 @@ export function App() {
 
   const openDetailResult =
     screen.kind === "detail" ? results.find((r) => r.frontmatter.source === screen.inputName) : undefined;
+
+  // Redacted drafts are user-editable free text that can end up holding PII (a user can
+  // leave identifiers in it, or paste unredacted content into it) — bound their local
+  // retention by default rather than only via an explicit "clear" action, same reasoning
+  // as `pruneDrafts`'s own doc comment. Runs once per app load, not once per draft, so a
+  // draft never outlives 30 days of the app simply never being reopened either.
+  useEffect(() => {
+    void pruneDrafts(30 * 24 * 60 * 60 * 1000);
+  }, []);
 
   // Track K/Phase 4: restore-on-open. Fires once per detail-screen open, looks up a saved
   // draft by content hash, and adopts it only if `redactedDrafts` still has no entry for

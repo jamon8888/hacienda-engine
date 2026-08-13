@@ -133,6 +133,33 @@ function slugify(text: string): string {
     .substring(0, 64);
 }
 
+/** The one shape the NER-result loop below actually reads from an entity. */
+interface RawNerEntity {
+  category: string;
+  text: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * `nerEngine.ner()` is an external WASM bridge call — its result isn't
+ * something this code controls the shape of. Without this guard, a malformed
+ * or incompatible result would throw a raw, uncaught `TypeError` reading
+ * `.category`/`.text`/`.start`/`.end` off an unexpected value, failing the
+ * whole file's processing instead of the "continue without NER" degradation
+ * the surrounding try/catch already intends for a NER failure.
+ */
+function isRawNerEntity(value: unknown): value is RawNerEntity {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.category === "string" &&
+    typeof v.text === "string" &&
+    typeof v.start === "number" &&
+    typeof v.end === "number"
+  );
+}
+
 const MA_TERMS =
   /\b(m&a|merger|acquisition|acquirer|acquired|acquires|target|spa|share purchase|earnout|indemnification|representation and warranty|material adverse change|break fee|closing condition|deal value|purchase price)\b/;
 const FS_TERMS =
@@ -354,7 +381,7 @@ async function processFile(
 
   // Run NER on the markdown (works for both transcription and extraction)
   console.log(`[Worker] Running NER on ${input.name}...`);
-  let nerResults: any[] = [];
+  let nerResults: unknown[] = [];
   try {
     const nerEngine = new XbergEngine(
       { bridgeTimeoutMs: 30000 },
@@ -385,7 +412,14 @@ async function processFile(
 
   const entities: Entity[] = [];
   for (const e of xbergEntities) {
-    if (!config.nerCategories.includes(e.category.toLowerCase())) continue;
+    if (!isRawNerEntity(e)) {
+      console.warn(`[Worker] Skipping malformed NER entity for ${input.name}:`, e);
+      continue;
+    }
+    // `e.category` is a runtime string from an external WASM bridge, not
+    // necessarily a valid `NerCategory` — compare as plain strings rather than
+    // asserting it into that narrower type.
+    if (!(config.nerCategories as string[]).includes(e.category.toLowerCase())) continue;
     entities.push({
       name: e.text,
       type: e.category.toLowerCase(),
@@ -557,6 +591,13 @@ async function processFiles(
   config: AppConfig,
 ): Promise<void> {
   console.log("[Worker] processFiles STARTED for", files.length, "files");
+
+  // Drop the previous batch before this one starts. `lastBatch` is only reassigned
+  // once this whole run completes (see the bottom of this function) — if it were left
+  // set here and this run then failed or threw partway through, a later "build-zip"
+  // request would still export the *previous* run's documents/manifest/registry as if
+  // they belonged to the batch the user just saw fail.
+  lastBatch = null;
 
   // Initialize vertical dictionary and registry
   //

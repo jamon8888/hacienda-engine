@@ -45,3 +45,27 @@ export async function loadDraft(contentHash: string): Promise<string | undefined
   const record = await db.get(STORE, contentHash);
   return record?.redactedMarkdown;
 }
+
+export async function deleteDraft(contentHash: string): Promise<void> {
+  const db = await getDB();
+  await db.delete(STORE, contentHash);
+}
+
+/**
+ * Drops drafts older than `maxAgeMs`. The redacted markdown this store holds is
+ * user-editable free text — a user can leave identifiers in it, or paste unredacted
+ * content into it — so unbounded local retention is a retention risk this app cannot
+ * otherwise let the user undo. Call on startup rather than only offering a manual
+ * "clear" control, so a draft is bounded by default even if nobody ever looks for one.
+ */
+export async function pruneDrafts(maxAgeMs: number): Promise<void> {
+  const db = await getDB();
+  const cutoff = Date.now() - maxAgeMs;
+  const tx = db.transaction(STORE, "readwrite");
+  let cursor = await tx.store.openCursor();
+  while (cursor) {
+    if (cursor.value.savedAt < cutoff) await cursor.delete();
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+}

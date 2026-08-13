@@ -229,16 +229,33 @@ export function FileBrowser({
             const clickable = row.openable && !!onOpen;
             const isOpen = openName === row.name;
             const isProcessing = !!row.update && row.update.stage !== "complete" && row.update.stage !== "error";
-            const isDone = !!row.result;
+            const result = row.result;
             const isError = !!row.error;
 
+            // Not a native `<button>`: the download control below must be a real,
+            // independently focusable `<button>`, and a `<button>` cannot contain
+            // other interactive content (the HTML content model forbids nesting
+            // interactive elements). A `div[role="button"]` with the same keyboard
+            // handling a native button gives for free (Enter/Space activation) lets
+            // the two controls be siblings instead.
             return (
-              <button
+              <div
                 key={row.name}
-                type="button"
                 data-file-row={row.name}
-                disabled={!clickable}
+                role="button"
+                tabIndex={clickable ? 0 : -1}
+                aria-disabled={!clickable}
                 onClick={clickable ? () => onOpen(row.name) : undefined}
+                onKeyDown={
+                  clickable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onOpen(row.name);
+                        }
+                      }
+                    : undefined
+                }
                 className={
                   "group flex flex-col rounded-lg border bg-card p-2 text-left transition-[border-color,background-color,box-shadow] " +
                   (clickable
@@ -249,10 +266,10 @@ export function FileBrowser({
               >
                 {/* Thumbnail area */}
                 <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-muted">
-                  {row.result ? (
+                  {result ? (
                     <FilePreview
                       fileName={row.name}
-                      previewUrl={previewUrls?.get(row.result.name)}
+                      previewUrl={previewUrls?.get(result.name)}
                     />
                   ) : isError ? (
                     <div className="flex h-full flex-col items-center justify-center gap-1.5">
@@ -276,23 +293,16 @@ export function FileBrowser({
                   )}
 
                   {/* Download overlay on hover */}
-                  {isDone && onDownloadFile && (
+                  {result && onDownloadFile && (
                     <div className="absolute inset-0 flex items-center justify-center bg-background/60 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
-                      <span
-                        role="button"
-                        tabIndex={0}
+                      <button
+                        type="button"
+                        aria-label={`Download ${row.name}`}
                         title="Download this file"
                         className="rounded-full bg-primary p-2 text-primary-foreground shadow-md hover:bg-primary/90"
                         onClick={(e) => {
                           e.stopPropagation();
-                          onDownloadFile(row.result!);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onDownloadFile(row.result!);
-                          }
+                          onDownloadFile(result);
                         }}
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
@@ -300,7 +310,7 @@ export function FileBrowser({
                           <polyline points="7 10 12 15 17 10" />
                           <line x1="12" y1="15" x2="12" y2="3" />
                         </svg>
-                      </span>
+                      </button>
                     </div>
                   )}
                 </div>
@@ -325,10 +335,10 @@ export function FileBrowser({
                 )}
 
                 {/* Stats (after processing) */}
-                {isDone && (
-                  <FileStats result={row.result!} piiCount={row.piiCount} edited={row.edited} />
+                {result && (
+                  <FileStats result={result} piiCount={row.piiCount} edited={row.edited} />
                 )}
-              </button>
+              </div>
             );
           })}
         </div>

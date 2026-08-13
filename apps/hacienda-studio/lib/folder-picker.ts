@@ -73,14 +73,12 @@ async function readDirectoryEntries(
 export async function pickFolder(): Promise<FolderPickResult | null> {
   if (supportsDirectoryPicker()) {
     try {
-      const dirHandle = await (window as any).showDirectoryPicker({
-        mode: "read",
-      });
+      const dirHandle = await showDirectoryPicker({ mode: "read" });
       const files = await readDirectoryEntries(dirHandle, "");
       return { files, directoryName: dirHandle.name };
-    } catch (err: any) {
+    } catch (err: unknown) {
       // User cancelled the dialog
-      if (err?.name === "AbortError") return null;
+      if (err instanceof Error && err.name === "AbortError") return null;
       throw err;
     }
   }
@@ -95,11 +93,16 @@ export async function pickFolder(): Promise<FolderPickResult | null> {
  */
 function webkitDirectoryFallback(): Promise<FolderPickResult | null> {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
+    const input = document.createElement("input") as HTMLInputElement & {
+      // Nonstandard: not in TS's DOM lib, and not covered by
+      // @types/wicg-file-system-access (that package types the separate,
+      // standards-track File System Access API, not this legacy attribute).
+      webkitdirectory: boolean;
+    };
     input.type = "file";
     input.setAttribute("webkitdirectory", "");
     // On Safari, the attribute must also be set as a property
-    (input as any).webkitdirectory = true;
+    input.webkitdirectory = true;
     input.multiple = true;
     input.style.display = "none";
 

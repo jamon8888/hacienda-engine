@@ -7,6 +7,12 @@ name: CI - WASM Freshness
 # detection/redaction engine, silently shipping stale WASM logic is a
 # correctness/compliance risk — this job rebuilds from source and fails if the
 # committed output has drifted.
+#
+# Toolchain and wasm-pack are both pinned below (nightly-2026-08-06, matching every
+# other dtolnay/rust-toolchain@nightly step in this repo's CI per ci-rust.yaml's own
+# comment; wasm-pack 0.15.0) — a floating nightly or wasm-pack version can regenerate
+# different pkg/ output on its own and fail this job for a reason unrelated to any
+# source change.
 on:
   push:
     branches: [main]
@@ -14,6 +20,7 @@ on:
       - "crates/hacienda-wasm/**"
       - "hacienda-core/**"
       - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/ci-wasm-freshness.yaml"
   pull_request:
     branches: [main]
@@ -21,6 +28,7 @@ on:
       - "crates/hacienda-wasm/**"
       - "hacienda-core/**"
       - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/ci-wasm-freshness.yaml"
 
 concurrency:
@@ -40,12 +48,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-06
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Rebuild hacienda-wasm/pkg from source
         run: wasm-pack build --target web --no-default-features crates/hacienda-wasm
