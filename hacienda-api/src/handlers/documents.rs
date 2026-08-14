@@ -77,6 +77,7 @@ pub async fn process_documents(
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
 
     let inputs: Vec<ExtractInput> = body
         .documents
@@ -133,7 +134,13 @@ pub async fn process_documents(
                 ApiError::internal()
             })?;
             let version_sequence = store
-                .create_version(document_id, &content_hash, &doc.content, entities_json)
+                .create_version(
+                    &tenant,
+                    document_id,
+                    &content_hash,
+                    &doc.content,
+                    entities_json,
+                )
                 .await
                 .map_err(ApiError::from)?;
             (Some(document_id), Some(version_sequence))

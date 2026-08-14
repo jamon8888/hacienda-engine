@@ -148,18 +148,45 @@ live — each touches a disjoint set of files.
       tenant. Added tenant scoping there as part of this task rather than deferring it,
       since the `JobStore::get` call site needed a `tenant` argument either way.
 
-## Task 5 — `DocumentVersionStore`: tenant-scope `create_version`/`list_versions`/`get_version`
+## Task 5 — `DocumentVersionStore`: tenant-scope `create_version`/`list_versions`/`get_version` — done
 
-- [ ] Add `&TenantId` to all three methods (`hacienda-core/src/store/postgres/versions.rs`).
-      Note this store has **only** a Postgres backend today (confirm — if there's an
-      in-memory variant for tests, treat it the same as the others; if not, this task is
-      Postgres-only and lighter than Tasks 2-4).
-- [ ] `get_version`/`list_versions` on a `document_id` belonging to a different tenant:
+- [x] Add `&TenantId` to all three methods (`hacienda-core/src/store/postgres/versions.rs`).
+      Confirmed Postgres-only, no in-memory backend, as anticipated.
+- [x] `get_version`/`list_versions` on a `document_id` belonging to a different tenant:
       same D-S1b-1 discipline — not-found, not forbidden.
-- [ ] Test: `document_version_diff_across_tenants_is_not_found` (spec §5) — exercise this
-      through the actual `GET /v1/documents/{id}/diff` handler
-      (`hacienda-api/src/handlers/versions.rs`), not just the store method directly, since
-      the handler is what a real cross-tenant prober would hit.
+- [x] **Real bug found and fixed, not anticipated by this plan**: `document_id` is
+      caller-supplied (the client picks the UUID), so two tenants choosing the same id is
+      plausible, not hypothetical. The old bare
+      `UNIQUE(document_id, version_sequence)` meant a second tenant's own first version
+      (`version_sequence = 1`) would collide with a first tenant's version 1 for the "same"
+      `document_id` — a real cross-tenant write failure, not just a read-side leak. Fixed
+      by swapping the constraint to `UNIQUE(tenant_id, document_id, version_sequence)` in
+      the same migration revision (same fix shape Task 6 already anticipated for
+      `presets_name_key`, applied here a task early since the bug was found while
+      implementing this one). Verified against live Postgres: two tenants versioning the
+      same `document_id` both get `version_sequence = 1` independently.
+- [x] `[deferred]` Test: `document_version_diff_across_tenants_is_not_found` (spec §5) —
+      **could not be exercised through the actual HTTP handler as originally planned**.
+      Discovered while writing it: this repo's test harness has no way to construct two
+      distinct-tenant principals over HTTP today — every `Token`/`InMemoryTokenStore`-based
+      `AuthContext` resolves through `AuthContext::new`, which hardcodes
+      `TenantId::default_tenant()` (`hacienda-core/src/auth/authn.rs`). Multi-tenant
+      `AuthContext` resolution is wired for `ApiKeyStore` in principle but no test fixture
+      in this codebase exercises a second tenant via a live HTTP request yet. Covered
+      instead at the store level, verified against live Postgres:
+      `version_get_and_list_for_another_tenants_document_id_is_not_found` and
+      `two_tenants_can_independently_version_the_same_document_id`
+      (`hacienda-core/src/store/postgres/versions.rs`). The handler call sites
+      (`list_document_versions`, `get_document`, `diff_document`, `get_diff_job`) all
+      correctly thread `tenant` through — same code path a real HTTP cross-tenant prober
+      would hit — just not exercised by an automated HTTP-level test in this change.
+      Flagged here rather than silently claimed as done.
+- [x] Also discovered and fixed in passing: `list_document_versions`
+      (`GET /v1/documents/{id}/versions`) and `get_document` (`GET /v1/documents/{id}`)
+      extracted **no caller at all** before this change — any authenticated caller could
+      read any tenant's document versions and content. Added the missing
+      `parts: Parts`/caller extraction to both as part of this task, same as the
+      `get_diff_job` gap closed in Task 4.
 
 ## Task 6 — `PresetStore`: tenant-scope and fix the global-uniqueness bug
 

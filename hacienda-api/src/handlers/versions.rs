@@ -69,11 +69,17 @@ fn entities_from_json(entities_json: &Value) -> Vec<EntityDto> {
 )]
 pub async fn list_document_versions(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(document_id): Path<Uuid>,
 ) -> Result<Json<DocumentVersionListResponse>, ApiError> {
     let store = require_store(&state)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+
     let versions = store
-        .list_versions(document_id)
+        .list_versions(&tenant, document_id)
         .await
         .map_err(ApiError::from)?;
 
@@ -102,11 +108,17 @@ pub async fn list_document_versions(
 )]
 pub async fn get_document(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(document_id): Path<Uuid>,
 ) -> Result<Json<DocumentEnvelopeResponse>, ApiError> {
     let store = require_store(&state)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+
     let versions = store
-        .list_versions(document_id)
+        .list_versions(&tenant, document_id)
         .await
         .map_err(ApiError::from)?;
     let latest = versions
@@ -220,12 +232,12 @@ pub async fn diff_document(
     let tenant = caller.tenant_ctx().tenant;
 
     let from = store
-        .get_version(document_id, query.from)
+        .get_version(&tenant, document_id, query.from)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
     let to = store
-        .get_version(document_id, query.to)
+        .get_version(&tenant, document_id, query.to)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;

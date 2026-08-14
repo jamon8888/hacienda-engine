@@ -584,14 +584,72 @@ the same addition.
 supplies `tenant_id` explicitly. The migration has not shipped to any real deployment yet,
 so editing it in place carries no rolling-upgrade risk.
 
-### Not implemented: Tasks 5-6
+### DocumentVersionStore: tenant scoping plus a real caller-supplied-id collision fix
 
-`DocumentVersionStore` and `PresetStore` remain exactly as described in §3.1 — designed,
-not touched. Whoever picks these up next: the `AuditStore`/`ReviewStore`/`JobStore`
+`DocumentVersionStore` (`hacienda-core/src/store/postgres/versions.rs`) is Postgres-only,
+as §3.1 anticipated (no in-memory backend to update). All three methods gained a leading
+`&TenantId`, following the same pattern as the other Postgres backends —
+`create_version`'s idempotency check and insert are both scoped by `tenant_id`, and
+`get_version`/`list_versions` resolve a cross-tenant `document_id` as `None`/empty, the
+same D-S1b-1 discipline as everywhere else.
+
+**A real bug found while implementing this, not anticipated by the original plan**:
+`document_id` is caller-supplied (the client picks the UUID via `POST /v1/documents`'s
+`document_id` field), so two tenants choosing the same id is plausible, not a hypothetical
+edge case — unlike the audit/review/job ids, which the store itself assigns. The old bare
+`UNIQUE(document_id, version_sequence)` constraint meant a second tenant's own first
+version (`version_sequence = 1`) would collide with a first tenant's version 1 for the
+"same" `document_id`, failing the INSERT with a constraint violation on an operation that
+has nothing to do with the first tenant — a cross-tenant *write* failure, not just a
+read-side leak. Fixed by swapping the constraint to
+`UNIQUE(tenant_id, document_id, version_sequence)` in this same migration revision — the
+identical fix shape already planned for `presets_name_key` in Task 6, applied here one
+task early since the bug surfaced during this task's implementation. Verified against a
+live Postgres: two tenants versioning the same `document_id` both independently receive
+`version_sequence = 1`.
+
+**Handler-layer changes, three of them real gaps closed in passing** (§3.3's "no signature
+changes" claim continues not to fully hold, same pattern as review/jobs):
+`hacienda-api/src/handlers/documents.rs`'s `process_documents` (the synchronous
+`create_version` call site) and `versions.rs`'s `diff_document`/`get_diff_job` (already
+touched for Task 4's `JobStore` threading) all resolve `caller.tenant_ctx().tenant` and
+pass it to the version-store calls. **`list_document_versions`
+(`GET /v1/documents/{id}/versions`) and `get_document` (`GET /v1/documents/{id}`) extracted
+no caller at all before this change** — any authenticated caller could read any tenant's
+document versions and content, the same class of gap already found and fixed for
+`versions::get_diff_job` in Task 4. Both gained the missing `parts: Parts`/caller
+extraction as part of this task.
+
+**Test coverage gap, disclosed rather than silently skipped**: §5 names
+`document_version_diff_across_tenants_is_not_found`, intended to exercise the actual
+`GET /v1/documents/{id}/diff` handler per the original plan. Attempting to write it
+surfaced a limitation in this repo's own test harness: every `Token`/
+`InMemoryTokenStore`-based `AuthContext` resolves through `AuthContext::new`
+(`hacienda-core/src/auth/authn.rs`), which hardcodes `TenantId::default_tenant()` — there
+is currently no fixture anywhere in this codebase for constructing a second-tenant
+principal and driving a request through it over HTTP. (Multi-tenant `AuthContext`
+resolution exists in principle via a `tenant_id`-carrying `ApiKeyStore` — S1b Task 6 adds
+`tenant_id` to `api_keys` for exactly this — but nothing exercises that path with a live
+request yet.) Rather than force an out-of-scope harness change or silently drop the test,
+isolation is instead verified at the store level against a live Postgres:
+`version_get_and_list_for_another_tenants_document_id_is_not_found` and
+`two_tenants_can_independently_version_the_same_document_id`
+(`hacienda-core/src/store/postgres/versions.rs`). The handler call sites all correctly
+thread `tenant` through — the same code path a real HTTP-level cross-tenant prober would
+exercise — this is a gap in automated test coverage at the HTTP layer specifically, not in
+the underlying enforcement.
+
+### Not implemented: Task 6
+
+`PresetStore` remains exactly as described in §3.1 — designed, not touched. Whoever picks
+this up next: the `AuditStore`/`ReviewStore`/`JobStore`/`DocumentVersionStore`
 implementations above are the reference patterns (trait-parameter threading, per-tenant
 `HashMap` or self-identifying-item-plus-filter for in-memory/file backends, `tenant_id =
-$n` predicates for Postgres), and `hacienda-core/src/tenancy.rs`'s module doc (decision
-D-S1-1) is the reasoning to re-read before considering any alternative — it heads off the
-same factory-vs-parameter detour this implementation took and backed out of before writing
-any code. Both remaining stores are Postgres-only (no in-memory backend), so both tasks
-are lighter than Tasks 2-4.
+$n` predicates for Postgres, and — new as of this task — a caller-supplied-identifier
+UNIQUE constraint needs `tenant_id` folded in, not just an added column, when the
+identifier isn't store-assigned), and `hacienda-core/src/tenancy.rs`'s module doc
+(decision D-S1-1) is the reasoning to re-read before considering any alternative. Presets
+are Postgres-only (no in-memory backend), so this task is lighter than Tasks 2-5 — and its
+own uniqueness fix (`presets_name_key` → `presets_tenant_name_key`) is now exactly the
+same shape as the one just applied to `document_versions` above, so that part of Task 6 is
+already proven correct by this task's verification.

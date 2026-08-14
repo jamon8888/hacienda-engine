@@ -667,6 +667,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `JobStore::get`/`create` needed a tenant argument regardless.
   `DocumentVersionStore`/`PresetStore` have the same gap and are not yet fixed — tracked
   in the same S1b spec.
+- **`DocumentVersionStore` is now tenant-scoped, and two more endpoints —
+  `GET /v1/documents/{id}/versions` and `GET /v1/documents/{id}` — had no auth extraction
+  at all, letting any authenticated caller read any tenant's document versions and
+  content.** Same root cause and same missing-auth-extraction pattern as the
+  `GET /v1/documents/{id}/diff/{diff_job_id}` fix above. Fixed by adding `&TenantId` to
+  `create_version`/`list_versions`/`get_version` (Postgres-only backend); a cross-tenant
+  `document_id` resolves as an empty list / `None`, identically to one that was never
+  used, never a distinguishable error. **Also fixed a real cross-tenant write bug, not
+  just a read-side leak**: `document_id` is caller-supplied (the client picks the UUID),
+  so two tenants choosing the same id is plausible — the old bare
+  `UNIQUE(document_id, version_sequence)` meant a second tenant's own first version could
+  collide with a first tenant's version 1 for the "same" `document_id`, failing an INSERT
+  that had nothing to do with the first tenant. Fixed by swapping the constraint to
+  `UNIQUE(tenant_id, document_id, version_sequence)` in the same migration revision;
+  verified against live Postgres that two tenants can now each version the same
+  `document_id` independently, both starting at sequence 1. `PresetStore` has the same
+  gap and is not yet fixed — tracked in the same S1b spec.
 - **The one call site that sends document content to an LLM now redacts structurally, not
   by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
   call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before
