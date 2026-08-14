@@ -606,6 +606,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The one call site that sends document content to an LLM now redacts structurally, not
+  by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
+  call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before
+  calling `hacienda_rag::answer_stream` directly — correct, but nothing stopped a future
+  caller from skipping the redaction step, unlike storage writes, which have had this
+  guarantee since P1. Fixed by a new `hacienda_rag::GuardedLlm`: it takes an injected
+  `Redactor` and redacts the prompt and every chunk before `answer_stream` is ever reached,
+  so a caller cannot construct the call without the redaction step. A workspace-wide test
+  (`crates/hacienda-rag/tests/llm_call_enforcement.rs`) fails the build if any crate outside
+  `GuardedLlm`'s owning module constructs a `liter_llm::LlmClient` or calls
+  `xberg::llm`'s text-completion functions directly. See
+  `superpowers/specs/2026-08-13-P6-llm-call-enforcement-point.md` §7 for what shipped and
+  where it diverges from the original placement recommendation (`hacienda-core` cannot
+  depend on `hacienda-rag`, where `liter-llm` actually lives).
 - **PII in structured extraction fields (tables, pages, PDF annotations/form fields, DOCX/PPTX
   tracked changes, extracted links, and nested archive members) is now redacted.** Previously,
   `HaciendaFacade::process_batch_with_auth` rewrote only `ExtractedDocument.content` —

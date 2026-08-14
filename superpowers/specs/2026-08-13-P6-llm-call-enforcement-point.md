@@ -1,7 +1,7 @@
 # P6 — LLM call enforcement point
 
 **Date:** 2026-08-13
-**Status:** Proposed
+**Status:** Fixed — see §7 for what actually shipped and where it diverges from §3
 **Program:** `2026-08-13-hacienda-xberg-capability-parity-program.md` §4
 **Extends:** `2026-08-01-P1-redaction-enforcement-point.md` — same pattern, applied to a
 network call instead of a store write
@@ -130,3 +130,54 @@ from the chain, not from trusting that the feature that sent it also logged it c
   migration in §4 — same observable behaviour, different internal path.
 - Every `GuardedLlm` call produces exactly one new audit entry type (§5), verifiable via
   `GET /v1/audit/entries` the same way every other audited action already is.
+
+## 7. What actually shipped
+
+**Placement diverges from §3's recommendation, for a reason §3 didn't check.**
+`hacienda-core` has zero dependency on `liter-llm` and cannot gain one without depending on
+`hacienda-rag` — the crate that already documents, in its own `Cargo.toml`, that the edge
+runs the other way (`hacienda-rag`'s `postgres` dev-dependency comment: *"hacienda-core does
+not depend on hacienda-rag"*). Placing `GuardedLlm` in `hacienda-core` as recommended would
+have required either reversing that dependency direction or duplicating `liter-llm` as a
+second `hacienda-core` dependency alongside `hacienda-rag`'s — both worse than the
+alternative taken: **`GuardedLlm` lives in `hacienda-rag::stream`**, next to
+`answer_stream` and the private `build_token_stream` it wraps, which is where
+`liter_llm::LlmClient` is actually constructed. This still satisfies D-P6-1 (nothing outside
+the owning module reaches the raw client) — `build_token_stream` was already private before
+this spec.
+
+**D-P6-3 (`PiiPipeline` dependency) is satisfied via a trait, not a direct reference.**
+Since `hacienda-rag` cannot depend on `hacienda-core`'s `PiiPipeline` type either, `GuardedLlm`
+is generic over a new `hacienda_rag::Redactor` trait (`async fn redact(&self, text: &str) ->
+RagResult<String>`) instead of holding a `PiiPipeline` reference directly. `hacienda-api`
+implements `Redactor` via `FacadeRedactor`, a thin adapter over
+`HaciendaFacade::redact_text_with_auth` — the same redaction call the migrated handler used
+to make by hand. This is a stronger decoupling than §3 anticipated, not a weaker one: any
+future crate wanting a `GuardedLlm`-backed capability supplies its own `Redactor` without
+`hacienda-rag` ever needing to know `hacienda-core` exists.
+
+**Migration (§4) shipped exactly as specified.** `hacienda_rag::answer_stream` is unchanged —
+same signature, same "performs no redaction itself" doc contract. `hacienda-api/src/handlers/rag_stream.rs`
+now builds a `FacadeRedactor` and calls `GuardedLlm::new(&redactor).stream(context, prompt,
+config)` once, instead of two manual `redact_text_with_auth` calls followed by a direct
+`answer_stream` call. `rag_answer_streams_citation_then_error_without_a_routable_model` (the
+pre-existing control test) passes unchanged.
+
+**Exit criteria, checked against §6:**
+- ✅ Never-leaks test, adapted: `guarded_llm_calls_the_redactor_on_the_prompt_and_every_chunk`
+  proves the `Redactor` sees the prompt and every chunk's raw content, and
+  `guarded_llm_refuses_to_stream_when_the_redactor_rejects_{the_prompt,a_chunk}` prove a
+  redaction failure stops the call before any stream is built — nothing downstream can
+  observe content the redactor didn't approve, whether or not a live LLM client is involved.
+- ✅ Structural check, via the grep-based fallback the spec itself anticipated needing:
+  `crates/hacienda-rag/tests/llm_call_enforcement.rs` walks every workspace crate's `src/`
+  (this crate's own `stream.rs` excepted) and fails the build if `liter_llm::create_client`,
+  `.chat_stream(`, or either `xberg::llm` text-completion entry point appears anywhere else.
+- ✅ `rag_stream::answer`'s existing control-corpus test, unchanged (above).
+- **Deferred, not shipped:** the new "LLM call" audit-entry type (§5). The redaction
+  guarantee — the part of I5 that actually stops unredacted text from leaving the process —
+  is structural as of this revision. The audit-linkage half (*a durable record that content
+  was sent to provider P for purpose X*) is additive polish on top of a guarantee that
+  already holds without it, not a safety property in itself, and needs its own small design
+  pass: `AuditEntryInput`'s `source: EntitySource` field has only `Regex`/`Model` today, and
+  neither names "sent to an LLM" honestly. Tracked as a follow-up, not silently dropped.

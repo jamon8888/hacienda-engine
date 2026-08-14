@@ -96,7 +96,8 @@ boundary," "every content operation writes an audit entry first," tenant isolati
 └────────────────────────────┬───────────────────────────────────────--┘
                              │
 ┌────────────────────────────┴───────────────────────────────────────--┐
-│  P6 — LLM call enforcement point (blocks X3, extends P1's guard)      │
+│  P6 — LLM call enforcement point — DONE. GuardedLlm redacts before    │
+│        the one existing call site reaches an LLM, structurally.      │
 └────────────────────────────┬───────────────────────────────────────--┘
                              │ required before any capability calls an LLM
 ┌────────────────────────────┴──────────────────────────────────────────┐
@@ -114,11 +115,12 @@ X1/X2/X3/X4 do not depend on each other. **P7 is done**, so the field-coverage q
 used to gate X1's `keywords`/`summarization`, X2's `transcription`/`layout-*`, and X3's
 `translation`/`summarization-llm`/`classification`/`structured` is closed — adding one of
 those fields is now "extend `redact_structured_fields` with one more field," the same
-proven mechanism, not new design. P6 still gates only X3 (the LLM-call boundary, a different
-concern from P7's field-coverage one). Rows that don't touch either boundary (X1's
-`qr-codes`/`tree-sitter`/`static-embeddings`/`candle-ocr`, X2's retrieval-time
-`embeddings`/`reranker`/`sparse-embeddings`/`late-interaction`, all of X4) are unblocked and
-can proceed immediately.
+proven mechanism, not new design. **P6 is also done** — `GuardedLlm` exists and the one
+call site that reaches an LLM goes through it — so X3's LLM-call boundary is closed too;
+what X3 still has to decide, per capability, is redact-first vs. raw-input-redact-output
+(§8), not whether the guard exists. Every row in X1/X2/X3/X4 is now unblocked on both axes
+this program tracks (field coverage and the LLM-call boundary) and can proceed in whatever
+order matches product priority.
 
 ---
 
@@ -362,7 +364,7 @@ correctness/leverage question, not a missing capability.
 
 | Wave | Content | Why |
 | --- | --- | --- |
-| **0** | **P7 — done.** **P6** remains open | P7 shipped as one pass (recursive redaction, not a strip-first hotfix — see P7 §8); unblocks `keywords`/`summarization`/`transcription`/`layout-*`/4-of-5 X3 features. P6 unblocks X3's LLM calls and closes I5 for the one call site that already exists (`rag_stream`) — independent of P7, still to build |
+| **0** | **P7 — done. P6 — done.** | P7 shipped as one pass (recursive redaction, not a strip-first hotfix — see P7 §8); unblocks `keywords`/`summarization`/`transcription`/`layout-*`/4-of-5 X3 features. P6 shipped as `GuardedLlm` in `hacienda-rag` (see P6 §7 for the placement change from the original recommendation); closes I5 for the one call site that already exists (`rag_stream`) and unblocks X3 to build on top of it |
 | **1** | **X1**, all rows | Zero new infrastructure, same shape as the already-shipped extraction-format win — highest leverage for the effort. `keywords`/`summarization` are no longer separately gated now that P7 is done |
 | **2** | **X2** | Gated on the ORT-strategy decision (§7); extraction-time rows (`transcription`/`layout-*`) no longer separately gated on P7 |
 | **3** | **X3** | After P6; `captioning` specifically waits on an image-redaction answer regardless |

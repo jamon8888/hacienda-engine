@@ -108,6 +108,75 @@ pub struct LlmAnswerConfig {
     pub system_prompt: Option<String>,
 }
 
+/// Redacts text before it is sent to an LLM.
+///
+/// Implemented by the caller — this crate has no PII-detection code of its own and no
+/// dependency on `hacienda-core` (`hacienda-core` cannot depend on `hacienda-rag`: see
+/// `hacienda-rag/Cargo.toml`'s dev-dependency comment on that edge, and `liter-llm` lives
+/// only here, not in `hacienda-core`, so the guard has to live on this side of that
+/// boundary). `hacienda-api` implements this over `HaciendaFacade::redact_text_with_auth`.
+///
+/// This is `2026-08-13-P6-llm-call-enforcement-point.md`'s guard, applied at the one seam
+/// this crate controls: [`GuardedLlm`] is the only public way in this crate to reach
+/// [`answer_stream`] with unredacted input, the same way [`answer_stream`] itself is the
+/// only public way to reach `liter_llm::LlmClient::chat_stream` (`build_token_stream` below
+/// is private). A future caller that skips `GuardedLlm` and calls `answer_stream` directly
+/// still has to redact by hand — same as today — but every consumer that has no reason to
+/// bypass it gets the guarantee by construction instead of by remembering to copy
+/// `rag_stream.rs`'s pattern.
+#[async_trait::async_trait]
+pub trait Redactor: Send + Sync {
+    /// Detect and redact PII in `text`, returning the redacted string.
+    async fn redact(&self, text: &str) -> RagResult<String>;
+}
+
+/// P6's LLM-call enforcement point: redacts `prompt` and every chunk in `context` through
+/// an injected [`Redactor`] *before* handing either to [`answer_stream`].
+///
+/// Unlike [`answer_stream`], which documents "callers must redact... this module performs
+/// no redaction itself," `GuardedLlm` performs the redaction itself — there is no discipline
+/// left for a caller to get wrong beyond constructing this type with a real `Redactor`
+/// instead of skipping it.
+pub struct GuardedLlm<'a> {
+    redactor: &'a (dyn Redactor + Sync),
+}
+
+impl<'a> GuardedLlm<'a> {
+    /// Wrap `redactor` as the mandatory redaction step for every call this guard makes.
+    pub fn new(redactor: &'a (dyn Redactor + Sync)) -> Self {
+        Self { redactor }
+    }
+
+    /// Redact `prompt` and every chunk's content in `context`, then stream an answer
+    /// exactly as [`answer_stream`] would from the redacted versions.
+    ///
+    /// Redaction happens here, before the returned stream is even constructed — a
+    /// redaction failure is a `RagResult::Err` returned directly from this `async fn`, not
+    /// an error surfacing mid-stream. This matters to callers that report pre-stream
+    /// failures differently from in-stream ones (`hacienda-api`'s `rag_stream::answer`
+    /// handler is exactly such a caller: see its module doc on why SSE errors can't reuse
+    /// its normal error type once the stream has started).
+    pub async fn stream(
+        &self,
+        context: RetrievedContext,
+        prompt: String,
+        config: LlmAnswerConfig,
+    ) -> RagResult<impl Stream<Item = RagResult<AnswerEvent>> + Send + 'static> {
+        let redacted_prompt = self.redactor.redact(&prompt).await?;
+        let mut redacted_chunks = Vec::with_capacity(context.chunks.len());
+        for mut chunk in context.chunks {
+            if let Some(content) = chunk.content.take() {
+                chunk.content = Some(self.redactor.redact(&content).await?);
+            }
+            redacted_chunks.push(chunk);
+        }
+        let redacted_context = RetrievedContext {
+            chunks: redacted_chunks,
+        };
+        Ok(answer_stream(redacted_context, redacted_prompt, config))
+    }
+}
+
 /// Stream an answer grounded in `context` for the given `prompt`.
 ///
 /// Events arrive in this order:
@@ -388,5 +457,139 @@ mod tests {
             matches!(&events[0], Ok(AnswerEvent::Citation(c)) if c.chunk_id == ChunkId("c1".to_string()))
         );
         assert!(events.iter().skip(1).any(|e| e.is_err()));
+    }
+
+    // ── GuardedLlm (P6) ────────────────────────────────────────────────────────
+
+    use std::sync::{Arc, Mutex};
+
+    /// Records every string it was asked to redact, and either echoes it back
+    /// unchanged or fails, depending on `fail_on`.
+    struct SpyRedactor {
+        seen: Arc<Mutex<Vec<String>>>,
+        fail_on: Option<&'static str>,
+    }
+
+    impl SpyRedactor {
+        fn new() -> Self {
+            Self {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+            }
+        }
+
+        fn failing_on(marker: &'static str) -> Self {
+            Self {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                fail_on: Some(marker),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Redactor for SpyRedactor {
+        async fn redact(&self, text: &str) -> RagResult<String> {
+            self.seen.lock().unwrap().push(text.to_string());
+            if self.fail_on == Some(text) {
+                return Err(RagError::InvalidQuery(
+                    "control-corpus value present — redaction refused".to_string(),
+                ));
+            }
+            Ok(text.to_string())
+        }
+    }
+
+    fn guarded_llm_test_chunk(content: &str) -> RetrievedChunk {
+        use crate::types::PrimaryScore;
+        RetrievedChunk {
+            id: ChunkId("c1".to_string()),
+            document_id: DocumentId("d1".to_string()),
+            ordinal: 0,
+            external_id: None,
+            content: Some(content.to_string()),
+            score: 1.0,
+            primary_score: PrimaryScore::Vector { score: 1.0 },
+            chunk_metadata: serde_json::Value::Null,
+            document: None,
+        }
+    }
+
+    fn guarded_llm_test_config() -> LlmAnswerConfig {
+        LlmAnswerConfig {
+            llm: xberg::LlmConfig {
+                model: "not-a-real-provider/does-not-exist".to_string(),
+                ..Default::default()
+            },
+            system_prompt: None,
+        }
+    }
+
+    /// The redaction step must see the prompt and every chunk's raw content — proof
+    /// nothing reaches an LLM without first passing through the injected [`Redactor`].
+    #[tokio::test]
+    async fn guarded_llm_calls_the_redactor_on_the_prompt_and_every_chunk() {
+        let redactor = SpyRedactor::new();
+        let context = RetrievedContext {
+            chunks: vec![guarded_llm_test_chunk("chunk with a PII value")],
+        };
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "prompt with a PII value".to_string(),
+                guarded_llm_test_config(),
+            )
+            .await;
+        assert!(result.is_ok(), "redaction succeeded, stream must build");
+
+        let seen = redactor.seen.lock().unwrap();
+        assert!(seen.contains(&"prompt with a PII value".to_string()));
+        assert!(seen.contains(&"chunk with a PII value".to_string()));
+    }
+
+    /// A redactor that refuses the prompt must stop `GuardedLlm` before any stream is
+    /// built — the LLM connection is never attempted with an un-redactable prompt.
+    #[tokio::test]
+    async fn guarded_llm_refuses_to_stream_when_the_redactor_rejects_the_prompt() {
+        let redactor = SpyRedactor::failing_on("control-corpus prompt");
+        let context = RetrievedContext {
+            chunks: vec![guarded_llm_test_chunk("harmless chunk")],
+        };
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "control-corpus prompt".to_string(),
+                guarded_llm_test_config(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a rejected prompt must not reach answer_stream"
+        );
+    }
+
+    /// Same guarantee, for chunk content instead of the prompt: a single un-redactable
+    /// chunk stops the whole call, not just that chunk.
+    #[tokio::test]
+    async fn guarded_llm_refuses_to_stream_when_the_redactor_rejects_a_chunk() {
+        let redactor = SpyRedactor::failing_on("control-corpus chunk");
+        let context = RetrievedContext {
+            chunks: vec![guarded_llm_test_chunk("control-corpus chunk")],
+        };
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "harmless prompt".to_string(),
+                guarded_llm_test_config(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a rejected chunk must not reach answer_stream"
+        );
     }
 }
