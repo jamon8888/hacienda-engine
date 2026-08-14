@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE jobs\n            SET status = $1, result_json = $2, updated_at = $3\n            WHERE id = $4\n            RETURNING id, status, owner, created_at, updated_at, result_json, error\n            ",
+  "query": "\n                    SELECT id, tenant_id, status, owner, created_at, updated_at, result_json, error\n                    FROM jobs\n                    WHERE tenant_id = $1\n                    ORDER BY created_at, id\n                    ",
   "describe": {
     "columns": [
       {
@@ -10,44 +10,47 @@
       },
       {
         "ordinal": 1,
-        "name": "status",
+        "name": "tenant_id",
         "type_info": "Text"
       },
       {
         "ordinal": 2,
-        "name": "owner",
+        "name": "status",
         "type_info": "Text"
       },
       {
         "ordinal": 3,
+        "name": "owner",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "updated_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "result_json",
         "type_info": "Text"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "error",
         "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text",
-        "Timestamptz",
         "Text"
       ]
     },
     "nullable": [
+      false,
       false,
       false,
       true,
@@ -57,5 +60,5 @@
       true
     ]
   },
-  "hash": "22035c73e70607ced5f10060c1bc0b91dec17d2446f9627daf22629fd99913c6"
+  "hash": "717088cbb9be9113f273bfbcab1320cf43e11a1f7f060ffa5f5dcc85a5de0ab9"
 }

@@ -647,6 +647,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   references to callers rather than wrapping every operation itself, unlike audit).
   `JobStore`/`DocumentVersionStore`/`PresetStore` have the same gap and are not yet fixed —
   tracked in the same S1b spec.
+- **`JobStore` is now tenant-scoped, and `GET /v1/documents/{id}/diff/{diff_job_id}` had
+  no tenant or ownership check at all — any authenticated caller who obtained or guessed a
+  diff job id could read its line-diff content, potentially PII, regardless of tenant.**
+  Same root cause as the `AuditStore`/`ReviewStore` gaps above, plus one handler that was
+  missing auth extraction entirely. Fixed by giving `Job` its own `tenant` field (`create`
+  sets it once; `get`/`transition`/`finish`/`fail`/`update_progress` match on `id &&
+  tenant` together so a cross-tenant id resolves as `None`/`NotFound`, identically to a
+  nonexistent one) across both backends — `InMemoryJobStore` (filter by the job's own
+  tenant field) and `PostgresJobStore` (a `tenant_id` column and predicate on every
+  query). `owner: Option<String>` is unchanged and still enforced separately at the
+  transport layer (`hacienda-api/src/handlers/jobs.rs`'s existing 404-not-403 checks) —
+  `tenant` and `owner` are independent dimensions, neither supersedes the other.
+  `hacienda-api`'s `documents.rs`/`rag.rs`/`versions.rs` handlers thread
+  `caller.tenant_ctx().tenant` through every job-store call, including into the
+  `tokio::spawn`ed background tasks that finish or fail a job after the handler returns.
+  `versions::get_diff_job` and `diff_document` previously extracted no `Caller` at all;
+  both gained the extraction as part of this fix rather than as separate follow-up, since
+  `JobStore::get`/`create` needed a tenant argument regardless.
+  `DocumentVersionStore`/`PresetStore` have the same gap and are not yet fixed — tracked
+  in the same S1b spec.
 - **The one call site that sends document content to an LLM now redacts structurally, not
   by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
   call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before

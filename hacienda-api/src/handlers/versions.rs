@@ -7,6 +7,7 @@
 
 use axum::{
     extract::{Path, State},
+    http::request::Parts,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -26,6 +27,7 @@ use crate::{
     },
     error::ApiError,
     extract::Query,
+    handlers::{caller_from_arc, extract_auth_context},
     state::ApiState,
 };
 
@@ -207,10 +209,15 @@ fn compute_line_diff(from: &str, to: &str) -> Vec<DiffLineDto> {
 )]
 pub async fn diff_document(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(document_id): Path<Uuid>,
     Query(query): Query<DocumentDiffQuery>,
 ) -> Result<Response, ApiError> {
     let store = require_store(&state)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
 
     let from = store
         .get_version(document_id, query.from)
@@ -223,14 +230,14 @@ pub async fn diff_document(
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
 
-    let job = state.jobs.create(None).await.map_err(|e| {
+    let job = state.jobs.create(&tenant, None).await.map_err(|e| {
         tracing::error!(error = %e, "failed to create diff job");
         ApiError::internal()
     })?;
     let job_id = job.id.clone();
     state
         .jobs
-        .transition(&job_id, JobStatus::Queued, JobStatus::Running)
+        .transition(&tenant, &job_id, JobStatus::Queued, JobStatus::Running)
         .await
         .map_err(|e| {
             tracing::error!(job_id = %job_id, error = %e, "failed to transition diff job to running");
@@ -245,7 +252,7 @@ pub async fn diff_document(
             match result {
                 Ok(lines) => {
                     let json = serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_string());
-                    let _ = state.jobs.finish(&job_id, json).await;
+                    let _ = state.jobs.finish(&tenant, &job_id, json).await;
                     Ok(Json(DocumentDiffResponse {
                         document_id,
                         from: query.from,
@@ -258,7 +265,7 @@ pub async fn diff_document(
                     tracing::error!(job_id = %job_id, error = %join_err, "diff computation panicked");
                     let _ = state
                         .jobs
-                        .fail(&job_id, "diff computation failed".to_string())
+                        .fail(&tenant, &job_id, "diff computation failed".to_string())
                         .await;
                     Err(ApiError::internal())
                 }
@@ -267,18 +274,19 @@ pub async fn diff_document(
         () = tokio::time::sleep(DIFF_SYNC_BUDGET) => {
             let task_jobs = state.jobs.clone();
             let task_job_id = job_id.clone();
+            let task_tenant = tenant.clone();
             tokio::spawn(async move {
                 match handle.await {
                     Ok(lines) => {
                         let json = serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_string());
-                        if let Err(e) = task_jobs.finish(&task_job_id, json).await {
+                        if let Err(e) = task_jobs.finish(&task_tenant, &task_job_id, json).await {
                             tracing::error!(job_id = %task_job_id, error = %e, "failed to record diff result");
                         }
                     }
                     Err(join_err) => {
                         tracing::error!(job_id = %task_job_id, error = %join_err, "diff computation panicked");
                         let _ = task_jobs
-                            .fail(&task_job_id, "diff computation failed".to_string())
+                            .fail(&task_tenant, &task_job_id, "diff computation failed".to_string())
                             .await;
                     }
                 }
@@ -294,6 +302,15 @@ pub async fn diff_document(
 /// present only once `succeeded`, `error` only once `failed`. The `document_id` path
 /// segment is not cross-checked against the job (`JobStore` has no notion of document
 /// identity) — the id namespace is global, same as `/v1/jobs/{id}`.
+///
+/// Tenant-scoped as of S1b: a `diff_job_id` belonging to a different tenant now resolves
+/// as 404, indistinguishable from an id that never existed (D-S1b-1) — this endpoint
+/// previously applied no isolation at all (`JobStore::get` took no tenant), which meant
+/// a diff's line content — potentially containing PII the versioning system exists to
+/// protect — was readable by any authenticated caller who guessed or observed a job id.
+/// Still no per-owner check (unlike `/v1/jobs/{id}`): the diff job has no `owner` set
+/// (`diff_document` calls `jobs.create(&tenant, None)`), so owner-level isolation was
+/// never applicable here — only the newly-added tenant boundary is.
 #[utoipa::path(
     get,
     path = "/v1/documents/{id}/diff/{diff_job_id}",
@@ -311,11 +328,16 @@ pub async fn diff_document(
 )]
 pub async fn get_diff_job(
     State(state): State<ApiState>,
+    parts: Parts,
     Path((_document_id, diff_job_id)): Path<(Uuid, String)>,
 ) -> Result<Json<DiffJobResultResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+
     let job = state
         .jobs
-        .get(&diff_job_id)
+        .get(&tenant, &diff_job_id)
         .await
         .map_err(|e| {
             tracing::error!(job_id = %diff_job_id, error = %e, "job store error fetching diff job");

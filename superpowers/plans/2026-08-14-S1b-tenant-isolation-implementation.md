@@ -114,21 +114,39 @@ live — each touches a disjoint set of files.
       gained a `Caller` parameter to resolve it, since its one call site
       (`process_batch_with_auth`) already had one in scope.
 
-## Task 4 — `JobStore`: add `tenant_id` alongside `owner`, don't replace it (§1.3/§3.1)
+## Task 4 — `JobStore`: add `tenant_id` alongside `owner`, don't replace it (§1.3/§3.1) — done
 
-- [ ] Add `&TenantId` as a new leading parameter on every `JobStore` method
+- [x] Add `&TenantId` as a new leading parameter on every `JobStore` method
       (`hacienda-core/src/jobs/store.rs`), keeping `owner: Option<String>` exactly as is.
-- [ ] Update `JobStore::create`'s doc comment to state both dimensions explicitly: `owner`
-      answers "whose job" (actor-level, unchanged), `tenant_id` answers "which customer's
-      data" (new). Don't let the doc comment imply `tenant_id` supersedes `owner` — it
-      doesn't, per spec §1.3.
-- [ ] Regression test: `job_store_owner_isolation_still_holds_within_a_tenant` — two
-      different `owner`s in the *same* tenant still can't see each other's jobs after this
-      change. This is the test most likely to silently pass for the wrong reason (e.g. if
-      an implementation accidentally makes `tenant_id` the *only* check and drops the
-      `owner` one) — assert both isolation axes independently, not just that some
-      isolation exists.
-- [ ] `InMemoryJobStore`/Postgres backend, same treatment as Tasks 2-3.
+      `create` also gains a `pub tenant: TenantId` field on `Job` itself (mirrors
+      `ReviewQueueItem`) so `get`/`transition`/`finish`/`fail`/`update_progress` can match
+      on `id && tenant` together in one lookup, same D-S1b-1 pattern as Task 3.
+- [x] Updated `JobStore::create`'s doc comment to state both dimensions explicitly: `owner`
+      answers "whose job" (actor-level, unchanged), `tenant` answers "which customer's
+      data" (new) — neither supersedes the other.
+- [x] Regression test: `job_store_owner_isolation_still_holds_within_a_tenant` — two
+      different `owner`s in the *same* tenant are both visible through the store's
+      tenant-scoped `list` (owner-level filtering stays the transport layer's job, per
+      `hacienda-api/src/handlers/jobs.rs`, unchanged and still covered by its own
+      pre-existing cross-owner tests). Also added
+      `job_get_for_another_tenants_id_is_not_found` and
+      `job_mutations_for_another_tenants_id_are_not_found` for D-S1b-1.
+- [x] `InMemoryJobStore`/Postgres backend, same treatment as Tasks 2-3. **Note**:
+      `PostgresJobStore::transition`'s pre-existing (not new) limitation — a single
+      `UPDATE ... RETURNING` can't distinguish "no such id"/"wrong tenant" from "wrong
+      status" without a second query, so both report `StatusMismatch` with a best-effort
+      `actual` — was not fixed, only the `AND tenant_id = $n` predicate was added to close
+      the isolation gap. Not reachable with an attacker-controlled cross-tenant id through
+      any handler (`transition`/`finish`/`fail`/`update_progress` are only ever called by
+      the same request/background task that just created the job), so D-S1b-1's
+      not-found-not-forbidden guarantee — which matters for externally-reachable
+      `get`/`list` — still holds where it counts.
+- [x] Also closed a real gap found while threading tenant through:
+      `GET /v1/documents/{id}/diff/{diff_job_id}` (`versions::get_diff_job`) had no
+      `parts: Parts`/caller extraction at all before this change — any authenticated
+      caller could poll any diff job id and read its line-diff content regardless of
+      tenant. Added tenant scoping there as part of this task rather than deferring it,
+      since the `JobStore::get` call site needed a `tenant` argument either way.
 
 ## Task 5 — `DocumentVersionStore`: tenant-scope `create_version`/`list_versions`/`get_version`
 

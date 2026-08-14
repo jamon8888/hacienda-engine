@@ -11,18 +11,18 @@
 -- default and drops the default in one migration: no rolling-upgrade window to protect
 -- against *when the corresponding Rust code ships in the same deploy*.
 --
--- That condition does NOT hold for every table below. Only `AuditStore` (S1b Task 2) and
--- `ReviewStore` (S1b Task 3) were actually updated to write `tenant_id` explicitly so far --
--- `JobStore`/`DocumentVersionStore`/`PresetStore`/`ApiKeyStore` remain unimplemented
--- (Tasks 4-6). Dropping the default on their columns here would make every existing,
--- un-updated `INSERT` on those tables fail its `NOT NULL` constraint the moment this
--- migration lands -- caught by `postgres-store-tests` failing on exactly that
+-- That condition does NOT hold for every table below. Only `AuditStore` (S1b Task 2),
+-- `ReviewStore` (S1b Task 3), and `JobStore` (S1b Task 4) were actually updated to write
+-- `tenant_id` explicitly so far -- `DocumentVersionStore`/`PresetStore`/`ApiKeyStore`
+-- remain unimplemented (Tasks 5-6). Dropping the default on their columns here would make
+-- every existing, un-updated `INSERT` on those tables fail its `NOT NULL` constraint the
+-- moment this migration lands -- caught by `postgres-store-tests` failing on exactly that
 -- (`null value in column "tenant_id" ... violates not-null constraint`) before this ever
 -- reached a real deployment. Their `tenant_id` columns are added here (so the schema is
 -- ready and the migration files stay batched) but keep `DEFAULT 'default'` until each
 -- store's own Rust change ships and drops it -- the same expand/contract split this
 -- spec's §3.2 originally called for, now applied per-table instead of per-migration-file
--- since this PR only finishes the Rust side for two of the six tables.
+-- since this PR only finishes the Rust side for three of the six tables.
 --
 -- Every row written before this ships had no tenant of its own; it backfills to
 -- `TenantId::default_tenant()`'s string form, `'default'`, matching every existing
@@ -38,8 +38,8 @@ ALTER TABLE audit_segments ALTER COLUMN tenant_id DROP DEFAULT;
 CREATE INDEX IF NOT EXISTS idx_audit_segments_node_tenant
     ON audit_segments (node_id, tenant_id);
 
--- The four tables below keep tenant_id's default until their own store gets the S1b
--- Task 4-6 treatment -- see the file-level comment above for why dropping it now would
+-- The three tables below keep tenant_id's default until their own store gets the S1b
+-- Task 5-6 treatment -- see the file-level comment above for why dropping it now would
 -- break every existing insert.
 
 ALTER TABLE review_items ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
@@ -49,6 +49,9 @@ ALTER TABLE review_items ALTER COLUMN tenant_id DROP DEFAULT;
 CREATE INDEX IF NOT EXISTS idx_review_items_tenant ON review_items (tenant_id, status);
 
 ALTER TABLE jobs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+-- Safe to drop now: every JobStore insert (both backends) supplies tenant_id explicitly
+-- as of this same change (S1b Task 4).
+ALTER TABLE jobs ALTER COLUMN tenant_id DROP DEFAULT;
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant ON jobs (tenant_id, owner);
 
 ALTER TABLE document_versions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';

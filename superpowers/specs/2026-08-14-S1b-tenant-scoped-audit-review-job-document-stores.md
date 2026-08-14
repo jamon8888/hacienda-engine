@@ -513,13 +513,85 @@ review-store touch points, so neither needed any change.
 one caller, `process_batch_with_auth`, already had one in scope) to resolve the tenant for
 the `ReviewQueueItem` it constructs.
 
-### Not implemented: Tasks 4-6
+### JobStore: `tenant` added alongside `owner`, neither supersedes the other
 
-`JobStore`, `DocumentVersionStore`, and `PresetStore` remain exactly as described in §3.1 —
-designed, not touched. Whoever picks these up next: the `AuditStore`/`ReviewStore`
+`Job` (`hacienda-core/src/jobs/types.rs`) gained a `pub tenant: TenantId` field, same
+self-identifying-item pattern as `ReviewQueueItem` — `create` sets it once, and
+`get`/`transition`/`finish`/`fail`/`update_progress` match on `id && tenant` together in
+one lookup so a cross-tenant id and a nonexistent id both resolve the same way (D-S1b-1).
+`owner: Option<String>` is unchanged: it still answers "whose job" (actor-level,
+handler-enforced), while `tenant` answers "which customer's data" (store-enforced). §1.3's
+warning not to let one dimension imply the other held throughout — `list`'s tenant filter
+does not touch `owner` at all, and the pre-existing owner-based 404-not-403 checks in
+`hacienda-api/src/handlers/jobs.rs` are untouched.
+
+- **`InMemoryJobStore`** (`hacienda-core/src/jobs/store.rs`): flat `Mutex<HashMap<String,
+  Job>>`, filtered by each job's own `tenant` field — same shape as
+  `InMemoryReviewStore`/`FileReviewStore`. New tests:
+  `job_get_for_another_tenants_id_is_not_found`,
+  `job_mutations_for_another_tenants_id_are_not_found`,
+  `job_store_owner_isolation_still_holds_within_a_tenant` (spec §5's named regression
+  guard — asserts both owners are visible via the tenant-scoped `list`, confirming
+  `tenant` scoping did not accidentally start doing `owner`'s job too).
+- **`PostgresJobStore`** (`hacienda-core/src/store/postgres/jobs.rs`): every query gained
+  a `tenant_id = $n` predicate, including both `query_as!` (compile-time-checked) and the
+  one runtime `query_as` call (`progress_json`-selecting queries, per this file's existing
+  convention of not requiring a live-Postgres `.sqlx/` regeneration for that one column).
+  **Pre-existing limitation, not introduced by this change**: `transition`'s single
+  `UPDATE ... RETURNING` cannot distinguish "no such id"/"wrong tenant" from "wrong
+  status" without a second query — both already reported `StatusMismatch` with a
+  best-effort `actual` before this spec, and still do after the `AND tenant_id = $n`
+  predicate was added. Left as-is rather than fixed here because it is out of this
+  change's scope and, more importantly, not reachable with an attacker-controlled
+  cross-tenant id through any handler: `transition`/`finish`/`fail`/`update_progress` are
+  only ever called by the same request or background task that just created the job, never
+  by an external caller supplying an arbitrary id. D-S1b-1's not-found-not-forbidden
+  guarantee matters for the externally-reachable methods — `get` (used by
+  `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/result`,
+  `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}`,
+  `GET /v1/documents/{id}/diff/{diff_job_id}`) and `list` (`GET /v1/jobs`) — both of which
+  correctly resolve a cross-tenant id as `None`/empty, verified against a live Postgres in
+  this session.
+
+**Handler-layer changes** (§3.3's "no signature changes" claim does not fully hold for
+jobs, same as it didn't for review): `hacienda-api/src/handlers/documents.rs`,
+`rag.rs`, and `versions.rs` all resolve `caller.tenant_ctx().tenant` and thread it through
+every `state.jobs.*` call, including into the `tokio::spawn`ed background tasks that
+finish/fail a job after the handler has already returned (the tenant is cloned into the
+task's captured state alongside the existing job id, same pattern the task already used).
+`hacienda-api/src/handlers/jobs.rs`'s `get_job`/`list_jobs`/`get_job_result` and `rag.rs`'s
+`get_migrate_status` needed only the same one-line addition each, since they already
+extracted a `caller`.
+
+**A real gap closed in passing**: `versions::get_diff_job`
+(`GET /v1/documents/{id}/diff/{diff_job_id}`) had no `parts: Parts`/caller extraction at
+all before this change — its own doc comment said so explicitly ("deliberately stricter
+than `versions::get_diff_job`'s poll endpoint, which applies no ownership check at all",
+written when `get_migrate_status` was added). Any authenticated caller who obtained or
+guessed a `diff_job_id` could read its line-diff content — potentially containing PII,
+since document versioning exists specifically to hold PII-bearing content — regardless of
+which tenant created it. Since `JobStore::get`'s call site needed a `tenant` argument
+either way for this task, adding the missing `parts: Parts`/caller extraction to close
+this gap was not extra scope, just the same change applied to a handler that had been
+skipped. `diff_document`, which creates the job, was already `caller`-free too and needed
+the same addition.
+
+### `jobs.tenant_id`'s default dropped in the same migration revision
+
+`hacienda-core/migrations/0004_tenant_scoping.sql` now drops `jobs.tenant_id`'s
+`DEFAULT 'default'` in this change, following the same reasoning already applied to
+`audit_segments` and `review_items`: every `JobStore` insert, across both backends, now
+supplies `tenant_id` explicitly. The migration has not shipped to any real deployment yet,
+so editing it in place carries no rolling-upgrade risk.
+
+### Not implemented: Tasks 5-6
+
+`DocumentVersionStore` and `PresetStore` remain exactly as described in §3.1 — designed,
+not touched. Whoever picks these up next: the `AuditStore`/`ReviewStore`/`JobStore`
 implementations above are the reference patterns (trait-parameter threading, per-tenant
 `HashMap` or self-identifying-item-plus-filter for in-memory/file backends, `tenant_id =
 $n` predicates for Postgres), and `hacienda-core/src/tenancy.rs`'s module doc (decision
 D-S1-1) is the reasoning to re-read before considering any alternative — it heads off the
 same factory-vs-parameter detour this implementation took and backed out of before writing
-any code.
+any code. Both remaining stores are Postgres-only (no in-memory backend), so both tasks
+are lighter than Tasks 2-4.

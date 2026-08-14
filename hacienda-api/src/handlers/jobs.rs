@@ -50,10 +50,11 @@ pub async fn get_job(
 ) -> Result<Json<JobResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
 
     let job = state
         .jobs
-        .get(&id)
+        .get(&tenant, &id)
         .await
         .map_err(|e| {
             tracing::error!(job_id = %id, error = %e, "job store error");
@@ -107,8 +108,9 @@ pub async fn list_jobs(
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let caller_id = caller.principal_id();
+    let tenant = caller.tenant_ctx().tenant;
 
-    let jobs = state.jobs.list(query.status).await.map_err(|e| {
+    let jobs = state.jobs.list(&tenant, query.status).await.map_err(|e| {
         tracing::error!(error = %e, "job store error");
         ApiError::internal()
     })?;
@@ -167,10 +169,11 @@ pub async fn get_job_result(
 ) -> Result<Json<JobResultResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
 
     let job = state
         .jobs
-        .get(&id)
+        .get(&tenant, &id)
         .await
         .map_err(|e| {
             tracing::error!(job_id = %id, error = %e, "job store error");

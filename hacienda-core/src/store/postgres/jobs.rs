@@ -5,6 +5,7 @@ use crate::jobs::{
     types::{Job, JobStatus},
     JobStore,
 };
+use crate::tenancy::TenantId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -24,6 +25,7 @@ impl PostgresJobStore {
 
 struct JobRow {
     id: String,
+    tenant_id: String,
     status: String,
     owner: Option<String>,
     created_at: DateTime<Utc>,
@@ -40,6 +42,7 @@ struct JobRow {
 fn row_to_job(row: JobRow) -> Job {
     Job {
         id: row.id,
+        tenant: TenantId::new(row.tenant_id),
         status: row.status.parse().unwrap_or(JobStatus::Queued),
         owner: row.owner,
         created_at: row.created_at.to_rfc3339(),
@@ -63,6 +66,7 @@ fn row_to_job(row: JobRow) -> Job {
 #[derive(sqlx::FromRow)]
 struct JobRowWithProgress {
     id: String,
+    tenant_id: String,
     status: String,
     owner: Option<String>,
     created_at: DateTime<Utc>,
@@ -75,6 +79,7 @@ struct JobRowWithProgress {
 fn row_to_job_with_progress(row: JobRowWithProgress) -> Job {
     Job {
         id: row.id,
+        tenant: TenantId::new(row.tenant_id),
         status: row.status.parse().unwrap_or(JobStatus::Queued),
         owner: row.owner,
         created_at: row.created_at.to_rfc3339(),
@@ -87,16 +92,18 @@ fn row_to_job_with_progress(row: JobRowWithProgress) -> Job {
 
 #[async_trait]
 impl JobStore for PostgresJobStore {
-    async fn create(&self, owner: Option<String>) -> Result<Job, JobError> {
+    async fn create(&self, tenant: &TenantId, owner: Option<String>) -> Result<Job, JobError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let tenant_id = tenant.as_str();
 
         sqlx::query!(
             r#"
-            INSERT INTO jobs (id, status, owner, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO jobs (id, tenant_id, status, owner, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
             "#,
             id,
+            tenant_id,
             JobStatus::Queued.to_string(),
             owner,
             now,
@@ -108,6 +115,7 @@ impl JobStore for PostgresJobStore {
 
         Ok(Job {
             id,
+            tenant: tenant.clone(),
             status: JobStatus::Queued,
             owner,
             created_at: now.to_rfc3339(),
@@ -118,15 +126,16 @@ impl JobStore for PostgresJobStore {
         })
     }
 
-    async fn get(&self, id: &str) -> Result<Option<Job>, JobError> {
+    async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Job>, JobError> {
         // Runtime query (not `query_as!`): includes `progress_json` so a
         // poller sees migrate-embeddings-style progress, without requiring a
         // live-Postgres `.sqlx/` cache regeneration for this one query. See
         // `JobRowWithProgress`'s doc comment.
         let row: Option<JobRowWithProgress> = sqlx::query_as(
-            "SELECT id, status, owner, created_at, updated_at, result_json, error, progress_json FROM jobs WHERE id = $1",
+            "SELECT id, tenant_id, status, owner, created_at, updated_at, result_json, error, progress_json FROM jobs WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
+        .bind(tenant.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| JobError::Internal(e.to_string()))?;
@@ -134,20 +143,26 @@ impl JobStore for PostgresJobStore {
         Ok(row.map(row_to_job_with_progress))
     }
 
-    async fn update_progress(&self, id: &str, progress_json: String) -> Result<Job, JobError> {
+    async fn update_progress(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        progress_json: String,
+    ) -> Result<Job, JobError> {
         let now = Utc::now();
 
         let row: JobRowWithProgress = sqlx::query_as(
             r#"
             UPDATE jobs
             SET progress_json = $1, updated_at = $2
-            WHERE id = $3
-            RETURNING id, status, owner, created_at, updated_at, result_json, error, progress_json
+            WHERE id = $3 AND tenant_id = $4
+            RETURNING id, tenant_id, status, owner, created_at, updated_at, result_json, error, progress_json
             "#,
         )
         .bind(progress_json)
         .bind(now)
         .bind(id)
+        .bind(tenant.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| JobError::Internal(e.to_string()))?
@@ -156,20 +171,34 @@ impl JobStore for PostgresJobStore {
         Ok(row_to_job_with_progress(row))
     }
 
-    async fn transition(&self, id: &str, from: JobStatus, to: JobStatus) -> Result<Job, JobError> {
+    async fn transition(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        from: JobStatus,
+        to: JobStatus,
+    ) -> Result<Job, JobError> {
         let now = Utc::now();
 
+        // Matching on id, tenant, and status together means a cross-tenant id falls into
+        // the same not-found-shaped path a status mismatch does — see this method's
+        // pre-existing (not new) limitation: the `RETURNING`-based compare-and-swap
+        // cannot distinguish "no such id"/"wrong tenant" from "wrong status" without a
+        // second query, so both report `StatusMismatch` with a best-effort `actual`. This
+        // predates tenant scoping; the `AND tenant_id = $n` predicate here only closes the
+        // isolation gap, it does not change that pre-existing imprecision.
         let row = sqlx::query_as!(
             JobRow,
             r#"
             UPDATE jobs
             SET status = $1, updated_at = $2
-            WHERE id = $3 AND status = $4
-            RETURNING id, status, owner, created_at, updated_at, result_json, error
+            WHERE id = $3 AND tenant_id = $4 AND status = $5
+            RETURNING id, tenant_id, status, owner, created_at, updated_at, result_json, error
             "#,
             to.to_string(),
             now,
             id,
+            tenant.as_str(),
             from.to_string()
         )
         .fetch_optional(&self.pool)
@@ -184,7 +213,12 @@ impl JobStore for PostgresJobStore {
         Ok(row_to_job(row))
     }
 
-    async fn finish(&self, id: &str, result_json: String) -> Result<Job, JobError> {
+    async fn finish(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        result_json: String,
+    ) -> Result<Job, JobError> {
         let now = Utc::now();
 
         let row = sqlx::query_as!(
@@ -192,13 +226,14 @@ impl JobStore for PostgresJobStore {
             r#"
             UPDATE jobs
             SET status = $1, result_json = $2, updated_at = $3
-            WHERE id = $4
-            RETURNING id, status, owner, created_at, updated_at, result_json, error
+            WHERE id = $4 AND tenant_id = $5
+            RETURNING id, tenant_id, status, owner, created_at, updated_at, result_json, error
             "#,
             JobStatus::Succeeded.to_string(),
             result_json,
             now,
-            id
+            id,
+            tenant.as_str()
         )
         .fetch_one(&self.pool)
         .await
@@ -207,7 +242,7 @@ impl JobStore for PostgresJobStore {
         Ok(row_to_job(row))
     }
 
-    async fn fail(&self, id: &str, error: String) -> Result<Job, JobError> {
+    async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError> {
         let now = Utc::now();
 
         let row = sqlx::query_as!(
@@ -215,13 +250,14 @@ impl JobStore for PostgresJobStore {
             r#"
             UPDATE jobs
             SET status = $1, error = $2, updated_at = $3
-            WHERE id = $4
-            RETURNING id, status, owner, created_at, updated_at, result_json, error
+            WHERE id = $4 AND tenant_id = $5
+            RETURNING id, tenant_id, status, owner, created_at, updated_at, result_json, error
             "#,
             JobStatus::Failed.to_string(),
             error,
             now,
-            id
+            id,
+            tenant.as_str()
         )
         .fetch_one(&self.pool)
         .await
@@ -230,17 +266,23 @@ impl JobStore for PostgresJobStore {
         Ok(row_to_job(row))
     }
 
-    async fn list(&self, filter: Option<JobStatus>) -> Result<Vec<Job>, JobError> {
+    async fn list(
+        &self,
+        tenant: &TenantId,
+        filter: Option<JobStatus>,
+    ) -> Result<Vec<Job>, JobError> {
+        let tenant_id = tenant.as_str();
         let rows = match filter {
             Some(status) => {
                 sqlx::query_as!(
                     JobRow,
                     r#"
-                    SELECT id, status, owner, created_at, updated_at, result_json, error
+                    SELECT id, tenant_id, status, owner, created_at, updated_at, result_json, error
                     FROM jobs
-                    WHERE status = $1
+                    WHERE tenant_id = $1 AND status = $2
                     ORDER BY created_at, id
                     "#,
+                    tenant_id,
                     status.to_string()
                 )
                 .fetch_all(&self.pool)
@@ -250,10 +292,12 @@ impl JobStore for PostgresJobStore {
                 sqlx::query_as!(
                     JobRow,
                     r#"
-                    SELECT id, status, owner, created_at, updated_at, result_json, error
+                    SELECT id, tenant_id, status, owner, created_at, updated_at, result_json, error
                     FROM jobs
+                    WHERE tenant_id = $1
                     ORDER BY created_at, id
-                    "#
+                    "#,
+                    tenant_id
                 )
                 .fetch_all(&self.pool)
                 .await
@@ -280,6 +324,13 @@ mod tests {
         PostgresJobStore::new(test_support::shared().await.pool())
     }
 
+    /// The tenant every test in this module uses. Mirrors `postgres::review::tests::t`:
+    /// these tests already share one un-torn-down Postgres database, so a fixed tenant
+    /// id keeps that existing shared behaviour rather than accidentally isolating them.
+    fn t() -> TenantId {
+        TenantId::new("pg-jobs-test-tenant")
+    }
+
     #[test]
     #[ignore]
     fn should_create_and_get_round_trip() {
@@ -287,14 +338,14 @@ mod tests {
             let store = test_store().await;
 
             let job = store
-                .create(Some("tenant-a".to_owned()))
+                .create(&t(), Some("tenant-a".to_owned()))
                 .await
                 .expect("create failed");
             assert_eq!(job.status, JobStatus::Queued);
             assert_eq!(job.owner.as_deref(), Some("tenant-a"));
 
             let fetched = store
-                .get(&job.id)
+                .get(&t(), &job.id)
                 .await
                 .expect("get failed")
                 .expect("job must exist");
@@ -308,7 +359,7 @@ mod tests {
     fn should_let_exactly_one_concurrent_claim_win() {
         test_support::block_on_shared(async {
             let store = Arc::new(test_store().await);
-            let job = store.create(None).await.expect("create failed");
+            let job = store.create(&t(), None).await.expect("create failed");
 
             let mut handles = Vec::new();
             for _ in 0..8 {
@@ -316,7 +367,7 @@ mod tests {
                 let id = job.id.clone();
                 handles.push(tokio::spawn(async move {
                     store
-                        .transition(&id, JobStatus::Queued, JobStatus::Running)
+                        .transition(&t(), &id, JobStatus::Queued, JobStatus::Running)
                         .await
                 }));
             }
@@ -335,7 +386,7 @@ mod tests {
             assert_eq!(losses, 7);
 
             let final_job = store
-                .get(&job.id)
+                .get(&t(), &job.id)
                 .await
                 .expect("get failed")
                 .expect("job must exist");
