@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO presets (name, config_json) VALUES ($1, $2) RETURNING id, name, config_json, created_at",
+  "query": "SELECT id, name, config_json, created_at FROM presets WHERE tenant_id = $1 ORDER BY created_at",
   "describe": {
     "columns": [
       {
@@ -26,8 +26,7 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Jsonb"
+        "Text"
       ]
     },
     "nullable": [
@@ -37,5 +36,5 @@
       false
     ]
   },
-  "hash": "260847ab306b6fa34183badb3a032853d640c4700de4f5a24d90e1e3b9d44867"
+  "hash": "4d7a0bf314e2863343476cd6d474316380324af94da33a79501d1fa62f9e5732"
 }

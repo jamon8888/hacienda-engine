@@ -11,19 +11,20 @@
 -- default and drops the default in one migration: no rolling-upgrade window to protect
 -- against *when the corresponding Rust code ships in the same deploy*.
 --
--- That condition does NOT hold for every table below. Only `AuditStore` (S1b Task 2),
--- `ReviewStore` (S1b Task 3), `JobStore` (S1b Task 4), and `DocumentVersionStore` (S1b
--- Task 5) were actually updated to write `tenant_id` explicitly so far --
--- `PresetStore`/`ApiKeyStore` remain unimplemented (Task 6). Dropping the default on their
--- columns here would make every existing, un-updated `INSERT` on those tables fail its
--- `NOT NULL` constraint the moment this migration lands -- caught by
--- `postgres-store-tests` failing on exactly that (`null value in column "tenant_id" ...
--- violates not-null constraint`) before this ever reached a real deployment. Their
--- `tenant_id` columns are added here (so the schema is ready and the migration files stay
--- batched) but keep `DEFAULT 'default'` until each store's own Rust change ships and
--- drops it -- the same expand/contract split this spec's §3.2 originally called for, now
--- applied per-table instead of per-migration-file since this PR only finishes the Rust
--- side for four of the six tables.
+-- That condition does NOT hold for every table below. `AuditStore` (S1b Task 2),
+-- `ReviewStore` (S1b Task 3), `JobStore` (S1b Task 4), `DocumentVersionStore` (S1b Task 5),
+-- and `PresetStore` (S1b Task 6) were all updated to write `tenant_id` explicitly --
+-- `ApiKeyStore` is the sole exception, and deliberately out of S1b's scope (this spec
+-- covers five stores, not six; `api_keys.tenant_id` is added here only so the schema is
+-- ready for whoever picks up `AuthContext.tenant` resolution from the key itself, per
+-- §3.2's closing note). Dropping the default on `api_keys.tenant_id` here would make
+-- every existing, un-updated `INSERT` on that table fail its `NOT NULL` constraint the
+-- moment this migration lands -- caught by `postgres-store-tests` failing on exactly that
+-- (`null value in column "tenant_id" ... violates not-null constraint`) before this ever
+-- reached a real deployment. Its `tenant_id` column is added here (so the schema is ready
+-- and the migration files stay batched) but keeps `DEFAULT 'default'` until its own Rust
+-- change ships and drops it -- the same expand/contract split this spec's §3.2 originally
+-- called for, now applied per-table instead of per-migration-file.
 --
 -- Every row written before this ships had no tenant of its own; it backfills to
 -- `TenantId::default_tenant()`'s string form, `'default'`, matching every existing
@@ -38,10 +39,6 @@ ALTER TABLE audit_segments ALTER COLUMN tenant_id DROP DEFAULT;
 -- node_id alone -- one open segment per node *per tenant*.
 CREATE INDEX IF NOT EXISTS idx_audit_segments_node_tenant
     ON audit_segments (node_id, tenant_id);
-
--- The two tables below keep tenant_id's default until their own store gets the S1b
--- Task 6 treatment -- see the file-level comment above for why dropping it now would
--- break every existing insert.
 
 ALTER TABLE review_items ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
 -- Safe to drop now: every ReviewStore insert (all three backends) supplies tenant_id
@@ -75,11 +72,13 @@ ALTER TABLE document_versions ADD CONSTRAINT document_versions_tenant_document_v
     UNIQUE (tenant_id, document_id, version_sequence);
 
 ALTER TABLE presets ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+-- Safe to drop now: every PresetStore insert (Postgres-only backend) supplies tenant_id
+-- explicitly as of this same change (S1b Task 6).
+ALTER TABLE presets ALTER COLUMN tenant_id DROP DEFAULT;
 -- Two tenants could not previously both name a preset "default" -- a functional bug
--- independent of isolation, fixed by the same column. Safe to swap the constraint now
--- even though PresetStore doesn't write tenant_id explicitly yet: every row (old and
--- new, until PresetStore is updated) shares the column default, so this is behaviourally
--- identical to the old bare UNIQUE(name) until that changes.
+-- independent of isolation, fixed by the same column. `name` is caller-supplied, the
+-- identical situation `document_versions_tenant_document_version_key` above already
+-- fixed for `document_id` -- the constraint must include tenant_id, not just the column.
 ALTER TABLE presets DROP CONSTRAINT presets_name_key;
 ALTER TABLE presets ADD CONSTRAINT presets_tenant_name_key UNIQUE (tenant_id, name);
 

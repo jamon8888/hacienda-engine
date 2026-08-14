@@ -188,15 +188,23 @@ live — each touches a disjoint set of files.
       `parts: Parts`/caller extraction to both as part of this task, same as the
       `get_diff_job` gap closed in Task 4.
 
-## Task 6 — `PresetStore`: tenant-scope and fix the global-uniqueness bug
+## Task 6 — `PresetStore`: tenant-scope and fix the global-uniqueness bug — done
 
-- [ ] Add `&TenantId` to all five methods (`hacienda-core/src/store/postgres/presets.rs`).
-- [ ] Test: `preset_names_collide_across_tenants_without_error` (spec §5) — this is a
-      behaviour *fix*, not just an isolation add: today two tenants literally cannot both
-      have a preset named `"default"`, which is a functional bug independent of any
-      security concern. Confirm this test fails against pre-Task-7 schema (the unique
-      constraint hasn't been swapped yet — see Task 7) and only starts passing once Task 7
-      ships; don't be surprised if it's red until then.
+- [x] Add `&TenantId` to all five methods (`hacienda-core/src/store/postgres/presets.rs`).
+- [x] Test: `preset_names_collide_across_tenants_without_error` (spec §5) — this is a
+      behaviour *fix*, not just an isolation add: two tenants can now each create a preset
+      named `"default"` (or any other name), which the old bare `UNIQUE(name)` made
+      impossible. The constraint swap (`presets_name_key` → `presets_tenant_name_key`,
+      `UNIQUE(tenant_id, name)`) shipped in this same change's migration revision rather
+      than deferred to a later Task 7, since — per the precedent already set by Task 5's
+      `document_versions` fix — there is no reason to defer a schema fix whose
+      corresponding Rust code ships in the same commit. Verified against live Postgres.
+- [x] Also added `preset_get_for_another_tenants_id_or_name_is_not_found` (D-S1b-1) and
+      threaded `&TenantId` through all four `hacienda-api/src/handlers/presets.rs`
+      handlers. **All four extracted no caller at all before this change** — the same gap
+      class found and fixed in Tasks 4 and 5 for the job/diff and document-version routes.
+      Added the missing `parts: Parts`/caller extraction to `create_preset`/
+      `list_presets`/`get_preset`/`delete_preset`.
 
 ## Task 7 — Facade call-site threading + Postgres contract migration (last)
 

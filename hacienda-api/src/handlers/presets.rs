@@ -11,6 +11,7 @@
 
 use axum::{
     extract::{Path, State},
+    http::request::Parts,
     http::StatusCode,
     Json,
 };
@@ -20,6 +21,7 @@ use crate::{
     dto::{CreatePresetRequest, PresetListResponse, PresetResponse},
     error::ApiError,
     extract::Json as SafeJson,
+    handlers::{caller_from_arc, extract_auth_context},
     state::ApiState,
 };
 
@@ -48,11 +50,17 @@ fn require_store(
 )]
 pub async fn create_preset(
     State(state): State<ApiState>,
+    parts: Parts,
     SafeJson(body): SafeJson<CreatePresetRequest>,
 ) -> Result<(StatusCode, Json<PresetResponse>), ApiError> {
     let store = require_store(&state)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+
     let preset = store
-        .create(&body.name, body.config)
+        .create(&tenant, &body.name, body.config)
         .await
         .map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(PresetResponse::from(preset))))
@@ -72,9 +80,15 @@ pub async fn create_preset(
 )]
 pub async fn list_presets(
     State(state): State<ApiState>,
+    parts: Parts,
 ) -> Result<Json<PresetListResponse>, ApiError> {
     let store = require_store(&state)?;
-    let presets = store.list().await.map_err(ApiError::from)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+
+    let presets = store.list(&tenant).await.map_err(ApiError::from)?;
     Ok(Json(PresetListResponse {
         presets: presets.into_iter().map(PresetResponse::from).collect(),
     }))
@@ -96,11 +110,17 @@ pub async fn list_presets(
 )]
 pub async fn get_preset(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PresetResponse>, ApiError> {
     let store = require_store(&state)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+
     let preset = store
-        .get(id)
+        .get(&tenant, id)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
@@ -122,9 +142,15 @@ pub async fn get_preset(
 )]
 pub async fn delete_preset(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let store = require_store(&state)?;
-    store.delete(id).await.map_err(ApiError::from)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+
+    store.delete(&tenant, id).await.map_err(ApiError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }

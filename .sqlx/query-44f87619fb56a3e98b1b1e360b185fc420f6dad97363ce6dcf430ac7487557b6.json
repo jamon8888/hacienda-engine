@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, name, config_json, created_at FROM presets WHERE name = $1",
+  "query": "SELECT id, name, config_json, created_at FROM presets WHERE name = $1 AND tenant_id = $2",
   "describe": {
     "columns": [
       {
@@ -26,6 +26,7 @@
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -36,5 +37,5 @@
       false
     ]
   },
-  "hash": "81856fdea5ff2881b3fe4393b0912549b5f4119d00d50ebbe4876b70f88ef8e0"
+  "hash": "44f87619fb56a3e98b1b1e360b185fc420f6dad97363ce6dcf430ac7487557b6"
 }

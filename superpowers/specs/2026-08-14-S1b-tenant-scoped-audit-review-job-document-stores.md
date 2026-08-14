@@ -639,17 +639,36 @@ thread `tenant` through — the same code path a real HTTP-level cross-tenant pr
 exercise — this is a gap in automated test coverage at the HTTP layer specifically, not in
 the underlying enforcement.
 
-### Not implemented: Task 6
+### PresetStore: tenant scoping plus the planned uniqueness fix
 
-`PresetStore` remains exactly as described in §3.1 — designed, not touched. Whoever picks
-this up next: the `AuditStore`/`ReviewStore`/`JobStore`/`DocumentVersionStore`
-implementations above are the reference patterns (trait-parameter threading, per-tenant
-`HashMap` or self-identifying-item-plus-filter for in-memory/file backends, `tenant_id =
-$n` predicates for Postgres, and — new as of this task — a caller-supplied-identifier
-UNIQUE constraint needs `tenant_id` folded in, not just an added column, when the
-identifier isn't store-assigned), and `hacienda-core/src/tenancy.rs`'s module doc
-(decision D-S1-1) is the reasoning to re-read before considering any alternative. Presets
-are Postgres-only (no in-memory backend), so this task is lighter than Tasks 2-5 — and its
-own uniqueness fix (`presets_name_key` → `presets_tenant_name_key`) is now exactly the
-same shape as the one just applied to `document_versions` above, so that part of Task 6 is
-already proven correct by this task's verification.
+`PresetStore` (`hacienda-core/src/store/postgres/presets.rs`) is Postgres-only, as §3.1
+anticipated. All five methods gained a leading `&TenantId`; `get`/`get_by_name` on an
+id/name belonging to a different tenant resolve as `None`, the same D-S1b-1 discipline as
+every other store in this spec. `Preset` itself gained no `tenant` field — unlike
+`ReviewQueueItem`/`Job`, every method already has an explicit `tenant` parameter to filter
+by, so there's nothing a self-identifying field would add.
+
+**The functional bug this task named up front is fixed**: `presets_name_key` (bare
+`UNIQUE(name)`) is replaced with `presets_tenant_name_key`
+(`UNIQUE(tenant_id, name)`) in this same migration revision — the identical shape Task 5
+already applied to `document_versions_tenant_document_version_key` for the same
+caller-supplied-identifier reason, so this fix arrived pre-validated by that task's own
+Postgres verification. Two tenants can now each create a preset named `"default"` (or any
+other name) without colliding. `preset_names_collide_across_tenants_without_error`
+(spec §5) is the new test proving this, verified against a live Postgres:
+`preset_get_for_another_tenants_id_or_name_is_not_found` covers D-S1b-1's read-side
+discipline the same way.
+
+**Every handler in `hacienda-api/src/handlers/presets.rs` extracted no caller at all
+before this change** — `create_preset`/`list_presets`/`get_preset`/`delete_preset` all
+gained the missing `parts: Parts`/caller extraction, the same gap class already found and
+fixed for `versions::get_diff_job` (Task 4) and
+`list_document_versions`/`get_document` (Task 5). This is the third store in a row where
+implementing tenant scoping surfaced a pre-existing "no auth extraction at all" bug in a
+handler nobody had touched since it was written — worth flagging as a pattern for whoever
+does S1's next pass: `parts: Parts` extraction is easy to omit silently in a handler that
+compiles and passes tests fine under a single-tenant assumption.
+
+This closes out every store this spec set out to cover (Tasks 2-6). `ApiKeyStore` remains
+untouched — deliberately out of scope, tracked in §3.2's closing note above, not part of
+the five-store commitment this spec's title and §1 make.

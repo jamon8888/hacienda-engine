@@ -684,6 +684,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified against live Postgres that two tenants can now each version the same
   `document_id` independently, both starting at sequence 1. `PresetStore` has the same
   gap and is not yet fixed — tracked in the same S1b spec.
+- **`PresetStore` is now tenant-scoped, and all four `/v1/presets/*` endpoints had no auth
+  extraction at all — the same missing-auth-extraction bug found and fixed in the diff-job
+  and document-version routes above, this time in `create_preset`/`list_presets`/
+  `get_preset`/`delete_preset`.** Fixed by adding `&TenantId` to all five `PresetStore`
+  methods; `get`/`get_by_name` on an id/name belonging to a different tenant resolve as
+  `None`, never a distinguishable error. **Also fixes the functional bug this store was
+  named for**: `presets_name_key` (bare `UNIQUE(name)`) is replaced with
+  `presets_tenant_name_key` (`UNIQUE(tenant_id, name)`) in the same migration revision —
+  the identical caller-supplied-identifier fix already applied to `document_versions`
+  above. Two tenants can now each create a preset named `"default"` (or any other name)
+  without colliding, which the old constraint made impossible regardless of any security
+  concern. Verified against live Postgres. This closes out every store this S1b spec set
+  out to cover (`AuditStore`/`ReviewStore`/`JobStore`/`DocumentVersionStore`/
+  `PresetStore`) — see the spec for the one deliberately out-of-scope exception
+  (`ApiKeyStore`).
 - **The one call site that sends document content to an LLM now redacts structurally, not
   by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
   call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before
