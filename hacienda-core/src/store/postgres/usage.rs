@@ -126,7 +126,19 @@ mod tests {
     use crate::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
     use crate::store::postgres::audit::PostgresAuditStore;
     use crate::store::postgres::test_support;
+    use crate::tenancy::TenantId;
     use uuid::Uuid;
+
+    /// `PostgresUsageStore::summary` (unlike `AuditStore`) has no tenant scoping yet —
+    /// it aggregates `audit_entries` across every tenant, which is a real cross-tenant
+    /// billing-data leak surfaced while auditing this table for S1b but out of this
+    /// pass's scope to close (it needs an API-layer change too — see
+    /// `hacienda-api/src/routes.rs`'s usage handler). Tracked as a follow-up. This
+    /// helper only satisfies `AuditStore::append`'s now-mandatory tenant parameter so
+    /// these tests keep compiling; it does not claim `summary` is tenant-scoped.
+    fn t() -> TenantId {
+        TenantId::new("pg-usage-test-tenant")
+    }
 
     // Ignored by default — shares one Postgres instance with the other postgres-feature
     // test modules (see `test_support::shared`), so needs `--test-threads=1`. Run with:
@@ -171,12 +183,15 @@ mod tests {
             let avocat_7 = format!("avocat-7-{suffix}");
             let avocat_9 = format!("avocat-9-{suffix}");
             audit_store
-                .append(vec![
-                    entry(&format!("{suffix}-a1"), Some(&avocat_7), 10),
-                    entry(&format!("{suffix}-a2"), Some(&avocat_7), 15),
-                    entry(&format!("{suffix}-b1"), Some(&avocat_9), 100),
-                    entry(&format!("{suffix}-c1"), None, 5),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        entry(&format!("{suffix}-a1"), Some(&avocat_7), 10),
+                        entry(&format!("{suffix}-a2"), Some(&avocat_7), 15),
+                        entry(&format!("{suffix}-b1"), Some(&avocat_9), 100),
+                        entry(&format!("{suffix}-c1"), None, 5),
+                    ],
+                )
                 .await
                 .expect("append failed");
 
@@ -226,7 +241,7 @@ mod tests {
             let suffix = Uuid::new_v4();
             let principal = format!("avocat-1-{suffix}");
             audit_store
-                .append(vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)])
+                .append(&t(), vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)])
                 .await
                 .expect("append failed");
 

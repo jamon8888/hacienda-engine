@@ -2147,7 +2147,7 @@ pub(crate) mod tests {
         let audit_store = PostgresAuditStore::new(pool.clone());
         let principal = format!("avocat-{}", uuid::Uuid::new_v4());
         audit_store
-            .append(vec![AuditEntryInput {
+            .append(&hacienda_core::tenancy::TenantId::default_tenant(), vec![AuditEntryInput {
                 id: uuid::Uuid::new_v4().to_string(),
                 category: "Email".to_string(),
                 action: RedactionAction::Mask,
@@ -2231,7 +2231,7 @@ pub(crate) mod tests {
         // entry can be found by identity rather than assuming an empty table.
         let principal = format!("avocat-postgres-route-test-{}", uuid::Uuid::new_v4());
         audit_store
-            .append(vec![AuditEntryInput {
+            .append(&hacienda_core::tenancy::TenantId::default_tenant(), vec![AuditEntryInput {
                 id: uuid::Uuid::new_v4().to_string(),
                 category: "Email".to_string(),
                 action: RedactionAction::Mask,

@@ -416,8 +416,9 @@ impl HaciendaFacade {
         caller: Caller<'_>,
     ) -> Result<Vec<AuditEntry>, HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(store.entries().await?),
+            Some(store) => Ok(store.entries(&tenant).await?),
             None => Ok(Vec::new()),
         }
     }
@@ -433,8 +434,22 @@ impl HaciendaFacade {
     /// `None` is honest rather than convenient: a client must be able to tell "auditing
     /// is off, this result has no chain evidence" from "the chain is empty".
     pub async fn audit_tip(&self) -> Result<Option<String>, HaciendaError> {
+        self.audit_tip_with_auth(Caller::Trusted).await
+    }
+
+    /// [`Self::audit_tip`], scoped to `caller`'s tenant.
+    ///
+    /// Still deliberately not capability-guarded — see [`Self::audit_tip`]'s doc — but
+    /// the tenant is not optional: every content-bearing response attaches *its own
+    /// tenant's* chain tip, never another tenant's, so this needs `caller` even though
+    /// it needs no capability from it.
+    pub async fn audit_tip_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<String>, HaciendaError> {
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(Some(store.tip().await?)),
+            Some(store) => Ok(Some(store.tip(&tenant).await?)),
             None => Ok(None),
         }
     }
@@ -462,8 +477,9 @@ impl HaciendaFacade {
         limit: usize,
     ) -> Result<Option<AuditPage>, HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(Some(store.history(after, limit).await?)),
+            Some(store) => Ok(Some(store.history(&tenant, after, limit).await?)),
             None => Ok(None),
         }
     }
@@ -476,8 +492,9 @@ impl HaciendaFacade {
         caller: Caller<'_>,
     ) -> Result<Option<Vec<SegmentSeal>>, HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(Some(store.seals().await?)),
+            Some(store) => Ok(Some(store.seals(&tenant).await?)),
             None => Ok(None),
         }
     }
@@ -504,6 +521,7 @@ impl HaciendaFacade {
         format: ExportFormat,
     ) -> Result<Option<Vec<u8>>, HaciendaError> {
         caller.require(Capability::AuditExport)?;
+        let tenant = caller.tenant_ctx().tenant;
         let store = match &self.audit_store {
             Some(store) => store,
             None => return Ok(None),
@@ -513,7 +531,7 @@ impl HaciendaFacade {
         let mut cursor: Option<AuditCursor> = None;
         const EXPORT_PAGE_SIZE: usize = 1000;
         loop {
-            let page = store.history(cursor.as_ref(), EXPORT_PAGE_SIZE).await?;
+            let page = store.history(&tenant, cursor.as_ref(), EXPORT_PAGE_SIZE).await?;
             if page.entries.is_empty() {
                 break;
             }
@@ -556,8 +574,9 @@ impl HaciendaFacade {
     /// Requires `audit:read` capability.
     pub async fn verify_audit_with_auth(&self, caller: Caller<'_>) -> Result<(), HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(store.verify().await?),
+            Some(store) => Ok(store.verify(&tenant).await?),
             None => Ok(()),
         }
     }
@@ -587,6 +606,18 @@ impl HaciendaFacade {
     /// the write completes. Recovery is the correct backstop; `close` is the courtesy
     /// that avoids the extra startup work.
     ///
+    /// # Multi-tenant caveat (S1b)
+    ///
+    /// Seals only `caller`'s own tenant's open segment — [`AuditStore::close`] takes a
+    /// tenant and the store has no "every tenant that ever touched me" enumeration to
+    /// close them all. A process serving several tenants that calls plain `close()`
+    /// (which acts as [`TenantId::default_tenant()`] via `Caller::Trusted`) leaves every
+    /// other tenant's segment unsealed at shutdown. That is not a data-loss gap — see
+    /// the recovery note above — but it does mean a multi-tenant deployment that wants
+    /// every chain sealed before exit must call `close_with_auth` once per tenant it has
+    /// actually served, not just once. Tracked as a follow-up to close alongside this
+    /// gap rather than solved here.
+    ///
     /// # Errors
     ///
     /// Returns [`HaciendaError::Audit`] if the seal write fails, or
@@ -599,11 +630,17 @@ impl HaciendaFacade {
 
     /// Close stores with authentication context.
     ///
-    /// Requires `audit:read` capability (for sealing audit chain).
+    /// Requires `audit:read` capability (for sealing audit chain). See [`Self::close`]'s
+    /// multi-tenant caveat — this seals only `caller`'s own tenant's audit chain.
     pub async fn close_with_auth(&self, caller: Caller<'_>) -> Result<(), HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         let audit = match &self.audit_store {
-            Some(store) => store.close().await.map(|_| ()).map_err(HaciendaError::from),
+            Some(store) => store
+                .close(&tenant)
+                .await
+                .map(|_| ())
+                .map_err(HaciendaError::from),
             None => Ok(()),
         };
 
@@ -968,7 +1005,8 @@ impl HaciendaFacade {
             vertical,
         };
 
-        Ok(store.append(vec![input]).await?)
+        let tenant = caller.tenant_ctx().tenant;
+        Ok(store.append(&tenant, vec![input]).await?)
     }
 
     /// Append one `Reveal` entry per span whose plaintext was handed to `caller`.
@@ -1031,7 +1069,8 @@ impl HaciendaFacade {
             })
             .collect();
 
-        Ok(store.append(inputs).await?)
+        let tenant = caller.tenant_ctx().tenant;
+        Ok(store.append(&tenant, inputs).await?)
     }
 
     /// Record the glossary against the *original* text, before redaction rewrites it.
@@ -1125,7 +1164,8 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         }
 
-        Ok(store.append(inputs).await?)
+        let tenant = caller.tenant_ctx().tenant;
+        Ok(store.append(&tenant, inputs).await?)
     }
 
     /// Redact every text-bearing field on `document` beyond `.content`.
@@ -1683,6 +1723,7 @@ mod tests {
     use crate::auth::authn::TokenResolver as _;
     use crate::auth::InMemoryApiKeyStore;
     use crate::glossary::GlossaryConfig;
+    use crate::tenancy::TenantId;
     use crate::pii::PipelineConfig;
     use crate::redaction::{
         EnvKeyResolver, RedactionConfig, RedactionMode, ACTIVE_KEY_VAR, KEY_BYTES,
@@ -1755,42 +1796,44 @@ mod tests {
     impl AuditStore for CountingAuditStore {
         async fn append(
             &self,
+            tenant: &TenantId,
             inputs: Vec<AuditEntryInput>,
         ) -> Result<Vec<AuditEntry>, AuditError> {
             self.append_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.append(inputs).await
+            self.inner.append(tenant, inputs).await
         }
 
-        async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
-            self.inner.entries().await
+        async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
+            self.inner.entries(tenant).await
         }
 
-        async fn tip(&self) -> Result<String, AuditError> {
-            self.inner.tip().await
+        async fn tip(&self, tenant: &TenantId) -> Result<String, AuditError> {
+            self.inner.tip(tenant).await
         }
 
-        async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
-            self.inner.seals().await
+        async fn seals(&self, tenant: &TenantId) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+            self.inner.seals(tenant).await
         }
 
         async fn history(
             &self,
+            tenant: &TenantId,
             after: Option<&crate::audit::AuditCursor>,
             limit: usize,
         ) -> Result<crate::audit::AuditPage, AuditError> {
-            self.inner.history(after, limit).await
+            self.inner.history(tenant, after, limit).await
         }
 
-        async fn verify(&self) -> Result<(), AuditError> {
-            self.inner.verify().await
+        async fn verify(&self, tenant: &TenantId) -> Result<(), AuditError> {
+            self.inner.verify(tenant).await
         }
 
-        async fn rotate(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.rotate().await
+        async fn rotate(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.rotate(tenant).await
         }
 
-        async fn close(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.close().await
+        async fn close(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.close(tenant).await
         }
     }
 
@@ -1872,6 +1915,7 @@ mod tests {
     impl AuditStore for FailingAuditStore {
         async fn append(
             &self,
+            _tenant: &TenantId,
             _inputs: Vec<AuditEntryInput>,
         ) -> Result<Vec<AuditEntry>, AuditError> {
             Err(AuditError::Io {
@@ -1880,20 +1924,21 @@ mod tests {
             })
         }
 
-        async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
+        async fn entries(&self, _tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
             Ok(Vec::new())
         }
 
-        async fn tip(&self) -> Result<String, AuditError> {
+        async fn tip(&self, _tenant: &TenantId) -> Result<String, AuditError> {
             Ok(crate::audit::GENESIS_HASH.to_owned())
         }
 
-        async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+        async fn seals(&self, _tenant: &TenantId) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             Ok(Vec::new())
         }
 
         async fn history(
             &self,
+            _tenant: &TenantId,
             _after: Option<&crate::audit::AuditCursor>,
             _limit: usize,
         ) -> Result<crate::audit::AuditPage, AuditError> {
@@ -1903,18 +1948,18 @@ mod tests {
             })
         }
 
-        async fn verify(&self) -> Result<(), AuditError> {
+        async fn verify(&self, _tenant: &TenantId) -> Result<(), AuditError> {
             Ok(())
         }
 
-        async fn rotate(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
+        async fn rotate(&self, _tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
             Err(AuditError::Io {
                 path: "simulated".into(),
                 source: std::io::Error::other("injected failure"),
             })
         }
 
-        async fn close(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
+        async fn close(&self, _tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
             Err(AuditError::Io {
                 path: "simulated".into(),
                 source: std::io::Error::other("injected failure"),
@@ -2692,7 +2737,10 @@ mod tests {
                 .expect("chain from first run must still verify after restart");
 
             // The sealed segment carries the entry count from before the restart.
-            let seals = store.seals().await.expect("seals");
+            let seals = store
+                .seals(&TenantId::default_tenant())
+                .await
+                .expect("seals");
             let total_sealed: u64 = seals.iter().map(|s| s.entry_count).sum();
             assert_eq!(
                 total_sealed, entry_count_before as u64,
@@ -3887,45 +3935,47 @@ mod tests {
     impl AuditStore for TimingAuditStore {
         async fn append(
             &self,
+            tenant: &TenantId,
             inputs: Vec<AuditEntryInput>,
         ) -> Result<Vec<AuditEntry>, AuditError> {
             let start = std::time::Instant::now();
-            let result = self.inner.append(inputs).await;
+            let result = self.inner.append(tenant, inputs).await;
             self.append_nanos
                 .fetch_add(start.elapsed().as_nanos() as u64, Ordering::SeqCst);
             result
         }
 
-        async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
-            self.inner.entries().await
+        async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
+            self.inner.entries(tenant).await
         }
 
-        async fn tip(&self) -> Result<String, AuditError> {
-            self.inner.tip().await
+        async fn tip(&self, tenant: &TenantId) -> Result<String, AuditError> {
+            self.inner.tip(tenant).await
         }
 
-        async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
-            self.inner.seals().await
+        async fn seals(&self, tenant: &TenantId) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+            self.inner.seals(tenant).await
         }
 
         async fn history(
             &self,
+            tenant: &TenantId,
             after: Option<&crate::audit::AuditCursor>,
             limit: usize,
         ) -> Result<crate::audit::AuditPage, AuditError> {
-            self.inner.history(after, limit).await
+            self.inner.history(tenant, after, limit).await
         }
 
-        async fn verify(&self) -> Result<(), AuditError> {
-            self.inner.verify().await
+        async fn verify(&self, tenant: &TenantId) -> Result<(), AuditError> {
+            self.inner.verify(tenant).await
         }
 
-        async fn rotate(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.rotate().await
+        async fn rotate(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.rotate(tenant).await
         }
 
-        async fn close(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.close().await
+        async fn close(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.close(tenant).await
         }
     }
 

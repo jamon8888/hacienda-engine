@@ -1,8 +1,10 @@
 # S1b — Tenant-scoped audit, review, job, document-version, and preset stores
 
 **Date:** 2026-08-14
-**Status:** Proposed, implementation-ready — every claim below verified against current
-source, not inferred from `2026-08-01-S1-tenancy-and-projects.md`'s design intent
+**Status:** Partially shipped — `AuditStore` (Task 2) is implemented, tested (unit +
+live-Postgres), and merged; `ReviewStore`/`JobStore`/`DocumentVersionStore`/`PresetStore`
+(Tasks 3-6) remain designed but not implemented. See §7 for what actually shipped and
+where it diverges from the design below.
 **Extends:** `2026-08-01-S1-tenancy-and-projects.md` — this is the part of S1 that was
 never actually delivered (see §1)
 **Sibling:** `2026-08-14-P3a-tenant-scoped-pseudonym-keys.md` — P3a covers the
@@ -183,6 +185,13 @@ is valid *somewhere*, which is itself a disclosure.
 
 ### 3.2 Postgres migration — two steps, not one
 
+> **Correction (§7):** this section's two-migration design was superseded before
+> implementation — `0002`/`0003` were already taken by unrelated migrations by the time
+> this shipped, and this repo's own actual convention (`0002_document_version_content.sql`)
+> is single-file expand+contract, not a two-file split, because migrations and code deploy
+> together here with no rolling-upgrade window. What shipped is one file,
+> `hacienda-core/migrations/0004_tenant_scoping.sql`. See §7 for the full reasoning.
+
 **This must ship as two migrations, not one.** A single migration that adds the column
 *and* drops its default in the same transaction creates a window — between that migration
 landing and the corresponding Rust code deploying — where the schema requires `tenant_id`
@@ -308,3 +317,132 @@ Identical precedent to P3a §4:
   ship (in-memory, file, Postgres) — not just one.
 - No signature change above `hacienda-core` (§3.3) — same falsifiable claim P3a makes
   about the pseudonym layer, now extended to every other store.
+
+## 7. What actually shipped
+
+**AuditStore (Task 2) is done. ReviewStore/JobStore/DocumentVersionStore/PresetStore
+(Tasks 3-6) are not implemented** — this section is honest about that split rather than
+claiming the whole spec landed. Same posture as P3a's own "spec, not implement" choice
+and P6's §7: partial delivery stated plainly, not folded into "done."
+
+### Migration: one file, not two (§3.2)
+
+Shipped as `hacienda-core/migrations/0004_tenant_scoping.sql` — a single migration doing
+both the expand (`ADD COLUMN ... DEFAULT 'default'`) and the contract (`DROP DEFAULT`,
+the `presets` unique-constraint swap) in one file, for every table in §3.2's list
+including `api_keys`. Two things forced this away from §3.2's two-migration design:
+
+1. By the time this was written, `hacienda-core/migrations/0002_document_version_content.sql`
+   and `0003_job_progress.sql` already existed (added by unrelated work after this spec's
+   source investigation), so the filenames `0002_tenant_scoping_expand.sql`/
+   `0003_tenant_scoping_contract.sql` this spec names were already taken.
+2. Reading `0002_document_version_content.sql` showed this repo's actual, already-
+   established convention is single-file expand+contract, not a two-migration split —
+   because migrations and the Rust code that requires the new column ship together in one
+   deploy here, with no rolling-upgrade window between them to protect against. §3.2's
+   two-file reasoning assumed a gap this codebase doesn't have.
+
+### AuditStore: trait design matches §3.1 exactly, with one addition
+
+§3.1's proposed signatures (`&TenantId` as a parameter on `append`/`entries`/`history`/
+`tip`/`seals`) shipped unchanged. `verify`/`rotate`/`close` — not listed in §3.1's example
+block but obviously needing the same treatment for a store serving more than one tenant
+(each needs to know *which* tenant's open segment to verify/rotate/close) — also gained
+`&TenantId`, for all eight trait methods.
+
+An earlier implementation pass considered a facade-level "one store instance per tenant,
+cached" factory instead of trait-parameter threading, reasoning that the in-memory/file
+backends' existing design ("one instance = one isolated unit of state") would need zero
+changes under that scheme. This was abandoned **before any code was written** on reading
+`tenancy.rs`'s own module doc, which already documents this exact tradeoff as decision
+D-S1-1: a parameter fails to compile at every call site that forgets it; a
+one-store-per-tenant factory lets that same omission go unnoticed at construction time,
+where it's invisible. The trait-parameter design in §3.1 was correct as written; the
+divergence was caught by re-reading `tenancy.rs`, not by any change to the spec.
+
+### Per-backend notes
+
+- **`InMemoryAuditStore`** (`hacienda-core/src/audit/store.rs`): one `State` per tenant,
+  in a `HashMap<TenantId, State>` behind the store's single `Mutex`, lazily created on
+  that tenant's first call. `node_id`/`config_hash` stay store-wide (one writer node
+  serving many tenants). Two new tests: `two_tenants_audit_chains_are_independent`,
+  `audit_history_never_returns_another_tenants_entries`.
+- **`FileAuditStore`** (`hacienda-core/src/audit/store_file.rs`): layout gains one level,
+  `root/{node_id}/{tenant_id}/...`. Recovery no longer runs at `open()` — which tenants
+  exist isn't known until a caller names one — it runs lazily per tenant on first touch
+  (`ensure_tenant_loaded`), via `spawn_blocking` off the async executor. A dedicated
+  `recovery_lock: tokio::sync::Mutex<()>` serialises that first-touch recovery: an earlier
+  version without it let two concurrent first-touches of the same tenant race against each
+  other's on-disk files mid-recovery (one's freshly-created empty `.jsonl` could be
+  observed by the other's `find_unsealed_jsonl` scan and mistaken for a crash orphan) —
+  caught by `should_write_concurrent_appends_to_the_file_in_chain_order` failing
+  non-deterministically, fixed with double-checked locking around the recovery step. Three
+  existing tests changed from asserting `FileAuditStore::open` itself fails on a broken/
+  tampered chain to asserting the *first call that touches that tenant* fails instead —
+  `open` performing no recovery is the correct, intended behavior change, not a bug the
+  tests were pinning.
+- **`IndexedDbAuditStore`** (`hacienda-core/src/audit/store_idb.rs`, wasm32-only, gated
+  `#[cfg(target_arch = "wasm32")]`): updated to the same per-tenant `HashMap` pattern,
+  with per-tenant IndexedDB record keys. Could not be compiled or tested in this session —
+  no wasm32 target available in the sandbox this work ran in. Reviewed carefully by hand
+  against the same pattern proven correct in the other two backends, but genuinely
+  unverified; treat as higher-risk than the other backends until a real wasm32 build
+  exercises it.
+- **`PostgresAuditStore`** (`hacienda-core/src/store/postgres/audit.rs`): every query
+  gained a `tenant_id = $n` predicate; `get_or_create_open_segment`'s advisory lock key
+  now includes the tenant (`hashtext('hacienda_audit_open_segment:' || tenant)`) so one
+  tenant's first-append serialization doesn't block another's; `get_latest_seal_hash` —
+  not called out in §3.1/§3.2 but discovered during implementation — needed the same
+  filter, since without it a tenant's new seal would link its `prev_seal_hash` to
+  whichever tenant sealed most recently, producing a seal chain that spans tenants and
+  fails `verify_seal_chain` for both. `rotate`'s and `close`'s `fetch_one`/`FOR UPDATE`
+  queries needed the filter for a sharper reason than "correctness": without it, they
+  panic ("query returned more than one row") the moment a second tenant has its own open
+  segment, since those queries assumed exactly one open segment existed store-wide.
+  Verified against a live Postgres in this session (migrations applied by hand, since the
+  repo's disposable-Postgres test fixture needs Docker image pulls this sandbox's network
+  policy blocks) — all eight methods' tenant isolation confirmed functionally, including
+  the rotate/close/advisory-lock paths under two tenants each holding their own open
+  segment simultaneously.
+- **`PostgresUsageStore`** (`hacienda-core/src/store/postgres/usage.rs`) — not part of
+  this spec's scope, but discovered while auditing every `audit_entries`/`audit_segments`
+  reader for tenant leaks: `summary()` aggregates usage/billing numbers across **every**
+  tenant, with no `tenant_id` filter at all. This is a real cross-tenant billing-data leak,
+  reachable via `GET /v1/usage`. Left unfixed here — closing it needs an API-layer change
+  too (the handler and route currently have no tenant-scoped variant) — but flagged
+  explicitly rather than silently left for the next person to rediscover.
+
+### Facade threading (§3.3) — audit only
+
+Every `HaciendaFacade` method that touches `audit_store` now resolves
+`caller.tenant_ctx().tenant` and threads it through — `audit_entries_with_auth`,
+`audit_history_with_auth`, `audit_seals_with_auth`, `audit_export_with_auth`,
+`verify_audit_with_auth`, `close_with_auth`, and the internal `record_audit`/
+`record_audit_entries`/`record_token_reveal` paths. §3.3's "no `hacienda-api`/
+`hacienda-cli`/`hacienda-mcp` signature changes" claim held for everything **except**
+`audit_tip`, which — deliberately, per its own doc comment — takes no `Caller` at all (not
+capability-gated, so every content-bearing response can attach chain evidence regardless
+of the caller's capabilities). That property is orthogonal to tenancy: the tip still needs
+to be *this caller's tenant's* tip, so it needed a tenant even though it needed no
+capability. Fixed with an additive `audit_tip_with_auth(caller)` alongside the unchanged
+`audit_tip()` (which now delegates to `Caller::Trusted`), and every `hacienda-api` handler
+that called the old form updated to pass its already-in-scope `caller` — a real, if small,
+handler-layer change §3.3's blanket claim didn't anticipate.
+
+`close_with_auth` gained a documented multi-tenant caveat: it seals only the calling
+tenant's open segment, because `AuditStore` has no "every tenant this store has ever
+served" enumeration to close them all, and building one was out of scope here. Not a
+data-loss gap (recovery reseals an orphaned segment automatically on next open), but a
+real behavior a multi-tenant deployment doing an orderly shutdown needs to know: closing
+once via `Caller::Trusted` does not seal every tenant's chain.
+
+### Not implemented: Tasks 3-6
+
+`ReviewStore`, `JobStore`, `DocumentVersionStore`, and `PresetStore` remain exactly as
+described in §3.1 — designed, not touched. Whoever picks these up next: the `AuditStore`
+implementation above is the reference pattern (trait-parameter threading, per-tenant
+`HashMap` for in-memory backends, `tenant_id = $n` predicates for Postgres, lazy
+per-tenant recovery keyed by directory nesting for file backends where applicable), and
+`hacienda-core/src/tenancy.rs`'s module doc (decision D-S1-1) is the reasoning to re-read
+before considering any alternative — it heads off the same factory-vs-parameter detour
+this implementation took and backed out of before writing any code.

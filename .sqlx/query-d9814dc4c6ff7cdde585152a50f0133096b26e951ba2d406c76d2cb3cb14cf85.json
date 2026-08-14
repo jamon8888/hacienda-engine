@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT segment_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,\n                       entry_count, created_at, sealed_at\n                FROM audit_segments\n                WHERE sealed_at IS NOT NULL\n                ORDER BY sealed_at DESC\n                LIMIT 1\n                ",
+  "query": "\n                SELECT segment_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,\n                       entry_count, created_at, sealed_at\n                FROM audit_segments\n                WHERE sealed_at IS NOT NULL AND tenant_id = $1\n                ORDER BY sealed_at DESC\n                LIMIT 1\n                ",
   "describe": {
     "columns": [
       {
@@ -50,7 +50,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -64,5 +66,5 @@
       true
     ]
   },
-  "hash": "4600ae0f675159464d8c55fc6f9ae9a5ba3403703ce568a94a9b06f82c14d7fa"
+  "hash": "d9814dc4c6ff7cdde585152a50f0133096b26e951ba2d406c76d2cb3cb14cf85"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT segment_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL FOR UPDATE",
+  "query": "SELECT segment_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL AND tenant_id = $1 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -30,7 +30,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -40,5 +42,5 @@
       false
     ]
   },
-  "hash": "60e4a914742e11743031035a9a0b8652af280de891584a9175c42d64f0db5b1c"
+  "hash": "eee92e513b06916fb559e4f437a8d273daf647e4acf988f3edbce1be8b441d6e"
 }

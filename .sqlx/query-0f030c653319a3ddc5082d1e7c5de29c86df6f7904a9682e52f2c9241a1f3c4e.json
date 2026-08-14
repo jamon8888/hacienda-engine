@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, category, action, span_hash,\n                   span_length, confidence, source, pipeline_version, config_hash, principal,\n                   chain_hash, created_at\n            FROM audit_entries\n            WHERE segment_id = (\n                SELECT segment_id FROM audit_segments\n                WHERE sealed_at IS NULL\n                ORDER BY created_at DESC\n                LIMIT 1\n            )\n            ORDER BY sequence_num\n            ",
+  "query": "\n            SELECT id, category, action, span_hash,\n                   span_length, confidence, source, pipeline_version, config_hash, principal,\n                   chain_hash, created_at\n            FROM audit_entries\n            WHERE segment_id = (\n                SELECT segment_id FROM audit_segments\n                WHERE sealed_at IS NULL AND tenant_id = $1\n                ORDER BY created_at DESC\n                LIMIT 1\n            )\n            ORDER BY sequence_num\n            ",
   "describe": {
     "columns": [
       {
@@ -65,7 +65,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -82,5 +84,5 @@
       false
     ]
   },
-  "hash": "b53dcf0eeb7c8b8dbe4b59baf5df9a3bda4d8e7e90507fea8ce42e452ec7d1f6"
+  "hash": "0f030c653319a3ddc5082d1e7c5de29c86df6f7904a9682e52f2c9241a1f3c4e"
 }

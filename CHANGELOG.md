@@ -606,6 +606,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`AuditStore` is now tenant-scoped — two tenants sharing one process could previously
+  read, verify, and even seal each other's audit history.** `TenantCtx`/`Caller::tenant_ctx()`
+  (S1) resolved a tenant for every caller, but no store actually enforced it: `entries()`,
+  `history()`, `tip()`, `seals()`, and `verify()` all read *the* open segment/seal chain,
+  singular, store-wide — a second tenant's redaction/reveal audit trail (who saw what
+  plaintext, when) was fully readable by the first. Worse on the Postgres backend:
+  `rotate()`/`close()` assumed exactly one open segment existed globally and would panic
+  ("query returned more than one row") the moment a second tenant had its own; `verify()`'s
+  seal-chain check would fail for *both* tenants once each had sealed at least once, because
+  seals from different tenants got threaded into what looked like one broken chain. Fixed by
+  adding `&TenantId` to every `AuditStore` method (`append`/`entries`/`history`/`tip`/
+  `seals`/`verify`/`rotate`/`close`) across all three backends — `InMemoryAuditStore` (one
+  chain state per tenant), `FileAuditStore` (one directory per tenant under the node's, with
+  recovery now lazy per tenant instead of eager at open), and `PostgresAuditStore` (a
+  `tenant_id` column and predicate on every query, including a tenant-scoped advisory lock
+  for the open-segment race). `HaciendaFacade`'s audit call sites thread
+  `caller.tenant_ctx().tenant` through automatically — no API/CLI/MCP request shape changed.
+  `ReviewStore`/`JobStore`/`DocumentVersionStore`/`PresetStore` have the same gap and are
+  not yet fixed — tracked in
+  `superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`.
+  While auditing every `audit_entries` reader for the same class of leak,
+  `PostgresUsageStore::summary` (billing/usage aggregation, `GET /v1/usage`) was found to
+  have the identical gap — also not yet fixed, flagged in that spec's §7.
 - **The one call site that sends document content to an LLM now redacts structurally, not
   by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
   call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before

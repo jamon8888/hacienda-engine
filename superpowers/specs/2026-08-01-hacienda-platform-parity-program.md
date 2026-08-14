@@ -147,11 +147,16 @@ autre.
 > partageant un déploiement voient aujourd'hui l'historique d'audit, la file de revue
 > (texte en clair inclus, par conception) et les versions de documents l'un de l'autre.
 > Le volet pseudonymisation de cette alerte est spécifié séparément
-> (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`, référencé plus haut à P3) ; le reste
-> — audit, revue, jobs, versions, presets — est spécifié et prêt à implémenter dans
+> (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`, référencé plus haut à P3), non encore
+> implémenté. Le reste — audit, revue, jobs, versions, presets — est spécifié dans
 > `2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`, avec son plan
 > d'implémentation en huit tâches, `superpowers/plans/2026-08-14-S1b-tenant-isolation-implementation.md`.
-> Ni l'un ni l'autre n'est encore implémenté.
+> **Mise à jour (2026-08-14) :** `AuditStore` (les trois backends — mémoire, fichier,
+> Postgres — plus le fil `HaciendaFacade`) est livré et testé ; voir le §7 de la spec S1b
+> pour le détail exact de ce qui a été livré. `ReviewStore`, `JobStore`,
+> `DocumentVersionStore` et `PresetStore` restent non implémentés — l'historique d'audit
+> ne fuit plus d'un tenant à l'autre, mais la file de revue (texte en clair inclus) et les
+> versions de documents le font toujours.
 
 **Note.** Ne pas retarder : rétro-ajouter un tenant après mise en production impose de migrer
 les chaînes d'audit et de re-dériver les tokens. C'est le seul chantier réellement bloquant.

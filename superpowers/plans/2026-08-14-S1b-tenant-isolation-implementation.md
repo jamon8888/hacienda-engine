@@ -1,5 +1,16 @@
 # S1b — Tenant-scoped stores — Implementation plan
 
+**Status (2026-08-14):** Task 1 (migration) and Task 2 (`AuditStore`) shipped — see the
+spec's §7 "What actually shipped" for the real design/detail, which diverges from this
+plan in a few places the plan didn't anticipate (single migration file, not two;
+`verify`/`rotate`/`close` also gained `&TenantId`; a `recovery_lock` needed adding to
+`FileAuditStore` to close a real recovery race the plan didn't foresee;
+`audit_tip_with_auth` needed adding as a new facade method). Tasks 3-8 below are
+unstarted — still an accurate task breakdown for whoever picks them up, just not yet
+executed. Facade threading for `AuditStore` (part of what Task 7 describes) already
+shipped alongside Task 2, since the trait signature change forced it — see the spec's §7
+for exactly which facade methods changed.
+
 **Spec:** `superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`
 **Sibling plan:** none written yet for P3a (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`)
 — that spec is implementation-ready but has no separate plan file; its §3 is detailed
@@ -39,46 +50,46 @@ live — each touches a disjoint set of files.
 
 ## Task 1 — Postgres expand migration (ships alone, first)
 
-- [ ] Write `hacienda-core/migrations/0002_tenant_scoping_expand.sql` exactly as spec §3.2
+- [x] Write `hacienda-core/migrations/0002_tenant_scoping_expand.sql` exactly as spec §3.2
       shows: `ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'` on `audit_segments`,
       `review_items`, `jobs`, `document_versions`, `presets`, `api_keys`, plus the four new
       indexes. Do **not** drop any default or touch the `presets.name` constraint in this
       migration — that is Task 7.
-- [ ] Run it against a live Postgres instance (`postgres-integration-tests`' fixture) and
+- [x] Run it against a live Postgres instance (`postgres-integration-tests`' fixture) and
       confirm every existing row backfills to `'default'` and every existing insert (from
       unmodified, pre-this-plan code) still succeeds unchanged.
-- [ ] `SQLX_OFFLINE=true cargo check -p hacienda-core --features postgres` to catch any
+- [x] `SQLX_OFFLINE=true cargo check -p hacienda-core --features postgres` to catch any
       `sqlx::query!`/`query_as!` macro whose compile-time-checked SQL now disagrees with
       the widened schema (expect none — this migration only adds columns, doesn't touch
       any column an existing query already selects `*` around... verify column lists are
       explicit, not `SELECT *`, before assuming this).
-- [ ] Deploy. This step alone changes no observable behaviour — every caller still sees
+- [x] Deploy. This step alone changes no observable behaviour — every caller still sees
       exactly what they saw before, because nothing reads the new column yet.
 
 ## Task 2 — `AuditStore`: the hash-chain partitioning decision (§1.2/§3.1)
 
-- [ ] Add `&TenantId` to `AuditStore::append`/`entries`/`history`/`tip`/`seals`
+- [x] Add `&TenantId` to `AuditStore::append`/`entries`/`history`/`tip`/`seals`
       (`hacienda-core/src/audit/store.rs`).
-- [ ] `InMemoryAuditStore`: key its internal chain state by `TenantId`, not a single chain
+- [x] `InMemoryAuditStore`: key its internal chain state by `TenantId`, not a single chain
       — a `HashMap<TenantId, AuditChain>` or equivalent, lazily inserted on first use per
       tenant (mirrors how the existing single-chain state is already lazily-initialized-once
       logic, just keyed now).
-- [ ] `FileAuditStore` (`hacienda-core/src/audit/store_file.rs`): move segment files from
+- [x] `FileAuditStore` (`hacienda-core/src/audit/store_file.rs`): move segment files from
       `<audit_dir>/<node_id>/segment-*.jsonl` to
       `<audit_dir>/<node_id>/<tenant_id>/segment-*.jsonl`. Sanitise `tenant_id` the same
       way `node_id` is already sanitised for path use (find that sanitisation, reuse it —
       do not write a second one).
-- [ ] Postgres backend (`hacienda-core/src/store/postgres/audit.rs`): every query that
+- [x] Postgres backend (`hacienda-core/src/store/postgres/audit.rs`): every query that
       currently filters/keys on `node_id` alone gains `AND tenant_id = $n`; "the currently
       open segment for this node" becomes "for this (node, tenant)" — this is the change
       most likely to have a subtle bug, since it is the one place uniqueness genuinely
       changes shape (one open segment per node *per tenant* now, not one per node).
-- [ ] Test: `two_tenants_audit_chains_are_independent` and
+- [x] Test: `two_tenants_audit_chains_are_independent` and
       `audit_history_never_returns_another_tenants_entries` (spec §5), run against all
       three backends — copy the existing pattern this codebase already uses for
       backend-parametrised tests (`should_construct_arc_dyn_audit_store`-style, or
       wherever `InMemoryAuditStore`/`FileAuditStore`/Postgres already share a test body).
-- [ ] Update every direct `AuditStore` construction in test setup across the workspace to
+- [x] Update every direct `AuditStore` construction in test setup across the workspace to
       pass `&TenantId::default_tenant()` — mechanical, not a design change (same "no other
       call site changes" claim the spec's exit criteria make).
 

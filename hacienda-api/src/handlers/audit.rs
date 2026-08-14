@@ -811,10 +811,16 @@ mod tests {
 
         // Seal the segment: `verify` re-reads sealed segments from disk, which is what
         // makes on-disk tampering detectable in the first place.
-        let seal = store.rotate().await.expect("rotate");
+        let seal = store
+            .rotate(&hacienda_core::tenancy::TenantId::default_tenant())
+            .await
+            .expect("rotate");
         assert!(seal.entry_count >= 3, "the corpus must fill the segment");
 
-        let path = node_dir.join(format!("{}.jsonl", seal.segment_id));
+        // S1b: segment files live one level deeper now, under the tenant's own
+        // subdirectory (`node_dir/{tenant_id}/...`), not directly in `node_dir`.
+        let tenant_dir = node_dir.join(hacienda_core::tenancy::TenantId::default_tenant().as_str());
+        let path = tenant_dir.join(format!("{}.jsonl", seal.segment_id));
         let original = fs::read_to_string(&path).expect("read the sealed segment");
         let mut records: Vec<serde_json::Value> = original
             .lines()
@@ -863,7 +869,10 @@ mod tests {
         let app = build_router(state);
 
         process_the_corpus(&app).await;
-        store.rotate().await.expect("rotate");
+        store
+            .rotate(&hacienda_core::tenancy::TenantId::default_tenant())
+            .await
+            .expect("rotate");
 
         let body: serde_json::Value = serde_json::from_str(
             &body_text(get(&app, "/v1/audit/verify", ALL_CAPS_TOKEN).await).await,
