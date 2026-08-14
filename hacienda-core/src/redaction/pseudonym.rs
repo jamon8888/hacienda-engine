@@ -217,6 +217,16 @@ impl std::fmt::Display for KeyId {
     }
 }
 
+/// One key's identity and rotation status, with no key material — the shape
+/// [`GET /v1/keys`](crate::HaciendaFacade::list_keys_with_auth) reports (D-P3-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyStatus {
+    pub id: KeyId,
+    /// `true` for the key new tokens mint under; `false` for a retired key still
+    /// loaded for reveal.
+    pub active: bool,
+}
+
 /// A pseudonymisation key: an id, and the secret that reverses every token bearing it.
 ///
 /// # Security
@@ -602,6 +612,24 @@ impl Pseudonymiser {
         // Every token this crate mints encodes normalised UTF-8, so a non-UTF-8 result
         // means a forged body that happened to authenticate — impossible without the key.
         String::from_utf8(plaintext.to_vec()).map_err(|_| PseudonymError::UnreadableToken)
+    }
+
+    /// This tenant's key ids and rotation status — the active key first, then every
+    /// retired key still loaded, in no particular order. Never exposes key material
+    /// (D-P3-3, `2026-08-01-P3-pseudonymisation-as-a-service.md` §3) — only what
+    /// [`GET /v1/keys`](crate::HaciendaFacade::list_keys_with_auth) is allowed to report.
+    pub fn key_statuses(&self) -> Vec<KeyStatus> {
+        let mut statuses = vec![KeyStatus {
+            id: self.active.id().clone(),
+            active: true,
+        }];
+        statuses.extend(
+            self.retired
+                .keys()
+                .cloned()
+                .map(|id| KeyStatus { id, active: false }),
+        );
+        statuses
     }
 
     fn key(&self, id: &KeyId) -> Result<&PseudonymKey, PseudonymError> {

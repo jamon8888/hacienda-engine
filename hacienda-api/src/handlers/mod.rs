@@ -12,6 +12,7 @@ pub mod auth;
 pub mod documents;
 pub mod info;
 pub mod jobs;
+pub mod keys;
 pub mod openapi;
 pub mod pii;
 pub mod presets;

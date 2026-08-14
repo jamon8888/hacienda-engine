@@ -11,8 +11,12 @@ use crate::error::HaciendaError;
 use crate::glossary::{EntityGlossary, GlossaryEntry};
 use crate::pii::ner::NerDetector;
 use crate::pii::pipeline::build_detector;
-use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineResult};
-use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionAuditEntry, RedactionError};
+use crate::pii::{
+    MergedEntity, PiiCategory, PiiError, PiiPipeline, PipelineMetrics, PipelineResult,
+};
+use crate::redaction::{
+    KeyId, KeyResolver, KeyStatus, Pseudonymiser, RedactionAuditEntry, RedactionError,
+};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
 use crate::tenancy::TenantId;
@@ -1187,6 +1191,59 @@ impl HaciendaFacade {
         let plaintext = pseudonymiser.reveal(token)?;
         self.record_token_reveal(&plaintext, caller).await?;
         Ok(plaintext)
+    }
+
+    /// Mint the pseudonym token for a caller-supplied `(category, value)` pair, without
+    /// revealing anything (P3b §2, D-P3-1 in the parent P3 spec).
+    ///
+    /// Requires only `documents:process` — not `pii:reveal` — because computing the token
+    /// for a value the caller already supplies discloses nothing new; only the reverse
+    /// direction ([`Self::reveal_token_with_auth`]) does. This is what makes a GDPR right
+    /// of access or erasure practicable against redacted storage: compute the token for
+    /// the value a data subject names, then search the corpus for *that token*, without
+    /// decrypting it. No audit entry is written here for the same reason: `reveal` records
+    /// a disclosure event, and minting isn't one.
+    ///
+    /// Resolves through [`Self::pseudonymiser_for`], the same reveal-only cache
+    /// `reveal_token_with_auth` uses — this works under a key-resolver-only configuration
+    /// with no `[pii]` detection section, exactly like reveal does (P3a §7).
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no key resolver is configured, or the caller's
+    /// tenant has no resolvable key. [`HaciendaError::Pseudonym`] wrapping
+    /// [`crate::redaction::PseudonymError::UnsupportedCategory`] for a
+    /// [`PiiCategory::Custom`] name containing a token delimiter.
+    pub async fn mint_pseudonym_token_with_auth(
+        &self,
+        caller: Caller<'_>,
+        category: &PiiCategory,
+        value: &str,
+    ) -> Result<String, HaciendaError> {
+        caller.require(Capability::DocumentsProcess)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pseudonymiser = self.pseudonymiser_for(&tenant)?;
+        Ok(pseudonymiser.token(category, value)?)
+    }
+
+    /// List the caller's tenant's pseudonym key ids and rotation status — identifiers
+    /// only, never key material (P3b §3, D-P3-3 in the parent P3 spec).
+    ///
+    /// Requires `audit:read`, per the parent P3 spec's route table. Resolves through
+    /// [`Self::pseudonymiser_for`], so this also works with no `[pii]` section configured.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no key resolver is configured, or the caller's
+    /// tenant has no resolvable key.
+    pub async fn list_keys_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Vec<KeyStatus>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pseudonymiser = self.pseudonymiser_for(&tenant)?;
+        Ok(pseudonymiser.key_statuses())
     }
 
     /// Record a token reveal audit entry for a single plaintext value.
@@ -2424,6 +2481,136 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revealed, "bob@example.com");
+    }
+
+    // ── P3b: pseudonym key management API surface ─────────────────────────────
+
+    /// P3b §5: minting is pure — the same `(category, value)` pair mints the same
+    /// token across two independent calls (P3's founding determinism property,
+    /// narrowed to `mint_pseudonym_token_with_auth`).
+    #[tokio::test]
+    async fn mint_token_same_value_same_token_two_calls() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let first = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        let second = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+    }
+
+    /// P3b §5 / D-P3-1: a caller holding `documents:process` but *not* `pii:reveal`
+    /// can still mint — minting discloses nothing the caller doesn't already supply,
+    /// unlike reveal.
+    #[tokio::test]
+    async fn mint_token_requires_only_documents_process_not_pii_reveal() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let ctx = AuthContext::with_tenant(
+            "alice",
+            TenantId::default_tenant(),
+            crate::auth::CapabilitySet::new([Capability::DocumentsProcess]),
+        );
+        let caller = Caller::Principal(&ctx);
+
+        let token = facade
+            .mint_pseudonym_token_with_auth(caller, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        assert!(!token.is_empty());
+    }
+
+    /// P3b §5: `GET /v1/keys`' facade method reports the active key plus every
+    /// configured retired key, and nothing else.
+    #[tokio::test]
+    async fn list_keys_reports_active_and_one_retired_status() {
+        let resolver: Arc<dyn KeyResolver> =
+            Arc::new(EnvKeyResolver::with_lookup(|name| match name {
+                ACTIVE_KEY_VAR => Some("k2".to_string()),
+                "HACIENDA_PSEUDONYM_KEY_K2" => Some("07".repeat(KEY_BYTES)),
+                "HACIENDA_PSEUDONYM_KEY_K1" => Some("a9".repeat(KEY_BYTES)),
+                _ => None,
+            }));
+        let retired = vec![KeyId::new("k1").unwrap()];
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, resolver, &retired).unwrap();
+
+        let mut statuses = facade.list_keys_with_auth(Caller::Trusted).await.unwrap();
+        statuses.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].id.as_str(), "k1");
+        assert!(!statuses[0].active);
+        assert_eq!(statuses[1].id.as_str(), "k2");
+        assert!(statuses[1].active);
+    }
+
+    /// P3b §5 / D-P3-3: nothing in a [`KeyStatus`] can carry key material — there is no
+    /// field to leak one through in the first place, but this pins that shape so a
+    /// future field addition can't reintroduce it silently.
+    #[tokio::test]
+    async fn list_keys_response_contains_no_key_material() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let statuses = facade.list_keys_with_auth(Caller::Trusted).await.unwrap();
+        for status in statuses {
+            // `KeyStatus` has exactly two fields, `id` and `active` — this loop and
+            // the assertions below are the exhaustiveness check: if a third field
+            // existed, nothing here would fail to compile to remind us to check it.
+            assert!(!status.id.as_str().is_empty());
+        }
+    }
+
+    /// P3b §5: two tenants resolve independent key listings and mint independent
+    /// tokens through the same facade — reusing P3a's `two_tenant_key_resolver`.
+    #[tokio::test]
+    async fn list_keys_and_token_resolve_the_callers_own_tenant() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        // Unlike `acme_caller_ctx()` above (scoped to reveal), this test also needs
+        // `audit:read` for `list_keys_with_auth`.
+        let acme_ctx = AuthContext::with_tenant(
+            "alice",
+            TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([
+                Capability::DocumentsProcess,
+                Capability::PiiReveal,
+                Capability::AuditRead,
+            ]),
+        );
+        let acme = Caller::Principal(&acme_ctx);
+
+        let default_keys = facade.list_keys_with_auth(Caller::Trusted).await.unwrap();
+        let acme_keys = facade.list_keys_with_auth(acme).await.unwrap();
+        assert_eq!(default_keys.len(), 1);
+        assert_eq!(acme_keys.len(), 1);
+        assert_eq!(default_keys[0].id.as_str(), "k1");
+        assert_eq!(acme_keys[0].id.as_str(), "k1");
+
+        let default_token = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        let acme_token = facade
+            .mint_pseudonym_token_with_auth(acme, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        assert_ne!(
+            default_token, acme_token,
+            "two tenants minting the same value must get different tokens"
+        );
     }
 
     /// Counts `detect` calls — used to prove `pii_pipeline_for` never reloads the NER

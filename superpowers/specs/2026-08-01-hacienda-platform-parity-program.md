@@ -139,16 +139,18 @@ segments d'audit sont nommés `(tenant, node)` ; quotas et limites par tenant.
 produisent des tokens **différents** ; une clé retirée d'un tenant ne déchiffre rien d'un
 autre.
 
-> **⚠ Alerte (2026-08-14), toujours ouverte.** `TenantCtx`/`Caller::tenant_ctx()` sont
+> **⚠ Alerte (2026-08-14), résolue le même jour.** `TenantCtx`/`Caller::tenant_ctx()` sont
 > livrés, mais "tous les traits de store le prennent en paramètre de scope" ci-dessus ne
-> l'est pas : vérifié directement contre `AuditStore`, `ReviewStore`, `JobStore`,
-> `DocumentVersionStore`, `PresetStore` — aucun ne prend de paramètre de tenant, et le
-> schéma Postgres (`0001_init.sql`) n'a de colonne `tenant_id` nulle part. Deux tenants
-> partageant un déploiement voient aujourd'hui l'historique d'audit, la file de revue
-> (texte en clair inclus, par conception) et les versions de documents l'un de l'autre.
-> Le volet pseudonymisation de cette alerte est spécifié séparément
-> (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`, référencé plus haut à P3), non encore
-> implémenté. Le reste — audit, revue, jobs, versions, presets — est spécifié dans
+> l'était **pas** à l'ouverture de cette alerte : vérifié directement contre `AuditStore`,
+> `ReviewStore`, `JobStore`, `DocumentVersionStore`, `PresetStore` — aucun ne prenait de
+> paramètre de tenant, et le schéma Postgres (`0001_init.sql`) n'avait de colonne
+> `tenant_id` nulle part. Deux tenants partageant un déploiement voyaient l'historique
+> d'audit, la file de revue (texte en clair inclus, par conception) et les versions de
+> documents l'un de l'autre.
+> Le volet pseudonymisation de cette alerte a été spécifié séparément
+> (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`, référencé plus haut à P3) et est
+> maintenant lui aussi implémenté (voir plus bas dans ce paragraphe). Le reste — audit,
+> revue, jobs, versions, presets — est spécifié dans
 > `2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`, avec son plan
 > d'implémentation en huit tâches, `superpowers/plans/2026-08-14-S1b-tenant-isolation-implementation.md`.
 > **Mise à jour (2026-08-14) :** les cinq stores couverts par la spec S1b sont livrés et

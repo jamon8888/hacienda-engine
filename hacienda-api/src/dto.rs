@@ -90,6 +90,18 @@ pub struct RevealTokenRequest {
     pub token: String,
 }
 
+/// Body for `POST /v1/pii/token` — mint the pseudonym token for a known value, without
+/// revealing anything (P3b §2).
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MintTokenRequest {
+    #[schema(value_type = String)]
+    pub category: PiiCategory,
+    /// The plaintext value to compute a token for. Never logged, and never echoed back
+    /// anywhere but this response's own `token` field, which does not contain it.
+    pub value: String,
+}
+
 /// The decision a reviewer may record for a queued item.
 ///
 /// A closed enum, not a free `String`: the OpenAPI schema this derives lists exactly
@@ -202,6 +214,38 @@ pub struct RevealTokenResponse {
     pub plaintext: String,
     /// Current audit chain tip. `null` when auditing is disabled.
     pub audit_chain_tip: Option<String>,
+}
+
+/// Response for `POST /v1/pii/token`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MintTokenResponse {
+    /// The pseudonym token for the requested value. Format: `[CATEGORY:key_id:base32...]`
+    pub token: String,
+}
+
+/// One key's identity and rotation status within a `GET /v1/keys` response. Never
+/// carries key material (D-P3-3, P3b §3).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeyStatusDto {
+    pub id: String,
+    /// `true` for the key new tokens mint under; `false` for a retired key still able
+    /// to reveal tokens minted under it.
+    pub active: bool,
+}
+
+impl From<hacienda_core::redaction::KeyStatus> for KeyStatusDto {
+    fn from(status: hacienda_core::redaction::KeyStatus) -> Self {
+        Self {
+            id: status.id.as_str().to_string(),
+            active: status.active,
+        }
+    }
+}
+
+/// Response for `GET /v1/keys`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeyListResponse {
+    pub keys: Vec<KeyStatusDto>,
 }
 
 /// A single document's result within a `POST /v1/documents` response.

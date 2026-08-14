@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, rag_stream,
-        uploads, usage, versions,
+        audit, audit_review, auth, documents, info, jobs, keys, openapi, pii, presets, rag,
+        rag_stream, uploads, usage, versions,
     },
     state::ApiState,
 };
@@ -116,6 +116,13 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/pii/reveal",
         access: Access::Capability(Capability::PiiReveal),
         make_router: || post(pii::reveal_token),
+    },
+    // `token` needs only `documents:process` (D-P3-1, P3b §2) — minting a token for a
+    // caller-supplied value discloses nothing new, unlike `reveal` above.
+    RouteSpec {
+        path: "/v1/pii/token",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(pii::mint_token),
     },
     RouteSpec {
         path: "/v1/pii/config",
@@ -326,6 +333,13 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/usage",
         access: Access::Capability(Capability::AuditRead),
         make_router: || get(usage::get_usage),
+    },
+    // Pseudonym key ids and status only, never material (D-P3-3, P3b §3) — gated under
+    // the same `AuditRead` capability the parent P3 spec's route table assigns it.
+    RouteSpec {
+        path: "/v1/keys",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(keys::list_keys),
     },
 ];
 
@@ -919,6 +933,131 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// P3b: `POST /v1/pii/token` requires only `documents:process`, not `pii:reveal`
+    /// — the opposite gating from `/v1/pii/reveal` (D-P3-1).
+    #[tokio::test]
+    async fn token_route_works_with_only_documents_process() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pii/token")
+                    .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"category":"email","value":"bob@example.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            200,
+            "token minting must work with documents:process alone"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["token"].as_str().unwrap().starts_with("[EMAIL:"));
+    }
+
+    /// P3b: minting the same value twice returns the same token.
+    #[tokio::test]
+    async fn token_route_same_value_same_token() {
+        let app = build_router(state_with_pii());
+
+        let mint = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/pii/token")
+                .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"category":"email","value":"bob@example.com"}"#,
+                ))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(mint()).await.unwrap();
+        let first_body = axum::body::to_bytes(first.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+
+        let second = app.oneshot(mint()).await.unwrap();
+        let second_body = axum::body::to_bytes(second.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+
+        assert_eq!(first_json["token"], second_json["token"]);
+    }
+
+    /// P3b: `GET /v1/keys` requires `audit:read`; `documents:process` alone is 403.
+    #[tokio::test]
+    async fn keys_route_requires_audit_read() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/keys")
+                    .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// P3b / D-P3-3: `GET /v1/keys`' response reports the configured key's id and
+    /// active status, and the raw JSON text contains no key material — `state_with_pii`
+    /// configures `HACIENDA_PSEUDONYM_KEY_K1` to 64 bytes of hex `07`s, so a leak would
+    /// show up as that literal substring.
+    #[tokio::test]
+    async fn keys_route_reports_status_with_no_key_material() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/keys")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+
+        assert!(
+            !text.contains(&"07".repeat(64)),
+            "key material leaked into the /v1/keys response: {text}"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(text).unwrap();
+        let keys = json["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0]["id"], "k1");
+        assert_eq!(keys[0]["active"], true);
     }
 
     /// The route table's path set must be internally consistent (no duplicate paths).

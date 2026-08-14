@@ -96,6 +96,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`POST /v1/pii/token` and `GET /v1/keys`: two of the four routes the pseudonymisation
+  spec always called for, never built until now.** `Pseudonymiser` had an API surface for
+  reveal (`POST /v1/pii/reveal`) but not for minting a token without revealing, or for
+  listing what keys exist — verified directly against `hacienda-api/src/routes.rs`. Added
+  `POST /v1/pii/token` (mint the token for a caller-supplied `(category, value)` pair;
+  requires `documents:process` only, not `pii:reveal`, since computing a token for a value
+  the caller already knows discloses nothing new — D-P3-1) and `GET /v1/keys` (the caller's
+  tenant's key ids and `active`/`retired` status, `audit:read`; never key material, D-P3-3).
+  Together these make a GDPR right of access or erasure practicable against redacted
+  storage without decrypting the corpus: compute the token for a named value, then search
+  for *that token*. Both resolve through the same per-tenant, reveal-only `Pseudonymiser`
+  cache the P3a tenant-scoping entry above added (`HaciendaFacade::pseudonymiser_for`), so
+  both work under a key-resolver-only configuration with no `[pii]` detection section
+  configured, exactly like `reveal` does. `POST /v1/keys/rotate` — the fourth route the
+  spec names — is explicitly not built: it needs a `KeyResolver` whose active key can
+  change at runtime, which `EnvKeyResolver`'s environment-variable model has no sound way
+  to do per-tenant; tracked against the future KMS-backed resolver (S2) instead of built
+  twice. See `superpowers/specs/2026-08-14-P3b-pseudonym-key-management-api.md`.
 - **`hacienda-mcp` (new crate): an MCP (Model Context Protocol) server for the guarded
   facade, wired up as `hacienda mcp serve` (stdio transport).** Closes the gap the parity
   program's own `2026-08-01-hacienda-platform-parity-program.md` §9 flagged as
