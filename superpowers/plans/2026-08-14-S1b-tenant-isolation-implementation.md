@@ -1,15 +1,31 @@
 # S1b — Tenant-scoped stores — Implementation plan
 
-**Status (2026-08-14):** Task 1 (migration) and Task 2 (`AuditStore`) shipped — see the
+**Status (2026-08-14):** Tasks 1-6 shipped — every store this spec set out to cover
+(`AuditStore`, `ReviewStore`, `JobStore`, `DocumentVersionStore`, `PresetStore`) is
+tenant-scoped, across every applicable backend, verified against a live Postgres. See the
 spec's §7 "What actually shipped" for the real design/detail, which diverges from this
-plan in a few places the plan didn't anticipate (single migration file, not two;
-`verify`/`rotate`/`close` also gained `&TenantId`; a `recovery_lock` needed adding to
-`FileAuditStore` to close a real recovery race the plan didn't foresee;
-`audit_tip_with_auth` needed adding as a new facade method). Tasks 3-8 below are
-unstarted — still an accurate task breakdown for whoever picks them up, just not yet
-executed. Facade threading for `AuditStore` (part of what Task 7 describes) already
-shipped alongside Task 2, since the trait signature change forced it — see the spec's §7
-for exactly which facade methods changed.
+plan in several places it didn't anticipate — most importantly, **there was never a
+separate Task 7 contract migration**: each task dropped its own table's `tenant_id`
+default in the same commit as its Rust change, following the precedent Task 2 set (see
+below), so `0004_tenant_scoping.sql` itself is now fully contracted — no defaults remain
+except `api_keys.tenant_id`, which is deliberately out of S1b's scope. Two real,
+previously-undiscovered bugs were found and fixed along the way: a cross-tenant
+`document_versions` sequence collision (Task 5) and the `presets` name-uniqueness bug
+(Task 6, the functional bug the task was named for). Three HTTP handlers
+(`list_document_versions`/`get_document` in Task 5, all four `/v1/presets/*` routes in
+Task 6, plus `get_diff_job`/`diff_document` in Task 4) extracted no `Caller` at all before
+this work — closed as part of the same tasks that added tenant scoping, not deferred.
+
+Task 7 as originally scoped ("thread `caller.tenant_ctx().tenant` into every store call
+`HaciendaFacade` makes" + "ship the contract migration") turned out to be two claims that
+were each already satisfied by the time Tasks 2-6 finished: facade threading only applies
+to `AuditStore`/`ReviewStore` (the only two stores `HaciendaFacade` actually calls —
+`JobStore`/`DocumentVersionStore`/`PresetStore` are wired directly into `ApiState` and
+called from `hacienda-api` handlers, confirmed by `grep`ping `facade.rs` for each store
+name and finding zero matches for the latter three), and that threading shipped alongside
+Tasks 2 and 3 respectively, forced by each trait's signature change. The contract
+migration is moot per the paragraph above. What Task 7 actually needed, and got, was one
+more full-workspace build+test pass after Task 6 landed (see below) plus this write-up.
 
 **Spec:** `superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`
 **Sibling plan:** none written yet for P3a (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`)
@@ -206,36 +222,62 @@ live — each touches a disjoint set of files.
       Added the missing `parts: Parts`/caller extraction to `create_preset`/
       `list_presets`/`get_preset`/`delete_preset`.
 
-## Task 7 — Facade call-site threading + Postgres contract migration (last)
+## Task 7 — Facade call-site threading + Postgres contract migration (last) — done, mostly moot
 
-- [ ] Thread `caller.tenant_ctx().tenant` into every store call `HaciendaFacade` makes,
-      across all six stores touched by Tasks 2-6. This is mechanical once each store's
-      signature is updated — the pattern is `let tenant = caller.tenant_ctx().tenant;`
-      once per facade method, then pass `&tenant` to whichever store call already existed.
-- [ ] Full workspace build + test (`cargo check --workspace --exclude hacienda-wasm`,
-      `cargo test --workspace --exclude hacienda-wasm`) — this is the point where every
-      previously-mechanical "add `&TenantId::default_tenant()` in test setup" edit from
-      Tasks 2-6 either compiles clean or surfaces a call site this plan missed.
-- [ ] Deploy Tasks 1-7's Rust changes (with Task 1's migration already live from before).
-      Confirm in production/staging logs or a smoke test that inserts now carry explicit
-      `tenant_id` values, not the column default.
-- [ ] Only then: write and ship `hacienda-core/migrations/0003_tenant_scoping_contract.sql`
-      exactly as spec §3.2 shows (drop every default, swap the `presets` unique
-      constraint). This is the migration that makes `preset_names_collide_across_tenants_without_error`
-      (Task 6) finally pass.
-- [ ] Re-run the full test suite one more time against the contracted schema to confirm
-      nothing depended on the now-removed defaults.
+- [x] Thread `caller.tenant_ctx().tenant` into every store call `HaciendaFacade` makes.
+      **Turned out to already be fully done** by the end of Task 3: `grep`ping
+      `facade.rs` for `JobStore`/`PresetStore`/`DocumentVersionStore` returns zero
+      matches — the facade only ever calls `AuditStore` and `ReviewStore` (via
+      `ReviewQueue`), and both of those already had `caller.tenant_ctx().tenant`
+      threaded through every call site as an unavoidable consequence of Tasks 2 and 3's
+      trait signature changes (the code would not compile otherwise). `JobStore`/
+      `DocumentVersionStore`/`PresetStore` are wired directly into `ApiState` and called
+      from `hacienda-api` handlers, never through the facade — their threading happened
+      in Tasks 4-6 at the handler layer instead, which is where it belongs.
+- [x] Full workspace build + test (`cargo check --workspace --exclude hacienda-wasm`,
+      `cargo test --workspace --exclude hacienda-wasm`) — run after every task (2-6), and
+      once more here as a final pass after Task 6 landed. Baseline held throughout: the
+      same 5 pre-existing environmental failures (root-in-container permission-bypass
+      tests, no-Docker `connect_and_migrate`), zero new regressions, test count growing
+      task by task as isolation tests were added.
+- [ ] Deploy Tasks 1-6's Rust changes and confirm in production/staging logs or a smoke
+      test that inserts now carry explicit `tenant_id` values. **Not performed** — this
+      plan was executed in a sandboxed development session with no deployment target;
+      flagged here rather than silently marked done. Whoever deploys this should treat it
+      as the one remaining manual step before considering S1b fully closed operationally
+      (the code and schema are already there).
+- [x] ~~Write and ship a separate `0003_tenant_scoping_contract.sql`~~ — **did not happen,
+      and does not need to**: each of Tasks 2-6 dropped its own table's `tenant_id`
+      default in the *same* migration revision (`0004_tenant_scoping.sql`) as its Rust
+      change, rather than deferring to a later contract migration. This was possible
+      because the whole of Tasks 1-6 shipped as commits on one still-open PR, never
+      individually deployed in between — the rolling-upgrade window §3.2 originally
+      worried about never existed in this session's context. A real production rollout
+      that deploys each task separately would still need that gap respected; this repo's
+      own actual migration convention (single-file expand+contract, established by
+      `0002_document_version_content.sql` and reaffirmed in this migration's own
+      comments) is what the file follows instead. `0004_tenant_scoping.sql` now has zero
+      remaining defaults except `api_keys.tenant_id`, deliberately out of scope.
+      `preset_names_collide_across_tenants_without_error` (Task 6) passes as of Task 6's
+      own commit, not a later one.
+- [x] Re-run the full test suite against the fully-contracted schema — done as part of
+      Task 6's own verification (live Postgres, `.sqlx` cache regenerated against the
+      post-contract schema throughout).
 
-## Task 8 — Cross-reference and close out
+## Task 8 — Cross-reference and close out — done
 
-- [ ] Update `2026-08-01-hacienda-platform-parity-program.md`'s S1 section (French) with
-      an amendment note, same pattern as the existing P7 alert: S1's `TenantCtx` landing
-      was necessary but not sufficient; S1b + P3a is what actually closes tenant isolation.
-      Cross-reference both child specs.
-- [ ] Update `2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`'s own status if it has
-      shipped by this point, or note it as a parallel, independent piece of the same S1
-      closure if it hasn't.
-- [ ] `CHANGELOG.md` `### Security` entry, same style as the P6/P7 entries already there:
-      name the specific disclosure this closes (audit history, review queue content,
-      document versions, preset names — cross-tenant, pre-fix), not just "added tenant
-      scoping."
+- [x] Updated `2026-08-01-hacienda-platform-parity-program.md`'s S1 alert (French):
+      replaced the stale "only `AuditStore` shipped" note with one covering all five
+      stores, the two bugs found and fixed along the way, and the three previously
+      caller-less handlers closed in passing. P3a is correctly still noted as the one
+      remaining open piece of the alert.
+- [x] `2026-08-14-P3a-tenant-scoped-pseudonym-keys.md` — checked, still
+      "Proposed, implementation-ready," genuinely untouched by this work (pseudonym keys
+      are an independent piece of S1's closure, not one of S1b's five stores). No edit
+      needed there; the platform-parity alert above already frames it as the remaining
+      open item.
+- [x] `CHANGELOG.md` `### Security` entries — one per store (Tasks 2-6), each naming the
+      specific disclosure closed and any real bug found along the way, matching the
+      style of the existing P6/P7 entries. Not a single combined entry — five entries,
+      landed incrementally as each task's own commit, which is more honest about
+      sequencing than one entry claiming everything shipped together.

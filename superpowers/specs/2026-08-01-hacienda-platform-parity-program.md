@@ -151,12 +151,22 @@ autre.
 > implémenté. Le reste — audit, revue, jobs, versions, presets — est spécifié dans
 > `2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`, avec son plan
 > d'implémentation en huit tâches, `superpowers/plans/2026-08-14-S1b-tenant-isolation-implementation.md`.
-> **Mise à jour (2026-08-14) :** `AuditStore` (les trois backends — mémoire, fichier,
-> Postgres — plus le fil `HaciendaFacade`) est livré et testé ; voir le §7 de la spec S1b
-> pour le détail exact de ce qui a été livré. `ReviewStore`, `JobStore`,
-> `DocumentVersionStore` et `PresetStore` restent non implémentés — l'historique d'audit
-> ne fuit plus d'un tenant à l'autre, mais la file de revue (texte en clair inclus) et les
-> versions de documents le font toujours.
+> **Mise à jour (2026-08-14) :** les cinq stores couverts par la spec S1b sont livrés et
+> testés — `AuditStore` (Tâche 2), `ReviewStore` (Tâche 3), `JobStore` (Tâche 4),
+> `DocumentVersionStore` (Tâche 5) et `PresetStore` (Tâche 6), chacun avec ses trois
+> backends applicables (mémoire/fichier/Postgres selon le store) et son fil
+> `HaciendaFacade`/`hacienda-api` propre. Voir le §7 de la spec S1b pour le détail exact de
+> ce qui a été livré par store, y compris deux bugs réels découverts en cours de route et
+> corrigés dans la même migration : une collision de séquence de version entre tenants sur
+> `document_versions` (identifiant fourni par l'appelant, pas assigné par le store) et le
+> bug fonctionnel historique de `presets` (deux tenants ne pouvaient pas nommer un preset
+> `"default"`). Trois endpoints HTTP (`GET /v1/documents/{id}/versions`,
+> `GET /v1/documents/{id}`, et les quatre routes `/v1/presets/*`) n'extrayaient aucun
+> `Caller` du tout avant ce travail — corrigé au passage, pas seulement le scope tenant.
+> `ApiKeyStore` reste hors périmètre de S1b, volontairement (voir §3.2 de la spec S1b).
+> Le volet pseudonymisation de cette alerte (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`)
+> reste spécifié séparément et non encore implémenté à ce jour — c'est la seule pièce
+> encore ouverte de cette alerte.
 
 **Note.** Ne pas retarder : rétro-ajouter un tenant après mise en production impose de migrer
 les chaînes d'audit et de re-dériver les tokens. C'est le seul chantier réellement bloquant.
