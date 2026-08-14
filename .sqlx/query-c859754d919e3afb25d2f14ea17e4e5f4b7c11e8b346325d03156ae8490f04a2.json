@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                   priority, assigned_reviewer, decided_by, decided_at, decision, comment,\n                   deadline, created_at\n            FROM review_items\n            WHERE id = $1\n            ",
+  "query": "\n            UPDATE review_items\n            SET status = $1, decided_by = $2, decided_at = $3, decision = $4, comment = $5\n            WHERE id = $6 AND tenant_id = $7 AND decision IS NULL\n            RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                      priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,\n                      decision, comment\n            ",
   "describe": {
     "columns": [
       {
@@ -55,37 +55,43 @@
       },
       {
         "ordinal": 10,
-        "name": "decided_by",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 11,
-        "name": "decided_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 12,
-        "name": "decision",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 13,
-        "name": "comment",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 14,
         "name": "deadline",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 15,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "decided_by",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "decided_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "decision",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "comment",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Text",
         "Text"
       ]
     },
@@ -101,12 +107,12 @@
       false,
       true,
       true,
+      false,
       true,
       true,
       true,
-      true,
-      false
+      true
     ]
   },
-  "hash": "8ef755ca5ca03dd6dfb98acaaaef152b146aff3c56ff0563f19bf64b05a5199a"
+  "hash": "c859754d919e3afb25d2f14ea17e4e5f4b7c11e8b346325d03156ae8490f04a2"
 }

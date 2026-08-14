@@ -93,24 +93,26 @@ live — each touches a disjoint set of files.
       pass `&TenantId::default_tenant()` — mechanical, not a design change (same "no other
       call site changes" claim the spec's exit criteria make).
 
-## Task 3 — `ReviewStore`: tenant on the item, not just the call (§3.1)
+## Task 3 — `ReviewStore`: tenant on the item, not just the call (§3.1) — done
 
-- [ ] Add `tenant: TenantId` to `ReviewQueueItem` (`hacienda-core/src/review/types.rs` or
-      wherever the struct lives — confirm exact path before editing).
-- [ ] `ReviewStore::list`/`get`/`stats` take `&TenantId` and filter by it.
-- [ ] `assign`/`decide` (which take only `id: &str` today) must first resolve the item,
-      compare its `tenant` to the caller's, and return `ReviewError::NotFound`-shaped
-      (whatever that variant is named) on mismatch — not a distinguishable forbidden
-      error. This is D-S1b-1 from the spec; write the test
-      (`review_get_for_another_tenants_item_id_is_not_found`) before the implementation to
-      pin the exact behaviour, since "not found on mismatch" is easy to accidentally
-      implement as "forbidden on mismatch" if the check is bolted on after the fact.
-- [ ] `InMemoryReviewStore`/`FileReviewStore`/Postgres backend: same three-backend
-      treatment as Task 2. `FileReviewStore` moves to one JSONL file per tenant, same
-      directory-nesting approach as `FileAuditStore`.
-- [ ] `ReviewQueue::submit` (`hacienda-core/src/review/queue.rs` — confirm path) is the
-      one call site that constructs a `ReviewQueueItem`; it needs the tenant threaded in
-      from wherever it's called (ultimately from a facade method that has `Caller`).
+- [x] Add `tenant: TenantId` to `ReviewQueueItem` (`hacienda-core/src/review/types.rs`).
+- [x] `ReviewStore::list`/`get`/`stats` take `&TenantId` and filter by it.
+- [x] `assign`/`decide` match on `id && tenant` together in one lookup and return
+      `ReviewError::NotFound` on a cross-tenant id — indistinguishable from a nonexistent
+      one (D-S1b-1). Tests: `review_get_for_another_tenants_item_id_is_not_found`,
+      `review_assign_and_decide_for_another_tenants_item_id_is_not_found`,
+      `two_tenants_review_queues_are_independent`.
+- [x] `InMemoryReviewStore`/`FileReviewStore`/Postgres backend all updated. **Deviation**:
+      `FileReviewStore` did *not* move to one JSONL file per tenant — it kept its existing
+      flat, eagerly-replayed `HashMap<String, ReviewQueueItem>` and filters by each item's
+      own `tenant` field at query time. Items already self-identify their tenant (unlike
+      audit segments, which don't carry one), so per-tenant directory nesting would have
+      added complexity without adding correctness. See spec §7's ReviewStore section for
+      the full reasoning.
+- [x] `ReviewQueue::submit` (`hacienda-core/src/review/queue.rs`) threads `&TenantId`
+      through to `ReviewQueueItem`'s `tenant` field; `HaciendaFacade::submit_for_review`
+      gained a `Caller` parameter to resolve it, since its one call site
+      (`process_batch_with_auth`) already had one in scope.
 
 ## Task 4 — `JobStore`: add `tenant_id` alongside `owner`, don't replace it (§1.3/§3.1)
 

@@ -2147,19 +2147,22 @@ pub(crate) mod tests {
         let audit_store = PostgresAuditStore::new(pool.clone());
         let principal = format!("avocat-{}", uuid::Uuid::new_v4());
         audit_store
-            .append(&hacienda_core::tenancy::TenantId::default_tenant(), vec![AuditEntryInput {
-                id: uuid::Uuid::new_v4().to_string(),
-                category: "Email".to_string(),
-                action: RedactionAction::Mask,
-                span_hash: "hash".to_string(),
-                span_length: 42,
-                confidence: Some(1.0),
-                source: EntitySource::Regex,
-                pipeline_version: "1.0".to_string(),
-                config_hash: "cfg".to_string(),
-                principal: Some(principal.clone()),
-                vertical: None,
-            }])
+            .append(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                vec![AuditEntryInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    category: "Email".to_string(),
+                    action: RedactionAction::Mask,
+                    span_hash: "hash".to_string(),
+                    span_length: 42,
+                    confidence: Some(1.0),
+                    source: EntitySource::Regex,
+                    pipeline_version: "1.0".to_string(),
+                    config_hash: "cfg".to_string(),
+                    principal: Some(principal.clone()),
+                    vertical: None,
+                }],
+            )
             .await
             .expect("append failed");
 
@@ -2231,19 +2234,22 @@ pub(crate) mod tests {
         // entry can be found by identity rather than assuming an empty table.
         let principal = format!("avocat-postgres-route-test-{}", uuid::Uuid::new_v4());
         audit_store
-            .append(&hacienda_core::tenancy::TenantId::default_tenant(), vec![AuditEntryInput {
-                id: uuid::Uuid::new_v4().to_string(),
-                category: "Email".to_string(),
-                action: RedactionAction::Mask,
-                span_hash: "hash".to_string(),
-                span_length: 42,
-                confidence: Some(1.0),
-                source: EntitySource::Regex,
-                pipeline_version: "1.0".to_string(),
-                config_hash: "cfg".to_string(),
-                principal: Some(principal.clone()),
-                vertical: None,
-            }])
+            .append(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                vec![AuditEntryInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    category: "Email".to_string(),
+                    action: RedactionAction::Mask,
+                    span_hash: "hash".to_string(),
+                    span_length: 42,
+                    confidence: Some(1.0),
+                    source: EntitySource::Regex,
+                    pipeline_version: "1.0".to_string(),
+                    config_hash: "cfg".to_string(),
+                    principal: Some(principal.clone()),
+                    vertical: None,
+                }],
+            )
             .await
             .expect("append failed");
 
@@ -2253,6 +2259,7 @@ pub(crate) mod tests {
         review_store
             .submit(ReviewQueueItem {
                 id: review_id.clone(),
+                tenant: hacienda_core::tenancy::TenantId::default_tenant(),
                 text_snippet: "jane@example.com".to_string(),
                 category: "email".to_string(),
                 start: 0,

@@ -59,6 +59,7 @@ use std::sync::Mutex;
 use crate::review::error::ReviewError;
 use crate::review::store::ReviewStore;
 use crate::review::types::{QueueStats, ReviewDecision, ReviewQueueItem, ReviewStatus};
+use crate::tenancy::TenantId;
 
 // ── Event types ───────────────────────────────────────────────────────────────
 
@@ -108,6 +109,14 @@ struct FileState {
 impl FileState {
     fn get_mut(&mut self, id: &str) -> Option<&mut ReviewQueueItem> {
         self.by_id.get_mut(id)
+    }
+
+    /// Same as [`Self::get_mut`], but an id belonging to a different tenant is treated
+    /// exactly like an id that does not exist — `None` either way. This is what makes
+    /// the not-found-not-forbidden property (D-S1b-1) fall out of the lookup itself
+    /// rather than needing a second branch at every call site to enforce it.
+    fn get_mut_for_tenant(&mut self, tenant: &TenantId, id: &str) -> Option<&mut ReviewQueueItem> {
+        self.by_id.get_mut(id).filter(|item| item.tenant == *tenant)
     }
 
     fn insert(&mut self, item: ReviewQueueItem) {
@@ -337,7 +346,12 @@ impl ReviewStore for FileReviewStore {
         Ok(item)
     }
 
-    async fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
+    async fn assign(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        reviewer: &str,
+    ) -> Result<ReviewQueueItem, ReviewError> {
         self.check_not_poisoned()?;
 
         // The entire check-and-mutate sequence runs under io_order + state lock. This
@@ -353,7 +367,7 @@ impl ReviewStore for FileReviewStore {
         let (updated_item, bytes) = {
             let mut state = self.state();
             let item = state
-                .get_mut(id)
+                .get_mut_for_tenant(tenant, id)
                 .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
             if item.status != ReviewStatus::Pending {
@@ -394,6 +408,7 @@ impl ReviewStore for FileReviewStore {
 
     async fn decide(
         &self,
+        tenant: &TenantId,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
@@ -410,7 +425,7 @@ impl ReviewStore for FileReviewStore {
         let (updated_item, bytes) = {
             let mut state = self.state();
             let item = state
-                .get_mut(id)
+                .get_mut_for_tenant(tenant, id)
                 .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
             if item.decision.is_some() {
@@ -457,27 +472,44 @@ impl ReviewStore for FileReviewStore {
 
     async fn list(
         &self,
+        tenant: &TenantId,
         filter: Option<ReviewStatus>,
     ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
         self.check_not_poisoned()?;
         let state = self.state();
-        let all = state.items_in_order();
+        let mine = state
+            .items_in_order()
+            .into_iter()
+            .filter(|i| i.tenant == *tenant);
         let result = match filter {
-            Some(status) => all.into_iter().filter(|i| i.status == status).collect(),
-            None => all,
+            Some(status) => mine.filter(|i| i.status == status).collect(),
+            None => mine.collect(),
         };
         Ok(result)
     }
 
-    async fn get(&self, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+    ) -> Result<Option<ReviewQueueItem>, ReviewError> {
         self.check_not_poisoned()?;
-        Ok(self.state().by_id.get(id).cloned())
+        Ok(self
+            .state()
+            .by_id
+            .get(id)
+            .filter(|item| item.tenant == *tenant)
+            .cloned())
     }
 
-    async fn stats(&self) -> Result<QueueStats, ReviewError> {
+    async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
         self.check_not_poisoned()?;
         let state = self.state();
-        let all = state.items_in_order();
+        let all: Vec<ReviewQueueItem> = state
+            .items_in_order()
+            .into_iter()
+            .filter(|i| i.tenant == *tenant)
+            .collect();
         let count = |status: ReviewStatus| all.iter().filter(|i| i.status == status).count();
         Ok(QueueStats {
             total: all.len(),
@@ -679,9 +711,15 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
+    /// The tenant used by every test that doesn't itself care about tenant scoping.
+    fn t() -> TenantId {
+        TenantId::new("tenant-a")
+    }
+
     fn make_item(id: &str) -> ReviewQueueItem {
         ReviewQueueItem {
             id: id.to_string(),
+            tenant: t(),
             text_snippet: "John Smith".to_string(),
             category: "PersonName".to_string(),
             start: 0,
@@ -723,11 +761,17 @@ mod tests {
                 .await
                 .expect("submit must succeed");
             store
-                .assign(&item.id, "alice")
+                .assign(&t(), &item.id, "alice")
                 .await
                 .expect("assign must succeed");
             store
-                .decide(&item.id, ReviewDecision::Approve, "alice", "looks fine")
+                .decide(
+                    &t(),
+                    &item.id,
+                    ReviewDecision::Approve,
+                    "alice",
+                    "looks fine",
+                )
                 .await
                 .expect("decide must succeed");
             item.id
@@ -736,7 +780,7 @@ mod tests {
 
         let store2 = open_store(&dir);
         let replayed = store2
-            .get(&item_id)
+            .get(&t(), &item_id)
             .await
             .expect("get must not error")
             .expect("item must be present after restart");
@@ -763,19 +807,19 @@ mod tests {
         {
             let store = open_store(&dir);
             let item = store
-                .get("item-2")
+                .get(&t(), "item-2")
                 .await
                 .expect("get")
                 .expect("must be present");
             assert_eq!(item.status, ReviewStatus::Pending, "must replay as Pending");
-            store.assign("item-2", "bob").await.expect("assign");
+            store.assign(&t(), "item-2", "bob").await.expect("assign");
         }
 
         // Step 3: decide — opens fresh store again.
         {
             let store = open_store(&dir);
             let item = store
-                .get("item-2")
+                .get(&t(), "item-2")
                 .await
                 .expect("get")
                 .expect("must be present");
@@ -785,7 +829,7 @@ mod tests {
                 "must replay as InReview"
             );
             store
-                .decide("item-2", ReviewDecision::Reject, "bob", "not PII")
+                .decide(&t(), "item-2", ReviewDecision::Reject, "bob", "not PII")
                 .await
                 .expect("decide");
         }
@@ -794,7 +838,7 @@ mod tests {
         {
             let store = open_store(&dir);
             let item = store
-                .get("item-2")
+                .get(&t(), "item-2")
                 .await
                 .expect("get")
                 .expect("must be present");
@@ -832,7 +876,7 @@ mod tests {
         // The store must open successfully and replay both complete items.
         let store = open_store(&dir);
         let items = store
-            .list(None)
+            .list(&t(), None)
             .await
             .expect("list must not error despite truncated line");
 
@@ -887,7 +931,10 @@ mod tests {
 
         // The new item must survive one more restart.
         let store = open_store(&dir);
-        let items = store.list(None).await.expect("list after second restart");
+        let items = store
+            .list(&t(), None)
+            .await
+            .expect("list after second restart");
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         assert!(
             ids.contains(&"item-b"),
@@ -906,12 +953,12 @@ mod tests {
         {
             let store = open_store(&dir);
             store.submit(make_item("item-5")).await.expect("submit");
-            store.assign("item-5", "alice").await.expect("assign");
+            store.assign(&t(), "item-5", "alice").await.expect("assign");
         }
 
         // After restart, a second assign must fail — the item is InReview, not Pending.
         let store2 = open_store(&dir);
-        let result = store2.assign("item-5", "bob").await;
+        let result = store2.assign(&t(), "item-5", "bob").await;
         assert!(
             result.is_err(),
             "second assign must fail after restart — item is no longer Pending"
@@ -946,7 +993,7 @@ mod tests {
             .await
             .expect("submit must succeed");
         store
-            .assign(&item.id, "alice")
+            .assign(&t(), &item.id, "alice")
             .await
             .expect("assign must succeed");
 
@@ -957,7 +1004,7 @@ mod tests {
 
         // `decide` must fail — the disk write is rejected.
         let err = store
-            .decide(&item.id, ReviewDecision::Approve, "alice", "ok")
+            .decide(&t(), &item.id, ReviewDecision::Approve, "alice", "ok")
             .await
             .expect_err("decide must fail when the log file is read-only");
         assert!(
@@ -973,7 +1020,7 @@ mod tests {
         // `AlreadyDecided`. `AlreadyDecided` would indicate that the phantom in-memory
         // mutation is still visible and the caller's retry is being misdirected.
         let retry = store
-            .decide(&item.id, ReviewDecision::Approve, "alice", "ok")
+            .decide(&t(), &item.id, ReviewDecision::Approve, "alice", "ok")
             .await;
         assert!(
             retry.is_err(),
@@ -998,7 +1045,7 @@ mod tests {
             .await
             .expect("submit must succeed");
         store
-            .assign(&item.id, "alice")
+            .assign(&t(), &item.id, "alice")
             .await
             .expect("assign must succeed");
 
@@ -1009,7 +1056,7 @@ mod tests {
 
         // `decide` must fail.
         store
-            .decide(&item.id, ReviewDecision::Approve, "alice", "ok")
+            .decide(&t(), &item.id, ReviewDecision::Approve, "alice", "ok")
             .await
             .expect_err("decide must fail when the log file is read-only");
 
@@ -1020,7 +1067,7 @@ mod tests {
         drop(store);
         let store2 = open_store(&dir);
         let replayed = store2
-            .get(&item.id)
+            .get(&t(), &item.id)
             .await
             .expect("get must not error")
             .expect("item must still be present");
@@ -1085,13 +1132,13 @@ mod tests {
                 let assigner = Arc::clone(&store);
                 let assign_id = id.clone();
                 handles.push(tokio::spawn(async move {
-                    let _ = assigner.assign(&assign_id, "alice").await;
+                    let _ = assigner.assign(&t(), &assign_id, "alice").await;
                 }));
 
                 let decider = Arc::clone(&store);
                 handles.push(tokio::spawn(async move {
                     let _ = decider
-                        .decide(&id, ReviewDecision::Approve, "bob", "ok")
+                        .decide(&t(), &id, ReviewDecision::Approve, "bob", "ok")
                         .await;
                 }));
             }
@@ -1099,12 +1146,12 @@ mod tests {
                 handle.await.expect("task must not panic");
             }
 
-            let live = store.list(None).await.expect("live list");
+            let live = store.list(&t(), None).await.expect("live list");
 
             drop(store);
             let replayed = FileReviewStore::open(log)
                 .expect("reopen after concurrent writes")
-                .list(None)
+                .list(&t(), None)
                 .await
                 .expect("replayed list");
 

@@ -453,13 +453,73 @@ data-loss gap (recovery reseals an orphaned segment automatically on next open),
 real behavior a multi-tenant deployment doing an orderly shutdown needs to know: closing
 once via `Caller::Trusted` does not seal every tenant's chain.
 
-### Not implemented: Tasks 3-6
+### ReviewStore: tenant lives on the item, not threaded through `submit`
 
-`ReviewStore`, `JobStore`, `DocumentVersionStore`, and `PresetStore` remain exactly as
-described in §3.1 — designed, not touched. Whoever picks these up next: the `AuditStore`
-implementation above is the reference pattern (trait-parameter threading, per-tenant
-`HashMap` for in-memory backends, `tenant_id = $n` predicates for Postgres, lazy
-per-tenant recovery keyed by directory nesting for file backends where applicable), and
-`hacienda-core/src/tenancy.rs`'s module doc (decision D-S1-1) is the reasoning to re-read
-before considering any alternative — it heads off the same factory-vs-parameter detour
-this implementation took and backed out of before writing any code.
+Unlike `AuditStore`'s per-tenant `HashMap<TenantId, State>` partitioning, `ReviewQueueItem`
+(`hacienda-core/src/review/types.rs`) gained its own `pub tenant: TenantId` field. The
+struct has no `Default` impl, so the compiler already forces every construction site to
+supply a tenant — `submit(item: ReviewQueueItem)` did not need a separate `&TenantId`
+parameter to get D-S1-1's core property (an omitted tenant fails to compile, not to run).
+`assign`/`decide`/`list`/`get`/`stats` — the methods that only have an `id` in hand, not a
+full item — each gained a leading `&TenantId` parameter, matching §3.1's proposed shape.
+
+The not-found-not-forbidden discipline (D-S1b-1) is enforced the same way in all three
+backends: `assign`/`decide`/`get` match on `id == id && tenant == tenant` together in one
+lookup, so a cross-tenant id and a nonexistent id fall into the identical `NotFound`
+branch — no second, distinguishing branch exists to get wrong.
+
+- **`InMemoryReviewStore`** (`hacienda-core/src/review/store.rs`): flat
+  `Mutex<Vec<ReviewQueueItem>>`, filtered by each item's own `tenant` field at query time —
+  no per-tenant partitioning needed since items already self-identify. Three new tests:
+  `review_get_for_another_tenants_item_id_is_not_found`,
+  `review_assign_and_decide_for_another_tenants_item_id_is_not_found`,
+  `two_tenants_review_queues_are_independent`.
+- **`FileReviewStore`** (`hacienda-core/src/review/store_file.rs`): same flat-map-plus-
+  filter shape as the in-memory backend — one shared `HashMap<String, ReviewQueueItem>`
+  built by `open()`'s existing eager, whole-log replay, with a new
+  `FileState::get_mut_for_tenant` helper (`self.by_id.get_mut(id).filter(|item| item.tenant
+  == *tenant)`) used by `assign`/`decide`. Deliberately did **not** adopt `FileAuditStore`'s
+  lazy-per-tenant-directory recovery: review items don't need physically separated
+  per-tenant chains, so the simpler eager-replay-plus-filter design is both correct and
+  less code.
+- **`PostgresReviewStore`** (`hacienda-core/src/store/postgres/review.rs`): every query
+  gained a `tenant_id = $n` predicate, including the `UPDATE ... WHERE id = $n AND
+  tenant_id = $n AND status = 'pending'`/`... AND decision IS NULL` compare-and-swap
+  queries for `assign`/`decide`. `row_to_item` now takes `tenant: TenantId` as a plain
+  parameter instead of selecting a `tenant_id` column — every call site already knows the
+  tenant from the query's own `WHERE` predicate, so there is nothing to select. Verified
+  against a live Postgres in this session (same disposable-Postgres-needs-Docker
+  limitation as `AuditStore`'s note above): submit, cross-tenant `get`/`assign`/`decide`
+  all confirmed to resolve as documented (`None`/`NotFound`, never a distinguishable
+  error), same-tenant `assign`/`decide` confirmed to succeed.
+
+`review_items.tenant_id`'s `DEFAULT 'default'` is dropped in this change's revision of
+`0004_tenant_scoping.sql` (the migration has not shipped to any real deployment yet, so
+editing it in place — rather than adding a second migration — carries no rolling-upgrade
+risk), following the same reasoning already applied to `audit_segments`'s default: every
+`ReviewStore` insert, across all three backends, now supplies `tenant_id` explicitly.
+
+**API-layer deviation from `AuditStore`'s pattern**: `HaciendaFacade` exposes `ReviewQueue`
+references directly to callers (`review_queue()`, `review_queue_with_auth(caller)`,
+`review_queue_read_with_auth(caller)` all return `Option<&ReviewQueue>`) rather than
+wrapping every review operation itself, the way it does for audit. §3.3's "no
+`hacienda-api` signature changes" claim does not hold for review: `hacienda-api/src/
+handlers/audit_review.rs`'s `get_review` and `decide_review` needed direct edits to
+resolve `caller.tenant_ctx().tenant` and pass it into `queue.list`/`queue.decide` — a real,
+necessary deviation, not an oversight. `hacienda-cli` and `hacienda-mcp` have no
+review-store touch points, so neither needed any change.
+
+`HaciendaFacade::submit_for_review` gained a leading `caller: Caller<'_>` parameter (its
+one caller, `process_batch_with_auth`, already had one in scope) to resolve the tenant for
+the `ReviewQueueItem` it constructs.
+
+### Not implemented: Tasks 4-6
+
+`JobStore`, `DocumentVersionStore`, and `PresetStore` remain exactly as described in §3.1 —
+designed, not touched. Whoever picks these up next: the `AuditStore`/`ReviewStore`
+implementations above are the reference patterns (trait-parameter threading, per-tenant
+`HashMap` or self-identifying-item-plus-filter for in-memory/file backends, `tenant_id =
+$n` predicates for Postgres), and `hacienda-core/src/tenancy.rs`'s module doc (decision
+D-S1-1) is the reasoning to re-read before considering any alternative — it heads off the
+same factory-vs-parameter detour this implementation took and backed out of before writing
+any code.

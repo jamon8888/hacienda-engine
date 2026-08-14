@@ -531,7 +531,9 @@ impl HaciendaFacade {
         let mut cursor: Option<AuditCursor> = None;
         const EXPORT_PAGE_SIZE: usize = 1000;
         loop {
-            let page = store.history(&tenant, cursor.as_ref(), EXPORT_PAGE_SIZE).await?;
+            let page = store
+                .history(&tenant, cursor.as_ref(), EXPORT_PAGE_SIZE)
+                .await?;
             if page.entries.is_empty() {
                 break;
             }
@@ -747,7 +749,7 @@ impl HaciendaFacade {
             // audited and reviewed on this task, one at a time, exactly as before.
             for (document, result) in extraction.results.iter_mut().zip(detections) {
                 self.observe_glossary(&document.content, &result);
-                review_submitted += self.submit_for_review(&result).await?;
+                review_submitted += self.submit_for_review(caller, &result).await?;
 
                 document.content = result.redacted_text.clone();
 
@@ -1552,24 +1554,32 @@ impl HaciendaFacade {
     /// than being counted: `review_submitted` is reported back to the caller, and a number
     /// that counts attempts rather than acceptances would tell an operator that items are
     /// queued for review when nothing is.
-    async fn submit_for_review(&self, result: &PipelineResult) -> Result<usize, HaciendaError> {
+    async fn submit_for_review(
+        &self,
+        caller: Caller<'_>,
+        result: &PipelineResult,
+    ) -> Result<usize, HaciendaError> {
         let Some(queue) = &self.review_queue else {
             return Ok(0);
         };
+        let tenant = caller.tenant_ctx().tenant;
         let mut count = 0;
         for entity in &result.entities {
             if queue.needs_review(entity.confidence) {
                 queue
-                    .submit(ReviewRequest {
-                        // The snippet is the model's own mention text, which is empty for
-                        // regex spans — those are deterministic and need no human context.
-                        text_snippet: entity.text.clone(),
-                        category: entity.category.to_string(),
-                        start: entity.start,
-                        end: entity.end,
-                        confidence: entity.confidence,
-                        source: entity.source.to_string(),
-                    })
+                    .submit(
+                        &tenant,
+                        ReviewRequest {
+                            // The snippet is the model's own mention text, which is empty for
+                            // regex spans — those are deterministic and need no human context.
+                            text_snippet: entity.text.clone(),
+                            category: entity.category.to_string(),
+                            start: entity.start,
+                            end: entity.end,
+                            confidence: entity.confidence,
+                            source: entity.source.to_string(),
+                        },
+                    )
                     .await?;
                 count += 1;
             }
@@ -1723,7 +1733,6 @@ mod tests {
     use crate::auth::authn::TokenResolver as _;
     use crate::auth::InMemoryApiKeyStore;
     use crate::glossary::GlossaryConfig;
-    use crate::tenancy::TenantId;
     use crate::pii::PipelineConfig;
     use crate::redaction::{
         EnvKeyResolver, RedactionConfig, RedactionMode, ACTIVE_KEY_VAR, KEY_BYTES,
@@ -1732,6 +1741,7 @@ mod tests {
         FileReviewStore, InMemoryReviewStore, QueueStats, ReviewConfig, ReviewDecision,
         ReviewError, ReviewQueueItem, ReviewRequest, ReviewStatus,
     };
+    use crate::tenancy::TenantId;
     use async_trait::async_trait;
     use std::fs;
     use std::path::PathBuf;
@@ -1811,7 +1821,10 @@ mod tests {
             self.inner.tip(tenant).await
         }
 
-        async fn seals(&self, tenant: &TenantId) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+        async fn seals(
+            &self,
+            tenant: &TenantId,
+        ) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             self.inner.seals(tenant).await
         }
 
@@ -1868,33 +1881,46 @@ mod tests {
             self.inner.submit(item).await
         }
 
-        async fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.assign(id, reviewer).await
+        async fn assign(
+            &self,
+            tenant: &TenantId,
+            id: &str,
+            reviewer: &str,
+        ) -> Result<ReviewQueueItem, ReviewError> {
+            self.inner.assign(tenant, id, reviewer).await
         }
 
         async fn decide(
             &self,
+            tenant: &TenantId,
             id: &str,
             decision: ReviewDecision,
             reviewer: &str,
             comment: &str,
         ) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.decide(id, decision, reviewer, comment).await
+            self.inner
+                .decide(tenant, id, decision, reviewer, comment)
+                .await
         }
 
         async fn list(
             &self,
+            tenant: &TenantId,
             filter: Option<ReviewStatus>,
         ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
-            self.inner.list(filter).await
+            self.inner.list(tenant, filter).await
         }
 
-        async fn get(&self, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
-            self.inner.get(id).await
+        async fn get(
+            &self,
+            tenant: &TenantId,
+            id: &str,
+        ) -> Result<Option<ReviewQueueItem>, ReviewError> {
+            self.inner.get(tenant, id).await
         }
 
-        async fn stats(&self) -> Result<QueueStats, ReviewError> {
-            self.inner.stats().await
+        async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
+            self.inner.stats(tenant).await
         }
 
         async fn close(&self) -> Result<(), ReviewError> {
@@ -1932,7 +1958,10 @@ mod tests {
             Ok(crate::audit::GENESIS_HASH.to_owned())
         }
 
-        async fn seals(&self, _tenant: &TenantId) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+        async fn seals(
+            &self,
+            _tenant: &TenantId,
+        ) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             Ok(Vec::new())
         }
 
@@ -1952,7 +1981,10 @@ mod tests {
             Ok(())
         }
 
-        async fn rotate(&self, _tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+        async fn rotate(
+            &self,
+            _tenant: &TenantId,
+        ) -> Result<crate::audit::SegmentSeal, AuditError> {
             Err(AuditError::Io {
                 path: "simulated".into(),
                 source: std::io::Error::other("injected failure"),
@@ -2165,7 +2197,7 @@ mod tests {
             facade
                 .review_queue()
                 .expect("review queue is configured")
-                .stats()
+                .stats(&TenantId::default_tenant())
                 .await
                 .expect("stats")
                 .pending,
@@ -2782,20 +2814,29 @@ mod tests {
                 .expect("an explicitly supplied review store must produce a queue");
 
             let item = queue
-                .submit(ReviewRequest {
-                    text_snippet: "bob@example.com".into(),
-                    category: "Email".into(),
-                    start: 0,
-                    end: 15,
-                    confidence: 0.4,
-                    source: "regex".into(),
-                })
+                .submit(
+                    &TenantId::default_tenant(),
+                    ReviewRequest {
+                        text_snippet: "bob@example.com".into(),
+                        category: "Email".into(),
+                        start: 0,
+                        end: 15,
+                        confidence: 0.4,
+                        source: "regex".into(),
+                    },
+                )
                 .await
                 .expect("submit first run");
             item_id = item.id.clone();
 
             queue
-                .decide(&item_id, ReviewDecision::Approve, "amy", "looks right")
+                .decide(
+                    &TenantId::default_tenant(),
+                    &item_id,
+                    ReviewDecision::Approve,
+                    "amy",
+                    "looks right",
+                )
                 .await
                 .expect("decide first run");
 
@@ -2819,7 +2860,7 @@ mod tests {
             let item = facade
                 .review_queue()
                 .expect("queue after restart")
-                .get(&item_id)
+                .get(&TenantId::default_tenant(), &item_id)
                 .await
                 .expect("get after restart")
                 .expect("the item written in the first run must still exist");
@@ -2872,18 +2913,28 @@ mod tests {
             "passing a review store must build a queue; dropping it silently loses every decision",
         );
         queue
-            .submit(ReviewRequest {
-                text_snippet: "bob@example.com".into(),
-                category: "Email".into(),
-                start: 0,
-                end: 15,
-                confidence: 0.4,
-                source: "regex".into(),
-            })
+            .submit(
+                &TenantId::default_tenant(),
+                ReviewRequest {
+                    text_snippet: "bob@example.com".into(),
+                    category: "Email".into(),
+                    start: 0,
+                    end: 15,
+                    confidence: 0.4,
+                    source: "regex".into(),
+                },
+            )
             .await
             .expect("submit must reach the supplied store");
 
-        assert_eq!(queue.stats().await.expect("stats").total, 1);
+        assert_eq!(
+            queue
+                .stats(&TenantId::default_tenant())
+                .await
+                .expect("stats")
+                .total,
+            1
+        );
     }
 
     /// `verify_audit` on a facade with no audit store returns `Ok(())`.
@@ -3703,7 +3754,7 @@ mod tests {
                 let result = pipeline.process(&text).await?;
                 facade.observe_glossary(&text, &result);
                 let audit_entries = facade.record_audit(&result, Caller::Trusted).await?;
-                let submitted = facade.submit_for_review(&result).await?;
+                let submitted = facade.submit_for_review(Caller::Trusted, &result).await?;
                 Ok(audit_entries.len() + submitted)
             });
         }
@@ -3953,7 +4004,10 @@ mod tests {
             self.inner.tip(tenant).await
         }
 
-        async fn seals(&self, tenant: &TenantId) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+        async fn seals(
+            &self,
+            tenant: &TenantId,
+        ) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             self.inner.seals(tenant).await
         }
 

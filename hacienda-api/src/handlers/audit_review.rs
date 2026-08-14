@@ -97,8 +97,9 @@ pub async fn get_review(
         .review_queue_read_with_auth(caller)
         .map_err(ApiError::from)?;
 
+    let tenant = caller.tenant_ctx().tenant;
     let items = match queue {
-        Some(q) => q.list(None).await.unwrap_or_default(),
+        Some(q) => q.list(&tenant, None).await.unwrap_or_default(),
         None => Vec::new(),
     };
 
@@ -143,8 +144,15 @@ pub async fn decide_review(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::invalid_request("review queue not configured"))?;
 
+    let tenant = caller.tenant_ctx().tenant;
     let item = queue
-        .decide(&id, body.decision.into(), &body.reviewer, &body.comment)
+        .decide(
+            &tenant,
+            &id,
+            body.decision.into(),
+            &body.reviewer,
+            &body.comment,
+        )
         .await
         .map_err(ApiError::from)?;
 

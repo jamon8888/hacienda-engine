@@ -629,6 +629,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   While auditing every `audit_entries` reader for the same class of leak,
   `PostgresUsageStore::summary` (billing/usage aggregation, `GET /v1/usage`) was found to
   have the identical gap — also not yet fixed, flagged in that spec's §7.
+- **`ReviewStore` is now tenant-scoped — two tenants sharing one process could previously
+  see, claim, and decide each other's pending review items, including unredacted
+  `text_snippet` content by design.** Same root cause as the `AuditStore` gap above:
+  `assign`/`decide`/`list`/`get`/`stats` all read or mutated the queue with no tenant
+  predicate at all. Fixed by giving `ReviewQueueItem` its own `tenant` field (so
+  `submit` cannot omit one — the struct has no `Default`) and adding `&TenantId` to every
+  other `ReviewStore` method, across all three backends — `InMemoryReviewStore` and
+  `FileReviewStore` (filter by the item's own tenant field at query time) and
+  `PostgresReviewStore` (a `tenant_id` column and predicate on every query, including the
+  `assign`/`decide` compare-and-swap `UPDATE`s). A cross-tenant id resolves as `None`/
+  `NotFound`, identically to an id that does not exist, never a distinguishable
+  forbidden-shaped error — the same discipline `AuditStore`'s fix established.
+  `HaciendaFacade::submit_for_review` gained a `Caller` parameter to resolve the tenant;
+  `hacienda-api`'s `GET /v1/review` and `POST /v1/review/{id}/decide` handlers now thread
+  `caller.tenant_ctx().tenant` through directly (the facade exposes `ReviewQueue`
+  references to callers rather than wrapping every operation itself, unlike audit).
+  `JobStore`/`DocumentVersionStore`/`PresetStore` have the same gap and are not yet fixed —
+  tracked in the same S1b spec.
 - **The one call site that sends document content to an LLM now redacts structurally, not
   by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
   call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before

@@ -1,11 +1,21 @@
 //! Core types for the human review queue.
 
+use crate::tenancy::TenantId;
 use serde::{Deserialize, Serialize};
 
 /// A single item awaiting (or having received) human review.
+///
+/// # Tenant scoping (S1b)
+///
+/// `tenant` travels with the item rather than being a repeated parameter on every
+/// [`crate::review::store::ReviewStore`] method — see that trait's doc and
+/// `tenancy.rs`'s module doc (decision D-S1-1) for why a store method still takes
+/// `&TenantId` explicitly wherever it cannot resolve the tenant from an item it already
+/// has in hand (`list`/`get`/`stats`, and the pre-lookup half of `assign`/`decide`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewQueueItem {
     pub id: String,
+    pub tenant: TenantId,
     pub text_snippet: String,
     pub category: String,
     pub start: u32,
