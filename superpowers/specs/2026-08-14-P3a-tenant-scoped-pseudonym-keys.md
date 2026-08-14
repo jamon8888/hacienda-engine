@@ -9,6 +9,10 @@ open dependency on S1, which S1 itself never actually delivered for the pseudony
 specifically (see §1).
 **Depends on:** nothing unshipped — `TenantCtx`/`Caller::tenant_ctx()` already exist and
 already reach every call site this spec touches (§3.3)
+**Sibling:** `2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md` — covers
+every other store S1 promised tenant scoping for (audit, review, jobs, document versions,
+presets) that this spec doesn't. The two together close S1 completely; independent of
+each other, may ship in either order.
 **Blocks:** nothing new adopting pseudonymisation in a multi-tenant deployment should ship
 before this — see §1 for why the current behavior is a live cross-tenant leak, not a
 theoretical gap

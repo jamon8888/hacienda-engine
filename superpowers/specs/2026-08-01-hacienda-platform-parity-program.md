@@ -139,6 +139,20 @@ segments d'audit sont nommés `(tenant, node)` ; quotas et limites par tenant.
 produisent des tokens **différents** ; une clé retirée d'un tenant ne déchiffre rien d'un
 autre.
 
+> **⚠ Alerte (2026-08-14), toujours ouverte.** `TenantCtx`/`Caller::tenant_ctx()` sont
+> livrés, mais "tous les traits de store le prennent en paramètre de scope" ci-dessus ne
+> l'est pas : vérifié directement contre `AuditStore`, `ReviewStore`, `JobStore`,
+> `DocumentVersionStore`, `PresetStore` — aucun ne prend de paramètre de tenant, et le
+> schéma Postgres (`0001_init.sql`) n'a de colonne `tenant_id` nulle part. Deux tenants
+> partageant un déploiement voient aujourd'hui l'historique d'audit, la file de revue
+> (texte en clair inclus, par conception) et les versions de documents l'un de l'autre.
+> Le volet pseudonymisation de cette alerte est spécifié séparément
+> (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`, référencé plus haut à P3) ; le reste
+> — audit, revue, jobs, versions, presets — est spécifié et prêt à implémenter dans
+> `2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`, avec son plan
+> d'implémentation en huit tâches, `superpowers/plans/2026-08-14-S1b-tenant-isolation-implementation.md`.
+> Ni l'un ni l'autre n'est encore implémenté.
+
 **Note.** Ne pas retarder : rétro-ajouter un tenant après mise en production impose de migrer
 les chaînes d'audit et de re-dériver les tokens. C'est le seul chantier réellement bloquant.
 
