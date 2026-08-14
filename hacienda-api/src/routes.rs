@@ -421,7 +421,8 @@ pub(crate) mod tests {
         };
 
         let config = HaciendaConfig::default().with_pii(pii_config);
-        let facade = Arc::new(HaciendaFacade::with_key_resolver(config, &resolver, &[]).unwrap());
+        let facade =
+            Arc::new(HaciendaFacade::with_key_resolver(config, Arc::new(resolver), &[]).unwrap());
 
         let auth = AuthState::new(Arc::new(DevTokenResolver));
         let jobs = InMemoryJobStore::new().into_arc();

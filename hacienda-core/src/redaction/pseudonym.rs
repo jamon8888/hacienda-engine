@@ -4,6 +4,7 @@
 //! `superpowers/specs/2026-07-28-hacienda-cli-api-integration-design.md`.
 
 use crate::pii::types::PiiCategory;
+use crate::tenancy::TenantId;
 use aes_siv::siv::Aes256Siv;
 use aes_siv::{Key, KeyInit};
 use data_encoding::{BASE32_NOPAD, HEXLOWER_PERMISSIVE};
@@ -284,22 +285,37 @@ impl std::fmt::Debug for PseudonymKey {
 ///
 /// `Send + Sync` is required: the facade holding a resolver is shared across the async
 /// runtime.
+///
+/// # Tenant scoping (P3a)
+///
+/// Both methods take `&TenantId`. Two different tenants resolving the same [`KeyId`]
+/// must be able to get *different* key material — otherwise two tenants pseudonymising
+/// the same plaintext value mint the byte-identical token, which is a cross-tenant
+/// correlation leak (see `superpowers/specs/2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`
+/// §1). `TenantId::default_tenant()` must resolve to *exactly* the same key material a
+/// bare, untenanted lookup returned before this parameter existed — every token minted
+/// before this shipped was, in effect, minted for the default tenant, and must keep
+/// revealing under an unmodified single-tenant deployment (spec §4).
 pub trait KeyResolver: Send + Sync {
-    /// The key that new tokens are minted under.
+    /// The key that new tokens are minted under, for `tenant`.
     ///
     /// # Errors
     ///
-    /// [`PseudonymError::NoActiveKey`] if none is configured. This must never fall back
-    /// to a default or generated key: a per-process random key would produce tokens that
-    /// no other node agrees with and that nothing can ever reveal.
-    fn active(&self) -> Result<PseudonymKey, PseudonymError>;
+    /// [`PseudonymError::NoActiveKey`] if none is configured for `tenant`. This must
+    /// never fall back to a default or generated key, and never to another tenant's key:
+    /// a per-process random key would produce tokens that no other node agrees with and
+    /// that nothing can ever reveal, and borrowing another tenant's key would silently
+    /// reintroduce the exact cross-tenant leak this parameter exists to close.
+    fn active(&self, tenant: &TenantId) -> Result<PseudonymKey, PseudonymError>;
 
-    /// The key with a given id, for revealing tokens minted before a rotation.
+    /// The key with a given id, scoped to `tenant`, for revealing tokens minted before a
+    /// rotation.
     ///
     /// # Errors
     ///
-    /// [`PseudonymError::KeyNotFound`] if the id is not configured.
-    fn resolve(&self, id: &KeyId) -> Result<PseudonymKey, PseudonymError>;
+    /// [`PseudonymError::KeyNotFound`] if the id is not configured for `tenant` —
+    /// including when it is configured for a *different* tenant only.
+    fn resolve(&self, tenant: &TenantId, id: &KeyId) -> Result<PseudonymKey, PseudonymError>;
 }
 
 /// How [`EnvKeyResolver`] reads a named value; `None` means "not configured".
@@ -316,8 +332,44 @@ type Lookup = dyn Fn(&str) -> Option<String> + Send + Sync;
 ///
 /// Hex rather than base64 so the value is unambiguous when copied by hand and contains no
 /// characters a shell will interpret.
+///
+/// # Tenant-scoped variable names (P3a)
+///
+/// For [`TenantId::default_tenant()`], the variable name looked up is exactly the base
+/// name above — unchanged from before tenant scoping existed, which is what makes this
+/// safe to ship into an existing single-tenant deployment with no re-provisioning (spec
+/// §3.1's back-compat requirement). For any other tenant, the looked-up name gains a
+/// `HACIENDA_TENANT_<TENANT>_` prefix, where `<TENANT>` is the tenant id uppercased with
+/// every character outside `[A-Z0-9_]` replaced by `_` (tenant ids are otherwise
+/// unrestricted — see `tenancy.rs`'s module doc — but an environment variable name is
+/// not). A tenant with no variable under its prefixed name is a resolution failure, per
+/// [`KeyResolver::active`]'s doc: this must never silently fall back to the default
+/// tenant's key or any other tenant's key. Every non-default tenant's key material must
+/// be provisioned explicitly before that tenant can pseudonymise — deliberate friction,
+/// not an oversight to smooth over.
 pub struct EnvKeyResolver {
     lookup: Box<Lookup>,
+}
+
+/// Build the environment variable name `base` (e.g. [`ACTIVE_KEY_VAR`], or a `KeyId`'s
+/// own `env_var()`) resolves under for `tenant` — see [`EnvKeyResolver`]'s doc for the
+/// convention and the back-compat requirement it exists to satisfy.
+fn scoped_var_name(tenant: &TenantId, base: &str) -> String {
+    if *tenant == TenantId::default_tenant() {
+        return base.to_string();
+    }
+    let sanitized: String = tenant
+        .as_str()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("HACIENDA_TENANT_{sanitized}_{base}")
 }
 
 impl EnvKeyResolver {
@@ -352,13 +404,14 @@ impl std::fmt::Debug for EnvKeyResolver {
 }
 
 impl KeyResolver for EnvKeyResolver {
-    fn active(&self) -> Result<PseudonymKey, PseudonymError> {
-        let id = (self.lookup)(ACTIVE_KEY_VAR).ok_or(PseudonymError::NoActiveKey)?;
-        self.resolve(&KeyId::new(id.trim())?)
+    fn active(&self, tenant: &TenantId) -> Result<PseudonymKey, PseudonymError> {
+        let variable = scoped_var_name(tenant, ACTIVE_KEY_VAR);
+        let id = (self.lookup)(&variable).ok_or(PseudonymError::NoActiveKey)?;
+        self.resolve(tenant, &KeyId::new(id.trim())?)
     }
 
-    fn resolve(&self, id: &KeyId) -> Result<PseudonymKey, PseudonymError> {
-        let variable = id.env_var();
+    fn resolve(&self, tenant: &TenantId, id: &KeyId) -> Result<PseudonymKey, PseudonymError> {
+        let variable = scoped_var_name(tenant, &id.env_var());
         let encoded = (self.lookup)(&variable).ok_or_else(|| PseudonymError::KeyNotFound {
             id: id.0.clone(),
             variable,
@@ -426,7 +479,7 @@ pub struct Pseudonymiser {
 }
 
 impl Pseudonymiser {
-    /// Load the active key and any retired keys still needed to read old tokens.
+    /// Load `tenant`'s active key and any retired keys still needed to read old tokens.
     ///
     /// All keys are resolved eagerly. Discovering at startup that a retired key is
     /// unreadable is a configuration error someone can fix; discovering it when a data
@@ -435,9 +488,13 @@ impl Pseudonymiser {
     /// # Errors
     ///
     /// [`PseudonymError::NoActiveKey`] or [`PseudonymError::KeyNotFound`] if any listed
-    /// key is missing, and the parse errors above if any is malformed.
-    pub fn new(resolver: &dyn KeyResolver, retired: &[KeyId]) -> Result<Self, PseudonymError> {
-        Self::from_keys(resolver.active()?, resolver, retired)
+    /// key is missing for `tenant`, and the parse errors above if any is malformed.
+    pub fn new(
+        resolver: &dyn KeyResolver,
+        tenant: &TenantId,
+        retired: &[KeyId],
+    ) -> Result<Self, PseudonymError> {
+        Self::from_keys(resolver.active(tenant)?, resolver, tenant, retired)
     }
 
     /// As [`Pseudonymiser::new`], but with the active key named explicitly.
@@ -452,16 +509,18 @@ impl Pseudonymiser {
     /// As [`Pseudonymiser::new`], with [`PseudonymError::KeyNotFound`] for `active` too.
     pub fn with_active(
         resolver: &dyn KeyResolver,
+        tenant: &TenantId,
         active: KeyId,
         retired: &[KeyId],
     ) -> Result<Self, PseudonymError> {
-        let active = resolver.resolve(&active)?;
-        Self::from_keys(active, resolver, retired)
+        let active = resolver.resolve(tenant, &active)?;
+        Self::from_keys(active, resolver, tenant, retired)
     }
 
     fn from_keys(
         active: PseudonymKey,
         resolver: &dyn KeyResolver,
+        tenant: &TenantId,
         retired: &[KeyId],
     ) -> Result<Self, PseudonymError> {
         let retired = retired
@@ -469,7 +528,7 @@ impl Pseudonymiser {
             // The active key is already held; listing it as retired too is harmless
             // configuration noise, not an error worth refusing to start over.
             .filter(|id| **id != *active.id())
-            .map(|id| Ok((id.clone(), resolver.resolve(id)?)))
+            .map(|id| Ok((id.clone(), resolver.resolve(tenant, id)?)))
             .collect::<Result<HashMap<_, _>, PseudonymError>>()?;
         Ok(Self { active, retired })
     }
@@ -683,6 +742,11 @@ mod padding_tests {
 #[cfg(test)]
 mod key_tests {
     use super::{EnvKeyResolver, KeyId, KeyResolver, PseudonymError, PseudonymKey, KEY_BYTES};
+    use crate::tenancy::TenantId;
+
+    fn t() -> TenantId {
+        TenantId::default_tenant()
+    }
 
     #[test]
     fn should_reject_a_key_id_that_would_break_token_parsing() {
@@ -710,7 +774,7 @@ mod key_tests {
         let resolver = EnvKeyResolver::with_lookup(|_| None);
         let id = KeyId::new("absent").unwrap();
         assert!(matches!(
-            resolver.resolve(&id),
+            resolver.resolve(&t(), &id),
             Err(PseudonymError::KeyNotFound { .. })
         ));
     }
@@ -719,7 +783,7 @@ mod key_tests {
     fn should_report_a_missing_active_key_rather_than_inventing_one() {
         let resolver = EnvKeyResolver::with_lookup(|_| None);
         assert!(matches!(
-            resolver.active(),
+            resolver.active(&t()),
             Err(PseudonymError::NoActiveKey)
         ));
     }
@@ -741,7 +805,7 @@ mod key_tests {
         });
         let id = KeyId::new("k1").unwrap();
         assert!(matches!(
-            resolver.resolve(&id),
+            resolver.resolve(&t(), &id),
             Err(PseudonymError::MalformedKeyMaterial { .. })
         ));
     }
@@ -754,7 +818,7 @@ mod key_tests {
             "HACIENDA_PSEUDONYM_KEY_K1" => Some(hex.clone()),
             _ => None,
         });
-        let active = resolver.active().unwrap();
+        let active = resolver.active(&t()).unwrap();
         assert_eq!(active.id().as_str(), "k1");
         assert_eq!(active.material(), &[7u8; KEY_BYTES]);
     }
@@ -769,6 +833,81 @@ mod key_tests {
         assert!(rendered.contains("redacted"), "{rendered}");
         assert!(rendered.contains("k1"), "the id is not secret: {rendered}");
     }
+
+    // ── P3a: tenant-scoped resolution ──────────────────────────────────────────
+
+    /// Regression guard for spec §4's back-compat requirement: a bare (untenanted)
+    /// variable name must resolve identically before and after tenant scoping existed.
+    #[test]
+    fn default_tenant_token_unchanged_by_this_change() {
+        let hex = "07".repeat(KEY_BYTES);
+        let resolver = EnvKeyResolver::with_lookup(move |name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some(hex.clone()),
+            _ => None,
+        });
+        let active = resolver.active(&TenantId::default_tenant()).unwrap();
+        assert_eq!(active.id().as_str(), "k1");
+        assert_eq!(active.material(), &[7u8; KEY_BYTES]);
+    }
+
+    /// A tenant with nothing provisioned under its own prefixed variable name must fail
+    /// closed — never fall back to the default tenant's key or invent one.
+    #[test]
+    fn tenant_with_no_provisioned_key_fails_closed() {
+        let hex = "07".repeat(KEY_BYTES);
+        let resolver = EnvKeyResolver::with_lookup(move |name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some(hex.clone()),
+            _ => None,
+        });
+        let acme = TenantId::new("acme");
+        assert!(matches!(
+            resolver.active(&acme),
+            Err(PseudonymError::NoActiveKey)
+        ));
+        assert!(matches!(
+            resolver.resolve(&acme, &KeyId::new("k1").unwrap()),
+            Err(PseudonymError::KeyNotFound { .. })
+        ));
+    }
+
+    /// A tenant's key resolves under its own prefixed variable names, independent of
+    /// whatever the default tenant (or another tenant) has configured.
+    #[test]
+    fn should_resolve_a_tenant_scoped_key_under_its_prefixed_variable_name() {
+        let default_hex = "07".repeat(KEY_BYTES);
+        let acme_hex = "a9".repeat(KEY_BYTES);
+        let resolver = EnvKeyResolver::with_lookup(move |name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some(default_hex.clone()),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_KEY_K1" => Some(acme_hex.clone()),
+            _ => None,
+        });
+        let default_key = resolver.active(&TenantId::default_tenant()).unwrap();
+        let acme_key = resolver.active(&TenantId::new("acme")).unwrap();
+        assert_eq!(default_key.material(), &[0x07u8; KEY_BYTES]);
+        assert_eq!(acme_key.material(), &[0xa9u8; KEY_BYTES]);
+    }
+
+    /// A tenant id containing characters illegal in an environment variable name is
+    /// sanitised, not rejected — deployments should not have to avoid punctuation in
+    /// tenant ids just because this resolver happens to be env-var-backed.
+    #[test]
+    fn should_sanitise_a_tenant_id_containing_non_env_var_characters() {
+        let hex = "5c".repeat(KEY_BYTES);
+        let resolver = EnvKeyResolver::with_lookup(move |name| {
+            (name == "HACIENDA_TENANT_ACME_CORP_HACIENDA_PSEUDONYM_ACTIVE_KEY")
+                .then(|| "k1".to_string())
+                .or_else(|| {
+                    (name == "HACIENDA_TENANT_ACME_CORP_HACIENDA_PSEUDONYM_KEY_K1")
+                        .then(|| hex.clone())
+                })
+        });
+        let key = resolver.active(&TenantId::new("acme-corp")).unwrap();
+        assert_eq!(key.material(), &[0x5cu8; KEY_BYTES]);
+    }
 }
 
 #[cfg(test)]
@@ -778,6 +917,13 @@ mod pseudonymiser_tests {
         KEY_VAR_PREFIX,
     };
     use crate::pii::types::PiiCategory;
+    use crate::tenancy::TenantId;
+
+    /// The tenant every test in this module uses that doesn't itself care about tenant
+    /// scoping (that's `pseudonym::key_tests`' and `facade.rs`'s job).
+    fn t() -> TenantId {
+        TenantId::default_tenant()
+    }
 
     /// A resolver holding `k1` and `k2` with distinct material, active id as given.
     fn resolver(active: &'static str) -> EnvKeyResolver {
@@ -795,7 +941,7 @@ mod pseudonymiser_tests {
 
     fn built(active: &'static str, retired: &[&str]) -> Pseudonymiser {
         let retired: Vec<KeyId> = retired.iter().map(|r| k(r)).collect();
-        Pseudonymiser::new(&resolver(active), &retired).unwrap()
+        Pseudonymiser::new(&resolver(active), &t(), &retired).unwrap()
     }
 
     #[test]
@@ -887,6 +1033,7 @@ mod pseudonymiser_tests {
                 "HACIENDA_PSEUDONYM_KEY_K1" => Some("5c".repeat(KEY_BYTES)),
                 _ => None,
             }),
+            &t(),
             &[],
         )
         .unwrap();
@@ -1048,7 +1195,7 @@ mod pseudonymiser_tests {
     fn should_fail_to_build_when_no_active_key_is_configured() {
         let empty = EnvKeyResolver::with_lookup(|_| None);
         assert!(matches!(
-            Pseudonymiser::new(&empty, &[]),
+            Pseudonymiser::new(&empty, &t(), &[]),
             Err(PseudonymError::NoActiveKey)
         ));
     }
@@ -1058,7 +1205,7 @@ mod pseudonymiser_tests {
         // Starting up with an unreadable retired key would mean discovering the corpus is
         // partly irreversible only when someone exercises a right of access.
         assert!(matches!(
-            Pseudonymiser::new(&resolver("k1"), &[k("gone")]),
+            Pseudonymiser::new(&resolver("k1"), &t(), &[k("gone")]),
             Err(PseudonymError::KeyNotFound { .. })
         ));
     }
@@ -1067,5 +1214,48 @@ mod pseudonymiser_tests {
     fn should_expose_the_key_variable_names_it_reads() {
         assert_eq!(ACTIVE_KEY_VAR, "HACIENDA_PSEUDONYM_ACTIVE_KEY");
         assert_eq!(KEY_VAR_PREFIX, "HACIENDA_PSEUDONYM_KEY_");
+    }
+
+    /// P3a §1's founding claim, now concrete: two tenants sharing one resolver, each
+    /// with their own key material under the same key id, must mint different tokens
+    /// for the identical plaintext — otherwise a shared surface (a support ticket, an
+    /// analytics pipeline reading exports from multiple tenants) lets one tenant
+    /// correlate identities across another.
+    #[test]
+    fn two_tenants_same_value_different_tokens() {
+        let resolver = EnvKeyResolver::with_lookup(move |name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_KEY_K1" => Some("a9".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        let acme = TenantId::new("acme");
+
+        let default_p = Pseudonymiser::new(&resolver, &t(), &[]).unwrap();
+        let acme_p = Pseudonymiser::new(&resolver, &acme, &[]).unwrap();
+
+        let default_token = default_p
+            .token(&PiiCategory::Email, "alice@example.com")
+            .unwrap();
+        let acme_token = acme_p
+            .token(&PiiCategory::Email, "alice@example.com")
+            .unwrap();
+        assert_ne!(
+            default_token, acme_token,
+            "same plaintext under two tenants' distinct keys must not collide"
+        );
+
+        // Cross-tenant reveal must fail — a probing caller learns nothing about
+        // whether the token is valid under some other tenant's key (D-P3-6). Both
+        // tenants happen to use the same active key *id* ("k1") here with different
+        // *material*, so `acme_p` finds an id match and attempts decryption, which
+        // authentication then rejects — the same `UnreadableToken` path
+        // `should_refuse_to_reveal_a_token_whose_key_id_matches_but_material_does_not`
+        // above already covers for a single tenant, now shown to hold across tenants.
+        assert!(matches!(
+            acme_p.reveal(&default_token),
+            Err(PseudonymError::UnreadableToken)
+        ));
     }
 }

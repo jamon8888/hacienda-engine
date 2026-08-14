@@ -1,8 +1,8 @@
 # P3a — Tenant-scoped pseudonym keys
 
 **Date:** 2026-08-14
-**Status:** Proposed, implementation-ready — architecture confirmed against current code,
-not inferred from the design docs alone
+**Status:** Implemented (2026-08-14) — all six tasks shipped; see §7 for what landed and the
+one deviation from the design as originally proposed.
 **Extends:** `2026-08-01-P3-pseudonymisation-as-a-service.md` §5 ("Cloisonnement par
 tenant") and `2026-08-01-S1-tenancy-and-projects.md` — this spec is what closes P3 §5's
 open dependency on S1, which S1 itself never actually delivered for the pseudonym layer
@@ -191,3 +191,44 @@ the following methods (not exhaustive — verify against the file at implementat
 - No call site outside `hacienda-core` changes signature (§3.3) — if implementation
   discovers one is needed, that's a signal this design missed something, not a small
   extension to wave through.
+
+## 7. Implementation notes
+
+Shipped as designed in §3.1–§3.3, with all five §5 tests passing and every §6 exit
+criterion met. `hacienda-api`/`hacienda-cli`/`hacienda-mcp` needed no call-site signature
+changes, confirming §3.3's prediction — the one exception (below) is a constructor-time
+change, not a per-request call site.
+
+**One real, small, justified deviation from §3.2's sketch:** `HaciendaFacade::with_key_resolver`
+took `resolver: &dyn KeyResolver` before this spec; it now takes `resolver: Arc<dyn
+KeyResolver>`. The per-tenant cache means the facade must retain the resolver to build
+later tenants' pipelines lazily, not just consume it once at construction — a borrowed
+reference can't outlive the constructor call. Every caller of `with_key_resolver`
+(`hacienda-cli`, `hacienda-api` test setup) updated to pass `Arc::new(resolver)`; this is a
+one-time constructor change, not a widened per-request surface.
+
+**One correction to §3.3's open question, found by a CLI integration-test regression:**
+§3.3 offered two options for `reveal_token_with_auth` — "its own
+`self.pseudonymiser_for(&tenant)` accessor, or route through `pii_pipeline_for` and expose
+the inner pseudonymiser." The first implementation attempt took the second option (a
+`PiiPipeline::pseudonymiser()`/`RedactionEngine::pseudonymiser()` accessor pair, reusing the
+`pii_pipeline_for` cache), on the reasoning that it avoided a second per-tenant map. That
+broke `hacienda-cli`'s `pii_reveal.rs` integration tests: `with_key_resolver` can be, and is
+in real CLI usage (`hacienda pii reveal <token>` run with no `[pii]` config section at
+all — a config the CLI's `run_pii_reveal` always builds via `load_config(..., None, None)`,
+carrying no pipeline config), called with a resolver but no `[pii]` section configured.
+Routing reveal through `pii_pipeline_for` made it depend on `config.pii` being `Some`, which
+this call shape doesn't guarantee — a real, pre-existing decoupling (`pii_pipeline` vs.
+`pseudonymiser` were always two independent optional fields before this spec) that the
+"one cache" sketch had missed. Fixed by taking §3.3's first-offered option instead: a
+dedicated `pseudonymisers: Option<Mutex<HashMap<TenantId, Arc<Pseudonymiser>>>>` cache,
+gated on `key_resolver.is_some()` rather than `config.pii.is_some()`, with its own eager
+default-tenant build in `build()` for the same fail-fast-at-startup guarantee
+`pii_pipelines` gets. `pii_pipeline_for` and `pseudonymiser_for` share the actual key
+resolution step (`build_pseudonymiser`) — only the cache and its gating condition differ,
+so this is not a return to fully duplicated logic, just two caches instead of one.
+
+Verified: `cargo test --workspace` — every test passes except the five pre-existing,
+environment-only failures unrelated to this change (two read-only-file-permission tests
+that don't hold as root, and three testcontainers/Postgres tests that need Docker, which
+this sandbox does not have).

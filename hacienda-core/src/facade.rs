@@ -9,11 +9,15 @@ use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
 use crate::glossary::{EntityGlossary, GlossaryEntry};
+use crate::pii::ner::NerDetector;
+use crate::pii::pipeline::build_detector;
 use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineResult};
 use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionAuditEntry, RedactionError};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
+use crate::tenancy::TenantId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -37,15 +41,43 @@ pub(crate) const MAX_REDACTION_DEPTH: usize = 64;
 
 pub struct HaciendaFacade {
     config: HaciendaConfig,
-    /// `Arc`-wrapped so [`Self::detect_concurrently`] can hand each spawned task its own
-    /// cheap clone without cloning the pipeline itself (`PiiPipeline` is not `Clone`).
-    pii_pipeline: Option<Arc<PiiPipeline>>,
-    /// The pseudonymiser instance used for minting and revealing tokens.
+    /// Per-tenant cache of built pipelines (P3a §3.2). `None` when `config.pii` is not
+    /// configured at all — same meaning `pii_pipeline: Option<Arc<PiiPipeline>>` had
+    /// before this existed. `Some(HashMap::new())` starts empty except for the default
+    /// tenant, which [`Self::build`] populates eagerly so a bad key configuration is
+    /// still a startup error, not a surprise on a tenant's first request (matches the
+    /// pre-P3a behaviour exactly for a single-tenant deployment).
     ///
-    /// Separate from `pii_pipeline` because token reveal is a standalone operation that
-    /// does not require running the full detection pipeline. Cloned from the same
-    /// `Arc<Pseudonymiser>` passed to the pipeline to maintain a single instance per key set.
-    pseudonymiser: Option<Arc<Pseudonymiser>>,
+    /// Reading and writing this cache is the only synchronous, `&self`-only work
+    /// [`Self::pii_pipeline_for`] does; the `Mutex` is never held across an `.await`.
+    pii_pipelines: Option<Mutex<HashMap<TenantId, Arc<PiiPipeline>>>>,
+    /// The NER backend, loaded once regardless of how many tenants pseudonymise.
+    /// `Clone` is cheap (`NerDetector`'s own doc comment) — every tenant's
+    /// [`PiiPipeline`] gets an owned clone of this instead of reloading model weights.
+    shared_detector: Option<NerDetector>,
+    /// Where a tenant's pseudonymisation key material comes from. `None` when the
+    /// facade was built via [`Self::new`]/[`Self::with_stores`] without
+    /// [`Self::with_key_resolver`] — `Pseudonymize` mode then fails to build a pipeline
+    /// for any tenant, exactly as it fails today with no resolver configured.
+    key_resolver: Option<Arc<dyn KeyResolver>>,
+    /// The active key id [`crate::redaction::RedactionConfig::key_id`] pins, if set —
+    /// applies identically to every tenant's [`Pseudonymiser`], since it names which
+    /// key new tokens mint under, not whose material is used.
+    pinned_active_key: Option<KeyId>,
+    /// Retired keys every tenant's [`Pseudonymiser`] must still be able to reveal.
+    retired_keys: Vec<KeyId>,
+    /// Per-tenant cache of standalone [`Pseudonymiser`]s, used only by
+    /// [`Self::reveal_token_with_auth`]. `None` when [`Self::key_resolver`] is `None`.
+    ///
+    /// Kept independent of [`Self::pii_pipelines`]: [`Self::with_key_resolver`] can be
+    /// called with no `[pii]` section configured at all (e.g. `hacienda pii reveal` run
+    /// against a config with no pipeline section) — reveal only needs key material, not
+    /// a full detection/redaction pipeline, so it must keep working in that case exactly
+    /// as it did before this cache existed, when `pseudonymiser` was a field independent
+    /// of `pii_pipeline`. `Some(HashMap::new())` starts empty except for the default
+    /// tenant, which [`Self::build`] populates eagerly for the same fail-fast-at-startup
+    /// reason [`Self::pii_pipelines`] does.
+    pseudonymisers: Option<Mutex<HashMap<TenantId, Arc<Pseudonymiser>>>>,
     compliance: Option<ComplianceGenerator>,
     /// The persistence backend for the tamper-evident audit log.
     ///
@@ -153,31 +185,39 @@ impl HaciendaFacade {
     ///
     /// [`FileAuditStore`]: crate::audit::FileAuditStore
     pub fn new(config: HaciendaConfig) -> Result<Self, HaciendaError> {
-        Self::build(config, None, None, None, None)
+        Self::build(config, None, None, Vec::new(), None, None, None)
     }
 
     /// Build a facade that can mint and reverse pseudonym tokens.
     ///
     /// Required when the PII configuration selects
     /// [`RedactionMode::Pseudonymize`](crate::redaction::RedactionMode::Pseudonymize).
-    /// [`HaciendaFacade::new`] passes no key and therefore *fails* for that mode; it does
-    /// not fall back to masking, because that would apply a weaker control than the one
-    /// the operator configured.
+    /// [`HaciendaFacade::new`] passes no resolver and therefore *fails* for that mode; it
+    /// does not fall back to masking, because that would apply a weaker control than the
+    /// one the operator configured.
     ///
     /// The active key comes from
     /// [`RedactionConfig::key_id`](crate::redaction::RedactionConfig::key_id) when set and
-    /// from the resolver's own notion of "active" otherwise. `retired` names keys that are
-    /// no longer minted under but whose existing tokens must stay revealable — they are
-    /// loaded eagerly, so a missing one is a startup error rather than a surprise during
-    /// a right-of-access request.
+    /// from the resolver's own notion of "active" otherwise — resolved independently per
+    /// tenant (P3a), the first time each tenant's pipeline is built. `retired` names keys
+    /// that are no longer minted under but whose existing tokens must stay revealable for
+    /// every tenant; they are resolved eagerly as part of building each tenant's
+    /// [`Pseudonymiser`], so a missing one is an error at that point rather than a
+    /// surprise during a right-of-access request.
+    ///
+    /// `resolver` is now `Arc`-wrapped rather than borrowed (P3a): the facade must be
+    /// able to call it again lazily, on a later request, for a tenant it has not seen
+    /// yet — not just once at construction, as before. The default tenant's pipeline is
+    /// still built eagerly here, so a bad key configuration for that tenant remains a
+    /// startup error exactly as it was before this change.
     ///
     /// # Errors
     ///
     /// As [`HaciendaFacade::new`], plus
-    /// [`HaciendaError::Pii`] wrapping a key resolution failure.
+    /// [`HaciendaError::Pii`] wrapping a key resolution failure for the default tenant.
     pub fn with_key_resolver(
         config: HaciendaConfig,
-        resolver: &dyn KeyResolver,
+        resolver: Arc<dyn KeyResolver>,
         retired: &[KeyId],
     ) -> Result<Self, HaciendaError> {
         let configured = config
@@ -187,12 +227,15 @@ impl HaciendaFacade {
             .map(KeyId::new)
             .transpose()
             .map_err(key_error)?;
-        let pseudonymiser = match configured {
-            Some(id) => Pseudonymiser::with_active(resolver, id, retired),
-            None => Pseudonymiser::new(resolver, retired),
-        }
-        .map_err(key_error)?;
-        Self::build(config, Some(Arc::new(pseudonymiser)), None, None, None)
+        Self::build(
+            config,
+            Some(resolver),
+            configured,
+            retired.to_vec(),
+            None,
+            None,
+            None,
+        )
     }
 
     /// Build a facade with explicit store backends.
@@ -222,24 +265,39 @@ impl HaciendaFacade {
         review_store: Option<Arc<dyn ReviewStore>>,
         api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
-        Self::build(config, None, audit_store, review_store, api_key_store)
+        Self::build(
+            config,
+            None,
+            None,
+            Vec::new(),
+            audit_store,
+            review_store,
+            api_key_store,
+        )
     }
 
     /// Shared construction. Accepts all optional overrides and applies defaults for any
     /// that are `None`.
     fn build(
         config: HaciendaConfig,
-        pseudonymiser: Option<Arc<Pseudonymiser>>,
+        key_resolver: Option<Arc<dyn KeyResolver>>,
+        pinned_active_key: Option<KeyId>,
+        retired_keys: Vec<KeyId>,
         audit_store: Option<Arc<dyn AuditStore>>,
         review_store: Option<Arc<dyn ReviewStore>>,
         api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
-        let pii_pipeline = config
+        // The detector is the expensive part (P3a §3.2) — built once here, regardless
+        // of how many tenants go on to pseudonymise, and cheaply `Clone`d into each
+        // tenant's own `PiiPipeline` by `pii_pipeline_for`.
+        let shared_detector = config
             .pii
-            .clone()
-            .map(|c| PiiPipeline::with_pseudonymiser(c, pseudonymiser.clone()))
+            .as_ref()
+            .map(build_detector)
             .transpose()?
-            .map(Arc::new);
+            .flatten();
+        let pii_pipelines = config.pii.is_some().then(|| Mutex::new(HashMap::new()));
+        let pseudonymisers = key_resolver.is_some().then(|| Mutex::new(HashMap::new()));
 
         // Auditing without detection would record nothing, so the store follows the
         // pipeline rather than being independently switchable.
@@ -274,7 +332,7 @@ impl HaciendaFacade {
             (None, None) => None,
         };
 
-        Ok(Self {
+        let facade = Self {
             compliance: config.compliance.clone().map(ComplianceGenerator::new),
             review_queue,
             glossary: config
@@ -282,12 +340,179 @@ impl HaciendaFacade {
                 .clone()
                 .filter(|g| g.enabled)
                 .map(|g| Mutex::new(EntityGlossary::new(g))),
-            pii_pipeline,
-            pseudonymiser,
+            pii_pipelines,
+            shared_detector,
+            key_resolver,
+            pinned_active_key,
+            retired_keys,
+            pseudonymisers,
             audit_store,
             api_key_store,
             config,
-        })
+        };
+
+        // Build and cache the default tenant's pipeline eagerly, so a bad key
+        // configuration (Pseudonymize mode with no resolvable key) is still a startup
+        // error here, exactly as it was before per-tenant pipelines existed — every
+        // other tenant is lazy (P3a §3.2), but a single-tenant deployment upgrading
+        // into this change must see identical fail-fast behaviour (spec §4).
+        if facade.pii_pipelines.is_some() {
+            facade.pii_pipeline_for(&TenantId::default_tenant())?;
+        }
+        // Same fail-fast rule for the standalone reveal-only pseudonymiser cache: a
+        // caller of `with_key_resolver` with no `[pii]` section at all (e.g. `hacienda
+        // pii reveal` with no pipeline config) must still see a bad key configuration
+        // at startup, not on first reveal.
+        if facade.pseudonymisers.is_some() {
+            facade.pseudonymiser_for(&TenantId::default_tenant())?;
+        }
+
+        Ok(facade)
+    }
+
+    /// Return the [`PiiPipeline`] for `tenant`, building and caching it on first use for
+    /// that tenant (P3a §3.2).
+    ///
+    /// Building means resolving `tenant`'s pseudonymisation key material via
+    /// [`Self::key_resolver`], if one is configured, and assembling a pipeline around
+    /// the one shared, already-loaded NER detector — never reloading the model. Two
+    /// concurrent callers racing to build the same not-yet-cached tenant both do the
+    /// resolution work, but only one's result is kept (`HashMap::entry`'s
+    /// `or_insert`), so every caller after the race settles observes the same `Arc`.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no `[pii]` section is configured at all — the
+    /// same condition `self.pii_pipeline.as_ref().ok_or(HaciendaError::PiiDisabled)`
+    /// checked before this cache existed.
+    ///
+    /// [`HaciendaError::Pii`] wrapping a [`PiiError`] if pipeline assembly fails for
+    /// `tenant` specifically — most commonly
+    /// [`RedactionError::MissingPseudonymKey`] when the mode is `Pseudonymize` and
+    /// `tenant` has no key resolvable (no [`Self::key_resolver`] configured at all, or
+    /// the resolver has no material provisioned for this tenant specifically — see
+    /// `EnvKeyResolver`'s tenant-prefixed lookup convention,
+    /// `redaction/pseudonym.rs`).
+    fn pii_pipeline_for(&self, tenant: &TenantId) -> Result<Arc<PiiPipeline>, HaciendaError> {
+        let pipelines = self
+            .pii_pipelines
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+
+        {
+            let cache = lock(pipelines);
+            if let Some(pipeline) = cache.get(tenant) {
+                return Ok(Arc::clone(pipeline));
+            }
+        }
+
+        // `pii_pipelines` is only `Some` when `config.pii` was, so this is always
+        // populated by the time any tenant reaches here.
+        let pii_config = self
+            .config
+            .pii
+            .clone()
+            .expect("pii_pipelines is Some only when config.pii is Some");
+
+        let pseudonymiser = self
+            .key_resolver
+            .as_ref()
+            .map(|resolver| Self::build_pseudonymiser(self, resolver, tenant))
+            .transpose()?;
+
+        let pipeline = Arc::new(PiiPipeline::with_detector_and_pseudonymiser(
+            pii_config,
+            self.shared_detector.clone(),
+            pseudonymiser,
+        )?);
+
+        let mut cache = lock(pipelines);
+        let pipeline = Arc::clone(cache.entry(tenant.clone()).or_insert(pipeline));
+        Ok(pipeline)
+    }
+
+    /// Resolve `tenant`'s pseudonymisation key material via `resolver`, honouring
+    /// [`Self::pinned_active_key`]/[`Self::retired_keys`] — the shared build step behind
+    /// both [`Self::pii_pipeline_for`] and [`Self::pseudonymiser_for`].
+    fn build_pseudonymiser(
+        &self,
+        resolver: &Arc<dyn KeyResolver>,
+        tenant: &TenantId,
+    ) -> Result<Arc<Pseudonymiser>, HaciendaError> {
+        let built = match &self.pinned_active_key {
+            Some(id) => Pseudonymiser::with_active(
+                resolver.as_ref(),
+                tenant,
+                id.clone(),
+                &self.retired_keys,
+            ),
+            None => Pseudonymiser::new(resolver.as_ref(), tenant, &self.retired_keys),
+        }
+        .map_err(key_error)?;
+        Ok(Arc::new(built))
+    }
+
+    /// Return the standalone, reveal-only [`Pseudonymiser`] for `tenant`, building and
+    /// caching it on first use.
+    ///
+    /// Independent of [`Self::pii_pipeline_for`]'s cache: [`Self::with_key_resolver`]
+    /// can be used with no `[pii]` section configured at all — reveal needs only key
+    /// material, not a detection/redaction pipeline — so this must keep working in that
+    /// case (see the field doc on [`Self::pseudonymisers`]).
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no [`Self::key_resolver`] is configured at all.
+    /// [`HaciendaError::Pii`] if `tenant` has no key resolvable.
+    fn pseudonymiser_for(&self, tenant: &TenantId) -> Result<Arc<Pseudonymiser>, HaciendaError> {
+        let cache = self
+            .pseudonymisers
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+
+        {
+            let map = lock(cache);
+            if let Some(pseudonymiser) = map.get(tenant) {
+                return Ok(Arc::clone(pseudonymiser));
+            }
+        }
+
+        // `pseudonymisers` is only `Some` when `key_resolver` was, so this is always
+        // populated by the time any tenant reaches here.
+        let resolver = self
+            .key_resolver
+            .as_ref()
+            .expect("pseudonymisers is Some only when key_resolver is Some");
+        let built = self.build_pseudonymiser(resolver, tenant)?;
+
+        let mut map = lock(cache);
+        let built = Arc::clone(map.entry(tenant.clone()).or_insert(built));
+        Ok(built)
+    }
+
+    /// Whether a `[pii]` section is configured at all, independent of any tenant's
+    /// pipeline having actually been built yet.
+    fn pii_enabled(&self) -> bool {
+        self.pii_pipelines.is_some()
+    }
+
+    /// As [`Self::pii_pipeline_for`], but PII being disabled entirely is `Ok(None)`
+    /// rather than [`HaciendaError::PiiDisabled`].
+    ///
+    /// For call sites where "no `[pii]` section configured" is a legitimate, silent
+    /// no-op — `process_batch_with_auth`'s `if let Some(pipeline) = ...` skip, matching
+    /// its pre-P3a behaviour exactly — rather than a client-facing error. Any other
+    /// failure (a tenant's key does not resolve, pipeline assembly fails) still
+    /// propagates; only the "not configured at all" case is folded into `None`.
+    fn optional_pii_pipeline_for(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<Option<Arc<PiiPipeline>>, HaciendaError> {
+        match self.pii_pipeline_for(tenant) {
+            Ok(pipeline) => Ok(Some(pipeline)),
+            Err(HaciendaError::PiiDisabled) => Ok(None),
+            Err(other) => Err(other),
+        }
     }
 
     pub fn config(&self) -> &HaciendaConfig {
@@ -739,7 +964,10 @@ impl HaciendaFacade {
         let mut audit_entries = Vec::new();
         let mut review_submitted = 0;
 
-        if let Some(pipeline) = &self.pii_pipeline {
+        let tenant = caller.tenant_ctx().tenant;
+        let pipeline = self.optional_pii_pipeline_for(&tenant)?;
+
+        if let Some(pipeline) = &pipeline {
             let detections = self
                 .detect_concurrently(pipeline, &extraction.results)
                 .await?;
@@ -779,7 +1007,7 @@ impl HaciendaFacade {
                 .unwrap_or_default(),
             metadata: HaciendaMetadata {
                 processing_time_ms: start.elapsed().as_millis() as u64,
-                pii_enabled: self.pii_pipeline.is_some(),
+                pii_enabled: self.pii_enabled(),
                 documents: extraction.results.len(),
             },
             extraction,
@@ -844,10 +1072,8 @@ impl HaciendaFacade {
             caller.require(Capability::PiiReveal)?;
         }
 
-        let pipeline = self
-            .pii_pipeline
-            .as_ref()
-            .ok_or(HaciendaError::PiiDisabled)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pipeline = self.pii_pipeline_for(&tenant)?;
 
         let result = pipeline.scan(text).await?;
 
@@ -912,10 +1138,8 @@ impl HaciendaFacade {
     ) -> Result<TextRedactResult, HaciendaError> {
         caller.require(Capability::DocumentsProcess)?;
 
-        let pipeline = self
-            .pii_pipeline
-            .as_ref()
-            .ok_or(HaciendaError::PiiDisabled)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pipeline = self.pii_pipeline_for(&tenant)?;
 
         let result = pipeline.process(text).await?;
         let audit_entries = self.record_audit(&result, caller).await?;
@@ -958,10 +1182,8 @@ impl HaciendaFacade {
         token: &str,
     ) -> Result<String, HaciendaError> {
         caller.require(Capability::PiiReveal)?;
-        let pseudonymiser = self
-            .pseudonymiser
-            .as_ref()
-            .ok_or(HaciendaError::PiiDisabled)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pseudonymiser = self.pseudonymiser_for(&tenant)?;
         let plaintext = pseudonymiser.reveal(token)?;
         self.record_token_reveal(&plaintext, caller).await?;
         Ok(plaintext)
@@ -986,11 +1208,16 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         };
 
+        let tenant = caller.tenant_ctx().tenant;
         let principal = caller.principal_id().map(str::to_owned);
         let span_hash = blake3::hash(plaintext.as_bytes()).to_hex().to_string();
+        // Best-effort: the caller that reached this point already built and cached this
+        // tenant's pipeline (`reveal_token_with_auth` calls `pii_pipeline_for` first), so
+        // this is a cache hit in practice. `.ok()` rather than `?` because a failure to
+        // resolve provenance metadata must not block recording that the reveal happened.
         let vertical = self
-            .pii_pipeline
-            .as_ref()
+            .pii_pipeline_for(&tenant)
+            .ok()
             .and_then(|p| p.vertical_provenance_id());
 
         let input = AuditEntryInput {
@@ -1007,7 +1234,6 @@ impl HaciendaFacade {
             vertical,
         };
 
-        let tenant = caller.tenant_ctx().tenant;
         Ok(store.append(&tenant, vec![input]).await?)
     }
 
@@ -1039,10 +1265,15 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         }
 
+        let tenant = caller.tenant_ctx().tenant;
         let principal = caller.principal_id().map(str::to_owned);
+        // Best-effort, same reasoning as `record_token_reveal`: this tenant's pipeline
+        // is already built and cached by the caller that detected `entities` in the
+        // first place, so this is a cache hit; a failure here must not block recording
+        // the reveal itself.
         let vertical = self
-            .pii_pipeline
-            .as_ref()
+            .pii_pipeline_for(&tenant)
+            .ok()
             .and_then(|p| p.vertical_provenance_id());
         let inputs: Vec<AuditEntryInput> = entities
             .iter()
@@ -1071,7 +1302,6 @@ impl HaciendaFacade {
             })
             .collect();
 
-        let tenant = caller.tenant_ctx().tenant;
         Ok(store.append(&tenant, inputs).await?)
     }
 
@@ -1137,10 +1367,14 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         };
 
+        let tenant = caller.tenant_ctx().tenant;
         let principal = caller.principal_id().map(str::to_owned);
+        // Best-effort, same reasoning as `record_token_reveal`/`record_reveal`: this
+        // tenant's pipeline is already built and cached by the caller that produced
+        // `audit_log` in the first place.
         let vertical = self
-            .pii_pipeline
-            .as_ref()
+            .pii_pipeline_for(&tenant)
+            .ok()
             .and_then(|p| p.vertical_provenance_id());
         let inputs: Vec<AuditEntryInput> = audit_log
             .iter()
@@ -1166,7 +1400,6 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         }
 
-        let tenant = caller.tenant_ctx().tenant;
         Ok(store.append(&tenant, inputs).await?)
     }
 
@@ -2051,7 +2284,8 @@ mod tests {
     #[tokio::test]
     async fn should_redact_with_reversible_tokens_end_to_end() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
         let result = facade
             .process(text_input("mail bob@example.com"))
             .await
@@ -2062,7 +2296,8 @@ mod tests {
         assert!(content.contains("[EMAIL:k1:"), "{content}");
 
         // The whole point of the mode: the value is recoverable by a key holder.
-        let pseudonymiser = Pseudonymiser::new(&key_resolver(), &[]).unwrap();
+        let pseudonymiser =
+            Pseudonymiser::new(&key_resolver(), &TenantId::default_tenant(), &[]).unwrap();
         assert_eq!(
             pseudonymiser.reveal(token_in(content)).unwrap(),
             "bob@example.com"
@@ -2074,7 +2309,8 @@ mod tests {
         // Cross-document co-reference. If each document minted its own token, a reader
         // could not tell that the same person appears in both.
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
         let result = facade
             .process_batch(vec![
                 text_input("from bob@example.com"),
@@ -2099,7 +2335,8 @@ mod tests {
     async fn should_mint_under_the_key_named_by_configuration() {
         // Config pins the minting key rather than inheriting the resolver's active one.
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(Some("k2")));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
         let result = facade
             .process(text_input("mail bob@example.com"))
             .await
@@ -2116,7 +2353,161 @@ mod tests {
         // Better a startup failure than discovering the corpus is irreversible when a
         // data subject exercises a right of access.
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(Some("gone")));
-        assert!(HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).is_err());
+        assert!(HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).is_err());
+    }
+
+    // ── P3a: tenant-scoped pseudonym keys ─────────────────────────────────────
+
+    /// A resolver holding distinct `k1` material for the default tenant and for
+    /// `acme`, both under key id `k1` — mirrors
+    /// `pseudonym::pseudonymiser_tests::two_tenants_same_value_different_tokens`, one
+    /// level up at the facade's own public API.
+    fn two_tenant_key_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(EnvKeyResolver::with_lookup(|name| match name {
+            ACTIVE_KEY_VAR => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_KEY_K1" => Some("a9".repeat(KEY_BYTES)),
+            _ => None,
+        }))
+    }
+
+    fn acme_caller_ctx() -> AuthContext {
+        AuthContext::with_tenant(
+            "alice",
+            TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([Capability::DocumentsProcess, Capability::PiiReveal]),
+        )
+    }
+
+    /// Spec §5: a `Caller::Principal` from tenant A cannot have a tenant-B token
+    /// revealed through their own facade call — ties into P3's own
+    /// `cross_tenant_token_is_unknown_key_not_forbidden` (D-P3-6): the reveal fails the
+    /// same way an unknown token would, not with a distinguishable "forbidden" error
+    /// that would confirm the token is valid for *some* tenant.
+    #[tokio::test]
+    async fn reveal_resolves_the_callers_own_tenants_key() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let acme_ctx = acme_caller_ctx();
+        let acme = Caller::Principal(&acme_ctx);
+
+        // The default tenant (Caller::Trusted) mints a token under its own key.
+        let default_result = facade
+            .redact_text_with_auth(Caller::Trusted, "mail bob@example.com")
+            .await
+            .unwrap();
+        let default_token = token_in(&default_result.redacted_text);
+
+        // Tenant acme cannot reveal it: same failure shape an unknown token would
+        // produce, per D-P3-6 — never a distinguishable "forbidden".
+        assert!(facade
+            .reveal_token_with_auth(acme, default_token)
+            .await
+            .is_err());
+
+        // Tenant acme mints and reveals its own token correctly, under its own,
+        // different key material.
+        let acme_result = facade
+            .redact_text_with_auth(acme, "mail bob@example.com")
+            .await
+            .unwrap();
+        let acme_token = token_in(&acme_result.redacted_text);
+        assert_ne!(
+            default_token, acme_token,
+            "two tenants redacting the same value must mint different tokens"
+        );
+        let revealed = facade
+            .reveal_token_with_auth(acme, acme_token)
+            .await
+            .unwrap();
+        assert_eq!(revealed, "bob@example.com");
+    }
+
+    /// Counts `detect` calls — used to prove `pii_pipeline_for` never reloads the NER
+    /// backend when building a second tenant's pipeline (P3a §3.2), mirroring how
+    /// `CountingAuditStore` (above) proves D3 elsewhere in this module.
+    struct CountingNerBackend {
+        detect_calls: AtomicUsize,
+    }
+
+    impl CountingNerBackend {
+        fn new() -> Self {
+            Self {
+                detect_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn detect_call_count(&self) -> usize {
+            self.detect_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl NerBackend for CountingNerBackend {
+        async fn detect(
+            &self,
+            _text: &str,
+            _categories: &[EntityCategory],
+        ) -> XbergResult<Vec<Entity>> {
+            self.detect_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    /// Two tenants' pipelines share the one loaded detector — proven two ways: the
+    /// backend's `Arc` strong count grows by exactly one per tenant pipeline built
+    /// (never resets, which a reload would look like — a fresh `Arc::new` per tenant
+    /// would leave this count flat relative to the baseline), and a `detect` call
+    /// against each tenant's pipeline reaches the *same* counter.
+    #[tokio::test]
+    async fn pii_pipeline_for_reuses_the_loaded_detector_across_tenants() {
+        let counting_backend = Arc::new(CountingNerBackend::new());
+        let backend: Arc<dyn NerBackend> = counting_backend.clone();
+        let detector = NerDetector::new(Arc::clone(&backend));
+
+        let config = HaciendaConfig::default().with_pii(pii_config());
+        let facade = HaciendaFacade {
+            config,
+            pii_pipelines: Some(Mutex::new(HashMap::new())),
+            shared_detector: Some(detector),
+            key_resolver: None,
+            pinned_active_key: None,
+            retired_keys: Vec::new(),
+            pseudonymisers: None,
+            compliance: None,
+            audit_store: None,
+            review_queue: None,
+            glossary: None,
+            api_key_store: None,
+        };
+
+        // Two references already exist: this test's own `backend`, and the clone
+        // `facade.shared_detector`'s `NerDetector` holds.
+        let baseline = Arc::strong_count(&backend);
+
+        let tenant_a = TenantId::new("acme");
+        let tenant_b = TenantId::new("umbrella");
+        let pipeline_a = facade.pii_pipeline_for(&tenant_a).unwrap();
+        let pipeline_b = facade.pii_pipeline_for(&tenant_b).unwrap();
+
+        assert_eq!(
+            Arc::strong_count(&backend),
+            baseline + 2,
+            "each tenant's pipeline must hold a clone of the same backend Arc, not a \
+             freshly constructed one"
+        );
+
+        pipeline_a.process("hello").await.unwrap();
+        pipeline_b.process("hello").await.unwrap();
+        assert_eq!(
+            counting_backend.detect_call_count(),
+            2,
+            "one detect call per pipeline, against the one shared backend"
+        );
     }
 
     #[tokio::test]
@@ -2406,7 +2797,10 @@ mod tests {
     #[tokio::test]
     async fn redact_structured_fields_covers_every_known_field() {
         let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
-        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
         let mut document = document_with_corpus_everywhere().await;
 
         // `redact_structured_fields` no longer appends its own fields' entries — it
@@ -2532,7 +2926,10 @@ mod tests {
     #[tokio::test]
     async fn redact_structured_fields_refuses_to_recurse_past_the_depth_limit() {
         let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
-        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
         let mut document = document_with_corpus_everywhere().await;
         assert!(
             document.children.is_some(),
@@ -2567,7 +2964,10 @@ mod tests {
     #[tokio::test]
     async fn redact_table_redacts_markdown_directly_when_cells_are_empty() {
         let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
-        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
 
         let mut table = xberg::Table {
             cells: Vec::new(),
@@ -2657,7 +3057,10 @@ mod tests {
             None,
         )
         .unwrap();
-        let pipeline = facade.pii_pipeline.as_ref().expect("pii configured");
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
 
         // No archive children: isolates the "one append per document" claim for a
         // document's own structured fields from the separate "one append per nested
@@ -3057,12 +3460,19 @@ mod tests {
         )));
         HaciendaFacade {
             config,
-            pii_pipeline: Some(Arc::new(pipeline)),
+            pii_pipelines: Some(Mutex::new(HashMap::from([(
+                TenantId::default_tenant(),
+                Arc::new(pipeline),
+            )]))),
+            shared_detector: None,
+            key_resolver: None,
+            pinned_active_key: None,
+            retired_keys: Vec::new(),
+            pseudonymisers: None,
             compliance: None,
             audit_store,
             review_queue: None,
             glossary: None,
-            pseudonymiser: None,
             api_key_store: None,
         }
     }
@@ -3326,7 +3736,8 @@ mod tests {
     #[tokio::test]
     async fn should_reveal_a_previously_minted_pseudonym_token() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let result = facade
             .process(text_input("mail bob@example.com"))
@@ -3347,7 +3758,8 @@ mod tests {
     #[tokio::test]
     async fn should_reject_reveal_without_pii_reveal_capability() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let result = facade
             .process(text_input("mail bob@example.com"))
@@ -3369,7 +3781,8 @@ mod tests {
     #[tokio::test]
     async fn should_reject_a_malformed_token() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
         let caller = Caller::Principal(&ctx);
@@ -3383,7 +3796,8 @@ mod tests {
     #[tokio::test]
     async fn should_record_an_audit_entry_for_a_token_reveal() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let result = facade
             .process(text_input("mail bob@example.com"))
@@ -3813,12 +4227,19 @@ mod tests {
         let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
         HaciendaFacade {
             config,
-            pii_pipeline: Some(Arc::new(pipeline)),
+            pii_pipelines: Some(Mutex::new(HashMap::from([(
+                TenantId::default_tenant(),
+                Arc::new(pipeline),
+            )]))),
+            shared_detector: None,
+            key_resolver: None,
+            pinned_active_key: None,
+            retired_keys: Vec::new(),
+            pseudonymisers: None,
             compliance: None,
             audit_store,
             review_queue: None,
             glossary: None,
-            pseudonymiser: None,
             api_key_store: None,
         }
     }

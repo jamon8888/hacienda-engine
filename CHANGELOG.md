@@ -699,6 +699,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out to cover (`AuditStore`/`ReviewStore`/`JobStore`/`DocumentVersionStore`/
   `PresetStore`) — see the spec for the one deliberately out-of-scope exception
   (`ApiKeyStore`).
+- **Pseudonym tokens are now tenant-scoped — two tenants sharing one process previously got
+  the byte-identical token for the same plaintext value, a cross-tenant correlation leak.**
+  `Pseudonymiser::token` derives a deterministic AES-256-SIV token from `category` + `text`
+  + the pseudonymiser's own key material only; `HaciendaFacade` held exactly one
+  `Pseudonymiser`, built once at construction from one `KeyResolver` call, for the lifetime
+  of the process — S1's `TenantCtx`/`Caller::tenant_ctx()` never reached the
+  pseudonymisation layer at all, unlike every store `AuditStore` through `PresetStore`
+  above. Fixed by adding `&TenantId` to `KeyResolver::active`/`resolve` and to
+  `Pseudonymiser::new`/`with_active`/`from_keys`, and by replacing `HaciendaFacade`'s single
+  `Option<Arc<PiiPipeline>>`/`Option<Arc<Pseudonymiser>>` with a per-tenant cache
+  (`pii_pipeline_for`/`pseudonymiser_for`) that builds and resolves each tenant's key
+  material lazily on first use, sharing one loaded NER detector across every tenant
+  (`NerDetector` now derives `Clone`, cheap because its backend is already `Arc`-wrapped) —
+  the expensive part is never reloaded per tenant. `EnvKeyResolver` resolves
+  `TenantId::default_tenant()` to exactly the same environment variable it always has
+  (`HACIENDA_PSEUDONYM_ACTIVE_KEY`/`HACIENDA_PSEUDONYM_KEY_<ID>`), so no already-minted
+  token or existing single-tenant deployment is affected; any other tenant resolves under a
+  `HACIENDA_TENANT_<TENANT>_`-prefixed variable name, provisioned explicitly — a tenant with
+  no provisioned key fails closed, never falling back to another tenant's material. A
+  cross-tenant reveal fails the same way an unknown or forged token does
+  (`HaciendaError::Pii`/`UnreadableToken`), never a distinguishable forbidden-shaped error —
+  the same discipline `ReviewStore`'s fix established for stores, applied here to the
+  pseudonym layer specifically (`reveal_token_with_auth` resolves strictly the caller's own
+  tenant's key). No call site outside `hacienda-core` changed signature; the one
+  constructor-time exception is `HaciendaFacade::with_key_resolver`, which now takes
+  `Arc<dyn KeyResolver>` instead of `&dyn KeyResolver` so the facade can retain the resolver
+  to build later tenants' pipelines lazily. This closes the other half of the S1
+  tenant-isolation gap the `AuditStore` entry above opens with — see
+  `superpowers/specs/2026-08-14-P3a-tenant-scoped-pseudonym-keys.md` for the full design and
+  §7 for one further correction found by a `hacienda-cli` integration-test regression
+  (`hacienda pii reveal` run with a key resolver but no `[pii]` section configured needs its
+  own reveal-only pseudonymiser cache, independent of the detection-pipeline cache).
 - **The one call site that sends document content to an LLM now redacts structurally, not
   by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
   call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before

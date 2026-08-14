@@ -37,7 +37,7 @@ fn build_facade(config: HaciendaConfig) -> Result<HaciendaFacade, hacienda::Haci
         .as_ref()
         .is_some_and(|p| p.redaction.mode == RedactionMode::Pseudonymize);
     if needs_pseudonymiser {
-        HaciendaFacade::with_key_resolver(config, &EnvKeyResolver::new(), &[])
+        HaciendaFacade::with_key_resolver(config, Arc::new(EnvKeyResolver::new()), &[])
     } else {
         HaciendaFacade::new(config)
     }
@@ -76,7 +76,7 @@ pub async fn run_pii_reveal(
 ) -> Result<()> {
     let config = load_config(config_path, config_json, None, None)?;
     let facade = Arc::new(
-        HaciendaFacade::with_key_resolver(config, &EnvKeyResolver::new(), &[])
+        HaciendaFacade::with_key_resolver(config, Arc::new(EnvKeyResolver::new()), &[])
             .context("no pseudonym key is configured for this process")?,
     );
 
