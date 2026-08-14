@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tenant-name sanitisation for pseudonym keys was not injective — `acme-corp` and
+  `acme_corp` could resolve the same key.** `scoped_var_name` (P3a) folded every
+  character outside `[A-Za-z0-9_]` in a tenant id to `_` before uppercasing, so
+  `acme-corp`, `acme_corp`, and `acme.corp` all produced the same
+  `HACIENDA_TENANT_ACME_CORP_...` variable name — three tenants sharing one key,
+  silently, with no error. This is the exact cross-tenant correlation leak P3a exists
+  to close. Fixed by rejecting a non-default tenant id outside `[A-Za-z0-9_]` outright
+  (`PseudonymError::UnsupportedTenantId`) instead of folding it — the same discipline
+  `KeyId::new` already applies to `-` in a key id, extended to tenant ids. Found by
+  CodeRabbit review on this branch; caught before merge.
+- **`PostgresJobStore::finish`/`fail` returned a generic 500-shaped `Internal` error,
+  not `NotFound`, for another tenant's job id.** Both used `fetch_one`, which errors
+  with `RowNotFound` once the `tenant_id` predicate excludes every row for a
+  cross-tenant id — `.map_err` then collapsed that into `JobError::Internal`,
+  contradicting the store's own documented contract and the in-memory backend's
+  behavior. Fixed by switching to `fetch_optional` + `ok_or_else(NotFound)`, matching
+  `update_progress`'s existing shape.
+- **`PostgresAuditStore::rotate` returned a generic backend error, not `StoreClosed`,
+  for a tenant with no open segment.** Same `fetch_one`-vs-`fetch_optional` shape as
+  the job-store fix above; a tenant that never appended (or was already closed) now
+  gets `AuditError::StoreClosed { operation: "rotate" }`, matching
+  `InMemoryAuditStore::rotate`.
+- **A tenant map lookup that "can never fail" used `expect`, panicking a library on a
+  broken invariant instead of returning an error.** Both `FileAuditStore` and
+  `IndexedDbAuditStore` re-look-up a tenant's state after `ensure_tenant_loaded`
+  populates it, and every mutating method asserted the entry was still there with
+  `.expect(...)`. Replaced with a new `AuditError::Internal` variant, propagated with
+  `?`, across `append`/`entries`/`history`/`tip`/`seals`/`verify`/`rotate`/`close` in
+  both files — an audit write is exactly the operation that must not be able to take
+  the whole process down with it.
+- **A JSONL review-queue record written before S1b shipped tenant scoping has no
+  `tenant` key — `FileReviewStore::open`'s replay would fail outright on any log
+  written before this change.** `ReviewQueueItem::tenant` had no `#[serde(default)]`.
+  Fixed by defaulting to `TenantId::default_tenant()` on deserialization when the key
+  is absent, matching what every such record was, in effect, written for.
+- **`GET /v1/review` converted every review-queue read failure into a silently empty
+  list.** `unwrap_or_default()` on `q.list(...)` meant a real store failure was
+  indistinguishable from "nothing awaits review." Now propagated as an `ApiError`;
+  `None` (no queue configured) remains the only legitimate empty-list case.
+- **`ReviewStore::submit` was the one method on the trait with no `&TenantId`
+  parameter**, relying on the caller to have already labelled the item with the
+  correct tenant rather than enforcing it the way `assign`/`decide`/`list`/`get`/
+  `stats` all do. Added the parameter across all three backends; each now overwrites
+  `item.tenant` with it.
+- **`IndexedDbAuditStore` never migrated the pre-S1b `current` snapshot record** —
+  `ensure_tenant_loaded` only ever read the new per-tenant `current:{tenant_id}` key,
+  so the default tenant's first load against an existing browser database would find
+  nothing and silently start a fresh genesis chain, leaving the real history
+  unreachable (not deleted) in the database. Fixed with a read-side fallback: only for
+  the default tenant, and only when the new key has nothing, fall back to the legacy
+  bare `current` key. The next mutation persists under the new key as normal.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
@@ -96,8 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Six review and compliance routes each spec's own table always named, but that were
-  never wired to HTTP.** Verified directly against `hacienda-api/src/routes.rs`: in both
+- **Six review and compliance routes named in the specifications were never wired to
+  HTTP.** Verified directly against `hacienda-api/src/routes.rs`: in both
   cases the underlying business logic already existed and was already tested —
   `ReviewQueue::get`/`assign`/`stats` (`hacienda-core/src/review/queue.rs`) and
   `ComplianceGenerator::model_card`/`checklist`/`dora_report`

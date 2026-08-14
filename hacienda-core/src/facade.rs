@@ -2218,8 +2218,12 @@ mod tests {
 
     #[async_trait]
     impl ReviewStore for ClosingReviewStore {
-        async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.submit(item).await
+        async fn submit(
+            &self,
+            tenant: &TenantId,
+            item: ReviewQueueItem,
+        ) -> Result<ReviewQueueItem, ReviewError> {
+            self.inner.submit(tenant, item).await
         }
 
         async fn assign(

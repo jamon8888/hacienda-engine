@@ -15,6 +15,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewQueueItem {
     pub id: String,
+    /// Defaults to [`TenantId::default_tenant`] when absent on deserialization — a
+    /// record written by `FileReviewStore` before S1b shipped this field has no
+    /// `tenant` key in its JSONL line at all, and every such record was, in effect,
+    /// created for the single pre-tenancy deployment that field now names explicitly.
+    /// Without this default, `FileReviewStore::open`'s replay would fail outright on
+    /// any log written before this change (`review/store_file.rs` reads exactly this
+    /// struct back via `serde_json`).
+    #[serde(default = "TenantId::default_tenant")]
     pub tenant: TenantId,
     pub text_snippet: String,
     pub category: String,
@@ -176,5 +184,68 @@ impl Default for ReviewConfig {
             confidence_threshold: 0.5,
             deadline_hours: Some(24),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A JSONL line written by `FileReviewStore` before S1b shipped the `tenant` field
+    /// has no `tenant` key at all. Without `#[serde(default = "TenantId::default_tenant")]`
+    /// this fails to deserialize, and `FileReviewStore::open`'s replay of an
+    /// existing log from before this change would error on its very first line.
+    #[test]
+    fn legacy_record_with_no_tenant_key_deserializes_to_the_default_tenant() {
+        let legacy_json = r#"{
+            "id": "item-1",
+            "text_snippet": "jane@example.com",
+            "category": "email",
+            "start": 0,
+            "end": 16,
+            "confidence": 0.4,
+            "source": "regex",
+            "status": "pending",
+            "priority": "normal",
+            "assigned_reviewer": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "deadline": null,
+            "decision": null,
+            "decided_by": null,
+            "decided_at": null,
+            "comment": null
+        }"#;
+
+        let item: ReviewQueueItem = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(item.tenant, TenantId::default_tenant());
+    }
+
+    /// A record that does carry a `tenant` key still deserializes to that tenant, not
+    /// the default — the `#[serde(default = ...)]` must only kick in when the key is
+    /// absent, never override an explicit value.
+    #[test]
+    fn record_with_an_explicit_tenant_key_keeps_it() {
+        let json = r#"{
+            "id": "item-1",
+            "tenant": "acme",
+            "text_snippet": "jane@example.com",
+            "category": "email",
+            "start": 0,
+            "end": 16,
+            "confidence": 0.4,
+            "source": "regex",
+            "status": "pending",
+            "priority": "normal",
+            "assigned_reviewer": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "deadline": null,
+            "decision": null,
+            "decided_by": null,
+            "decided_at": null,
+            "comment": null
+        }"#;
+
+        let item: ReviewQueueItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.tenant, TenantId::new("acme"));
     }
 }

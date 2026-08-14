@@ -235,9 +235,10 @@ impl JobStore for PostgresJobStore {
             id,
             tenant.as_str()
         )
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(|e| JobError::Internal(e.to_string()))?;
+        .map_err(|e| JobError::Internal(e.to_string()))?
+        .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
 
         Ok(row_to_job(row))
     }
@@ -259,9 +260,10 @@ impl JobStore for PostgresJobStore {
             id,
             tenant.as_str()
         )
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(|e| JobError::Internal(e.to_string()))?;
+        .map_err(|e| JobError::Internal(e.to_string()))?
+        .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
 
         Ok(row_to_job(row))
     }

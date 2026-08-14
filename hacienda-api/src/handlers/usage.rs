@@ -20,6 +20,14 @@ fn require_store(state: &ApiState) -> Result<&Arc<dyn UsageStore>, ApiError> {
 
 /// `GET /v1/usage?since=&until=` — per-principal entity/byte counts over the audit
 /// chain, optionally windowed by `created_at`. Both bounds are optional and independent.
+///
+/// # Known gap: not tenant-scoped
+///
+/// This route currently returns usage aggregated across **every** tenant, not just the
+/// caller's — a deliberately deferred, tracked gap in
+/// [`UsageStore::summary`](hacienda_core::store::postgres::usage::UsageStore::summary),
+/// whose own doc has the full rationale. The response carries `principal` values, so
+/// this discloses which principals exist in other tenants, not only usage totals.
 #[utoipa::path(
     get,
     path = "/v1/usage",

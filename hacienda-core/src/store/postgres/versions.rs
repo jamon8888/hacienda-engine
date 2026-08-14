@@ -104,12 +104,16 @@ impl DocumentVersionStore for PostgresDocumentVersionStore {
         // Serialize concurrent version creation for the same document. Without this,
         // two transactions racing "SELECT MAX(version_sequence)+1" under READ COMMITTED
         // isolation can compute the same next sequence number and one loses to the
-        // UNIQUE (document_id, version_sequence) constraint instead of getting a clean
-        // sequential number. The lock is scoped per-document (hashtext of the UUID
-        // text) and held only for this transaction — uncontended callers pay nothing.
-        // Not scoped by tenant: two tenants racing on the same document_id must still
-        // serialize against each other, since the UNIQUE constraint below is
-        // (document_id, version_sequence) alone, not per-tenant.
+        // UNIQUE (tenant_id, document_id, version_sequence) constraint instead of
+        // getting a clean sequential number. The lock is scoped per-document (hashtext
+        // of the UUID text) and held only for this transaction — uncontended callers
+        // pay nothing. Not scoped by tenant: harmless, and simpler than it needs to be
+        // now that the constraint is tenant-scoped (S1b) — two tenants racing on the
+        // same document_id still serialize against each other here, even though they no
+        // longer could collide at the constraint itself. A tenant-scoped lock key would
+        // remove that unnecessary cross-tenant contention; not done here since nothing
+        // observed it as a real bottleneck.
+
         sqlx::query!(
             "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
             document_id.to_string()

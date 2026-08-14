@@ -441,7 +441,8 @@ fn classify_verify_failure(error: &hacienda_core::audit::AuditError) -> Option<S
         | AuditError::Json(_)
         | AuditError::StoreClosed { .. }
         | AuditError::UnresolvableCursor { .. }
-        | AuditError::Backend(_) => None,
+        | AuditError::Backend(_)
+        | AuditError::Internal(_) => None,
     }
 }
 

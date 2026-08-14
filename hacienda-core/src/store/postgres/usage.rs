@@ -48,6 +48,17 @@ pub struct UsageRecord {
 pub trait UsageStore: Send + Sync {
     /// Aggregate usage per principal, optionally windowed to `created_at >= since` and
     /// `created_at < until`. `None` on either bound leaves that side open.
+    ///
+    /// # Known gap: not tenant-scoped
+    ///
+    /// [`PostgresUsageStore`]'s implementation aggregates `audit_entries` across every
+    /// tenant, not just the caller's — unlike every other store this workspace's S1b
+    /// tenant-scoping pass covers. The returned rows carry `principal` values, so this
+    /// is a privacy leak, not just a billing-accuracy one: a response discloses which
+    /// principals exist in *other* tenants. Surfaced while auditing this table for S1b
+    /// and deliberately deferred (needs an API-layer change too — see
+    /// `hacienda-api/src/handlers/usage.rs`'s `get_usage`), tracked as a follow-up, not
+    /// fixed silently.
     async fn summary(
         &self,
         since: Option<DateTime<Utc>>,
@@ -129,13 +140,10 @@ mod tests {
     use crate::tenancy::TenantId;
     use uuid::Uuid;
 
-    /// `PostgresUsageStore::summary` (unlike `AuditStore`) has no tenant scoping yet —
-    /// it aggregates `audit_entries` across every tenant, which is a real cross-tenant
-    /// billing-data leak surfaced while auditing this table for S1b but out of this
-    /// pass's scope to close (it needs an API-layer change too — see
-    /// `hacienda-api/src/routes.rs`'s usage handler). Tracked as a follow-up. This
-    /// helper only satisfies `AuditStore::append`'s now-mandatory tenant parameter so
-    /// these tests keep compiling; it does not claim `summary` is tenant-scoped.
+    /// This helper only satisfies `AuditStore::append`'s now-mandatory tenant
+    /// parameter so these tests keep compiling — it does not claim `summary` is
+    /// tenant-scoped. See [`UsageStore::summary`](super::UsageStore::summary)'s own doc
+    /// for the known cross-tenant gap this store still has.
     fn t() -> TenantId {
         TenantId::new("pg-usage-test-tenant")
     }
@@ -241,7 +249,10 @@ mod tests {
             let suffix = Uuid::new_v4();
             let principal = format!("avocat-1-{suffix}");
             audit_store
-                .append(&t(), vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)])
+                .append(
+                    &t(),
+                    vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)],
+                )
                 .await
                 .expect("append failed");
 

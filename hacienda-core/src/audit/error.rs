@@ -85,6 +85,16 @@ pub enum AuditError {
     /// underlying errors are JS/DOM exceptions, not `std::io::Error`.
     #[error("audit backend error: {0}")]
     Backend(String),
+
+    /// An invariant this store maintains internally did not hold — a bug in this
+    /// crate, not a caller mistake or an environment problem. Every tenant-scoped
+    /// method calls `ensure_tenant_loaded` before looking its tenant up in the
+    /// in-memory map; nothing removes an entry once inserted, so the lookup
+    /// immediately after should never fail. Reported rather than asserted with
+    /// `expect` — a panic in a library takes the whole process down with it, and an
+    /// audit write is exactly the operation that must not do that.
+    #[error("audit store invariant violated: {0}")]
+    Internal(String),
 }
 
 /// Lets Postgres backend code use `?` directly on `sqlx::Error` instead of a

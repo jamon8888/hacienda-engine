@@ -55,13 +55,21 @@ use crate::tenancy::TenantId;
 /// concurrent workload, not in sequential tests.
 #[async_trait]
 pub trait ReviewStore: Send + Sync {
-    /// Insert a pre-built item into the store.
+    /// Insert a pre-built item into the store, scoped to `tenant`.
     ///
     /// The item is constructed by [`ReviewQueue::submit`] which generates the id, priority,
-    /// deadline, and timestamps before calling here. The store records what it receives.
+    /// deadline, and timestamps before calling here. The store records what it receives,
+    /// after overwriting `item.tenant` with `tenant` — `tenant` is the parameter every
+    /// other method on this trait enforces isolation through, and `submit` matches that
+    /// discipline rather than trusting the caller to have already labelled `item`
+    /// correctly.
     ///
     /// [`ReviewQueue::submit`]: super::queue::ReviewQueue::submit
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError>;
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError>;
 
     /// Atomic compare-and-swap: move `id` from `Pending` to `InReview`.
     ///
@@ -186,7 +194,12 @@ impl InMemoryReviewStore {
 
 #[async_trait]
 impl ReviewStore for InMemoryReviewStore {
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        mut item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        item.tenant = tenant.clone();
         // Guard acquired, item pushed, guard dropped before returning. No .await while held.
         self.lock().push(item.clone());
         Ok(item)
@@ -364,7 +377,7 @@ mod tests {
     async fn review_get_for_another_tenants_item_id_is_not_found() {
         let store = InMemoryReviewStore::new();
         store
-            .submit(make_item("item-a", t()))
+            .submit(&t(), make_item("item-a", t()))
             .await
             .expect("submit for tenant a");
 
@@ -383,7 +396,7 @@ mod tests {
     async fn review_assign_and_decide_for_another_tenants_item_id_is_not_found() {
         let store = InMemoryReviewStore::new();
         store
-            .submit(make_item("item-a", t()))
+            .submit(&t(), make_item("item-a", t()))
             .await
             .expect("submit for tenant a");
 
@@ -409,15 +422,15 @@ mod tests {
     async fn two_tenants_review_queues_are_independent() {
         let store = InMemoryReviewStore::new();
         store
-            .submit(make_item("a-1", t()))
+            .submit(&t(), make_item("a-1", t()))
             .await
             .expect("submit a-1");
         store
-            .submit(make_item("a-2", t()))
+            .submit(&t(), make_item("a-2", t()))
             .await
             .expect("submit a-2");
         store
-            .submit(make_item("b-1", t2()))
+            .submit(&t2(), make_item("b-1", t2()))
             .await
             .expect("submit b-1");
 

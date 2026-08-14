@@ -24,7 +24,12 @@ impl PostgresReviewStore {
 
 #[async_trait]
 impl ReviewStore for PostgresReviewStore {
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        mut item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        item.tenant = tenant.clone();
         let deadline = parse_optional_rfc3339(item.deadline.as_deref())?;
         let tenant_id = item.tenant.as_str();
 
@@ -367,7 +372,10 @@ mod tests {
             let id = uuid::Uuid::new_v4().to_string();
             let item = test_item(&id);
 
-            store.submit(item.clone()).await.expect("submit failed");
+            store
+                .submit(&t(), item.clone())
+                .await
+                .expect("submit failed");
 
             let fetched = store
                 .get(&t(), &id)
@@ -387,7 +395,10 @@ mod tests {
         test_support::block_on_shared(async {
             let store = Arc::new(test_store().await);
             let id = uuid::Uuid::new_v4().to_string();
-            store.submit(test_item(&id)).await.expect("submit failed");
+            store
+                .submit(&t(), test_item(&id))
+                .await
+                .expect("submit failed");
 
             let mut handles = Vec::new();
             for i in 0..8 {
@@ -426,7 +437,10 @@ mod tests {
         test_support::block_on_shared(async {
             let store = Arc::new(test_store().await);
             let id = uuid::Uuid::new_v4().to_string();
-            store.submit(test_item(&id)).await.expect("submit failed");
+            store
+                .submit(&t(), test_item(&id))
+                .await
+                .expect("submit failed");
             store
                 .assign(&t(), &id, "reviewer-0")
                 .await

@@ -189,6 +189,14 @@ impl From<HaciendaError> for ApiError {
                     | PseudonymError::UnsupportedCategory { .. } => {
                         ApiError::invalid_request("Invalid pseudonym token.")
                     }
+                    // Not a token-forgery/probing surface — the tenant id comes from
+                    // the caller's own authenticated context, never from request
+                    // content, so a distinct message here cannot leak anything about
+                    // another tenant's token (unlike the arms above, which stay
+                    // deliberately generic for that reason).
+                    PseudonymError::UnsupportedTenantId { .. } => ApiError::invalid_request(
+                        "This tenant id cannot be used for pseudonymisation.",
+                    ),
                 }
             }
             HaciendaError::Pii(pii_err) => {
@@ -211,6 +219,11 @@ impl From<HaciendaError> for ApiError {
                             | PseudonymError::UnreadableToken
                             | PseudonymError::UnsupportedCategory { .. } => {
                                 ApiError::invalid_request("Invalid pseudonym token.")
+                            }
+                            PseudonymError::UnsupportedTenantId { .. } => {
+                                ApiError::invalid_request(
+                                    "This tenant id cannot be used for pseudonymisation.",
+                                )
                             }
                         }
                     }

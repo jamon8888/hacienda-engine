@@ -2686,25 +2686,28 @@ pub(crate) mod tests {
         // have something to act on.
         let review_id = uuid::Uuid::new_v4().to_string();
         review_store
-            .submit(ReviewQueueItem {
-                id: review_id.clone(),
-                tenant: hacienda_core::tenancy::TenantId::default_tenant(),
-                text_snippet: "jane@example.com".to_string(),
-                category: "email".to_string(),
-                start: 0,
-                end: 16,
-                confidence: 0.4,
-                source: "regex".to_string(),
-                status: ReviewStatus::Pending,
-                priority: Priority::High,
-                assigned_reviewer: None,
-                created_at: chrono::Utc::now().to_rfc3339(),
-                deadline: None,
-                decision: None,
-                decided_by: None,
-                decided_at: None,
-                comment: None,
-            })
+            .submit(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                ReviewQueueItem {
+                    id: review_id.clone(),
+                    tenant: hacienda_core::tenancy::TenantId::default_tenant(),
+                    text_snippet: "jane@example.com".to_string(),
+                    category: "email".to_string(),
+                    start: 0,
+                    end: 16,
+                    confidence: 0.4,
+                    source: "regex".to_string(),
+                    status: ReviewStatus::Pending,
+                    priority: Priority::High,
+                    assigned_reviewer: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    deadline: None,
+                    decision: None,
+                    decided_by: None,
+                    decided_at: None,
+                    comment: None,
+                },
+            )
             .await
             .expect("submit failed");
 

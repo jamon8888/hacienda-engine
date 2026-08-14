@@ -102,7 +102,7 @@ pub async fn get_review(
 
     let tenant = caller.tenant_ctx().tenant;
     let items = match queue {
-        Some(q) => q.list(&tenant, None).await.unwrap_or_default(),
+        Some(q) => q.list(&tenant, None).await.map_err(ApiError::from)?,
         None => Vec::new(),
     };
 

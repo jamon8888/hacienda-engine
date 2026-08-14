@@ -105,7 +105,7 @@ impl ReviewQueue {
             comment: None,
         };
 
-        self.store.submit(item).await
+        self.store.submit(tenant, item).await
     }
 
     /// Record a reviewer's decision, moving the item to its terminal status.

@@ -307,14 +307,20 @@ impl AuditStore for PostgresAuditStore {
 
         // Get current open segment — this tenant's. Without the `tenant_id` filter,
         // `fetch_one` would error as soon as a second tenant's open segment exists:
-        // "one open segment" only holds per tenant now, not store-wide.
+        // "one open segment" only holds per tenant now, not store-wide. `fetch_optional`,
+        // not `fetch_one`: a tenant that has never appended (or was already closed) has
+        // no open segment, which is `StoreClosed`, not a generic backend error — matching
+        // `InMemoryAuditStore::rotate`'s own `StoreClosed { operation: "rotate" }`.
         let segment_row = sqlx::query!(
             "SELECT segment_id, node_id, config_hash, entry_count, created_at \
              FROM audit_segments WHERE sealed_at IS NULL AND tenant_id = $1",
             tenant_id
         )
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AuditError::StoreClosed {
+            operation: "rotate",
+        })?;
 
         let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
         let tip = compute_tip(&entries);
@@ -886,6 +892,54 @@ mod tests {
         }
     }
 
+    /// Two tenants, neither of which is the shared `t()` this whole module's other
+    /// tests race on (see the module doc's "one shared open segment" caveat) — each
+    /// gets its own fresh, UUID-suffixed id so this test cannot inherit contamination
+    /// from, or contaminate, the rest of the suite. Proves the central S1b guarantee
+    /// `get_latest_seal_hash`'s own doc names: without the `tenant_id` filter, a second
+    /// tenant's seal chain would link into the first's `prev_seal_hash` and break
+    /// `verify_seal_chain` for both.
+    #[test]
+    #[ignore]
+    fn two_tenants_maintain_independent_seal_chains() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
+            let tenant_a = TenantId::new(format!("pg-audit-isolation-a-{}", Uuid::new_v4()));
+            let tenant_b = TenantId::new(format!("pg-audit-isolation-b-{}", Uuid::new_v4()));
+            let config_hash = format!("cfg-{}", Uuid::new_v4());
+
+            store
+                .append(&tenant_a, vec![test_input(&unique_id("a1"), &config_hash)])
+                .await
+                .expect("append a1");
+            let seal_a = store.rotate(&tenant_a).await.expect("rotate a");
+
+            store
+                .append(&tenant_b, vec![test_input(&unique_id("b1"), &config_hash)])
+                .await
+                .expect("append b1");
+            let seal_b = store.rotate(&tenant_b).await.expect("rotate b");
+
+            let seals_a = store.seals(&tenant_a).await.expect("seals a");
+            let seals_b = store.seals(&tenant_b).await.expect("seals b");
+
+            assert_eq!(seals_a.len(), 1);
+            assert_eq!(seals_a[0].segment_id, seal_a.segment_id);
+            assert_eq!(seals_b.len(), 1);
+            assert_eq!(seals_b[0].segment_id, seal_b.segment_id);
+
+            // Neither tenant's chain contains the other's segment — the isolation
+            // property this test exists to prove.
+            assert!(!seals_a.iter().any(|s| s.segment_id == seal_b.segment_id));
+            assert!(!seals_b.iter().any(|s| s.segment_id == seal_a.segment_id));
+
+            // Each tenant's own chain — its sealed segment plus the fresh, empty open
+            // segment `rotate` left behind — verifies independently.
+            store.verify(&tenant_a).await.expect("verify a");
+            store.verify(&tenant_b).await.expect("verify b");
+        });
+    }
+
     #[test]
     #[ignore]
     fn should_return_one_entry_per_input_in_order() {
@@ -898,7 +952,10 @@ mod tests {
                 test_input(&e2, &config_hash),
                 test_input(&e3, &config_hash),
             ];
-            let entries = store.append(&t(), inputs).await.expect("append must succeed");
+            let entries = store
+                .append(&t(), inputs)
+                .await
+                .expect("append must succeed");
             assert_eq!(entries.len(), 3);
             assert_eq!(entries[0].id, e1);
             assert_eq!(entries[1].id, e2);
@@ -959,7 +1016,10 @@ mod tests {
             // Bootstrap an open segment up front so every racing append targets the same
             // segment rather than each trying to create one.
             store
-                .append(&t(), vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
+                .append(
+                    &t(),
+                    vec![test_input(&Uuid::new_v4().to_string(), &config_hash)],
+                )
                 .await
                 .expect("bootstrap append failed");
 
@@ -1018,7 +1078,10 @@ mod tests {
                 store.append(&t(), inputs).await.expect("append failed");
                 store.rotate(&t()).await.expect("rotate failed");
                 store
-                    .append(&t(), vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
+                    .append(
+                        &t(),
+                        vec![test_input(&Uuid::new_v4().to_string(), &config_hash)],
+                    )
                     .await
                     .expect("post-rotate append failed");
                 // `store` (and its pool) is dropped here — simulates the process exiting.
@@ -1059,17 +1122,23 @@ mod tests {
             let store = test_store().await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
-                .append(&t(), vec![
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                    ],
+                )
                 .await
                 .expect("first append");
             store
-                .append(&t(), vec![
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                    ],
+                )
                 .await
                 .expect("second append");
             let entries = store.entries(&t()).await.expect("entries");
@@ -1088,12 +1157,18 @@ mod tests {
             let store = test_store().await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
-                .append(&t(), vec![test_input(&unique_id("pre-rotate"), &config_hash)])
+                .append(
+                    &t(),
+                    vec![test_input(&unique_id("pre-rotate"), &config_hash)],
+                )
                 .await
                 .expect("append before rotate");
             store.rotate(&t()).await.expect("rotate");
             store
-                .append(&t(), vec![test_input(&unique_id("post-rotate"), &config_hash)])
+                .append(
+                    &t(),
+                    vec![test_input(&unique_id("post-rotate"), &config_hash)],
+                )
                 .await
                 .expect("append after rotate");
             store.verify(&t()).await.expect("verify after rotation");
@@ -1140,10 +1215,13 @@ mod tests {
             store.rotate(&t()).await.expect("rotate");
             let (open1, open2) = (unique_id("open-1"), unique_id("open-2"));
             store
-                .append(&t(), vec![
-                    test_input(&open1, &config_hash),
-                    test_input(&open2, &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        test_input(&open1, &config_hash),
+                        test_input(&open2, &config_hash),
+                    ],
+                )
                 .await
                 .expect("append to new segment");
             let entries = store.entries(&t()).await.expect("entries");
@@ -1185,10 +1263,10 @@ mod tests {
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (t1, t2) = (unique_id("t1"), unique_id("t2"));
             store
-                .append(&t(), vec![
-                    test_input(&t1, &config_hash),
-                    test_input(&t2, &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![test_input(&t1, &config_hash), test_input(&t2, &config_hash)],
+                )
                 .await
                 .expect("append");
             store.rotate(&t()).await.expect("rotate seals the segment");
@@ -1225,10 +1303,10 @@ mod tests {
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (c1, c2) = (unique_id("c1"), unique_id("c2"));
             store
-                .append(&t(), vec![
-                    test_input(&c1, &config_hash),
-                    test_input(&c2, &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![test_input(&c1, &config_hash), test_input(&c2, &config_hash)],
+                )
                 .await
                 .expect("append");
             store.rotate(&t()).await.expect("rotate");

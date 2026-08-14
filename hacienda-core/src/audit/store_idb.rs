@@ -48,6 +48,12 @@ use crate::tenancy::TenantId;
 const OBJECT_STORE: &str = "hacienda_audit_snapshot";
 const SCHEMA_VERSION: u32 = 1;
 
+/// The pre-S1b record key: one global snapshot, no tenant concept at all. Every chain
+/// ever written under this key was, in effect, the default tenant's — see
+/// [`IndexedDbAuditStore::ensure_tenant_loaded`]'s fallback for why this constant still
+/// exists after S1b introduced per-tenant keys.
+const LEGACY_CURRENT_KEY: &str = "current";
+
 /// The IndexedDB record key holding `tenant`'s snapshot. One key per tenant in the same
 /// object store (see the module doc's C3 note — S1b requires this backend to isolate
 /// tenants exactly like the other two, even though a browser profile is normally
@@ -143,6 +149,19 @@ impl IndexedDbAuditStore {
     /// Rehydrate `tenant`'s state from IndexedDB into the in-memory map, if it is not
     /// already cached there. A no-op — no DB round trip — once a tenant has been touched
     /// once, since every mutation keeps the cached copy in sync (see `persist`).
+    ///
+    /// # Legacy database fallback
+    ///
+    /// A database written before S1b has no per-tenant keys at all — every chain lived
+    /// under one bare [`LEGACY_CURRENT_KEY`] record, since there was no tenant concept
+    /// to key by. `SCHEMA_VERSION` was not bumped and no migration runs in
+    /// `with_on_upgrade_needed`, so without this fallback the default tenant's first
+    /// load after upgrading to this version would find nothing under its new
+    /// [`snapshot_key`] and silently start a fresh genesis chain — the pre-existing
+    /// history would still be sitting in the database, just unreachable. So: only for
+    /// the default tenant, and only when the new key has nothing, fall back to the
+    /// legacy key. The next mutation persists under the new key as normal (`persist`),
+    /// so this fallback is needed at most once per default-tenant chain.
     async fn ensure_tenant_loaded(&self, tenant: &TenantId) -> Result<(), AuditError> {
         {
             let map = self.state();
@@ -151,8 +170,12 @@ impl IndexedDbAuditStore {
             }
         }
 
-        let snapshot: Option<Snapshot> = {
-            let tx = self.db.transaction(OBJECT_STORE).build().map_err(backend_err)?;
+        let mut snapshot: Option<Snapshot> = {
+            let tx = self
+                .db
+                .transaction(OBJECT_STORE)
+                .build()
+                .map_err(backend_err)?;
             let store = tx.object_store(OBJECT_STORE).map_err(backend_err)?;
             store
                 .get(snapshot_key(tenant))
@@ -161,6 +184,21 @@ impl IndexedDbAuditStore {
                 .await
                 .map_err(backend_err)?
         };
+
+        if snapshot.is_none() && *tenant == TenantId::default_tenant() {
+            let tx = self
+                .db
+                .transaction(OBJECT_STORE)
+                .build()
+                .map_err(backend_err)?;
+            let store = tx.object_store(OBJECT_STORE).map_err(backend_err)?;
+            snapshot = store
+                .get(LEGACY_CURRENT_KEY.to_string())
+                .serde()
+                .map_err(backend_err)?
+                .await
+                .map_err(backend_err)?;
+        }
 
         let state = match snapshot {
             Some(snapshot) => rehydrate(snapshot, &self.node_id, &self.config_hash)?,
@@ -269,9 +307,11 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let (result, snapshot) = {
                 let mut map = self.state();
-                let state = map
-                    .get_mut(&tenant)
-                    .expect("ensure_tenant_loaded just populated this tenant");
+                let state = map.get_mut(&tenant).ok_or_else(|| {
+                    AuditError::Internal(
+                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                    )
+                })?;
                 let segment = state.open.as_mut().ok_or(AuditError::StoreClosed {
                     operation: "append",
                 })?;
@@ -292,9 +332,11 @@ impl super::AuditStore for IndexedDbAuditStore {
         let fut = async move {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
-            let state = map
-                .get(&tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get(&tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
             Ok(state
                 .open
                 .as_ref()
@@ -319,9 +361,11 @@ impl super::AuditStore for IndexedDbAuditStore {
         let fut = async move {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
-            let state = map
-                .get(&tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get(&tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
 
             let mut extents: Vec<(&str, u64)> = state
                 .sealed
@@ -352,9 +396,11 @@ impl super::AuditStore for IndexedDbAuditStore {
         let fut = async move {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
-            let state = map
-                .get(&tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get(&tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
             match state.open.as_ref() {
                 Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
                 _ => Ok(state
@@ -372,9 +418,11 @@ impl super::AuditStore for IndexedDbAuditStore {
         let fut = async move {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
-            let state = map
-                .get(&tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get(&tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
             Ok(state.sealed.iter().map(|(seal, _)| seal.clone()).collect())
         };
         SendWrapper::new(fut).await
@@ -386,9 +434,11 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let (sealed, open_entries, open_tip) = {
                 let map = self.state();
-                let state = map
-                    .get(&tenant)
-                    .expect("ensure_tenant_loaded just populated this tenant");
+                let state = map.get(&tenant).ok_or_else(|| {
+                    AuditError::Internal(
+                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                    )
+                })?;
                 let (entries, tip) = match state.open.as_ref() {
                     Some(segment) => (segment.entries().to_vec(), segment.tip().to_owned()),
                     None => (Vec::new(), crate::audit::GENESIS_HASH.to_owned()),
@@ -414,9 +464,11 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let (seal, snapshot) = {
                 let mut map = self.state();
-                let state = map
-                    .get_mut(&tenant)
-                    .expect("ensure_tenant_loaded just populated this tenant");
+                let state = map.get_mut(&tenant).ok_or_else(|| {
+                    AuditError::Internal(
+                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                    )
+                })?;
                 let old = state.open.take().ok_or(AuditError::StoreClosed {
                     operation: "rotate",
                 })?;
@@ -444,9 +496,11 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let (seal, snapshot) = {
                 let mut map = self.state();
-                let state = map
-                    .get_mut(&tenant)
-                    .expect("ensure_tenant_loaded just populated this tenant");
+                let state = map.get_mut(&tenant).ok_or_else(|| {
+                    AuditError::Internal(
+                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                    )
+                })?;
 
                 if let Some(seal) = &state.closed_seal {
                     return Ok(seal.clone());

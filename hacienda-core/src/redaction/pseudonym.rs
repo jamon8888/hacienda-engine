@@ -58,6 +58,21 @@ pub enum PseudonymError {
 
     #[error("category '{category}' cannot appear in a pseudonym token: {reason}")]
     UnsupportedCategory { category: String, reason: String },
+
+    /// A non-default tenant id contains characters outside `[a-z0-9_]` (case-insensitive).
+    ///
+    /// [`scoped_var_name`] folds every character outside that set to `_` before
+    /// uppercasing, and that fold is not injective: `acme-corp`, `acme_corp`, and
+    /// `acme.corp` would all resolve the same `HACIENDA_TENANT_ACME_CORP_...` variable
+    /// and therefore share key material — the exact cross-tenant correlation leak P3a
+    /// exists to close. Rejecting the id outright is the same discipline
+    /// [`KeyId::new`] already applies to `-` in a key id, extended to tenant ids.
+    #[error(
+        "tenant id '{tenant}' cannot be used to name a pseudonym key variable: \
+         expected characters from [a-z0-9_] so that no two tenant ids map to the \
+         same environment variable name"
+    )]
+    UnsupportedTenantId { tenant: String },
 }
 
 /// Collapse spelling variants of one value onto a single canonical form.
@@ -349,14 +364,19 @@ type Lookup = dyn Fn(&str) -> Option<String> + Send + Sync;
 /// name above — unchanged from before tenant scoping existed, which is what makes this
 /// safe to ship into an existing single-tenant deployment with no re-provisioning (spec
 /// §3.1's back-compat requirement). For any other tenant, the looked-up name gains a
-/// `HACIENDA_TENANT_<TENANT>_` prefix, where `<TENANT>` is the tenant id uppercased with
-/// every character outside `[A-Z0-9_]` replaced by `_` (tenant ids are otherwise
+/// `HACIENDA_TENANT_<TENANT>_` prefix, where `<TENANT>` is the tenant id uppercased —
+/// requiring every character to already be in `[A-Za-z0-9_]` (tenant ids are otherwise
 /// unrestricted — see `tenancy.rs`'s module doc — but an environment variable name is
-/// not). A tenant with no variable under its prefixed name is a resolution failure, per
-/// [`KeyResolver::active`]'s doc: this must never silently fall back to the default
-/// tenant's key or any other tenant's key. Every non-default tenant's key material must
-/// be provisioned explicitly before that tenant can pseudonymise — deliberate friction,
-/// not an oversight to smooth over.
+/// not). A tenant id outside that set is rejected
+/// ([`PseudonymError::UnsupportedTenantId`]), not folded onto a nearby spelling: folding
+/// (an earlier version of this resolver's behavior) is not injective — `acme-corp` and
+/// `acme_corp` would fold to the same variable and therefore share key material, the
+/// exact cross-tenant leak this whole mechanism exists to close. A tenant with no
+/// variable under its prefixed name is a resolution failure, per [`KeyResolver::active`]'s
+/// doc: this must never silently fall back to the default tenant's key or any other
+/// tenant's key. Every non-default tenant's key material must be provisioned explicitly
+/// before that tenant can pseudonymise — deliberate friction, not an oversight to smooth
+/// over.
 pub struct EnvKeyResolver {
     lookup: Box<Lookup>,
 }
@@ -364,22 +384,28 @@ pub struct EnvKeyResolver {
 /// Build the environment variable name `base` (e.g. [`ACTIVE_KEY_VAR`], or a `KeyId`'s
 /// own `env_var()`) resolves under for `tenant` — see [`EnvKeyResolver`]'s doc for the
 /// convention and the back-compat requirement it exists to satisfy.
-fn scoped_var_name(tenant: &TenantId, base: &str) -> String {
+///
+/// # Errors
+///
+/// [`PseudonymError::UnsupportedTenantId`] if `tenant` (other than the default tenant,
+/// which never reaches this encoding at all) contains any character outside
+/// `[A-Za-z0-9_]`. The encoding uppercases and passes matching characters through
+/// unchanged — never folds one character to another — so two different tenant ids
+/// never produce the same variable name. Folding instead of rejecting (the earlier
+/// version of this function) would let `acme-corp` and `acme_corp` share one variable,
+/// and therefore one tenant's key material.
+fn scoped_var_name(tenant: &TenantId, base: &str) -> Result<String, PseudonymError> {
     if *tenant == TenantId::default_tenant() {
-        return base.to_string();
+        return Ok(base.to_string());
     }
-    let sanitized: String = tenant
-        .as_str()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("HACIENDA_TENANT_{sanitized}_{base}")
+    let raw = tenant.as_str();
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(PseudonymError::UnsupportedTenantId {
+            tenant: raw.to_string(),
+        });
+    }
+    let component = raw.to_ascii_uppercase();
+    Ok(format!("HACIENDA_TENANT_{component}_{base}"))
 }
 
 impl EnvKeyResolver {
@@ -415,13 +441,13 @@ impl std::fmt::Debug for EnvKeyResolver {
 
 impl KeyResolver for EnvKeyResolver {
     fn active(&self, tenant: &TenantId) -> Result<PseudonymKey, PseudonymError> {
-        let variable = scoped_var_name(tenant, ACTIVE_KEY_VAR);
+        let variable = scoped_var_name(tenant, ACTIVE_KEY_VAR)?;
         let id = (self.lookup)(&variable).ok_or(PseudonymError::NoActiveKey)?;
         self.resolve(tenant, &KeyId::new(id.trim())?)
     }
 
     fn resolve(&self, tenant: &TenantId, id: &KeyId) -> Result<PseudonymKey, PseudonymError> {
-        let variable = scoped_var_name(tenant, &id.env_var());
+        let variable = scoped_var_name(tenant, &id.env_var())?;
         let encoded = (self.lookup)(&variable).ok_or_else(|| PseudonymError::KeyNotFound {
             id: id.0.clone(),
             variable,
@@ -920,21 +946,42 @@ mod key_tests {
     }
 
     /// A tenant id containing characters illegal in an environment variable name is
-    /// sanitised, not rejected — deployments should not have to avoid punctuation in
-    /// tenant ids just because this resolver happens to be env-var-backed.
+    /// rejected, not folded onto one — folding `-`/`.`/` ` all to `_` would make
+    /// `acme-corp`, `acme.corp`, and `acme corp` resolve the *same* variable, and
+    /// therefore share key material with each other. Same discipline `KeyId::new`
+    /// already applies to `-` in a key id, extended to tenant ids.
     #[test]
-    fn should_sanitise_a_tenant_id_containing_non_env_var_characters() {
-        let hex = "5c".repeat(KEY_BYTES);
-        let resolver = EnvKeyResolver::with_lookup(move |name| {
-            (name == "HACIENDA_TENANT_ACME_CORP_HACIENDA_PSEUDONYM_ACTIVE_KEY")
-                .then(|| "k1".to_string())
-                .or_else(|| {
-                    (name == "HACIENDA_TENANT_ACME_CORP_HACIENDA_PSEUDONYM_KEY_K1")
-                        .then(|| hex.clone())
-                })
+    fn should_reject_a_tenant_id_containing_non_env_var_characters() {
+        let resolver = EnvKeyResolver::with_lookup(|_| None);
+        let err = resolver.active(&TenantId::new("acme-corp")).unwrap_err();
+        assert!(
+            matches!(err, PseudonymError::UnsupportedTenantId { tenant } if tenant == "acme-corp")
+        );
+    }
+
+    /// Two tenant ids that would collide under a folding scheme (`acme-corp` and
+    /// `acme_corp`) must not resolve to the same variable — proven by resolving
+    /// distinct key material for each and confirming neither call reaches the other's
+    /// variable name. `acme_corp` is legal (already `[a-z0-9_]`) and must still work.
+    #[test]
+    fn distinct_tenant_ids_that_would_collide_under_folding_resolve_independently() {
+        let hex_a = "5c".repeat(KEY_BYTES);
+        let resolver = EnvKeyResolver::with_lookup(move |name| match name {
+            "HACIENDA_TENANT_ACME_CORP_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_ACME_CORP_HACIENDA_PSEUDONYM_KEY_K1" => Some(hex_a.clone()),
+            _ => None,
         });
-        let key = resolver.active(&TenantId::new("acme-corp")).unwrap();
+
+        // The legal underscore spelling resolves.
+        let key = resolver.active(&TenantId::new("acme_corp")).unwrap();
         assert_eq!(key.material(), &[0x5cu8; KEY_BYTES]);
+
+        // The hyphen spelling — which would have folded onto the same variable name —
+        // is rejected outright, never silently sharing `acme_corp`'s key.
+        assert!(matches!(
+            resolver.active(&TenantId::new("acme-corp")).unwrap_err(),
+            PseudonymError::UnsupportedTenantId { .. }
+        ));
     }
 }
 

@@ -311,7 +311,12 @@ impl FileReviewStore {
 
 #[async_trait]
 impl ReviewStore for FileReviewStore {
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        mut item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        item.tenant = tenant.clone();
         self.check_not_poisoned()?;
 
         // Acquire io_order first, then the state lock — always this order.
@@ -757,7 +762,7 @@ mod tests {
         let item_id = {
             let store = open_store(&dir);
             let item = store
-                .submit(make_item("item-1"))
+                .submit(&t(), make_item("item-1"))
                 .await
                 .expect("submit must succeed");
             store
@@ -800,7 +805,10 @@ mod tests {
         // Step 1: submit.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-2")).await.expect("submit");
+            store
+                .submit(&t(), make_item("item-2"))
+                .await
+                .expect("submit");
         }
 
         // Step 2: assign — opens fresh store from disk.
@@ -856,8 +864,14 @@ mod tests {
         // Write two complete items.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-3")).await.expect("submit 3");
-            store.submit(make_item("item-4")).await.expect("submit 4");
+            store
+                .submit(&t(), make_item("item-3"))
+                .await
+                .expect("submit 3");
+            store
+                .submit(&t(), make_item("item-4"))
+                .await
+                .expect("submit 4");
         }
 
         // Append a partial (truncated) JSON line to the log file.
@@ -908,7 +922,10 @@ mod tests {
 
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-a")).await.expect("submit a");
+            store
+                .submit(&t(), make_item("item-a"))
+                .await
+                .expect("submit a");
         }
 
         // Simulate a crash part-way through appending a second event.
@@ -926,7 +943,10 @@ mod tests {
         // Recover and write a new item.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-b")).await.expect("submit b");
+            store
+                .submit(&t(), make_item("item-b"))
+                .await
+                .expect("submit b");
         }
 
         // The new item must survive one more restart.
@@ -952,7 +972,10 @@ mod tests {
         // Submit and assign before the crash.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-5")).await.expect("submit");
+            store
+                .submit(&t(), make_item("item-5"))
+                .await
+                .expect("submit");
             store.assign(&t(), "item-5", "alice").await.expect("assign");
         }
 
@@ -989,7 +1012,7 @@ mod tests {
         let store = open_store(&dir);
 
         let item = store
-            .submit(make_item("item-x"))
+            .submit(&t(), make_item("item-x"))
             .await
             .expect("submit must succeed");
         store
@@ -1041,7 +1064,7 @@ mod tests {
         let store = open_store(&dir);
 
         let item = store
-            .submit(make_item("item-y"))
+            .submit(&t(), make_item("item-y"))
             .await
             .expect("submit must succeed");
         store
@@ -1116,7 +1139,7 @@ mod tests {
 
             for i in 0..ITEMS {
                 store
-                    .submit(make_item(&format!("item-{i}")))
+                    .submit(&t(), make_item(&format!("item-{i}")))
                     .await
                     .expect("submit");
             }

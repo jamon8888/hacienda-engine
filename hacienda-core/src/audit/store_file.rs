@@ -248,22 +248,18 @@ impl ContentionMetrics {
 }
 
 impl FileAuditStore {
-    /// Open or recover a durable audit store rooted at `root`.
+    /// Open a durable audit store rooted at `root`, creating `root/{node_id}/` if it
+    /// does not exist yet.
     ///
-    /// On first call this creates `root/{node_id}/`. On subsequent calls it finds any
-    /// existing segments, verifies their seal chain, replays any unsealed segment (one
-    /// left open by a previous run), and opens a successor linked to the recovered chain.
+    /// Recovery — finding a tenant's existing segments, verifying their seal chain, and
+    /// replaying any unsealed segment left open by a previous run — no longer happens
+    /// here: it happens lazily, per tenant, the first time that tenant is touched (see
+    /// [`ensure_tenant_loaded`](Self::ensure_tenant_loaded)). This method only creates
+    /// the node's root directory.
     ///
     /// # Errors
     ///
-    /// - [`AuditError::Io`] — directory creation or file I/O failed.
-    /// - [`AuditError::Json`] — a seal or entry file is malformed.
-    /// - [`AuditError::SegmentIntegrity`] / [`AuditError::SegmentLink`] — the seal
-    ///   chain does not verify. The store refuses to open rather than appending to a
-    ///   chain already known to be broken.
-    /// - [`AuditError::ChainIntegrity`] / [`AuditError::ConfigMismatch`] — an entry
-    ///   in the unsealed `.jsonl` does not extend the segment's chain. This fires when
-    ///   the file was edited between the crash and the recovery.
+    /// [`AuditError::Io`] if directory creation fails.
     pub fn open(
         root: impl AsRef<Path>,
         node_id: NodeId,
@@ -302,9 +298,12 @@ impl FileAuditStore {
         })
     }
 
-    /// Builder: override the sync policy after construction is not possible because
-    /// opening already performs recovery I/O. Pass the policy to
-    /// [`open_with_policy`](Self::open_with_policy) instead.
+    /// Builder: sets the sync policy after construction. Safe to call any time before a
+    /// tenant is first touched — recovery is lazy per tenant (see
+    /// [`ensure_tenant_loaded`](Self::ensure_tenant_loaded)), so unlike before S1b this
+    /// is no longer racing against I/O `open` already performed.
+    /// [`open_with_policy`](Self::open_with_policy) remains the more direct way to set
+    /// the policy at construction time.
     ///
     /// This method is provided for test ergonomics where the store is freshly created
     /// and the caller wants to change the policy before appending anything.
@@ -343,14 +342,30 @@ impl FileAuditStore {
         self.node_dir.join(tenant.as_str())
     }
 
-    /// Rehydrate `tenant`'s [`FileState`] from disk into the in-memory map, recovering it
-    /// exactly as the whole store used to recover at `open` time, if it is not already
-    /// cached there. A no-op once a tenant has been touched once in this process, since
-    /// every mutation keeps the cached copy in sync.
+    /// Rehydrate `tenant`'s [`FileState`] from disk into the in-memory map, if it is not
+    /// already cached there — a no-op once a tenant has been touched once in this
+    /// process, since every mutation keeps the cached copy in sync.
+    ///
+    /// This is where recovery actually happens (moved here from `open` at S1b, since
+    /// which tenants exist under a node is not known until a caller names one): finds
+    /// any existing segments for `tenant`, verifies their seal chain, replays any
+    /// unsealed segment (one left open by a previous run), and opens a successor linked
+    /// to the recovered chain.
     ///
     /// Runs the actual recovery I/O via `spawn_blocking`, same rationale as every other
     /// disk-touching path in this file: this is called from async trait methods, and
     /// synchronous file I/O must not run directly on the async executor.
+    ///
+    /// # Errors
+    ///
+    /// - [`AuditError::Io`] — file I/O failed.
+    /// - [`AuditError::Json`] — a seal or entry file is malformed.
+    /// - [`AuditError::SegmentIntegrity`] / [`AuditError::SegmentLink`] — the seal
+    ///   chain does not verify. Recovery refuses to complete rather than appending to a
+    ///   chain already known to be broken.
+    /// - [`AuditError::ChainIntegrity`] / [`AuditError::ConfigMismatch`] — an entry in
+    ///   the unsealed `.jsonl` does not extend the segment's chain. This fires when the
+    ///   file was edited between the crash and the recovery.
     async fn ensure_tenant_loaded(&self, tenant: &TenantId) -> Result<(), AuditError> {
         {
             let map = self.state();
@@ -455,9 +470,11 @@ impl AuditStore for FileAuditStore {
         // lock's — do not try to solve it by swapping `state` for a tokio mutex.
         let (entries, bytes, path, should_sync) = {
             let mut map = self.state();
-            let state = map
-                .get_mut(tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get_mut(tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
 
             let segment = state.open.as_mut().ok_or(AuditError::StoreClosed {
                 operation: "append",
@@ -530,9 +547,11 @@ impl AuditStore for FileAuditStore {
         self.check_not_poisoned()?;
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
-        let state = map
-            .get(tenant)
-            .expect("ensure_tenant_loaded just populated this tenant");
+        let state = map.get(tenant).ok_or_else(|| {
+            AuditError::Internal(
+                "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+            )
+        })?;
         Ok(state
             .open
             .as_ref()
@@ -576,9 +595,11 @@ impl AuditStore for FileAuditStore {
         // that no later step needs its file.
         let (sealed, open) = {
             let map = self.state();
-            let state = map
-                .get(tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get(tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
             let open = state
                 .open
                 .as_ref()
@@ -612,9 +633,11 @@ impl AuditStore for FileAuditStore {
         self.check_not_poisoned()?;
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
-        let state = map
-            .get(tenant)
-            .expect("ensure_tenant_loaded just populated this tenant");
+        let state = map.get(tenant).ok_or_else(|| {
+            AuditError::Internal(
+                "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+            )
+        })?;
         match state.open.as_ref() {
             Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
             // Empty open segment, or no open segment at all: the newest seal is the head.
@@ -630,9 +653,11 @@ impl AuditStore for FileAuditStore {
         self.check_not_poisoned()?;
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
-        let state = map
-            .get(tenant)
-            .expect("ensure_tenant_loaded just populated this tenant");
+        let state = map.get(tenant).ok_or_else(|| {
+            AuditError::Internal(
+                "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+            )
+        })?;
         Ok(state.sealed.clone())
     }
 
@@ -644,9 +669,11 @@ impl AuditStore for FileAuditStore {
         // a routine integrity check into an outage.
         let (sealed, open_entries, open_tip, tenant_dir) = {
             let map = self.state();
-            let state = map
-                .get(tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get(tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
             let (entries, tip) = match state.open.as_ref() {
                 Some(s) => (s.entries().to_vec(), s.tip().to_owned()),
                 None => (Vec::new(), crate::audit::GENESIS_HASH.to_owned()),
@@ -684,9 +711,11 @@ impl AuditStore for FileAuditStore {
         // ── Step 1: seal the open segment under the state lock ────────────────
         let (seal, seal_bytes, seal_path, new_path) = {
             let mut map = self.state();
-            let state = map
-                .get_mut(tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get_mut(tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
 
             let old = state.open.take().ok_or(AuditError::StoreClosed {
                 operation: "rotate",
@@ -758,9 +787,11 @@ impl AuditStore for FileAuditStore {
         // acquisition, matching InMemoryAuditStore's single-lock design.
         let (seal, seal_bytes, sp, already_closed) = {
             let mut map = self.state();
-            let state = map
-                .get_mut(tenant)
-                .expect("ensure_tenant_loaded just populated this tenant");
+            let state = map.get_mut(tenant).ok_or_else(|| {
+                AuditError::Internal(
+                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                )
+            })?;
 
             if let Some(existing) = &state.closed_seal {
                 return Ok(existing.clone());
@@ -1291,12 +1322,23 @@ mod tests {
         let store = make_store(&dir);
 
         store
-            .append(&t(), vec![make_input("e1"), make_input("e2"), make_input("e3")])
+            .append(
+                &t(),
+                vec![make_input("e1"), make_input("e2"), make_input("e3")],
+            )
             .await
             .expect("append must succeed");
 
         let node_dir = dir.path().join(NODE).join(t().as_str());
-        let open_seg = store.state().get(&t()).unwrap().open.as_ref().unwrap().id().to_owned();
+        let open_seg = store
+            .state()
+            .get(&t())
+            .unwrap()
+            .open
+            .as_ref()
+            .unwrap()
+            .id()
+            .to_owned();
         let jsonl = jsonl_path(&node_dir, &open_seg);
         let contents = fs::read_to_string(&jsonl).expect("jsonl must exist");
 
@@ -1315,7 +1357,10 @@ mod tests {
         {
             let store = make_store(&dir);
             store
-                .append(&t(), vec![make_input("r1"), make_input("r2"), make_input("r3")])
+                .append(
+                    &t(),
+                    vec![make_input("r1"), make_input("r2"), make_input("r3")],
+                )
                 .await
                 .expect("append");
             // Drop without calling close — simulates a crash.
@@ -1327,7 +1372,10 @@ mod tests {
 
         // The recovered segment is now sealed; the open segment is its successor.
         // Verify that the full chain is intact.
-        store2.verify(&t()).await.expect("recovered chain must verify");
+        store2
+            .verify(&t())
+            .await
+            .expect("recovered chain must verify");
 
         // The entries from the crashed run are in the sealed segment.
         let seals = store2.seals(&t()).await.expect("seals");
@@ -1343,7 +1391,10 @@ mod tests {
 
         {
             let store = make_store(&dir);
-            store.append(&t(), vec![make_input("s1")]).await.expect("append");
+            store
+                .append(&t(), vec![make_input("s1")])
+                .await
+                .expect("append");
             // Crash without sealing.
         }
 
@@ -1370,7 +1421,10 @@ mod tests {
         // Run 1: append and explicitly seal with rotate.
         let seal1 = {
             let store = make_store(&dir);
-            store.append(&t(), vec![make_input("a1")]).await.expect("append");
+            store
+                .append(&t(), vec![make_input("a1")])
+                .await
+                .expect("append");
             store.rotate(&t()).await.expect("rotate")
             // Drop after rotate — the successor is unsealed.
         };
@@ -1406,7 +1460,10 @@ mod tests {
         // Run 1: write a segment and seal it with close.
         let seal = {
             let store = make_store(&dir);
-            store.append(&t(), vec![make_input("b1")]).await.expect("append");
+            store
+                .append(&t(), vec![make_input("b1")])
+                .await
+                .expect("append");
             store.close(&t()).await.expect("close")
         };
 
@@ -1441,11 +1498,20 @@ mod tests {
         let dir = TempDir::new("two-seals-open");
         let store = make_store(&dir);
 
-        store.append(&t(), vec![make_input("x1")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("x1")])
+            .await
+            .expect("append");
         store.rotate(&t()).await.expect("rotate 1");
-        store.append(&t(), vec![make_input("x2")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("x2")])
+            .await
+            .expect("append");
         store.rotate(&t()).await.expect("rotate 2");
-        store.append(&t(), vec![make_input("x3")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("x3")])
+            .await
+            .expect("append");
 
         store
             .verify(&t())
@@ -1670,7 +1736,10 @@ mod tests {
         // order, `AuditChain::append` rejects the first out-of-place entry and this fails.
         let reopened = FileAuditStore::open(dir.path(), NodeId::new("node-a"), "cfg")
             .expect("the store must be able to reopen the file it just wrote");
-        reopened.verify(&t()).await.expect("replayed chain must verify");
+        reopened
+            .verify(&t())
+            .await
+            .expect("replayed chain must verify");
 
         let seals = reopened.seals(&t()).await.expect("seals");
         let total: u64 = seals.iter().map(|s| s.entry_count).sum();
@@ -1887,7 +1956,15 @@ mod tests {
         );
 
         // A real segment, but an index past its end.
-        let open_segment = store.state().get(&t()).unwrap().open.as_ref().unwrap().id().to_owned();
+        let open_segment = store
+            .state()
+            .get(&t())
+            .unwrap()
+            .open
+            .as_ref()
+            .unwrap()
+            .id()
+            .to_owned();
         let past_end = AuditCursor {
             segment_id: open_segment,
             index: 99,
@@ -1928,7 +2005,15 @@ mod tests {
             .expect("append");
 
         let node_dir = dir.path().join(NODE).join(t().as_str());
-        let open_segment = store.state().get(&t()).unwrap().open.as_ref().unwrap().id().to_owned();
+        let open_segment = store
+            .state()
+            .get(&t())
+            .unwrap()
+            .open
+            .as_ref()
+            .unwrap()
+            .id()
+            .to_owned();
         let jsonl = jsonl_path(&node_dir, &open_segment);
 
         // Stand in for an append that has written some bytes but not yet its newline.
@@ -1986,7 +2071,15 @@ mod tests {
 
         // Find the open segment's .jsonl and make it read-only.
         let node_dir = dir.path().join(NODE).join(t().as_str());
-        let seg_id = store.state().get(&t()).unwrap().open.as_ref().unwrap().id().to_owned();
+        let seg_id = store
+            .state()
+            .get(&t())
+            .unwrap()
+            .open
+            .as_ref()
+            .unwrap()
+            .id()
+            .to_owned();
         let jsonl = jsonl_path(&node_dir, &seg_id);
 
         fs::set_permissions(&jsonl, fs::Permissions::from_mode(0o444))
@@ -2037,7 +2130,15 @@ mod tests {
 
         // Now make the file read-only so the second append fails.
         let node_dir = dir.path().join(NODE).join(t().as_str());
-        let seg_id = store.state().get(&t()).unwrap().open.as_ref().unwrap().id().to_owned();
+        let seg_id = store
+            .state()
+            .get(&t())
+            .unwrap()
+            .open
+            .as_ref()
+            .unwrap()
+            .id()
+            .to_owned();
         let jsonl = jsonl_path(&node_dir, &seg_id);
 
         fs::set_permissions(&jsonl, fs::Permissions::from_mode(0o444))
