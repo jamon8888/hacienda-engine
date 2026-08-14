@@ -1979,6 +1979,11 @@ mod tests {
         let dir = TempDir::new("append-write-fail");
         let store = make_store(&dir);
 
+        // Recovery is lazy per tenant (S1b) — this tenant has never been touched, so
+        // `store.state()` alone would find no entry for it yet. A cheap read triggers
+        // `ensure_tenant_loaded` the same way any trait method would.
+        store.entries(&t()).await.expect("trigger tenant recovery");
+
         // Find the open segment's .jsonl and make it read-only.
         let node_dir = dir.path().join(NODE).join(t().as_str());
         let seg_id = store.state().get(&t()).unwrap().open.as_ref().unwrap().id().to_owned();
