@@ -701,8 +701,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ApiKeyStore`).
 - **Pseudonym tokens are now tenant-scoped — two tenants sharing one process previously got
   the byte-identical token for the same plaintext value, a cross-tenant correlation leak.**
-  `Pseudonymiser::token` derives a deterministic AES-256-SIV token from `category` + `text`
-  + the pseudonymiser's own key material only; `HaciendaFacade` held exactly one
+  `Pseudonymiser::token` derives a deterministic AES-256-SIV token from `category`, `text`,
+  and the pseudonymiser's own key material only; `HaciendaFacade` held exactly one
   `Pseudonymiser`, built once at construction from one `KeyResolver` call, for the lifetime
   of the process — S1's `TenantCtx`/`Caller::tenant_ctx()` never reached the
   pseudonymisation layer at all, unlike every store `AuditStore` through `PresetStore`
