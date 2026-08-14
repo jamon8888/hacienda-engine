@@ -325,12 +325,11 @@ Identical precedent to P3a §4:
 claiming the whole spec landed. Same posture as P3a's own "spec, not implement" choice
 and P6's §7: partial delivery stated plainly, not folded into "done."
 
-### Migration: one file, not two (§3.2)
+### Migration: one file, not two (§3.2) — but not one contract either
 
-Shipped as `hacienda-core/migrations/0004_tenant_scoping.sql` — a single migration doing
-both the expand (`ADD COLUMN ... DEFAULT 'default'`) and the contract (`DROP DEFAULT`,
-the `presets` unique-constraint swap) in one file, for every table in §3.2's list
-including `api_keys`. Two things forced this away from §3.2's two-migration design:
+Shipped as `hacienda-core/migrations/0004_tenant_scoping.sql` — a single migration file
+adding `tenant_id` to every table in §3.2's list including `api_keys`. Two things forced
+this away from §3.2's two-migration-*file* design:
 
 1. By the time this was written, `hacienda-core/migrations/0002_document_version_content.sql`
    and `0003_job_progress.sql` already existed (added by unrelated work after this spec's
@@ -341,6 +340,24 @@ including `api_keys`. Two things forced this away from §3.2's two-migration des
    because migrations and the Rust code that requires the new column ship together in one
    deploy here, with no rolling-upgrade window between them to protect against. §3.2's
    two-file reasoning assumed a gap this codebase doesn't have.
+
+**One file, but not one *contract*, per table.** §3.2's underlying reasoning — don't drop
+a column's default until the code writing to it has actually stopped needing that default
+— still applies, just at finer grain than "one migration file." The first version of
+`0004` dropped `tenant_id`'s default on every table it touched, `audit_segments` included.
+That broke immediately: `postgres-store-tests` in PR #81's CI failed with `null value in
+column "tenant_id" ... violates not-null constraint` on every `review_items`/`jobs`/
+`document_versions`/`presets`/`api_keys` insert, because only `AuditStore`'s Rust code was
+updated in this change — those five tables' stores still insert exactly as they did before
+S1b, with no `tenant_id` in the statement. Caught by CI before merge, fixed by keeping
+`DEFAULT 'default'` on those five tables' `tenant_id` columns; only `audit_segments`' gets
+its default dropped, since `AuditStore` is the only store this PR actually updated to
+supply it. Whoever implements Tasks 3-6 drops the corresponding table's default as part of
+that table's own change — same discipline §3.2 always intended, now applied per-table
+instead of per-file. The `presets` unique-constraint swap (`UNIQUE(name)` →
+`UNIQUE(tenant_id, name)`) was safe to keep despite this: every row, old and new, shares
+the column default until `PresetStore` changes, so the new constraint is behaviourally
+identical to the old one until then.
 
 ### AuditStore: trait design matches §3.1 exactly, with one addition
 
