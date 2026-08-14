@@ -47,7 +47,16 @@ pub enum HaciendaError {
     /// Structured-field redaction recursed into a nested archive member deeper than
     /// [`crate::facade::MAX_REDACTION_DEPTH`] — defense-in-depth alongside xberg's own
     /// `ExtractionConfig::max_archive_depth`. See that constant's doc comment.
-    #[error("archive nesting exceeds hacienda's redaction depth limit ({limit})")]
+    ///
+    /// No separate "observed depth" field: the guard fires the instant `depth` reaches
+    /// `limit` (one level at a time, checked before each further recursion — see
+    /// `HaciendaFacade::redact_structured_fields`), so the observed depth *is* `limit` at
+    /// the point this variant is constructed. A field that always equals `limit` would
+    /// answer nothing a reader can't already see.
+    #[error(
+        "archive nesting exceeds hacienda's redaction depth limit ({limit}); reduce the \
+         archive's nesting or, if this depth is expected, raise MAX_REDACTION_DEPTH"
+    )]
     RedactionDepthExceeded { limit: usize },
 }
 

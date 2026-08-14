@@ -32,7 +32,7 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::{Stream, StreamExt};
-use hacienda_core::{auth::Caller, HaciendaFacade};
+use hacienda_core::{auth::Caller, HaciendaError, HaciendaFacade};
 use hacienda_rag::{
     AnswerEvent, GuardedLlm, LlmAnswerConfig, RagError, RagResult, Redactor, RetrievedContext,
 };
@@ -49,6 +49,15 @@ use crate::{
 /// — the seam `GuardedLlm` (P6) redacts through. `hacienda-rag` cannot depend on
 /// `hacienda-core` (see that crate's dev-dependency comment on the edge), so this adapter
 /// lives here, in the one crate that already depends on both.
+///
+/// `redact` boxes the `HaciendaError` it gets into `RagError::Backend` because
+/// `hacienda_rag::Redactor`'s return type has no room for a richer error — but boxing loses
+/// nothing: [`map_guarded_llm_error`] downcasts it back to `HaciendaError` at the one point
+/// this crate turns a `GuardedLlm::stream` failure into an [`ApiError`], recovering the same
+/// 403/400/500 classification `redact_text_with_auth`'s direct callers already get through
+/// [`ApiError`]'s `From<HaciendaError>` impl. Without that downcast, every redaction failure
+/// — including a missing `documents:process` capability, which should be 403 — would
+/// collapse to the generic `RagError::Backend` → 500 mapping.
 struct FacadeRedactor<'a> {
     facade: &'a HaciendaFacade,
     caller: Caller<'a>,
@@ -63,6 +72,21 @@ impl Redactor for FacadeRedactor<'_> {
             .await
             .map_err(|error| RagError::Backend(Box::new(error)))?;
         Ok(result.redacted_text)
+    }
+}
+
+/// Maps a [`GuardedLlm::stream`] failure to [`ApiError`], recovering the [`HaciendaError`]
+/// [`FacadeRedactor::redact`] boxed instead of falling through to the generic
+/// `RagError::Backend` → 500 mapping — see that struct's doc comment for why this matters.
+/// A `RagError` that did not originate from `FacadeRedactor` (a genuine RAG-store error, a
+/// filter/query problem) still goes through the ordinary `From<RagError> for ApiError`.
+fn map_guarded_llm_error(error: RagError) -> ApiError {
+    match error {
+        RagError::Backend(inner) => match inner.downcast::<HaciendaError>() {
+            Ok(hacienda_error) => ApiError::from(*hacienda_error),
+            Err(inner) => ApiError::from(RagError::Backend(inner)),
+        },
+        other => ApiError::from(other),
     }
 }
 
@@ -130,7 +154,7 @@ pub async fn answer(
     let stream = GuardedLlm::new(&redactor)
         .stream(context, body.prompt, config)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(map_guarded_llm_error)?;
 
     let events = stream.map(to_sse_event);
 

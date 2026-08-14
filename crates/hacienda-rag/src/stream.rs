@@ -156,6 +156,15 @@ impl<'a> GuardedLlm<'a> {
     /// failures differently from in-stream ones (`hacienda-api`'s `rag_stream::answer`
     /// handler is exactly such a caller: see its module doc on why SSE errors can't reuse
     /// its normal error type once the stream has started).
+    ///
+    /// # Scope
+    ///
+    /// Only `prompt` and `RetrievedChunk::content` are redacted. Every other chunk field
+    /// (`chunk_metadata`, `external_id`, `document`) is forwarded unchanged, because
+    /// [`answer_stream`] builds the LLM's context from `content` alone — this is safe today
+    /// only because of that fact about a *different* function. If `answer_stream` ever
+    /// starts injecting another field into the prompt or system message, this method must
+    /// redact that field too, or the guarantee this type exists for quietly stops holding.
     pub async fn stream(
         &self,
         context: RetrievedContext,
@@ -500,13 +509,17 @@ mod tests {
     }
 
     fn guarded_llm_test_chunk(content: &str) -> RetrievedChunk {
+        guarded_llm_test_chunk_with(0, Some(content))
+    }
+
+    fn guarded_llm_test_chunk_with(ordinal: u32, content: Option<&str>) -> RetrievedChunk {
         use crate::types::PrimaryScore;
         RetrievedChunk {
-            id: ChunkId("c1".to_string()),
+            id: ChunkId(format!("c{ordinal}")),
             document_id: DocumentId("d1".to_string()),
-            ordinal: 0,
+            ordinal,
             external_id: None,
-            content: Some(content.to_string()),
+            content: content.map(str::to_string),
             score: 1.0,
             primary_score: PrimaryScore::Vector { score: 1.0 },
             chunk_metadata: serde_json::Value::Null,
@@ -590,6 +603,48 @@ mod tests {
         assert!(
             result.is_err(),
             "a rejected chunk must not reach answer_stream"
+        );
+    }
+
+    /// The loop in `stream` processes chunks one at a time; a rejection partway through
+    /// must still see every earlier chunk (proving the loop doesn't short-circuit before
+    /// reaching the redactor) and must still fail the whole call (proving a later
+    /// rejection isn't silently dropped once earlier chunks succeeded). A chunk with no
+    /// content (`content: None`) must be skipped without ever reaching the redactor —
+    /// there is nothing to redact.
+    #[tokio::test]
+    async fn guarded_llm_processes_every_chunk_in_order_and_fails_on_the_first_rejection() {
+        let redactor = SpyRedactor::failing_on("control-corpus chunk");
+        let context = RetrievedContext {
+            chunks: vec![
+                guarded_llm_test_chunk_with(0, Some("clean chunk")),
+                guarded_llm_test_chunk_with(1, None),
+                guarded_llm_test_chunk_with(2, Some("control-corpus chunk")),
+            ],
+        };
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "harmless prompt".to_string(),
+                guarded_llm_test_config(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "the rejected chunk must fail the whole call, not just itself"
+        );
+        let seen = redactor.seen.lock().unwrap();
+        assert!(
+            seen.contains(&"clean chunk".to_string()),
+            "the clean chunk before the rejected one must still have reached the redactor"
+        );
+        assert!(
+            !seen.iter().any(|s| s.is_empty()),
+            "a chunk with content: None must never reach the redactor — there is nothing \
+             to redact, and calling redact(\"\") would misrepresent it as an empty string \
+             that was actually redacted"
         );
     }
 }

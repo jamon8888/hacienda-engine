@@ -19,8 +19,20 @@ use std::path::{Path, PathBuf};
 /// `GuardedLlm`." Matched textually, not via `syn`, on purpose — the same tradeoff
 /// `hacienda-api/tests/safety.rs`'s `no_from_uri_in_crate_source` makes: a grep-based
 /// check that is easy to audit beats a parser-based one that is easy to trust blindly.
+///
+/// Known gaps in this approach, accepted rather than hidden: `use liter_llm::create_client;`
+/// followed by a bare `create_client(...)` call, or an `as`-aliased import, would not match
+/// the fully-qualified needles — `"create_client("` below closes the common case, but an
+/// aliased import (`use ... as make_client;`) still evades every needle here. And the scan
+/// (`walk_rust_files`) only covers each crate's `src/`, not `tests/`/`benches/`/`build.rs` —
+/// a direct LLM call in a test file is invisible to this check. Both gaps make this a
+/// second line of defense, not a substitute for the actual guarantee `GuardedLlm` provides
+/// structurally within `hacienda-rag` itself (nothing outside this crate can name
+/// `liter_llm` without adding it as a direct dependency, which `cargo-deny`/code review
+/// would flag as its own signal).
 const FORBIDDEN: &[&str] = &[
     "liter_llm::create_client",
+    "create_client(",
     ".chat_stream(",
     "xberg::llm::complete_text",
     "xberg::llm::complete_with_json_schema",
@@ -83,6 +95,14 @@ fn workspace_root() -> PathBuf {
 
 /// Every `src/*.rs` file under every top-level workspace member, skipping `target/` and
 /// any vendored/checked-out dependency trees.
+///
+/// This is an enforcement test, so a scan root that silently stops existing must fail the
+/// build, not just scan fewer files: a renamed or removed top-level crate used to leave the
+/// list below scanning nothing for it and the test would still pass, which is worse than
+/// not having the test at all — a reader trusts a green enforcement test. Every hardcoded
+/// root's `src/` is asserted to exist, and `crates/` itself must exist and be readable
+/// (`expect`, not the old `.into_iter().flatten().flatten()`, which silently produced zero
+/// roots for a missing or unreadable directory).
 fn walk_rust_files(workspace_root: &Path) -> impl Iterator<Item = PathBuf> {
     let mut roots = Vec::new();
     for name in [
@@ -92,13 +112,20 @@ fn walk_rust_files(workspace_root: &Path) -> impl Iterator<Item = PathBuf> {
         "hacienda-cli",
         "hacienda-mcp",
     ] {
-        roots.push(workspace_root.join(name).join("src"));
+        let src = workspace_root.join(name).join("src");
+        assert!(
+            src.is_dir(),
+            "workspace member '{name}' has no src/ at {} — update this list, otherwise the \
+             LLM-call enforcement check silently stops covering it",
+            src.display()
+        );
+        roots.push(src);
     }
-    for entry in std::fs::read_dir(workspace_root.join("crates"))
-        .into_iter()
-        .flatten()
-        .flatten()
-    {
+
+    let crates_dir = workspace_root.join("crates");
+    let crate_entries =
+        std::fs::read_dir(&crates_dir).expect("workspace has a crates/ directory to scan");
+    for entry in crate_entries.flatten() {
         let src = entry.path().join("src");
         if src.is_dir() {
             roots.push(src);

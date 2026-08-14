@@ -1228,6 +1228,43 @@ pub(crate) mod tests {
         assert_eq!(response.status().as_u16(), 404);
     }
 
+    /// `POST .../answer` against a facade with no `[pii]` section configured must fail
+    /// with `HaciendaError::PiiDisabled`'s own classification (400, `invalid_request`),
+    /// not the generic 500 `RagError::Backend` maps to. Before `map_guarded_llm_error`
+    /// (P6 review fix), `FacadeRedactor::redact` boxed every `HaciendaError` — including
+    /// this one — into an opaque `RagError::Backend`, and every redaction failure through
+    /// `GuardedLlm` collapsed to 500 regardless of its real cause. `state_with_rag()`'s own
+    /// doc comment names this exact failure mode (`redact_text_with_auth` "fails closed
+    /// with `PiiDisabled`") as the reason `state_with_rag_and_pii()` exists for the other
+    /// answer tests — this test is the assertion that doc comment was describing.
+    #[tokio::test]
+    async fn rag_answer_without_pii_configured_is_400_not_500() {
+        let app = build_router(state_with_rag());
+
+        assert_eq!(create_collection(&app.clone(), "c1", 3).await, 201);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/answer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"prompt":"hi","retrieve":{"mode":"vector","query_vector":[1.0,0.0,0.0],"top_k":5},"llm":{"model":"x/y"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            400,
+            "a PiiDisabled redaction failure must classify as 400, not the generic 500 \
+             RagError::Backend maps to"
+        );
+    }
+
     /// Without a configured RAG store, every `/v1/rag/*` route must fail cleanly
     /// (400), not panic or 500 — RAG is opt-in per `ApiState::rag_store`.
     #[tokio::test]

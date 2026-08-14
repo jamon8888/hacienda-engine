@@ -401,16 +401,19 @@ fn json_tool_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, rm
 ///
 /// The split between `invalid_params` and `internal_error` matters to an MCP client the
 /// same way a 4xx/5xx split matters to an HTTP one: `Extraction` (malformed or unsupported
-/// input document), `Authz` (the caller lacks a required capability) and `PiiDisabled` (the
-/// server has no `[pii]` section configured for this call to use) are all things the caller
-/// caused and can act on — a different file, a different key, a different tool. Everything
-/// else (audit/store/review/pseudonym/API-key faults) is this node's own fault; nothing the
-/// caller supplied would change the outcome, so it stays `internal_error`.
+/// input document), `Authz` (the caller lacks a required capability), `PiiDisabled` (the
+/// server has no `[pii]` section configured for this call to use), and
+/// `RedactionDepthExceeded` (the input archive nests deeper than this node accepts) are all
+/// things the caller caused and can act on — a different file, a different key, a different
+/// tool, a shallower archive. Everything else (audit/store/review/pseudonym/API-key faults)
+/// is this node's own fault; nothing the caller supplied would change the outcome, so it
+/// stays `internal_error`.
 fn map_hacienda_error(error: hacienda::HaciendaError) -> rmcp::ErrorData {
     match error {
         hacienda::HaciendaError::Extraction(_)
         | hacienda::HaciendaError::Authz(_)
-        | hacienda::HaciendaError::PiiDisabled => {
+        | hacienda::HaciendaError::PiiDisabled
+        | hacienda::HaciendaError::RedactionDepthExceeded { .. } => {
             rmcp::ErrorData::invalid_params(error.to_string(), None)
         }
         other => rmcp::ErrorData::internal_error(other.to_string(), None),
@@ -562,5 +565,23 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(names, expected);
+    }
+
+    /// `RedactionDepthExceeded` is a client-input-limit violation (an archive nested
+    /// deeper than this node accepts), not a server fault — it must classify the same way
+    /// `Extraction`/`Authz`/`PiiDisabled` already do (`invalid_params`), not fall through
+    /// to `internal_error`. A too-deep archive is exercised end-to-end in
+    /// `hacienda-core`'s own
+    /// `redact_structured_fields_refuses_to_recurse_past_the_depth_limit`; this test only
+    /// pins `map_hacienda_error`'s classification of the resulting error variant.
+    #[test]
+    fn redaction_depth_exceeded_maps_to_invalid_params_not_internal_error() {
+        let error = hacienda::HaciendaError::RedactionDepthExceeded { limit: 64 };
+        let mapped = map_hacienda_error(error);
+        assert_eq!(
+            mapped.code,
+            rmcp::ErrorData::invalid_params("", None).code,
+            "RedactionDepthExceeded must map to invalid_params, got {mapped:?}"
+        );
     }
 }
