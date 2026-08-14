@@ -252,6 +252,19 @@ RGPD adossée au déterminisme des tokens.
 une clé retirée reste révélable ; deux tenants ne partagent aucun token ; aucune réponse ne
 contient de matériel de clé.
 
+> **⚠ Alerte (2026-08-14), toujours ouverte.** Le « deux tenants ne partagent aucun token »
+> ci-dessus n'est **pas** vérifié aujourd'hui : `KeyResolver::active()`/`resolve()` et
+> `Pseudonymiser::token()` ne prennent aucun paramètre de tenant, et `HaciendaFacade` ne
+> construit qu'un seul `Pseudonymiser` pour toute la durée du process — vérifié directement
+> contre `hacienda-core/src/redaction/pseudonym.rs` et `facade.rs`, pas seulement contre ce
+> document. S1 a livré `TenantCtx`/`TenantId`/`Caller::tenant_ctx()`, atteignables partout,
+> mais jamais branchés dans la couche de pseudonymisation spécifiquement — deux tenants
+> partageant un déploiement obtiennent aujourd'hui le même jeton pour la même valeur, une
+> fuite par corrélation inter-clients. Architecture de correction entièrement spécifiée,
+> vérifiée faisable contre le code actuel (`NerDetector` déjà `Arc`-partageable, `Caller`
+> atteint déjà tous les sites d'appel nécessaires) : voir
+> `2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`. Pas encore implémentée.
+
 ### P4 — File de revue humaine
 
 **Portée.** `GET /v1/review/queue`, `POST /v1/review/{id}/assign`, `POST /v1/review/{id}/decision`,
