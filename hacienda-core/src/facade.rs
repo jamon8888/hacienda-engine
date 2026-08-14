@@ -915,6 +915,57 @@ impl HaciendaFacade {
         Ok(self.compliance.as_ref().map(|c| c.report(None)))
     }
 
+    /// Generate the AI Act Art. 11 model card alone, without the rest of the compliance
+    /// pack — for `GET /v1/compliance/model-card`.
+    ///
+    /// [`Self::compliance_report_with_auth`] already bundles this in when
+    /// `ReportType::ModelCard` is enabled; this exists for a caller who wants it
+    /// addressable on its own, per the parent P5 spec's route table.
+    ///
+    /// Requires `audit:read`, same as every other compliance route. Returns `None` when
+    /// compliance is not configured.
+    pub fn model_card_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<crate::compliance::ModelCard>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self
+            .compliance
+            .as_ref()
+            .map(ComplianceGenerator::model_card))
+    }
+
+    /// Generate the compliance checklist alone — for `GET /v1/compliance/checklist`.
+    ///
+    /// Same relationship to [`Self::compliance_report_with_auth`] as
+    /// [`Self::model_card_with_auth`] above.
+    pub fn compliance_checklist_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<crate::compliance::ComplianceChecklist>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self.compliance.as_ref().map(ComplianceGenerator::checklist))
+    }
+
+    /// Generate a DORA Art. 11 incident report — for `POST /v1/compliance/dora`.
+    ///
+    /// A `POST`, unlike the rest of this pack's `GET` routes: a DORA report describes one
+    /// specific incident (summary, timeline, root cause, timestamps, remediation), not a
+    /// static fact about the pipeline configuration, so it needs a caller-supplied body.
+    /// [`Self::compliance_report_with_auth`] can never produce one — it always calls
+    /// [`ComplianceGenerator::report`] with `None`, so a DORA report has had no way to
+    /// reach the API at all until this method.
+    ///
+    /// Returns `None` when compliance is not configured.
+    pub fn dora_report_with_auth(
+        &self,
+        caller: Caller<'_>,
+        incident: &crate::compliance::PiiIncident,
+    ) -> Result<Option<crate::compliance::DoraReport>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self.compliance.as_ref().map(|c| c.dora_report(incident)))
+    }
+
     /// Extract, detect, redact, audit, review, and generate compliance artefacts.
     ///
     /// # Errors
@@ -4132,6 +4183,74 @@ mod tests {
         let report = facade.compliance_report_with_auth(caller).await.unwrap();
 
         assert!(report.is_none());
+    }
+
+    // ── P4/P5: model-card, checklist, and DORA reachable standalone ────────────
+
+    /// `model_card`/`checklist` must be reachable without a full `report()` round trip
+    /// (`superpowers/specs/2026-08-14-P4-P5-missing-endpoints.md` §4).
+    #[tokio::test]
+    async fn model_card_and_checklist_are_reachable_standalone() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        assert!(facade.model_card_with_auth(caller).unwrap().is_some());
+        assert!(facade
+            .compliance_checklist_with_auth(caller)
+            .unwrap()
+            .is_some());
+    }
+
+    /// A DORA report has had no path to the API at all before this change —
+    /// `compliance_report_with_auth` always calls `report(None)`. Proves the new
+    /// standalone method actually produces one, given an incident.
+    #[tokio::test]
+    async fn dora_report_requires_an_incident_body() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let incident = crate::compliance::PiiIncident {
+            summary: "test incident".to_string(),
+            timeline: "detected then contained".to_string(),
+            root_cause: "misconfiguration".to_string(),
+            detected_at: "2026-08-14T00:00:00Z".to_string(),
+            contained_at: None,
+            resolved_at: None,
+            actions_taken: vec![],
+            lessons_learned: vec![],
+        };
+
+        let report = facade
+            .dora_report_with_auth(caller, &incident)
+            .unwrap()
+            .expect("compliance is configured");
+        assert!(!report.reference.is_empty());
+
+        // And bundled `report()` still never includes one — this method is additive,
+        // not a replacement for that behaviour.
+        let bundled = facade.compliance_report_with_auth(caller).await.unwrap();
+        assert!(bundled.unwrap().dora.is_none());
+    }
+
+    #[tokio::test]
+    async fn compliance_standalone_methods_reject_without_audit_read() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        assert!(facade.model_card_with_auth(caller).is_err());
+        assert!(facade.compliance_checklist_with_auth(caller).is_err());
     }
 
     // ── Phase 10 Task 2 Step 3: review_queue_read_with_auth vs review_queue_with_auth ──

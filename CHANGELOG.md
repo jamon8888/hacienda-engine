@@ -96,6 +96,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Six review and compliance routes each spec's own table always named, but that were
+  never wired to HTTP.** Verified directly against `hacienda-api/src/routes.rs`: in both
+  cases the underlying business logic already existed and was already tested —
+  `ReviewQueue::get`/`assign`/`stats` (`hacienda-core/src/review/queue.rs`) and
+  `ComplianceGenerator::model_card`/`checklist`/`dora_report`
+  (`hacienda-core/src/compliance/mod.rs`) — only the handler was missing, exactly the
+  "quelques centaines de lignes de handlers" shape wave 0 of
+  `2026-08-01-hacienda-platform-parity-program.md` §8 predicts. Added `GET /v1/review/{id}`
+  (single item, `audit:read` — same tier as the existing `GET /v1/review` list, not the
+  `review:decide` the spec's table proposes uniformly), `POST /v1/review/{id}/assign`
+  (`review:decide`, a write), `GET /v1/review/stats` (`audit:read`), `GET
+  /v1/compliance/model-card` and `GET /v1/compliance/checklist` (`audit:read`, both already
+  reachable bundled inside `GET /v1/compliance/report` when enabled in config — now also
+  addressable standalone), and `POST /v1/compliance/dora` (`audit:read`). The last one is a
+  `POST`, not the bare `GET` the spec's route table suggests: a DORA report describes one
+  specific incident (summary, timeline, root cause, timestamps, `Vec<String>`
+  actions-taken/lessons-learned), which doesn't fit query parameters, and — more
+  importantly — `compliance_report_with_auth` always calls `ComplianceGenerator::report`
+  with `incident: None`, so a DORA report had **no path to the API at all** before this
+  change, unlike the two `GET` additions above. No new facade method was needed for the two
+  `review:decide`/`audit:read` review reads or the assign write — `HaciendaFacade::
+  review_queue_with_auth`/`review_queue_read_with_auth` already return `Option<&ReviewQueue>`,
+  so the handlers call `.get`/`.assign`/`.stats` on it directly, the same way the existing
+  `decide_review` handler already calls `.decide`. See
+  `superpowers/specs/2026-08-14-P4-P5-missing-endpoints.md`.
 - **`POST /v1/pii/token` and `GET /v1/keys`: two of the four routes the pseudonymisation
   spec always called for, never built until now.** `Pseudonymiser` had an API surface for
   reveal (`POST /v1/pii/reveal`) but not for minting a token without revealing, or for

@@ -455,6 +455,41 @@ impl From<hacienda_core::review::types::ReviewQueueItem> for ReviewItemDto {
     }
 }
 
+/// Response from `GET /v1/review/{id}`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReviewItemResponse {
+    pub item: ReviewItemDto,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Body for `POST /v1/review/{id}/assign`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssignReviewItemRequest {
+    pub reviewer: String,
+}
+
+/// Response from `POST /v1/review/{id}/assign`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AssignReviewItemResponse {
+    pub item: ReviewItemDto,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/review/stats`. Typed, not the opaque-`Value` pattern the
+/// compliance responses use above — `QueueStats` is a flat struct of plain counts, cheap
+/// to name directly and more useful to a generated client than an opaque blob.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReviewStatsResponse {
+    pub total: usize,
+    pub pending: usize,
+    pub in_review: usize,
+    pub approved: usize,
+    pub rejected: usize,
+    pub modified: usize,
+    pub audit_chain_tip: Option<String>,
+}
+
 /// Response from `GET /v1/audit`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuditResponse {
@@ -495,6 +530,68 @@ pub struct ComplianceDpiaResponse {
 /// [`ComplianceDpiaResponse`]: `report` is the full `ComplianceReport`, kept opaque.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ComplianceReportResponse {
+    #[schema(value_type = serde_json::Value)]
+    pub report: serde_json::Value,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/compliance/model-card`. Same envelope-only rationale as
+/// [`ComplianceDpiaResponse`]: `report` carries `ModelCard`, kept opaque.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComplianceModelCardResponse {
+    #[schema(value_type = serde_json::Value)]
+    pub report: serde_json::Value,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Response from `GET /v1/compliance/checklist`. Same envelope-only rationale as
+/// [`ComplianceDpiaResponse`]: `report` carries `ComplianceChecklist`, kept opaque.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComplianceChecklistResponse {
+    #[schema(value_type = serde_json::Value)]
+    pub report: serde_json::Value,
+    pub audit_chain_tip: Option<String>,
+}
+
+/// Body for `POST /v1/compliance/dora` — the incident a DORA Art. 11 report describes.
+/// A `POST`, not `GET`: see `superpowers/specs/2026-08-14-P4-P5-missing-endpoints.md` §2
+/// for why this route needs a body no `GET` can carry.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DoraIncidentRequest {
+    pub summary: String,
+    pub timeline: String,
+    pub root_cause: String,
+    pub detected_at: String,
+    #[serde(default)]
+    pub contained_at: Option<String>,
+    #[serde(default)]
+    pub resolved_at: Option<String>,
+    #[serde(default)]
+    pub actions_taken: Vec<String>,
+    #[serde(default)]
+    pub lessons_learned: Vec<String>,
+}
+
+impl From<DoraIncidentRequest> for hacienda_core::compliance::PiiIncident {
+    fn from(body: DoraIncidentRequest) -> Self {
+        Self {
+            summary: body.summary,
+            timeline: body.timeline,
+            root_cause: body.root_cause,
+            detected_at: body.detected_at,
+            contained_at: body.contained_at,
+            resolved_at: body.resolved_at,
+            actions_taken: body.actions_taken,
+            lessons_learned: body.lessons_learned,
+        }
+    }
+}
+
+/// Response from `POST /v1/compliance/dora`. Same envelope-only rationale as
+/// [`ComplianceDpiaResponse`]: `report` carries `DoraReport`, kept opaque.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DoraReportResponse {
     #[schema(value_type = serde_json::Value)]
     pub report: serde_json::Value,
     pub audit_chain_tip: Option<String>,

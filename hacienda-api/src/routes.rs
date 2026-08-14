@@ -181,6 +181,24 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::ReviewDecide),
         make_router: || post(audit_review::decide_review),
     },
+    // `stats` (a static path) and `{id}` (dynamic) below never collide: axum's router
+    // matches the more specific static segment first, so a request for
+    // `/v1/review/stats` never reaches `get_review_item` with `id == "stats"`.
+    RouteSpec {
+        path: "/v1/review/stats",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_review_stats),
+    },
+    RouteSpec {
+        path: "/v1/review/{id}",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_review_item),
+    },
+    RouteSpec {
+        path: "/v1/review/{id}/assign",
+        access: Access::Capability(Capability::ReviewDecide),
+        make_router: || post(audit_review::assign_review_item),
+    },
     RouteSpec {
         path: "/v1/compliance/dpia",
         access: Access::Capability(Capability::AuditRead),
@@ -190,6 +208,21 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/compliance/report",
         access: Access::Capability(Capability::AuditRead),
         make_router: || get(audit_review::get_compliance_report),
+    },
+    RouteSpec {
+        path: "/v1/compliance/model-card",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_compliance_model_card),
+    },
+    RouteSpec {
+        path: "/v1/compliance/checklist",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_compliance_checklist),
+    },
+    RouteSpec {
+        path: "/v1/compliance/dora",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || post(audit_review::post_compliance_dora),
     },
     RouteSpec {
         path: "/v1/glossary",
@@ -441,6 +474,48 @@ pub(crate) mod tests {
         let auth = AuthState::new(Arc::new(DevTokenResolver));
         let jobs = InMemoryJobStore::new().into_arc();
         ApiState::new(facade, jobs, auth, ApiLimits::default())
+    }
+
+    /// A state with review and compliance both configured (in-memory review store,
+    /// `HaciendaFacade::new`'s default when `config.review` is `Some` — no Postgres
+    /// needed), and one pending review item pre-submitted so the new P4/P5 endpoints
+    /// (`get_review_item`, `assign_review_item`, `get_review_stats`) have something to
+    /// act on. Returns the state and that item's id.
+    async fn state_with_review_and_compliance() -> (ApiState, String) {
+        use hacienda_core::compliance::ComplianceConfig;
+        use hacienda_core::review::{ReviewConfig, ReviewRequest};
+
+        let config = HaciendaConfig {
+            pii: Some(PipelineConfig::default()),
+            compliance: Some(ComplianceConfig::default()),
+            review: Some(ReviewConfig::default()),
+            ..Default::default()
+        };
+        let facade = Arc::new(HaciendaFacade::new(config).unwrap());
+
+        let queue = facade
+            .review_queue_with_auth(hacienda_core::auth::Caller::Trusted)
+            .unwrap()
+            .expect("review configured above");
+        let item = queue
+            .submit(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                ReviewRequest {
+                    text_snippet: "jane@example.com".to_string(),
+                    category: "email".to_string(),
+                    start: 0,
+                    end: 16,
+                    confidence: 0.4,
+                    source: "regex".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let jobs = InMemoryJobStore::new().into_arc();
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        (state, item.id)
     }
 
     /// A state with auth disabled and an in-memory RAG store attached.
@@ -1058,6 +1133,220 @@ pub(crate) mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0]["id"], "k1");
         assert_eq!(keys[0]["active"], true);
+    }
+
+    // ── P4/P5: the missing review and compliance endpoints ─────────────────────
+
+    /// `GET /v1/review/{id}` returns the item by id, requiring only `audit:read`.
+    #[tokio::test]
+    async fn get_review_item_returns_the_item_by_id() {
+        let (state, item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/review/{item_id}"))
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["item"]["id"], item_id);
+        assert_eq!(json["item"]["text_snippet"], "jane@example.com");
+    }
+
+    /// An unknown id is a 400 with no distinguishable "forbidden" shape — not found is
+    /// not found, matching every other store's discipline in this codebase.
+    #[tokio::test]
+    async fn get_review_item_returns_400_for_an_unknown_id() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/review/does-not-exist")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// `POST /v1/review/{id}/assign` requires `review:decide`, not just `audit:read`.
+    #[tokio::test]
+    async fn assign_review_item_requires_review_decide() {
+        let (state, item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/review/{item_id}/assign"))
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reviewer":"alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// `POST /v1/review/{id}/assign` sets the reviewer, given `review:decide`.
+    #[tokio::test]
+    async fn assign_review_item_sets_the_reviewer() {
+        let (state, item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/review/{item_id}/assign"))
+                    .header("authorization", "Bearer hcd_review:decide_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reviewer":"alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["item"]["assigned_reviewer"], "alice");
+    }
+
+    /// `GET /v1/review/stats` reports the one pending item `state_with_review_and_compliance`
+    /// seeds, and the static `stats` path never collides with the dynamic `/v1/review/{id}`
+    /// route registered alongside it.
+    #[tokio::test]
+    async fn review_stats_reports_pending_count() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/review/stats")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["pending"], 1);
+    }
+
+    /// `GET /v1/compliance/model-card` and `GET /v1/compliance/checklist` are reachable
+    /// standalone, not only bundled inside `GET /v1/compliance/report`.
+    #[tokio::test]
+    async fn model_card_and_checklist_routes_work() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        for path in ["/v1/compliance/model-card", "/v1/compliance/checklist"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200, "{path} did not return 200");
+        }
+    }
+
+    /// `POST /v1/compliance/dora` — the route that could not be reached at all before
+    /// this change (`compliance_report_with_auth` never supplies an incident).
+    #[tokio::test]
+    async fn dora_route_accepts_an_incident_and_returns_a_report() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "summary": "test incident",
+            "timeline": "detected then contained",
+            "root_cause": "misconfiguration",
+            "detected_at": "2026-08-14T00:00:00Z",
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/compliance/dora")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["report"]["reference"].is_string());
+    }
+
+    /// Pins the §2 deviation: `/v1/compliance/dora` must be a `POST`, not a `GET` — a
+    /// `GET` to that path must not silently 200 with an empty/default incident.
+    #[tokio::test]
+    async fn dora_route_is_post_not_get() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/compliance/dora")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            405,
+            "GET must not be routable to a POST-only endpoint"
+        );
     }
 
     /// The route table's path set must be internally consistent (no duplicate paths).
