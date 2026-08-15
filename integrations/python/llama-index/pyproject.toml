@@ -1,0 +1,20 @@
+[project]
+name = "llama-index-readers-hacienda"
+version = "0.1.0"
+description = "LlamaIndex reader for hacienda-engine — PLANNED, not yet implemented. See README.md."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "hacienda-engine", email = "contact@hacienda.dev" }]
+dependencies = ["llama-index-core>=0.11,<1", "hacienda-sdk>=0.1.0,<1"]
+
+[project.urls]
+Homepage = "https://github.com/jamon8888/hacienda-engine/tree/main/integrations/python/llama-index"
+Repository = "https://github.com/jamon8888/hacienda-engine/tree/main/integrations/python/llama-index"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+hacienda-sdk = { path = "../../../sdks/python" }

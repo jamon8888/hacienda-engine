@@ -1,22 +1,27 @@
 [files]
-# fixtures/ner-eval/ is hand-written French/English NER eval prose (hacienda-core/tests/ner_eval.rs);
-# an English spell-checker has nothing useful to say about French sentences. Same reasoning for
-# docs/architecture/ and the two docs/*-ia-fr.md guides: French prose, not typos.
-#
-# apps/hacienda-studio/components/extend/layout-blocks.tsx embeds verbatim excerpts from academic
-# papers (as page-builder demo content) plus generated block ids — hyphenated line-break artifacts
-# ("transfor- mation"), author-name fragments, and random id substrings read as typos to an
-# English dictionary but are not text anyone here authored or should "fix".
 extend-exclude = [
-    "superpowers/",
-    ".ai-rulez/",
-    "scripts/",
-    "poly.toml",
-    "fixtures/ner-eval/",
-    "docs/architecture/",
-    "docs/hacienda-guide-ia-fr.md",
-    "docs/setup-harnais-ia-fr.md",
-    "apps/hacienda-studio/components/extend/layout-blocks.tsx",
+  "superpowers/",
+  ".ai-rulez/",
+  "scripts/",
+  "poly.toml",
+  # fixtures/ner-eval/ is hand-written French/English NER eval prose
+  # (hacienda-core/tests/ner_eval.rs); an English spell-checker has nothing useful to say
+  # about French sentences.
+  "fixtures/ner-eval/",
+  # Same reason, for the same language: `typos` reads "moteur" as "motor", "ressources" as
+  # "resources", "amont" as "amount" — corrections that would each make the text wrong.
+  # `docs/architecture/` is the French architecture corpus (analysis + index); English
+  # documents belong at the `docs/` root, where they stay checked. Same reasoning for the
+  # two docs/*-ia-fr.md guides.
+  "docs/architecture/",
+  "docs/hacienda-guide-ia-fr.md",
+  "docs/setup-harnais-ia-fr.md",
+  # apps/hacienda-studio/components/extend/layout-blocks.tsx embeds verbatim excerpts from
+  # academic papers (as page-builder demo content) plus generated block ids —
+  # hyphenated line-break artifacts ("transfor- mation"), author-name fragments, and random
+  # id substrings read as typos to an English dictionary but are not text anyone here
+  # authored or should "fix".
+  "apps/hacienda-studio/components/extend/layout-blocks.tsx",
 ]
 
 [default.extend-words]

@@ -466,8 +466,10 @@ mod tests {
                 "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
                 _ => None,
             });
+            let ctx =
+                crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
             Some(Arc::new(
-                crate::redaction::Pseudonymiser::new(&resolver, &[]).unwrap(),
+                crate::redaction::Pseudonymiser::new(&ctx, &resolver, &[]).unwrap(),
             ))
         };
 
@@ -512,8 +514,10 @@ mod tests {
                 "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
                 _ => None,
             });
+            let ctx =
+                crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
             Some(Arc::new(
-                crate::redaction::Pseudonymiser::new(&resolver, &[]).unwrap(),
+                crate::redaction::Pseudonymiser::new(&ctx, &resolver, &[]).unwrap(),
             ))
         };
 
@@ -566,7 +570,8 @@ mod tests {
             "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
             _ => None,
         });
-        Arc::new(crate::redaction::Pseudonymiser::new(&resolver, &[]).unwrap())
+        let ctx = crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
+        Arc::new(crate::redaction::Pseudonymiser::new(&ctx, &resolver, &[]).unwrap())
     }
 
     #[test]

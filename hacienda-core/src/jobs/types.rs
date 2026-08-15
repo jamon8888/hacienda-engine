@@ -93,4 +93,9 @@ pub struct Job {
     /// requests another tenant's job, preventing IDOR (OWASP A01). The store
     /// records the value; enforcement is the transport's responsibility.
     pub owner: Option<String>,
+    /// The tenant this job belongs to (S1). Unlike `owner` (a principal *within* a
+    /// tenant, optional for trusted callers), every job has exactly one tenant —
+    /// `Caller::Trusted`'s `tenant_ctx()` resolves to the `default` tenant, the same
+    /// one every pre-S1 job is attributed to.
+    pub tenant_id: String,
 }

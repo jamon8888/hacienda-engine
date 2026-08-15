@@ -241,7 +241,7 @@ Effort faible, débloque le commercial.
 | Chantier | Détail |
 | --- | --- |
 | **Activer chunking + embeddings** | Features `xberg/chunking` et `xberg/embeddings`, présentes au tag épinglé, derrière un flag optionnel pour ne pas imposer ONNX aux consommateurs qui ne s'en servent pas. |
-| **Posséder le trait `VectorStore`** | Reprendre la surface de contrat et les backends MIT de la rc.5 dans `hacienda-core`, avec attribution — ~3 900 lignes sans couplage à la version de xberg (§9.3). |
+| **Posséder le trait `VectorStore`** | Reprendre la surface de contrat et les backends MIT de la rc.5 dans `hacienda-core`, avec attribution — ~3 700 lignes sans couplage à la version de xberg (§9.3). |
 | **Décorateur `HaciendaVectorStore<S>`** | Rédaction avant vectorisation, audit à la récupération, générique sur n'importe quel backend. C'est là que vit le différenciateur — voir §9.4. |
 | **`POST /v1/index` + `POST /v1/search`** | Au-dessus du décorateur, sur un backend Postgres/pgvector à écrire. |
 | **Porter le bundle Studio côté serveur** | Registre d'entités, glossaire, export KG — ce qui existe en TS dans `worker/pipeline.ts` remonté en Rust et exposé en API. C'est le vrai différenciateur : **du RAG dont chaque chunk est rédigé, traçable et réversible par un porteur de clé.** |
@@ -385,7 +385,7 @@ error.rs                                                                   → 1
 
 Dépendances non optionnelles : `async-trait`, `serde`, `serde_json`, `thiserror`, `tracing`. Rien d'autre.
 
-Autrement dit, **~3 900 lignes de code MIT compilent indépendamment de la version de xberg** : le trait (114 l.), l'IR de types (272 l.), de filtres (371 l.) et de requêtes (238 l.), le registre (139 l.), et trois backends fonctionnels — mémoire (526 l.), SQLite + sqlite-vec (1 523 l.), graphqlite (513 l.). Le couplage au cœur que je redoutais n'existe que dans les features `pipeline` et `streaming`, dont Hacienda n'a pas besoin : l'orchestration d'ingestion, elle l'a déjà dans sa façade.
+Autrement dit, **~3 700 lignes de code MIT compilent indépendamment de la version de xberg** : le trait (114 l.), l'IR de types (272 l.), de filtres (371 l.) et de requêtes (238 l.), le registre (139 l.), et trois backends fonctionnels — mémoire (526 l.), SQLite + sqlite-vec (1 523 l.), graphqlite (513 l.). Le couplage au cœur que je redoutais n'existe que dans les features `pipeline` et `streaming`, dont Hacienda n'a pas besoin : l'orchestration d'ingestion, elle l'a déjà dans sa façade.
 
 **Voie B — licencier Xberg Pro ou Enterprise.** Le chemin conçu par l'éditeur. Il apporte vraisemblablement le pgvector tenant-scoped. **Impossible à évaluer aujourd'hui** : dépôt privé, conditions et mode de distribution inconnus. Question n°1 à poser à Kreuzberg (§9.8).
 
@@ -393,7 +393,7 @@ Autrement dit, **~3 900 lignes de code MIT compilent indépendamment de la versi
 
 **Recommandation : A et C fusionnent, et c'est la meilleure option.** Vendorer la surface de contrat et les backends rc.5 **dans `hacienda-core`, comme code de Hacienda**, pas comme dépendance. Ce n'est pas un fork — un fork suppose un amont à suivre, et il n'y en a plus ; c'est une **reprise de code MIT devenue nôtre**, exactement ce que la licence autorise et prévoit.
 
-Cela donne à la voie C son résultat (nous possédons la couche, indépendante d'un péage amont) sans en payer le coût (~3 900 lignes déjà écrites et testées, dont un backend SQLite non trivial). Les objections que je formulais contre la voie A — « aucun amont, aucune mise à jour, divergence permanente » — ne tiennent pas ici : ne pas avoir d'amont **est** le but recherché.
+Cela donne à la voie C son résultat (nous possédons la couche, indépendante d'un péage amont) sans en payer le coût (~3 700 lignes déjà écrites et testées, dont un backend SQLite non trivial). Les objections que je formulais contre la voie A — « aucun amont, aucune mise à jour, divergence permanente » — ne tiennent pas ici : ne pas avoir d'amont **est** le but recherché.
 
 Trois obligations qui vont avec :
 

@@ -7,6 +7,7 @@
 
 use axum::{
     extract::{Path, State},
+    http::request::Parts,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -26,6 +27,7 @@ use crate::{
     },
     error::ApiError,
     extract::Query,
+    handlers::{caller_from_arc, extract_auth_context},
     state::ApiState,
 };
 
@@ -207,10 +209,14 @@ fn compute_line_diff(from: &str, to: &str) -> Vec<DiffLineDto> {
 )]
 pub async fn diff_document(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(document_id): Path<Uuid>,
     Query(query): Query<DocumentDiffQuery>,
 ) -> Result<Response, ApiError> {
     let store = require_store(&state)?;
+
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
 
     let from = store
         .get_version(document_id, query.from)
@@ -223,10 +229,17 @@ pub async fn diff_document(
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
 
-    let job = state.jobs.create(None).await.map_err(|e| {
-        tracing::error!(error = %e, "failed to create diff job");
-        ApiError::internal()
-    })?;
+    let job = state
+        .jobs
+        .create(
+            &caller.tenant_ctx(),
+            caller.principal_id().map(str::to_owned),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to create diff job");
+            ApiError::internal()
+        })?;
     let job_id = job.id.clone();
     state
         .jobs

@@ -249,7 +249,7 @@ impl AuditStore for PostgresAuditStore {
         let rows = sqlx::query_as!(
             SealRow,
             r#"
-            SELECT segment_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
+            SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                    entry_count, created_at, sealed_at
             FROM audit_segments
             WHERE sealed_at IS NOT NULL
@@ -286,7 +286,7 @@ impl AuditStore for PostgresAuditStore {
 
         // Get current open segment
         let segment_row = sqlx::query!(
-            "SELECT segment_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL"
+            "SELECT segment_id, tenant_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL"
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -304,6 +304,7 @@ impl AuditStore for PostgresAuditStore {
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
             &segment_row.segment_id.to_string(),
+            &segment_row.tenant_id,
             &segment_row.node_id,
             &segment_row.config_hash,
             &tip,
@@ -314,6 +315,7 @@ impl AuditStore for PostgresAuditStore {
 
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
+            tenant_id: segment_row.tenant_id.clone(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
             prev_seal_hash,
@@ -334,12 +336,13 @@ impl AuditStore for PostgresAuditStore {
         .execute(&mut *tx)
         .await?;
 
-        // Create new open segment
+        // Create new open segment, inheriting the tenant the rotated segment belonged to.
         sqlx::query!(
             r#"
-            INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash)
-            VALUES ($1, $2, $3)
+            INSERT INTO audit_segments (tenant_id, node_id, config_hash, prev_seal_hash)
+            VALUES ($1, $2, $3, $4)
             "#,
+            segment_row.tenant_id,
             segment_row.node_id,
             segment_row.config_hash,
             seal_hash
@@ -359,7 +362,7 @@ impl AuditStore for PostgresAuditStore {
         let mut tx = self.pool.begin().await?;
 
         let segment_row = sqlx::query!(
-            "SELECT segment_id, node_id, config_hash, entry_count, created_at \
+            "SELECT segment_id, tenant_id, node_id, config_hash, entry_count, created_at \
              FROM audit_segments WHERE sealed_at IS NULL FOR UPDATE"
         )
         .fetch_optional(&mut *tx)
@@ -373,7 +376,7 @@ impl AuditStore for PostgresAuditStore {
             let sealed = sqlx::query_as!(
                 SealRow,
                 r#"
-                SELECT segment_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
+                SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                        entry_count, created_at, sealed_at
                 FROM audit_segments
                 WHERE sealed_at IS NOT NULL
@@ -401,6 +404,7 @@ impl AuditStore for PostgresAuditStore {
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
             &segment_row.segment_id.to_string(),
+            &segment_row.tenant_id,
             &segment_row.node_id,
             &segment_row.config_hash,
             &tip,
@@ -411,6 +415,7 @@ impl AuditStore for PostgresAuditStore {
 
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
+            tenant_id: segment_row.tenant_id.clone(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
             prev_seal_hash,
@@ -500,6 +505,7 @@ fn row_to_seal(row: SealRow) -> Result<SegmentSeal, AuditError> {
 
     Ok(SegmentSeal {
         segment_id: row.segment_id.to_string(),
+        tenant_id: row.tenant_id,
         node_id: row.node_id,
         config_hash: row.config_hash,
         prev_seal_hash: row.prev_seal_hash,
@@ -539,6 +545,7 @@ struct AuditEntryRow {
 
 struct SealRow {
     segment_id: Uuid,
+    tenant_id: String,
     node_id: String,
     config_hash: String,
     prev_seal_hash: Option<String>,

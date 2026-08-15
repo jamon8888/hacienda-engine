@@ -9,26 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`PostgresAuditStore` could permanently corrupt a segment's seal with no tampering
+  involved.** `get_or_create_open_segment` never set a newly-created segment's
+  `prev_seal_hash` column when creating one outside of `rotate()`'s own inline path —
+  notably right after a bare `close()`, which seals without opening a successor. That
+  segment's own seal, computed later by `rotate`/`close` against the *true* latest seal
+  hash at sealing time, then never matched what `verify()` read back from the
+  stale-`NULL` column, a permanent `SegmentIntegrity` mismatch in production, not just
+  in tests. Fixed by having `get_or_create_open_segment` populate `prev_seal_hash` the
+  same way `rotate` already does.
 - **The 5 `postgres-store-tests` skipped since the job's first run now pass and are no
-  longer `--skip`-listed in CI.** Root-caused to test isolation, not a seal-chain bug:
-  `should_detect_a_tampered_entry_in_a_sealed_segment` and
-  `should_report_a_missing_entry_as_a_count_mismatch` tamper a row directly via SQL
-  (bypassing the store's own API, on purpose — see their doc comments) to prove `verify()`
-  actually detects corruption, but never restored the row afterward. Every test in this
-  module shares one Postgres instance (`test_support::shared`, mirroring the single-writer
-  production design), and `verify()`/`entries()` deliberately scan the *whole* database
-  rather than just the calling test's own segment — so
-  `should_serialise_concurrent_appends_without_breaking_the_chain`,
-  `should_survive_a_process_restart_against_the_same_database`, and
-  `should_verify_after_a_rotation` (all three call `verify()`) inherited whichever tamper
-  test's corruption ran first in alphabetical order, regardless of what each was itself
-  testing. Confirmed via `hacienda-core/src/audit/store_file.rs`'s equivalent test, which
-  exercises the identical `SegmentIntegrity` path and passes cleanly — it gets a fresh
-  `TempDir` per test, so it has nothing to leak between runs. Fixed by having both tamper
-  tests restore the row (an `UPDATE` reversing the category tamper; a captured-then-
-  reinserted row for the delete tamper, since deletion can't be undone with a literal)
-  before returning — not by narrowing `verify()`'s production query scope to route around
-  the shared state, which the store-wide read is deliberate.
+  longer `--skip`-listed in CI.** Two independent causes, both fixed: the production bug
+  above, plus several tests asserting on an entry's position/count within "their"
+  segment without accounting for this suite's deliberately shared Postgres instance
+  (`test_support::shared`, mirroring the single-writer production design) — an earlier
+  test's un-rotated entries could still be sitting in the same open segment. Fixed by
+  sealing away any such leftovers before a test that needs exclusive ownership of what
+  it appends next, and by `should_survive_a_process_restart_against_the_same_database`
+  looking up its own rotated segment by id instead of assuming it's the only sealed
+  segment in the database. Verified against a real local Postgres 16, not just
+  `SQLX_OFFLINE` compile checks: 22/22 `store::postgres::*` tests passing, reproduced
+  clean across repeated fresh-schema runs.
+- **`hacienda-studio`'s audio/video transcription now actually runs, instead of failing
+  synchronously in every environment.** `worker/pipeline.ts` runs inside a Web Worker and
+  constructed `@remotion/whisper-web`'s `WhisperBridge` directly; that package's own
+  `canUseWhisperWeb()` checks `typeof window === "undefined"` and refuses to run otherwise —
+  a Worker has `self`, not `window`, so every `WhisperBridge.load()`/`transcribeAudio()` call
+  threw `"Whisper Web is not supported: `window` is not defined"` unconditionally, regardless
+  of network access or which model was selected. Fixed architecturally, not patched:
+  `WhisperBridge` (`lib/transcription/whisper-bridge.ts`) now runs only on the main thread
+  (a `WhisperBridge` instance owned by `App.tsx`), and the worker requests a transcription
+  over `postMessage` and awaits the reply — a small request/response correlation map
+  (`worker/transcribe-bridge.ts`'s `TranscriptionRequestBridge`, unit-tested in isolation)
+  keyed by `requestId`, with its own timeout so a lost or never-sent reply fails just that one
+  file (through the existing per-file `try`/`catch` in `processFiles`) instead of hanging the
+  whole batch — the same isolation guarantee a prior fix already gave the old, always-broken
+  code path. `WhisperBridge.transcribeAudio()`'s resample/transcribe progress callbacks are
+  now threaded into the existing per-file progress UI (a new `"transcribe"` `ProgressUpdate`
+  stage) instead of only reaching `console.log`. `tests/e2e/audio.spec.ts`, which previously
+  pinned the exact broken-in-every-environment error message as the expected outcome, now
+  asserts the opposite: that message must never appear again, and (via a mocked model host,
+  the same pattern already used for the NER model's real download) that the model download
+  is actually attempted on the main thread — real inference against real model weights is
+  intentionally left to a manual run, not this suite, for the same reason the NER model's
+  real ~600MB download already is.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
@@ -52,8 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.sqlx` cache instead. Five further `hacienda-core::store::postgres::audit` tests still
   fail on an unrelated, pre-existing `SegmentIntegrity` bug (all five fail on the *same*
   corrupted seal regardless of what each individually exercises — see the comment above
-  `postgres-store-tests` in `ci-postgres.yaml` and next to the audit test module) and are
-  skipped from CI pending further investigation with a live Postgres session.
+  `postgres-store-tests` in `ci-postgres.yaml` and next to the audit test module) were
+  skipped from CI pending further investigation with a live Postgres session; root-caused
+  and fixed, see the `PostgresAuditStore`/`postgres-store-tests` entries above.
 - **`POST /v1/documents` no longer silently drops every document when no PII pipeline is
   configured.** `process_documents` zipped `body.documents`, `result.extraction.results`,
   and `result.pii` three ways; `Iterator::zip` truncates to the shortest input, and
@@ -116,6 +141,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`hacienda review`, `hacienda compliance`, the rest of `hacienda audit`
+  (`list`/`export`), and `hacienda completions`** — the CLI/API parity gap `cli.rs`'s
+  header comment used to document as "deliberately absent" is closed now that the
+  backing `hacienda-core` functionality (`ReviewQueue`/`FileReviewStore`,
+  `ComplianceGenerator`, the segmented `FileAuditStore`) is real. `xberg` passthrough
+  remains out of scope (a separate, larger design question).
+  - `extract`/`scan` gain `--review-out <DIR>`: materialises this run's low-confidence
+    detections into a durable review queue at `<DIR>/review.jsonl`, readable and
+    actionable afterwards via the new `hacienda review` subcommand. Unlike
+    `--audit-out`/`--glossary-out` (which overwrite on every run), `--review-out`
+    *accumulates* — `FileReviewStore::open` replays what is already on disk before
+    appending this run's submissions, so repeated runs build one durable reviewer inbox.
+    Materialises `[review]` with defaults when none was configured, mirroring
+    `--glossary-out`'s `[glossary]` materialisation. Refused when combined with
+    `--no-redact`, same guard shape as `--audit-out`.
+  - `hacienda review list|show|assign|decide|stats <DIR>` operate directly on a durable
+    `FileReviewStore` — no facade, no capability check (the CLI is in-process and
+    trusted, the same `Caller::Trusted` precedent `pii reveal` already documents).
+    `decide`/`assign` surface the underlying `ReviewError` message (already decided,
+    not found, invalid transition) rather than a generic wrapper — this also fixed
+    `main.rs`'s error printing to show the *whole* anyhow context chain (`{:#}`) instead
+    of only the outermost `.context(...)` layer, which was silently dropping exactly
+    this kind of detail for every subcommand, not just the new ones.
+  - `hacienda compliance dpia|model-card|checklist|dora|report` generate GDPR/AI-Act/DORA
+    artefacts straight from `[compliance]` configuration — no facade or document
+    involved, since these are pure functions of config (and, for `dora`, an
+    `--incident <FILE>`-supplied `PiiIncident`). `compliance report` omits the DORA
+    section when no `--incident` is given, exposing `ComplianceGenerator::report`'s
+    existing "no incident, no DORA" behaviour as-is rather than forcing one.
+  - `hacienda audit list|export <DIR> --node <ID>` read a durable, segmented
+    `FileAuditStore` (`root/<node>/`, sealed and open segments) — distinct from
+    `audit verify`'s flat `audit.json` export from `--audit-out`. Both reuse
+    `HaciendaFacade::audit_history_with_auth`/`audit_export_with_auth` (built around a
+    facade with every other subsystem switched off) rather than re-implementing paging
+    or cross-segment chain reconstruction. `--node` has no default — segments are
+    per-writer, so guessing one would silently open (and start writing an empty segment
+    into) the wrong writer's history. Nothing in this CLI writes that layout yet
+    (`extract --audit-out` and `serve` both stay on their existing, deliberately
+    different audit paths), so this reads whatever a `FileAuditStore` another process —
+    a library embedding `hacienda-core` directly, or a future `serve` enhancement —
+    already wrote.
+  - `hacienda completions bash|zsh|fish|powershell|elvish` prints a completion script
+    generated by `clap_complete::generate` against the same `Cli` clap parses with, so it
+    can never name a flag or subcommand this binary does not actually have. New
+    `clap_complete` dependency.
 - **Server-side chunking for RAG document upsert.** `POST /v1/rag/collections/{name}/documents`
   previously required the caller to submit pre-chunked, pre-embedded `chunks` — `full_text` was
   stored for search only, never chunked. When `chunks` is omitted, the server now splits
@@ -186,8 +256,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MissingPseudonymKey` whenever that mode has no pseudonymiser). Conditional on mode,
   not unconditional: `Pseudonymiser::new` resolves the active key eagerly, so wiring it
   in on every run would break every non-pseudonymize invocation on a host with no
-  `HACIENDA_PSEUDONYM_ACTIVE_KEY` set. `hacienda serve` has the identical gap and is not
-  fixed by this change — known, not yet addressed.
+  `HACIENDA_PSEUDONYM_ACTIVE_KEY` set. `hacienda serve` had the identical gap; see the
+  next entry.
+- **`hacienda serve` now works in pseudonymize mode.** `run_serve` called
+  `HaciendaFacade::new(config)` directly instead of the `build_facade` helper the entry
+  above added — the same conditional-on-mode key-resolver wiring `run_extract`/`run_scan`
+  already used, just not called from `run_serve`. `HaciendaFacade::build` resolves the
+  pseudonymiser eagerly (`PiiPipeline::with_pseudonymiser` → `RedactionEngine::new`,
+  propagated through `.transpose()?`), so a server configured with
+  `[pii.redaction] mode = "pseudonymize"` failed at facade construction and never got as
+  far as binding its socket — it exited before printing its "serving on" line, not merely
+  on first request. Fixed by routing `run_serve` through the same `build_facade` helper.
+  Covered by a new regression test (`hacienda-cli/tests/serve_pseudonymize.rs`) that
+  starts `hacienda serve` in pseudonymize mode with a key configured and asserts the
+  process reaches its "serving on" line rather than exiting first.
 - **`hacienda pii reveal <token>` (CLI/API parity).** Reverses a pseudonym token via
   `HaciendaFacade::reveal_token_with_auth` as `Caller::Trusted` (the CLI's process
   boundary is the trust boundary, same precedent `serve` documents). Every

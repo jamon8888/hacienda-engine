@@ -20,6 +20,7 @@ use crate::review::types::{
     Priority, QueueStats, ReviewConfig, ReviewDecision, ReviewQueueItem, ReviewRequest,
     ReviewStatus,
 };
+use crate::tenancy::TenantCtx;
 
 /// Policy wrapper around a [`ReviewStore`].
 ///
@@ -74,6 +75,19 @@ impl ReviewQueue {
     /// that never reached the store is an item no reviewer will ever see, and reporting
     /// that as success would hide a compliance failure behind a clean return value.
     pub async fn submit(&self, request: ReviewRequest) -> Result<ReviewQueueItem, ReviewError> {
+        self.submit_for_tenant(
+            &TenantCtx::default_tenant(crate::tenancy::ActorId::new("queue")),
+            request,
+        )
+        .await
+    }
+
+    /// As [`submit`](Self::submit), scoped to an explicit tenant (S1).
+    pub async fn submit_for_tenant(
+        &self,
+        ctx: &TenantCtx,
+        request: ReviewRequest,
+    ) -> Result<ReviewQueueItem, ReviewError> {
         let deadline = self
             .config
             .deadline_hours
@@ -97,38 +111,50 @@ impl ReviewQueue {
             decided_by: None,
             decided_at: None,
             comment: None,
+            tenant_id: ctx.tenant.to_string(),
         };
 
         self.store.submit(item).await
     }
 
-    /// Record a reviewer's decision, moving the item to its terminal status.
+    /// Record a reviewer's decision, scoped to `ctx`'s tenant (S1).
     ///
     /// # Errors
     ///
-    /// - [`ReviewError::NotFound`] if no item has that id.
+    /// - [`ReviewError::NotFound`] if no item has that id in `ctx`'s tenant — including an
+    ///   id that exists but belongs to a different tenant, see [`ReviewStore::assign`]'s doc.
     /// - [`ReviewError::AlreadyDecided`] if the item already carries a decision.
     pub async fn decide(
         &self,
+        ctx: &TenantCtx,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
         comment: &str,
     ) -> Result<ReviewQueueItem, ReviewError> {
-        self.store.decide(id, decision, reviewer, comment).await
+        self.store
+            .decide(ctx, id, decision, reviewer, comment)
+            .await
     }
 
-    /// Assign a reviewer, moving a pending item to [`ReviewStatus::InReview`].
+    /// Assign a reviewer, moving a pending item to [`ReviewStatus::InReview`], scoped to
+    /// `ctx`'s tenant (S1).
     ///
     /// # Errors
     ///
-    /// - [`ReviewError::NotFound`] if no item has that id.
+    /// - [`ReviewError::NotFound`] if no item has that id in `ctx`'s tenant — including an
+    ///   id that exists but belongs to a different tenant, see [`ReviewStore::assign`]'s doc.
     /// - [`ReviewError::InvalidTransition`] if the item is not pending.
-    pub async fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
-        self.store.assign(id, reviewer).await
+    pub async fn assign(
+        &self,
+        ctx: &TenantCtx,
+        id: &str,
+        reviewer: &str,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        self.store.assign(ctx, id, reviewer).await
     }
 
-    /// List items, optionally restricted to a single status.
+    /// List `ctx`'s tenant's items, optionally restricted to a single status (S1).
     ///
     /// # Errors
     ///
@@ -140,30 +166,36 @@ impl ReviewQueue {
     /// by a broken store would reasonably conclude there was no work outstanding.
     pub async fn list(
         &self,
+        ctx: &TenantCtx,
         filter: Option<ReviewStatus>,
     ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
-        self.store.list(filter).await
+        self.store.list(ctx, filter).await
     }
 
-    /// Retrieve a single item by id.
+    /// Retrieve a single item by id, scoped to `ctx`'s tenant (S1).
     ///
     /// # Errors
     ///
     /// Whatever the backing store returns. Note the nesting: `Ok(None)` means the store
-    /// was read and holds no such item, while `Err(_)` means it could not be read at all.
-    /// Flattening the two would let an unreadable store answer "no such item".
-    pub async fn get(&self, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
-        self.store.get(id).await
+    /// was read and holds no such item in this tenant (including one that exists in a
+    /// different tenant), while `Err(_)` means it could not be read at all. Flattening the
+    /// two would let an unreadable store answer "no such item".
+    pub async fn get(
+        &self,
+        ctx: &TenantCtx,
+        id: &str,
+    ) -> Result<Option<ReviewQueueItem>, ReviewError> {
+        self.store.get(ctx, id).await
     }
 
-    /// Return counts of items in each status.
+    /// Return counts of `ctx`'s tenant's items in each status (S1).
     ///
     /// # Errors
     ///
     /// Whatever the backing store returns. As with [`list`](Self::list), a failure must
     /// not present as all-zero counts — that is indistinguishable from an empty queue.
-    pub async fn stats(&self) -> Result<QueueStats, ReviewError> {
-        self.store.stats().await
+    pub async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
+        self.store.stats(ctx).await
     }
 
     /// Release the backing store's resources. Idempotent.
@@ -201,6 +233,10 @@ impl Default for ReviewQueue {
 mod tests {
     use super::*;
 
+    fn ctx() -> TenantCtx {
+        TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"))
+    }
+
     fn request(confidence: f32) -> ReviewRequest {
         ReviewRequest {
             text_snippet: "alice@example.com".into(),
@@ -217,7 +253,28 @@ mod tests {
         let queue = ReviewQueue::default();
         let item = queue.submit(request(0.4)).await.expect("submit");
         assert_eq!(item.status, ReviewStatus::Pending);
-        assert_eq!(queue.stats().await.expect("stats").pending, 1);
+        assert_eq!(queue.stats(&ctx()).await.expect("stats").pending, 1);
+    }
+
+    #[tokio::test]
+    async fn should_default_submit_to_the_default_tenant() {
+        let queue = ReviewQueue::default();
+        let item = queue.submit(request(0.4)).await.expect("submit");
+        assert_eq!(item.tenant_id, "default");
+    }
+
+    #[tokio::test]
+    async fn should_stamp_the_submitting_tenant_onto_the_item() {
+        let queue = ReviewQueue::default();
+        let ctx = TenantCtx::new(
+            crate::tenancy::TenantId::new("acme"),
+            crate::tenancy::ActorId::new("test"),
+        );
+        let item = queue
+            .submit_for_tenant(&ctx, request(0.4))
+            .await
+            .expect("submit");
+        assert_eq!(item.tenant_id, "acme");
     }
 
     #[tokio::test]
@@ -274,13 +331,19 @@ mod tests {
         let queue = ReviewQueue::default();
         let item = queue.submit(request(0.4)).await.expect("submit");
         let decided = queue
-            .decide(&item.id, ReviewDecision::Approve, "dpo", "looks right")
+            .decide(
+                &ctx(),
+                &item.id,
+                ReviewDecision::Approve,
+                "dpo",
+                "looks right",
+            )
             .await
             .unwrap();
 
         assert_eq!(decided.status, ReviewStatus::Approved);
         assert_eq!(decided.decided_by.as_deref(), Some("dpo"));
-        let stats = queue.stats().await.expect("stats");
+        let stats = queue.stats(&ctx()).await.expect("stats");
         assert_eq!(stats.pending, 0);
         assert_eq!(stats.approved, 1);
     }
@@ -290,12 +353,12 @@ mod tests {
         let queue = ReviewQueue::default();
         let item = queue.submit(request(0.4)).await.expect("submit");
         queue
-            .decide(&item.id, ReviewDecision::Approve, "dpo", "")
+            .decide(&ctx(), &item.id, ReviewDecision::Approve, "dpo", "")
             .await
             .unwrap();
         assert!(matches!(
             queue
-                .decide(&item.id, ReviewDecision::Reject, "dpo", "")
+                .decide(&ctx(), &item.id, ReviewDecision::Reject, "dpo", "")
                 .await,
             Err(ReviewError::AlreadyDecided(_))
         ));
@@ -306,18 +369,18 @@ mod tests {
         let queue = ReviewQueue::default();
         assert!(matches!(
             queue
-                .decide("nope", ReviewDecision::Approve, "dpo", "")
+                .decide(&ctx(), "nope", ReviewDecision::Approve, "dpo", "")
                 .await,
             Err(ReviewError::NotFound(_))
         ));
-        assert!(queue.get("nope").await.expect("get").is_none());
+        assert!(queue.get(&ctx(), "nope").await.expect("get").is_none());
     }
 
     #[tokio::test]
     async fn should_move_an_assigned_item_into_review() {
         let queue = ReviewQueue::default();
         let item = queue.submit(request(0.4)).await.expect("submit");
-        let assigned = queue.assign(&item.id, "bob").await.unwrap();
+        let assigned = queue.assign(&ctx(), &item.id, "bob").await.unwrap();
         assert_eq!(assigned.status, ReviewStatus::InReview);
         assert_eq!(assigned.assigned_reviewer.as_deref(), Some("bob"));
     }
@@ -326,9 +389,9 @@ mod tests {
     async fn should_refuse_to_assign_an_item_that_is_no_longer_pending() {
         let queue = ReviewQueue::default();
         let item = queue.submit(request(0.4)).await.expect("submit");
-        queue.assign(&item.id, "bob").await.unwrap();
+        queue.assign(&ctx(), &item.id, "bob").await.unwrap();
         assert!(matches!(
-            queue.assign(&item.id, "carol").await,
+            queue.assign(&ctx(), &item.id, "carol").await,
             Err(ReviewError::InvalidTransition { .. })
         ));
     }
@@ -338,12 +401,12 @@ mod tests {
         let queue = ReviewQueue::default();
         let a = queue.submit(request(0.4)).await.expect("submit");
         queue.submit(request(0.4)).await.expect("submit");
-        queue.assign(&a.id, "bob").await.unwrap();
+        queue.assign(&ctx(), &a.id, "bob").await.unwrap();
 
-        assert_eq!(queue.list(None).await.expect("list").len(), 2);
+        assert_eq!(queue.list(&ctx(), None).await.expect("list").len(), 2);
         assert_eq!(
             queue
-                .list(Some(ReviewStatus::Pending))
+                .list(&ctx(), Some(ReviewStatus::Pending))
                 .await
                 .expect("list")
                 .len(),
@@ -351,7 +414,7 @@ mod tests {
         );
         assert_eq!(
             queue
-                .list(Some(ReviewStatus::InReview))
+                .list(&ctx(), Some(ReviewStatus::InReview))
                 .await
                 .expect("list")
                 .len(),
@@ -383,7 +446,7 @@ mod tests {
             let id = id.clone();
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                queue.assign(&id, &format!("reviewer-{t}")).await
+                queue.assign(&ctx(), &id, &format!("reviewer-{t}")).await
             }));
         }
 
@@ -406,7 +469,11 @@ mod tests {
         );
 
         let winner = results.into_iter().find_map(|r| r.ok()).unwrap();
-        let stored = queue.get(&id).await.expect("get").expect("the item exists");
+        let stored = queue
+            .get(&ctx(), &id)
+            .await
+            .expect("get")
+            .expect("the item exists");
         assert_eq!(stored.assigned_reviewer, winner.assigned_reviewer);
         assert_eq!(stored.status, ReviewStatus::InReview);
     }
@@ -433,7 +500,13 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 queue
-                    .decide(&id, ReviewDecision::Approve, &format!("reviewer-{t}"), "ok")
+                    .decide(
+                        &ctx(),
+                        &id,
+                        ReviewDecision::Approve,
+                        &format!("reviewer-{t}"),
+                        "ok",
+                    )
                     .await
             }));
         }
@@ -457,7 +530,11 @@ mod tests {
         );
 
         let winner = results.into_iter().find_map(|r| r.ok()).unwrap();
-        let stored = queue.get(&id).await.expect("get").expect("the item exists");
+        let stored = queue
+            .get(&ctx(), &id)
+            .await
+            .expect("get")
+            .expect("the item exists");
         assert_eq!(stored.decided_by, winner.decided_by);
         assert_eq!(stored.status, ReviewStatus::Approved);
     }
@@ -477,6 +554,6 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
-        assert_eq!(queue.stats().await.expect("stats").total, 200);
+        assert_eq!(queue.stats(&ctx()).await.expect("stats").total, 200);
     }
 }

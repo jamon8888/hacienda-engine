@@ -96,4 +96,46 @@ mod tests {
         migrate(&pool).await.expect("migrate failed");
         // If we get here, the schema is ready.
     }
+
+    /// A fresh database must have the `default` tenant admitted (0004_tenants.sql's
+    /// seed) — every other table's `tenant_id DEFAULT 'default'` backfill in
+    /// migrations 0005-0008 depends on this row existing to satisfy its FK constraint.
+    #[tokio::test]
+    async fn migrating_a_fresh_database_seeds_the_default_tenant() {
+        let fixture = PostgresFixture::start().await;
+        let pool = connect(fixture.database_url())
+            .await
+            .expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+
+        let id: String = sqlx::query_scalar("SELECT id FROM tenants WHERE id = 'default'")
+            .fetch_one(&pool)
+            .await
+            .expect("the default tenant must be seeded by migration 0004");
+        assert_eq!(id, "default");
+    }
+
+    /// Every tenant-scoped table added in S1 (migrations 0005-0008) must reject a
+    /// `tenant_id` that names no admitted tenant — otherwise the database can persist
+    /// an orphan tenant scope no `tenants` row ever admitted.
+    #[tokio::test]
+    async fn tenant_scoped_tables_reject_a_tenant_id_with_no_admitted_tenant() {
+        let fixture = PostgresFixture::start().await;
+        let pool = connect(fixture.database_url())
+            .await
+            .expect("connect failed");
+        migrate(&pool).await.expect("migrate failed");
+
+        let err = sqlx::query(
+            "INSERT INTO jobs (id, status, tenant_id) VALUES ('test-job-id', 'queued', 'ghost-tenant')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("a job for an unadmitted tenant must be rejected by the FK constraint");
+        assert!(
+            err.as_database_error()
+                .is_some_and(|e| e.is_foreign_key_violation()),
+            "expected a foreign key violation, got {err:?}"
+        );
+    }
 }
