@@ -73,7 +73,7 @@ from hacienda_sdk._generated.models.review_decide_request import ReviewDecideReq
 from hacienda_sdk._generated.models.scan_text_request import ScanTextRequest
 from hacienda_sdk._generated.models.upsert_document_request import UpsertDocumentRequest
 from hacienda_sdk._generated.types import UNSET, Unset
-from hacienda_sdk.errors import _unwrap
+from hacienda_sdk.errors import _unwrap, _unwrap_json
 
 # `target: "device"` (an embedded Cactus runtime, no HTTP underneath) is Phase 15
 # of the platform-parity plan and not implemented yet. The literal is already a
@@ -435,13 +435,13 @@ class _RagNamespaceSync:
         return _unwrap(answer.sync_detailed(name, client=self._client, body=body))
 
     def create_collection(self, body: Any):
-        return _unwrap(create_collection.sync_detailed(client=self._client, body=body))
+        return _unwrap_json(create_collection.sync_detailed(client=self._client, body=body))
 
     def delete_collection(self, name: str):
         return _unwrap(delete_collection.sync_detailed(name, client=self._client))
 
     def get_collection(self, name: str):
-        return _unwrap(get_collection.sync_detailed(name, client=self._client))
+        return _unwrap_json(get_collection.sync_detailed(name, client=self._client))
 
     def get_migrate_status(self, name: str, job_id: str):
         return _unwrap(get_migrate_status.sync_detailed(name, job_id, client=self._client))
@@ -460,7 +460,7 @@ class _RagNamespaceSync:
         return _unwrap(migrate_embeddings.sync_detailed(name, client=self._client, body=body))
 
     def retrieve(self, name: str, body: Any):
-        return _unwrap(retrieve.sync_detailed(name, client=self._client, body=body))
+        return _unwrap_json(retrieve.sync_detailed(name, client=self._client, body=body))
 
     def upsert_document(self, name: str, body: UpsertDocumentRequest):
         return _unwrap(upsert_document.sync_detailed(name, client=self._client, body=body))
@@ -474,13 +474,15 @@ class _RagNamespaceAsync:
         return _unwrap(await answer.asyncio_detailed(name, client=self._client, body=body))
 
     async def create_collection(self, body: Any):
-        return _unwrap(await create_collection.asyncio_detailed(client=self._client, body=body))
+        return _unwrap_json(
+            await create_collection.asyncio_detailed(client=self._client, body=body)
+        )
 
     async def delete_collection(self, name: str):
         return _unwrap(await delete_collection.asyncio_detailed(name, client=self._client))
 
     async def get_collection(self, name: str):
-        return _unwrap(await get_collection.asyncio_detailed(name, client=self._client))
+        return _unwrap_json(await get_collection.asyncio_detailed(name, client=self._client))
 
     async def get_migrate_status(self, name: str, job_id: str):
         return _unwrap(await get_migrate_status.asyncio_detailed(name, job_id, client=self._client))
@@ -505,7 +507,7 @@ class _RagNamespaceAsync:
         )
 
     async def retrieve(self, name: str, body: Any):
-        return _unwrap(await retrieve.asyncio_detailed(name, client=self._client, body=body))
+        return _unwrap_json(await retrieve.asyncio_detailed(name, client=self._client, body=body))
 
     async def upsert_document(self, name: str, body: UpsertDocumentRequest):
         return _unwrap(await upsert_document.asyncio_detailed(name, client=self._client, body=body))

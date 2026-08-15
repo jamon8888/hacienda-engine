@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>dev.hacienda</groupId>
+  <artifactId>spring-ai-hacienda</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <name>spring-ai-hacienda</name>
+  <description>
+    Spring AI integration for hacienda-engine — PLANNED, not yet implemented. See README.md.
+  </description>
+  <url>https://github.com/jamon8888/hacienda-engine/tree/main/integrations/java/spring-ai</url>
+
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+    </license>
+  </licenses>
+
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+</project>
