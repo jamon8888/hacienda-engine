@@ -31,6 +31,7 @@ pub enum ApiErrorCode {
     NotFound,
     PayloadTooLarge,
     UnsupportedMediaType,
+    RateLimited,
     Internal,
 }
 
@@ -43,6 +44,7 @@ impl ApiErrorCode {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -124,6 +126,19 @@ impl ApiError {
             message: "An internal error occurred. Check host logs for details.".into(),
         }
     }
+
+    /// The calling tenant has exceeded a request-rate quota (S1 spec §7).
+    ///
+    /// Callers should also set a `Retry-After` header — this constructor only builds the
+    /// body, since the header is set directly on the response by `quota::quota_middleware`
+    /// (a `axum::middleware::from_fn` function, not a handler going through the normal
+    /// `Result<_, ApiError>` → `IntoResponse` path this type otherwise always takes).
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self {
+            code: ApiErrorCode::RateLimited,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -189,6 +204,13 @@ impl From<HaciendaError> for ApiError {
                     | PseudonymError::UnsupportedCategory { .. } => {
                         ApiError::invalid_request("Invalid pseudonym token.")
                     }
+                    // Not a client-supplied-token fault — this tenant's id itself
+                    // cannot be resolved to a key (a tenant-provisioning problem, not
+                    // this request's). 500, not 400.
+                    PseudonymError::AmbiguousTenantId { .. } => {
+                        tracing::error!(error = %source, "tenant id cannot be resolved to a pseudonym key");
+                        ApiError::internal()
+                    }
                 }
             }
             HaciendaError::Pii(pii_err) => {
@@ -211,6 +233,10 @@ impl From<HaciendaError> for ApiError {
                             | PseudonymError::UnreadableToken
                             | PseudonymError::UnsupportedCategory { .. } => {
                                 ApiError::invalid_request("Invalid pseudonym token.")
+                            }
+                            PseudonymError::AmbiguousTenantId { .. } => {
+                                tracing::error!(error = %source, "tenant id cannot be resolved to a pseudonym key");
+                                ApiError::internal()
                             }
                         }
                     }

@@ -624,6 +624,9 @@ impl From<hacienda_core::audit::AuditEntry> for NodeAuditEntryDto {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SegmentSealDto {
     pub segment_id: String,
+    /// The tenant this segment belongs to (S1). Always `"default"` until per-tenant
+    /// audit storage is wired end-to-end.
+    pub tenant_id: String,
     /// The writer that produced the segment. This is where a client learns the node
     /// identity behind [`AuditScope::ThisNode`].
     pub node_id: String,
@@ -640,6 +643,7 @@ impl From<hacienda_core::audit::SegmentSeal> for SegmentSealDto {
     fn from(seal: hacienda_core::audit::SegmentSeal) -> Self {
         Self {
             segment_id: seal.segment_id,
+            tenant_id: seal.tenant_id,
             node_id: seal.node_id,
             config_hash: seal.config_hash,
             prev_seal_hash: seal.prev_seal_hash,

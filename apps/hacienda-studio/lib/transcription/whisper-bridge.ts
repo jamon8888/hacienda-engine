@@ -10,6 +10,21 @@ import type {
   TranscriptionSegment,
 } from "./types";
 
+/**
+ * Must be constructed and called on the main thread only. `@remotion/whisper-web`'s
+ * `canUseWhisperWeb()` gates on `typeof window !== "undefined"`, and `downloadWhisperModel`'s
+ * IndexedDB cache plus `resampleTo16Khz`'s `AudioContext`-based decode are both main-thread
+ * browser APIs — none of that exists inside a Web Worker (`self`, not `window`). Studio's
+ * pipeline runs in a Worker (`worker/pipeline.ts`), so that worker never constructs this
+ * class directly; it requests a transcription over `postMessage` and `App.tsx` is the one
+ * `WhisperBridge` instance actually performing it — see `worker/transcribe-bridge.ts` for the
+ * request/response bridge that connects the two.
+ *
+ * One instance should live for the life of the tab (a ref in `App.tsx`, not a per-request
+ * throwaway): `load()` is idempotent per `modelSize` (see below), so reusing the instance
+ * across every transcription in a batch — and across batches — is what avoids re-downloading
+ * or re-initializing the model per file.
+ */
 export class WhisperBridge {
   private loaded = false;
   private modelSize: string = "tiny.en";
@@ -51,6 +66,13 @@ export class WhisperBridge {
     audioBytes: Uint8Array<ArrayBuffer>,
     mimeType: string,
     config: TranscriptionConfig,
+    /**
+     * Fires with a 0..1 fraction for each of the two phases below. Optional: the caller
+     * (`App.tsx`, now that this class only ever runs on the main thread) decides whether to
+     * surface it, e.g. into the existing per-file progress UI — this class itself has no
+     * opinion on where progress is displayed.
+     */
+    onProgress?: (phase: "resample" | "transcribe", fraction: number) => void,
   ): Promise<TranscriptionResult> {
     if (!this.loaded) {
       await this.load(config.modelSize || "tiny.en");
@@ -60,20 +82,24 @@ export class WhisperBridge {
     const file = new File([audioBytes], "audio", { type: mimeType });
     const channelWaveform = await resampleTo16Khz({
       file,
-      onProgress: (p) =>
+      onProgress: (p) => {
         console.log(
           `[WhisperBridge] Resampling audio (${Math.round(p * 100)}%)...`,
-        ),
+        );
+        onProgress?.("resample", p);
+      },
     });
 
     console.log("[WhisperBridge] Transcribing...");
     const { transcription } = await transcribe({
       channelWaveform,
       model: this.modelSize as any,
-      onProgress: (p) =>
+      onProgress: (p) => {
         console.log(
           `[WhisperBridge] Transcribing (${Math.round(p * 100)}%)...`,
-        ),
+        );
+        onProgress?.("transcribe", p);
+      },
     });
 
     const segments: TranscriptionSegment[] = transcription.map((t: any) => ({

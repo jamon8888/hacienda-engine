@@ -1,11 +1,27 @@
 //! Command implementations for the hacienda CLI.
 
 use crate::cli::{
-    AuditVerifyArgs, ConcurrencyArgs, ExtractArgs, Format, RevealArgs, ScanArgs, ServeArgs,
+    AuditExportArgs, AuditExportFormat, AuditListArgs, AuditStoreArgs, AuditVerifyArgs,
+    CompletionsArgs, ComplianceDoraArgs, ComplianceFormatArgs, ComplianceReportArgs,
+    ConcurrencyArgs, ExtractArgs, Format, RevealArgs, ReviewAssignArgs, ReviewDecideArgs,
+    ReviewDecisionArg, ReviewListArgs, ReviewShowArgs, ReviewStatsArgs, ReviewStatusArg,
+    ReviewStoreArgs, ScanArgs, ServeArgs,
 };
 use crate::config::load_config;
 use anyhow::{Context, Result};
-use hacienda::audit::{export_json, verify_entries, AuditChain, AuditEntry, GENESIS_HASH};
+use clap::CommandFactory;
+use hacienda::audit::{
+    export_json, verify_entries, AuditChain, AuditEntry, AuditStore, ExportFormat, FileAuditStore,
+    NodeId, GENESIS_HASH,
+};
+use hacienda::compliance::{
+    ChecklistItem, ComplianceChecklist, ComplianceGenerator, ComplianceReport, DoraReport,
+    DpiaDocument, ModelCard, PiiIncident,
+};
+use hacienda::review::{
+    FileReviewStore, ReviewConfig, ReviewDecision, ReviewQueue, ReviewQueueItem, ReviewStatus,
+    ReviewStore as _,
+};
 use hacienda::{HaciendaConfig, HaciendaError, HaciendaFacade, HaciendaResult};
 use hacienda_api::{ApiLimits, ApiState};
 use hacienda_core::auth::{AuthState, Caller};
@@ -149,6 +165,108 @@ pub async fn run_audit_verify(args: AuditVerifyArgs) -> Result<()> {
             println!("audit chain OK ({} entries), tip: {tip}", entries.len());
         }
     }
+    Ok(())
+}
+
+/// Open a `FileAuditStore` at `<store.dir>/<store.node>/` and wrap it in a facade with
+/// every other subsystem switched off.
+///
+/// Reuses [`HaciendaFacade::audit_history_with_auth`]/[`HaciendaFacade::audit_export_with_auth`]
+/// rather than re-implementing their paging and cross-segment chain reconstruction here —
+/// the same "don't reimplement, call what's there" rule `write_audit_chain` already
+/// follows for `--audit-out`. `Caller::Trusted` throughout `run_audit_list`/`run_audit_export`
+/// is the same precedent `pii reveal`'s doc comment establishes: the CLI is in-process, so
+/// the process boundary is the trust boundary, and there is no remote caller to
+/// authenticate.
+fn open_audit_facade(store: &AuditStoreArgs) -> Result<HaciendaFacade> {
+    let node = NodeId::new(store.node.clone());
+    let file_store = FileAuditStore::open(&store.dir, node, store.config_hash.clone())
+        .with_context(|| format!("opening the audit store at {}", store.dir.display()))?;
+    HaciendaFacade::with_stores(
+        HaciendaConfig::default(),
+        Some(Arc::new(file_store) as Arc<dyn AuditStore>),
+        None,
+        None,
+    )
+    .context("building a facade around the opened audit store")
+}
+
+/// Run `hacienda audit list <dir> --node <id>`.
+pub async fn run_audit_list(args: AuditListArgs) -> Result<()> {
+    let facade = open_audit_facade(&args.store)?;
+    let result = run_audit_list_inner(&args, &facade).await;
+    close_after(&facade, result).await
+}
+
+async fn run_audit_list_inner(args: &AuditListArgs, facade: &HaciendaFacade) -> Result<()> {
+    let page = facade
+        .audit_history_with_auth(Caller::Trusted, args.after.as_ref(), args.limit)
+        .await?
+        .context(
+            "audit history is unavailable: the facade built around this store has no audit \
+             store configured (this should not happen — open_audit_facade always passes one)",
+        )?;
+
+    match args.format {
+        Format::Json => {
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "entries": page.entries,
+                "next": page.next.as_ref().map(|c| c.to_string()),
+            }))?;
+            println!("{json}");
+        }
+        Format::Text => {
+            if page.entries.is_empty() {
+                println!("(no entries on this page)");
+            }
+            for entry in &page.entries {
+                println!(
+                    "{}  [{}]  action={}  span_hash={}  chain_hash={}",
+                    entry.timestamp,
+                    entry.category,
+                    entry.action,
+                    entry.span_hash,
+                    entry.chain_hash
+                );
+            }
+            match &page.next {
+                Some(next) => println!("next: {next}"),
+                None => println!("(end of history)"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run `hacienda audit export <dir> --node <id> --out <file>`.
+pub async fn run_audit_export(args: AuditExportArgs) -> Result<()> {
+    let facade = open_audit_facade(&args.store)?;
+    let result = run_audit_export_inner(&args, &facade).await;
+    close_after(&facade, result).await
+}
+
+async fn run_audit_export_inner(args: &AuditExportArgs, facade: &HaciendaFacade) -> Result<()> {
+    let format = match args.format {
+        AuditExportFormat::Json => ExportFormat::Json,
+        AuditExportFormat::Csv => ExportFormat::Csv,
+        AuditExportFormat::JsonLines => ExportFormat::JsonLines,
+    };
+
+    let bytes = facade
+        .audit_export_with_auth(Caller::Trusted, format)
+        .await?
+        .context(
+            "audit export is unavailable: the facade built around this store has no audit \
+             store configured (this should not happen — open_audit_facade always passes one)",
+        )?;
+
+    std::fs::write(&args.out, &bytes)
+        .with_context(|| format!("writing audit export to {}", args.out.display()))?;
+    eprintln!(
+        "hacienda: wrote {} bytes to {}",
+        bytes.len(),
+        args.out.display()
+    );
     Ok(())
 }
 
@@ -478,6 +596,10 @@ async fn run_scan_inputs(args: &ScanArgs, facade: &HaciendaFacade) -> Result<()>
         write_glossary(facade, glossary_out).await?;
     }
 
+    if let Some(review_out) = &args.review_out {
+        write_review_queue(facade, review_out).await?;
+    }
+
     Ok(())
 }
 
@@ -539,6 +661,21 @@ pub async fn run_extract(
                 } else {
                     "[pii.audit] enabled = false in the effective configuration"
                 }
+            );
+        }
+    }
+
+    // Same shape as the `--audit-out` guard above: `--review-out` reads whatever this
+    // run's review queue submitted, and `--no-redact` guarantees that queue stays empty
+    // by skipping the PII stage the queue depends on.
+    if let Some(dir) = &args.review_out {
+        if args.no_redact {
+            anyhow::bail!(
+                "--review-out {} requires PII detection to run, but --no-redact skips the \
+                 PII stage entirely — there is nothing for a review queue to hold. If you \
+                 only need to know what PII is present, use `hacienda scan --review-out` \
+                 instead.",
+                dir.display()
             );
         }
     }
@@ -626,6 +763,10 @@ async fn run_extract_inputs(
 
     if let Some(glossary_out) = &args.glossary_out {
         write_glossary(facade, glossary_out).await?;
+    }
+
+    if let Some(review_out) = &args.review_out {
+        write_review_queue(facade, review_out).await?;
     }
 
     Ok(())
@@ -812,6 +953,462 @@ async fn write_glossary(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Materialise this run's review submissions into a durable queue at `<dir>/review.jsonl`.
+///
+/// Unlike [`write_audit_chain`] and [`write_glossary`], which start from an empty target
+/// on every run, [`FileReviewStore::open`] replays whatever `<dir>/review.jsonl` already
+/// holds before this run's items are appended — see `ExtractArgs::review_out` for why
+/// accumulating, rather than overwriting, is the right default for a durable reviewer
+/// inbox. Items are written via [`ReviewStore::submit`] directly (not
+/// `ReviewQueue::submit`, which mints a fresh id/priority/deadline) because these items
+/// were already fully constructed by this run's in-process queue; re-submitting through
+/// `ReviewQueue` would silently discard the id and priority a reviewer might already be
+/// looking at.
+async fn write_review_queue(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
+    let queue = facade.review_queue().context(
+        "--review-out requires a review queue, but this run built none — this should not \
+         happen, since --review-out materialises [review] automatically (see \
+         apply_cli_overrides in hacienda-cli/src/config.rs)",
+    )?;
+    let items = queue
+        .list(None)
+        .await
+        .context("reading this run's review queue")?;
+
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating review output directory {}", dir.display()))?;
+    let log_path = dir.join("review.jsonl");
+    let store = FileReviewStore::open(&log_path)
+        .with_context(|| format!("opening the review store at {}", log_path.display()))?;
+    for item in items {
+        store
+            .submit(item)
+            .await
+            .context("writing a review item to the durable store")?;
+    }
+
+    Ok(())
+}
+
+// ── review ──────────────────────────────────────────────────────────────────────
+
+/// Open the durable review queue at `<dir>/review.jsonl`, creating it empty if absent.
+///
+/// `ReviewConfig::default()` is inert here: every `review` subcommand only reads or
+/// transitions items that already exist (`list`/`show`/`assign`/`decide`/`stats`), and
+/// the config is consulted only by `ReviewQueue::submit` — which no `review` subcommand
+/// calls (that happens once, in-process, inside `write_review_queue` during
+/// `extract`/`scan --review-out`). `Caller::Trusted` reasoning applies here exactly as it
+/// does for `open_audit_facade`: the CLI is in-process, so there is no remote caller to
+/// gate `Capability::ReviewDecide`/`AuditRead` against, and going through a full
+/// `HaciendaFacade` just to reach a `ReviewQueue` it would build identically would add
+/// indirection without adding a check that means anything for this caller.
+fn open_review_queue(store: &ReviewStoreArgs) -> Result<ReviewQueue> {
+    let log_path = store.dir.join("review.jsonl");
+    let backend = FileReviewStore::open(&log_path)
+        .with_context(|| format!("opening the review store at {}", log_path.display()))?;
+    Ok(ReviewQueue::with_store(
+        ReviewConfig::default(),
+        Arc::new(backend),
+    ))
+}
+
+fn review_status_from_arg(status: ReviewStatusArg) -> ReviewStatus {
+    match status {
+        ReviewStatusArg::Pending => ReviewStatus::Pending,
+        ReviewStatusArg::InReview => ReviewStatus::InReview,
+        ReviewStatusArg::Approved => ReviewStatus::Approved,
+        ReviewStatusArg::Rejected => ReviewStatus::Rejected,
+        ReviewStatusArg::Modified => ReviewStatus::Modified,
+    }
+}
+
+fn review_decision_from_arg(decision: ReviewDecisionArg) -> ReviewDecision {
+    match decision {
+        ReviewDecisionArg::Approve => ReviewDecision::Approve,
+        ReviewDecisionArg::Reject => ReviewDecision::Reject,
+        ReviewDecisionArg::Modify => ReviewDecision::Modify,
+    }
+}
+
+/// Print one review item. `text_snippet` is the detected PII text itself — printing it is
+/// the point of human review (a reviewer cannot decide approve/reject/modify on a category
+/// name alone), and is the same trust boundary `pii reveal` already crosses for the same
+/// reason.
+fn print_review_item(item: &ReviewQueueItem, format: Format) -> Result<()> {
+    match format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(item)?),
+        Format::Text => {
+            println!("id: {}", item.id);
+            println!("category: {}", item.category);
+            println!("text: {}", item.text_snippet);
+            println!("span: {}..{}", item.start, item.end);
+            println!("confidence: {:.2}", item.confidence);
+            println!("source: {}", item.source);
+            println!("priority: {}", item.priority);
+            println!("status: {}", item.status);
+            println!("created_at: {}", item.created_at);
+            if let Some(deadline) = &item.deadline {
+                println!("deadline: {deadline}");
+            }
+            if let Some(reviewer) = &item.assigned_reviewer {
+                println!("assigned_reviewer: {reviewer}");
+            }
+            if let Some(decision) = item.decision {
+                println!("decision: {decision}");
+            }
+            if let Some(decided_by) = &item.decided_by {
+                println!("decided_by: {decided_by}");
+            }
+            if let Some(decided_at) = &item.decided_at {
+                println!("decided_at: {decided_at}");
+            }
+            if let Some(comment) = item.comment.as_deref().filter(|c| !c.is_empty()) {
+                println!("comment: {comment}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run `hacienda review list <dir>`.
+pub async fn run_review_list(args: ReviewListArgs) -> Result<()> {
+    let queue = open_review_queue(&args.store)?;
+    let items = queue
+        .list(args.status.map(review_status_from_arg))
+        .await
+        .context("listing the review queue")?;
+
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&items)?),
+        Format::Text => {
+            if items.is_empty() {
+                println!("(no review items match)");
+            }
+            for item in &items {
+                println!(
+                    "{}  [{}]  {}  conf={:.2}  priority={}  status={}",
+                    item.id,
+                    item.category,
+                    item.text_snippet,
+                    item.confidence,
+                    item.priority,
+                    item.status
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run `hacienda review show <dir> <id>`.
+pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
+    let queue = open_review_queue(&args.store)?;
+    let item = queue
+        .get(&args.id)
+        .await
+        .context("reading the review item")?
+        .ok_or_else(|| anyhow::anyhow!("no review item with id '{}'", args.id))?;
+    print_review_item(&item, args.format)
+}
+
+/// Run `hacienda review assign <dir> <id> --reviewer <name>`.
+pub async fn run_review_assign(args: ReviewAssignArgs) -> Result<()> {
+    let queue = open_review_queue(&args.store)?;
+    let item = queue
+        .assign(&args.id, &args.reviewer)
+        .await
+        .with_context(|| format!("assigning review item '{}'", args.id))?;
+    print_review_item(&item, args.format)
+}
+
+/// Run `hacienda review decide <dir> <id> --decision <d> --reviewer <name>`.
+pub async fn run_review_decide(args: ReviewDecideArgs) -> Result<()> {
+    let queue = open_review_queue(&args.store)?;
+    let item = queue
+        .decide(
+            &args.id,
+            review_decision_from_arg(args.decision),
+            &args.reviewer,
+            &args.comment,
+        )
+        .await
+        .with_context(|| format!("deciding review item '{}'", args.id))?;
+    print_review_item(&item, args.format)
+}
+
+/// Run `hacienda review stats <dir>`.
+pub async fn run_review_stats(args: ReviewStatsArgs) -> Result<()> {
+    let queue = open_review_queue(&args.store)?;
+    let stats = queue.stats().await.context("reading review queue stats")?;
+
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
+        Format::Text => {
+            println!("total:     {}", stats.total);
+            println!("pending:   {}", stats.pending);
+            println!("in_review: {}", stats.in_review);
+            println!("approved:  {}", stats.approved);
+            println!("rejected:  {}", stats.rejected);
+            println!("modified:  {}", stats.modified);
+        }
+    }
+    Ok(())
+}
+
+// ── compliance ──────────────────────────────────────────────────────────────────
+
+/// Build a [`ComplianceGenerator`] from the effective configuration's `[compliance]`
+/// section.
+///
+/// Compliance artefacts are pure functions of `ComplianceConfig` (plus, for DORA, an
+/// incident) — no facade, store, or document is involved, so this loads configuration
+/// directly rather than building a `HaciendaFacade` the way `compliance_report_with_auth`
+/// does. That facade method always passes `None` for the incident (there is no live
+/// incident state on a request-serving facade either), which is exactly the gap
+/// `compliance dora`/`--incident` exists to close for the CLI.
+fn compliance_generator(
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<ComplianceGenerator> {
+    let config = load_config(config_path, config_json, None, None)?;
+    let compliance = config.compliance.ok_or_else(|| {
+        anyhow::anyhow!(
+            "compliance reporting is not configured: add a [compliance] section to the \
+             configuration, or pass --config-json '{{\"compliance\":{{}}}}' to use defaults \
+             (run `hacienda config show` to see the effective configuration)"
+        )
+    })?;
+    Ok(ComplianceGenerator::new(compliance))
+}
+
+/// Read a [`PiiIncident`] from a JSON file.
+fn read_incident(path: &Path) -> Result<PiiIncident> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading incident file {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "{} is not a valid PiiIncident JSON document",
+            path.display()
+        )
+    })
+}
+
+fn print_dpia_text(doc: &DpiaDocument) {
+    println!("DATA PROTECTION IMPACT ASSESSMENT");
+    println!("{}", doc.processing_description);
+    println!();
+    println!("Necessity & proportionality:");
+    println!("{}", doc.necessity_proportionality);
+    println!();
+    println!("Risks:");
+    for risk in &doc.risks {
+        println!(
+            "  [{}] {} (likelihood={:?}, severity={:?}, residual={:?})",
+            risk.id, risk.description, risk.likelihood, risk.severity, risk.residual_risk
+        );
+        println!("      mitigation: {}", risk.mitigation);
+    }
+    println!();
+    println!("Mitigation measures:");
+    for measure in &doc.mitigation_measures {
+        println!("  - {measure}");
+    }
+}
+
+fn print_model_card_text(card: &ModelCard) {
+    println!(
+        "MODEL CARD: {} v{}",
+        card.model_details.name, card.model_details.version
+    );
+    println!("{}", card.model_details.description);
+    println!();
+    println!("architecture: {}", card.model_details.architecture);
+    println!("parameters:   {}", card.model_details.parameters);
+    println!("license:      {}", card.model_details.license);
+    println!();
+    println!("Evaluation:");
+    for metric in &card.evaluation.metrics {
+        println!("  {} = {}", metric.name, metric.value);
+    }
+    println!();
+    println!("Known biases:");
+    for bias in &card.bias_fairness.known_biases {
+        println!("  - {bias}");
+    }
+    println!();
+    println!("Intended use: {}", card.deployment.intended_use);
+}
+
+fn print_checklist_text(checklist: &ComplianceChecklist) {
+    let sections: [(&str, &[ChecklistItem]); 3] = [
+        ("GDPR", &checklist.gdpr_articles),
+        ("AI Act", &checklist.ai_act_articles),
+        ("DORA", &checklist.dora_articles),
+    ];
+    for (label, items) in sections {
+        println!("{label}");
+        for item in items {
+            println!(
+                "  [{:?}] {} — {}",
+                item.status, item.article, item.description
+            );
+            println!("      evidence: {}", item.evidence);
+        }
+        println!();
+    }
+}
+
+fn print_dora_report_text(report: &DoraReport) {
+    println!("DORA INCIDENT REPORT {}", report.reference);
+    println!("timestamp: {}", report.timestamp);
+    println!("entity:    {}", report.entity);
+    println!(
+        "severity: {}   category: {}",
+        report.classification.severity, report.classification.category
+    );
+    println!("impact: {}", report.classification.impact);
+    println!();
+    println!("summary:    {}", report.description.summary);
+    println!("timeline:   {}", report.description.timeline);
+    println!("root cause: {}", report.description.root_cause);
+    println!();
+    println!("detected_at:  {}", report.response.detected_at);
+    if let Some(contained_at) = &report.response.contained_at {
+        println!("contained_at: {contained_at}");
+    }
+    if let Some(resolved_at) = &report.response.resolved_at {
+        println!("resolved_at:  {resolved_at}");
+    }
+    println!("actions taken:");
+    for action in &report.response.actions_taken {
+        println!("  - {action}");
+    }
+    println!("lessons learned:");
+    for lesson in &report.response.lessons_learned {
+        println!("  - {lesson}");
+    }
+}
+
+fn print_compliance_report_text(report: &ComplianceReport) {
+    println!("COMPLIANCE REPORT — generated {}", report.generated_at);
+    println!();
+    let mut printed_any = false;
+    if let Some(dpia) = &report.dpia {
+        print_dpia_text(dpia);
+        println!();
+        printed_any = true;
+    }
+    if let Some(card) = &report.model_card {
+        print_model_card_text(card);
+        println!();
+        printed_any = true;
+    }
+    if let Some(dora) = &report.dora {
+        print_dora_report_text(dora);
+        println!();
+        printed_any = true;
+    }
+    if let Some(checklist) = &report.checklist {
+        print_checklist_text(checklist);
+        printed_any = true;
+    }
+    if !printed_any {
+        println!("(no reports enabled — see [compliance] enabled_reports in the configuration)");
+    }
+}
+
+/// Run `hacienda compliance dpia`.
+pub async fn run_compliance_dpia(
+    args: ComplianceFormatArgs,
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let generator = compliance_generator(config_path, config_json)?;
+    let doc = generator.dpia();
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&doc)?),
+        Format::Text => print_dpia_text(&doc),
+    }
+    Ok(())
+}
+
+/// Run `hacienda compliance model-card`.
+pub async fn run_compliance_model_card(
+    args: ComplianceFormatArgs,
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let generator = compliance_generator(config_path, config_json)?;
+    let card = generator.model_card();
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&card)?),
+        Format::Text => print_model_card_text(&card),
+    }
+    Ok(())
+}
+
+/// Run `hacienda compliance checklist`.
+pub async fn run_compliance_checklist(
+    args: ComplianceFormatArgs,
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let generator = compliance_generator(config_path, config_json)?;
+    let checklist = generator.checklist();
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&checklist)?),
+        Format::Text => print_checklist_text(&checklist),
+    }
+    Ok(())
+}
+
+/// Run `hacienda compliance dora --incident <file>`.
+pub async fn run_compliance_dora(
+    args: ComplianceDoraArgs,
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let generator = compliance_generator(config_path, config_json)?;
+    let incident = read_incident(&args.incident)?;
+    let report = generator.dora_report(&incident);
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Text => print_dora_report_text(&report),
+    }
+    Ok(())
+}
+
+/// Run `hacienda compliance report [--incident <file>]`.
+pub async fn run_compliance_report(
+    args: ComplianceReportArgs,
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let generator = compliance_generator(config_path, config_json)?;
+    let incident = args.incident.as_deref().map(read_incident).transpose()?;
+    let report = generator.report(incident.as_ref());
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Text => print_compliance_report_text(&report),
+    }
+    Ok(())
+}
+
+// ── completions ─────────────────────────────────────────────────────────────────
+
+/// Run `hacienda completions <shell>`.
+///
+/// The one genuinely mechanical piece of this slice: `clap_complete::generate` walks the
+/// same `Cli` clap already parses with, so a completion script can never name a flag or
+/// subcommand this binary does not actually have.
+pub fn run_completions(args: CompletionsArgs) -> Result<()> {
+    let mut cmd = crate::cli::Cli::command();
+    let name = cmd.get_name().to_string();
+    clap_complete::generate(args.shell, &mut cmd, name, &mut std::io::stdout());
+    Ok(())
+}
+
 /// Refuse a bind address that would expose the API to the network without authentication.
 ///
 /// This is the one policy `serve` enforces before opening a socket, and it is
@@ -860,7 +1457,7 @@ pub async fn run_serve(
     let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
     let auth_enabled = config.auth.enabled;
 
-    let facade = Arc::new(HaciendaFacade::new(config).context("building the facade")?);
+    let facade = Arc::new(build_facade(config).context("building the facade")?);
     let jobs = InMemoryJobStore::new().into_arc();
     // In-memory by default, same precedent as `jobs` above: durable is a caller
     // decision (embed a `PgVectorStore` instead), not this command's to make.

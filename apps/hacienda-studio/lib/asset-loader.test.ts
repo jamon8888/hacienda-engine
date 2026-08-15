@@ -1,5 +1,6 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { openDB } from "idb";
 import { fetchAsset, validateFile, loadTessdata } from "./asset-loader";
 
 function file(type: string, size = 1024): File {
@@ -197,13 +198,23 @@ describe("validateFile", () => {
  * path can be exercised for real, not mocked.
  */
 describe("loadTessdata", () => {
+  // `getDB()` (asset-loader.ts) opens a connection per call and never closes it — fine for a
+  // long-lived browser tab, but it means `indexedDB.deleteDatabase` here would block forever
+  // waiting for a versionchange on a connection nothing ever closes. Clearing the object
+  // store instead only needs a same-version transaction, which doesn't require exclusivity.
   afterEach(async () => {
     vi.unstubAllGlobals();
-    await new Promise<void>((resolve, reject) => {
-      const req = indexedDB.deleteDatabase("xberg-studio-assets");
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
+    const db = await openDB("xberg-studio-assets", 1);
+    try {
+      // Guards against a DB opened (by this very call, absent an upgrade callback) with
+      // no "tessdata" store yet — possible if a test's own setup throws before ever
+      // calling loadTessdata (which creates both stores). clear() would throw
+      // NotFoundError in that case; without the try/finally that would also skip
+      // db.close(), leaking the connection into the next test.
+      await db.clear("tessdata");
+    } finally {
+      db.close();
+    }
   });
 
   it("fetches and caches the language file on a cache miss", async () => {
