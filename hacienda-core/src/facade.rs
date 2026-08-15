@@ -1534,15 +1534,27 @@ impl HaciendaFacade {
     /// This method closes that gap the same way `.content` is closed: walk every
     /// text-bearing field, not just the one most callers think of as "the document text."
     ///
+    /// X1 (`superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`) added
+    /// three more fields once this method already covered everything above: `images`
+    /// (`.caption`/`.description`, pre-existing fields this method never walked, plus the
+    /// new `qr_codes[].payload` — a QR code can just as easily encode a phone number or a
+    /// vCard as a URL — and `.ocr_result`, a full nested `ExtractedDocument` from
+    /// `candle-trocr`, redacted recursively the same way archive `children` are),
+    /// `extracted_keywords[].text` (a YAKE/RAKE keyword can itself be a person's name),
+    /// and `summary.text` (an extractive summary is built from sentences lifted straight
+    /// out of `.content`, so anything detectable there can resurface here verbatim).
+    ///
     /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
     /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
     /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
     /// silently included by half-measure. Also not covered: fields gated behind
     /// extraction-config flags or Cargo features this workspace does not yet enable
     /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
-    /// `chunks`, `extracted_keywords`, `summary`, `translation`, `page_classifications`)
-    /// — see the `2026-08-13-hacienda-xberg-capability-parity-program.md` X1/X2/X3 specs,
-    /// each of which is gated on this method already covering the field it would add.
+    /// `chunks`, `translation`, `page_classifications`, `structured_output`,
+    /// `code_intelligence` — the `tree-sitter` Cargo feature is disabled pending an
+    /// upstream fix, see the workspace `Cargo.toml`'s `xberg` entry) — see the
+    /// `2026-08-13-hacienda-xberg-capability-parity-program.md` X2/X3 specs, each of
+    /// which is gated on this method already covering the field it would add.
     ///
     /// # Errors
     ///
@@ -1592,15 +1604,27 @@ impl HaciendaFacade {
     /// This method closes that gap the same way `.content` is closed: walk every
     /// text-bearing field, not just the one most callers think of as "the document text."
     ///
+    /// X1 (`superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`) added
+    /// three more fields once this method already covered everything above: `images`
+    /// (`.caption`/`.description`, pre-existing fields this method never walked, plus the
+    /// new `qr_codes[].payload` — a QR code can just as easily encode a phone number or a
+    /// vCard as a URL — and `.ocr_result`, a full nested `ExtractedDocument` from
+    /// `candle-trocr`, redacted recursively the same way archive `children` are),
+    /// `extracted_keywords[].text` (a YAKE/RAKE keyword can itself be a person's name),
+    /// and `summary.text` (an extractive summary is built from sentences lifted straight
+    /// out of `.content`, so anything detectable there can resurface here verbatim).
+    ///
     /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
     /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
     /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
     /// silently included by half-measure. Also not covered: fields gated behind
     /// extraction-config flags or Cargo features this workspace does not yet enable
     /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
-    /// `chunks`, `extracted_keywords`, `summary`, `translation`, `page_classifications`)
-    /// — see the `2026-08-13-hacienda-xberg-capability-parity-program.md` X1/X2/X3 specs,
-    /// each of which is gated on this method already covering the field it would add.
+    /// `chunks`, `translation`, `page_classifications`, `structured_output`,
+    /// `code_intelligence` — the `tree-sitter` Cargo feature is disabled pending an
+    /// upstream fix, see the workspace `Cargo.toml`'s `xberg` entry) — see the
+    /// `2026-08-13-hacienda-xberg-capability-parity-program.md` X2/X3 specs, each of
+    /// which is gated on this method already covering the field it would add.
     ///
     /// # Errors
     ///
@@ -1608,7 +1632,7 @@ impl HaciendaFacade {
     /// [`HaciendaError::Audit`] if a nested archive member's own append fails, and
     /// [`HaciendaError::RedactionDepthExceeded`] if `depth` (this document's nesting level,
     /// 0 for a top-level document) reaches [`MAX_REDACTION_DEPTH`] while walking into
-    /// `children`.
+    /// `children` or into an image's `ocr_result`.
     async fn redact_structured_fields(
         &self,
         document: &mut xberg::ExtractedDocument,
@@ -1617,6 +1641,11 @@ impl HaciendaFacade {
         audit_log: &mut Vec<RedactionAuditEntry>,
         depth: usize,
     ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        // Collects already-appended entries from any recursively-redacted `ExtractedDocument`
+        // nested inside this one — archive `children` below, and (X1) an image's OCR
+        // result. Declared up front so both loops can extend the same collection.
+        let mut child_audit_entries = Vec::new();
+
         for table in &mut document.tables {
             self.redact_table(table, pipeline, audit_log).await?;
         }
@@ -1717,6 +1746,61 @@ impl HaciendaFacade {
             }
         }
 
+        // Keywords (`keywords` feature, X1): keyword/keyphrase extraction runs over
+        // already-extracted content, so a keyword can itself be a PII value — a person's
+        // name is a plausible YAKE/RAKE keyword (X1 spec §3).
+        if let Some(keywords) = &mut document.extracted_keywords {
+            for keyword in keywords {
+                self.redact_string_field(&mut keyword.text, pipeline, audit_log)
+                    .await?;
+            }
+        }
+
+        // Extractive summary (`summarization` feature, X1): built from sentences lifted
+        // straight out of `.content`, so anything PII detection would catch there can
+        // resurface here verbatim.
+        if let Some(summary) = &mut document.summary {
+            self.redact_string_field(&mut summary.text, pipeline, audit_log)
+                .await?;
+        }
+
+        // Images: `.caption`/`.description` are pre-existing fields this method never
+        // walked before X1; `qr_codes` (X1, `qr-codes` feature) decodes to a string
+        // payload, not prose, but a QR code can encode a phone number, an email, or a
+        // vCard just as easily as a URL — X1 spec §3 says to treat it as document content
+        // for PII-scanning purposes regardless. `ocr_result` (X1, `candle-trocr`) nests a
+        // complete `ExtractedDocument` produced by OCR, so it recurses the same way an
+        // archive member does, sharing this document's depth budget.
+        if let Some(images) = &mut document.images {
+            if !images.is_empty() && depth >= MAX_REDACTION_DEPTH {
+                return Err(HaciendaError::RedactionDepthExceeded {
+                    limit: MAX_REDACTION_DEPTH,
+                });
+            }
+            for image in images {
+                if let Some(caption) = &mut image.caption {
+                    self.redact_string_field(caption, pipeline, audit_log)
+                        .await?;
+                }
+                if let Some(description) = &mut image.description {
+                    self.redact_string_field(description, pipeline, audit_log)
+                        .await?;
+                }
+                if let Some(qr_codes) = &mut image.qr_codes {
+                    for qr_code in qr_codes {
+                        self.redact_string_field(&mut qr_code.payload, pipeline, audit_log)
+                            .await?;
+                    }
+                }
+                if let Some(ocr_result) = &mut image.ocr_result {
+                    child_audit_entries.extend(
+                        self.redact_document_recursively(ocr_result, pipeline, caller, depth + 1)
+                            .await?,
+                    );
+                }
+            }
+        }
+
         // Archive members (`archives` feature): each is a *complete nested
         // `ExtractedDocument`* (a zip containing a PDF containing PII is exactly as real a
         // leak as the top-level PDF would be), and archives can nest arbitrarily deep
@@ -1724,7 +1808,6 @@ impl HaciendaFacade {
         // field loop. Each child gets its own single `append` — see
         // `redact_document_recursively` — so its entries are already real `AuditEntry`s,
         // unlike everything else collected into `audit_log` above.
-        let mut child_audit_entries = Vec::new();
         if let Some(children) = &mut document.children {
             if !children.is_empty() && depth >= MAX_REDACTION_DEPTH {
                 return Err(HaciendaError::RedactionDepthExceeded {
@@ -2004,11 +2087,38 @@ async fn extract_all(
     inputs: Vec<ExtractInput>,
     config: &HaciendaConfig,
 ) -> Result<ExtractionResult, HaciendaError> {
+    let extraction = safe_extraction_config(&config.extraction);
     if inputs.len() == 1 {
         let input = inputs.into_iter().next().expect("length checked above");
-        return Ok(extract(input, &config.extraction).await?);
+        return Ok(extract(input, &extraction).await?);
     }
-    Ok(xberg::extract_batch(inputs, &config.extraction).await?)
+    Ok(xberg::extract_batch(inputs, &extraction).await?)
+}
+
+/// Guards against a caller-invisible behaviour change from enabling xberg's
+/// `candle-trocr` Cargo feature (see the workspace `Cargo.toml`'s `xberg` entry for the
+/// full explanation): once `ocr-pipeline` is compiled in, an [`xberg::ExtractionConfig`]
+/// with no `ocr` section no longer skips OCR the way it did before — it falls through to
+/// `OcrConfig::default()`, whose backend (`"tesseract"`) isn't registered in this build
+/// (the `ocr`/`ocr-wasm` Cargo features stay off), turning every image extraction into a
+/// hard `Plugin` error instead of the metadata-only result callers got before this
+/// feature was enabled.
+///
+/// Forcing `disable_ocr = true` when the caller never set `extraction.ocr` themselves
+/// preserves that pre-`candle-trocr` behaviour for everyone who hasn't explicitly opted
+/// in. A caller who wants OCR sets `[extraction.ocr] backend = "candle-trocr"` in their
+/// config (`extraction.ocr` is then `Some`, so this function leaves it untouched); an
+/// explicit `disable_ocr = true`/`false` from the caller is also left untouched either
+/// way, since the condition below only fires when both are at their unset defaults.
+fn safe_extraction_config(config: &xberg::ExtractionConfig) -> xberg::ExtractionConfig {
+    if config.ocr.is_none() && !config.disable_ocr {
+        xberg::ExtractionConfig {
+            disable_ocr: true,
+            ..config.clone()
+        }
+    } else {
+        config.clone()
+    }
 }
 
 /// Rebuild a table's markdown rendering from its (already redacted) cells.
@@ -3017,6 +3127,38 @@ mod tests {
             result: Box::new(nested),
         };
 
+        // X1: keyword extraction, extractive summary, an image carrying a caption, a
+        // description, a decoded QR payload, and (recursively) an OCR result.
+        let keyword = xberg::Keyword {
+            text: P7_CORPUS_EMAIL.to_string(),
+            score: 1.0,
+            algorithm: xberg::KeywordAlgorithm::Yake,
+            positions: None,
+        };
+
+        let summary = xberg::DocumentSummary {
+            text: format!("summary mentioning {P7_CORPUS_EMAIL}"),
+            strategy: xberg::SummaryStrategy::default(),
+            token_count: None,
+        };
+
+        let mut ocr_result = base_document().await;
+        ocr_result.content = format!("ocr transcript: {P7_CORPUS_EMAIL}");
+
+        let qr_code = xberg::QrCode {
+            payload: P7_CORPUS_EMAIL.to_string(),
+            confidence: None,
+            bbox: None,
+        };
+
+        let image = xberg::ExtractedImage {
+            caption: Some(format!("caption: {P7_CORPUS_EMAIL}")),
+            description: Some(format!("description: {P7_CORPUS_EMAIL}")),
+            qr_codes: Some(vec![qr_code]),
+            ocr_result: Some(Box::new(ocr_result)),
+            ..Default::default()
+        };
+
         let mut document = base_document().await;
         document.content = "top-level content, redacted separately by the outer loop".to_string();
         document.metadata.authors = Some(vec![P7_CORPUS_EMAIL.to_string()]);
@@ -3030,6 +3172,9 @@ mod tests {
         document.revisions = Some(vec![revision]);
         document.uris = Some(vec![uri]);
         document.children = Some(vec![child]);
+        document.extracted_keywords = Some(vec![keyword]);
+        document.summary = Some(summary);
+        document.images = Some(vec![image]);
         document
     }
 
@@ -3157,6 +3302,37 @@ mod tests {
                     assert_field_redacted("children[].result.tables[].cells", cell);
                 }
             }
+        }
+
+        // X1
+        for keyword in document
+            .extracted_keywords
+            .as_ref()
+            .expect("extracted_keywords present")
+        {
+            assert_field_redacted("extracted_keywords[].text", &keyword.text);
+        }
+        assert_field_redacted(
+            "summary.text",
+            &document.summary.as_ref().expect("summary present").text,
+        );
+        for image in document.images.as_ref().expect("images present") {
+            assert_field_redacted("images[].caption", image.caption.as_deref().unwrap_or(""));
+            assert_field_redacted(
+                "images[].description",
+                image.description.as_deref().unwrap_or(""),
+            );
+            for qr_code in image.qr_codes.as_ref().expect("qr_codes present") {
+                assert_field_redacted("images[].qr_codes[].payload", &qr_code.payload);
+            }
+            assert_field_redacted(
+                "images[].ocr_result.content",
+                &image
+                    .ocr_result
+                    .as_ref()
+                    .expect("ocr_result present")
+                    .content,
+            );
         }
     }
 
@@ -3304,11 +3480,19 @@ mod tests {
             .expect("pii configured");
         let pipeline = &pipeline;
 
-        // No archive children: isolates the "one append per document" claim for a
-        // document's own structured fields from the separate "one append per nested
-        // archive member" behaviour `redact_document_recursively` provides.
+        // No archive children, and no image OCR results: isolates the "one append per
+        // document" claim for a document's own structured fields from the separate "one
+        // append per nested document" behaviour `redact_document_recursively` provides
+        // for both archive children and (X1) `images[].ocr_result`. `images` itself stays
+        // populated — `.caption`/`.description`/`.qr_codes` are still this document's own
+        // fields, not nested documents, so they belong in this test's coverage.
         let mut document = document_with_corpus_everywhere().await;
         document.children = None;
+        if let Some(images) = &mut document.images {
+            for image in images {
+                image.ocr_result = None;
+            }
+        }
 
         let mut audit_log = Vec::new();
         let child_audit_entries = facade

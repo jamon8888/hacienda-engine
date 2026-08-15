@@ -110,6 +110,100 @@ backend(s) to ship is separate from proving the integration works at all.
 No dependency on P6 (no LLM call here at all) or X2. This is the highest-leverage remaining
 slice in the program: same cost profile as the already-shipped `pdf`/`office`/`excel`/...
 change (a Cargo feature flip plus a PII-stage verification test), applied to six more
-capabilities. See the accompanying implementation plan,
-`2026-08-13-X1-pure-rust-enrichment-features-implementation.md`, for the concrete task
-breakdown.
+capabilities.
+
+## 6. Implementation notes (this pass)
+
+**`tree-sitter` deferred — genuine upstream compile break, not a scope decision.** This
+pass shipped five of the six capabilities; `tree-sitter` stayed off. This xberg commit's
+`impl From<&TreeSitterProcessConfig> for tree_sitter_language_pack::ProcessConfig`
+(`src/core/config/tree_sitter.rs`) builds that struct with a field literal that omits
+`max_source_bytes` and `parse_timeout_ms` — fields the `tree-sitter-language-pack`
+version Cargo currently resolves to (1.15.0, under this xberg commit's own unpinned
+`^`-range requirement) requires. `cargo check -p hacienda-core --features tree-sitter`
+fails inside the `xberg` crate itself, not in hacienda's code — reproduced locally after
+separately working around `tree-sitter-language-pack`'s own build-time issue (its build
+script fetches a parser-sources tarball from a GitHub release at build time; that needs
+`TSLP_OFFLINE=1` or real network access to a non-intercepted `github.com` to succeed —
+unrelated to the compile error, just what was needed to isolate it). See the workspace
+`Cargo.toml`'s `xberg` entry for the full note. `HaciendaFacade::redact_structured_fields`
+covers `code_intelligence` on the list of fields *not yet* covered (alongside the other
+Cargo-feature-gated fields already there) rather than adding dead code for a field that
+cannot currently exist in this build.
+
+**`candle-trocr` regression risk, found and fixed during implementation.** Enabling
+`candle-ocr`/`candle-trocr` compiles xberg's `ocr-pipeline` into `extractors::image`,
+which changes its default behaviour even for callers who never touch OCR: previously an
+image input always fell back to metadata-only extraction; with `ocr-pipeline` compiled,
+`ExtractionConfig::effective_disable_ocr()` (default `false`) no longer skips the OCR
+branch, and a config with no `[extraction.ocr]` section falls through to
+`OcrConfig::default()`, whose backend (`"tesseract"`) is not registered in this build
+(`ocr`/`ocr-wasm` stay off). Left alone, that turns every image extraction into a hard
+`Plugin` error for every existing caller. `HaciendaFacade::safe_extraction_config`
+(`hacienda-core/src/facade.rs`) closes this by forcing `disable_ocr = true` unless the
+caller's config already set `extraction.ocr` explicitly, so OCR stays a no-op by default
+— exactly the pre-`candle-trocr` behaviour — until a caller opts in with
+`[extraction.ocr] backend = "candle-trocr"`.
+
+**§3's `static-embeddings` guard assumption does not hold.** This section says
+confirming/extending "E4's existing vector-store guard" is enough — but no such guard
+exists in the current implementation. `hacienda-api/src/handlers/rag.rs::upsert_document`
+stores caller-supplied chunk content verbatim, with no redaction call anywhere in the
+file (its own doc comment already states the caller is responsible for pre-redacting or
+re-embedding after upsert — a documented expectation, not an enforced one), and
+`migrate_embeddings_work` reads stored chunk content straight from `RagStore` and feeds it
+to `xberg::embed_texts_async` with no redaction step in between. This is a pre-existing
+gap in E4 (`2026-08-01-hacienda-platform-parity-program.md` §6 names "chaque chunk est
+rédigé avant vectorisation" as E4's single most important guard), not something this pass
+introduces — X1 only surfaces it because `static-embeddings` would be a second embedder
+needing the same guard `P6`'s `GuardedLlm` (`crates/hacienda-rag/src/stream.rs:133-186`)
+already provides for the query-time LLM-answer path.
+
+Given that, `static-embeddings` is enabled on the workspace `xberg` dependency in this
+pass (so it compiles) but deliberately **not** threaded through `hacienda-rag`/
+`hacienda-api`'s own Cargo features or config surface: nothing today constructs the
+`EmbeddingModelType::Preset { name: "lightweight" }` config needed to reach the static
+backend through `xberg::embed_texts`/`embed_texts_async`, so this stays compile-only and
+does not newly expose an unguarded ingestion path. Building an ingestion-time guard
+(`GuardedLlm`-shaped, wrapping the embed call sites in `upsert_document` and
+`migrate_embeddings_work`) is real, separate work, tracked as its own follow-up rather
+than folded into this pass.
+
+**`keywords`/`summarization`/`qr-codes`/`candle-trocr` are reachable today.** Unlike
+`static-embeddings`, these already have a config surface — `HaciendaConfig.extraction`
+*is* xberg's own `ExtractionConfig`, round-tripped through `[extraction]` in
+`hacienda.{toml,yaml,json}` — so enabling the Cargo feature plus extending
+`HaciendaFacade::redact_structured_fields` to cover the fields they populate
+(`extracted_keywords`, `summary`, `images[].qr_codes`/`.caption`/`.description`/
+`.ocr_result`) is a complete, callable capability, not a compile-only stub. See
+`redact_structured_fields`'s own doc comment for the full field list and reasoning.
+`tree-sitter`'s `code_intelligence` would follow the same shape once the upstream compile
+break above clears — deliberately left off the covered-field list for now rather than
+adding dead code for a field that cannot currently exist in this build.
+
+**Test scope: core-level, not a new REST/CLI/MCP-level control-corpus test per
+transport.** §4's exit criteria describe testing `documents_process`'s (hacienda-mcp) and
+`POST /v1/documents`'s (hacienda-api) output directly, mirroring P7's own framing of "REST,
+CLI, MCP" as three separate transports needing separate coverage. Checked directly against
+current code before adding a new test file: `hacienda-api/src/dto.rs`'s `DocumentResult` —
+the actual `POST /v1/documents` response shape — exposes only `content`, `entities`,
+`document_id`, `version_sequence`; none of `tables`/`extracted_keywords`/`summary`/`images`/
+etc. are serialised into that response at all (confirmed by grep: zero references to
+`ExtractedDocument`'s structured fields anywhere under `hacienda-api/src/`). There is
+nothing at that REST layer for a corpus sweep to catch, independent of this pass's changes.
+`hacienda-cli`'s `--format json` output (`commands.rs`) and `hacienda-mcp`'s
+`documents_process` tool result both serialise the `ExtractedDocument` returned by
+`HaciendaFacade::process_batch_with_auth` directly, with no additional field-stripping —
+confirmed by reading both call sites — so both automatically carry
+`redact_structured_fields`'s redaction with no CLI/MCP-side code change needed; the
+correctness proof lives entirely in the core-level test
+(`redact_structured_fields_covers_every_known_field`, extended this pass to cover
+`extracted_keywords`/`summary`/`images[].qr_codes`/`.caption`/`.description`/`.ocr_result`),
+not in a duplicate per-transport HTTP/MCP round trip. A `candle-trocr` end-to-end test
+using a real scanned image would additionally need the TrOCR model weights downloaded from
+Hugging Face at test time — infeasible offline and undesirably flaky/slow even where network
+access exists — so that specific exit-criterion test (as literally scoped: OCR a real image
+through the real model) is not attempted; `redact_structured_fields`'s coverage of
+`images[].ocr_result` as a recursively-redacted nested `ExtractedDocument` is exercised
+today via a synthetic `ocr_result` in the same core-level test, proving the redaction wiring
+without requiring the model.

@@ -147,6 +147,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Five pure-Rust xberg enrichment capabilities were sitting in the dependency graph,
+  unreachable, the same class of gap as the earlier extraction-format win (X1).** Enabled
+  `keywords` (YAKE/RAKE), `summarization` (extractive TextRank), `qr-codes` (`rqrr`
+  decoding), `static-embeddings` (model2vec, no ONNX Runtime), and `candle-trocr` (candle
+  transformer OCR — hacienda already vendors candle for GLiNER2 NER, so this is new model
+  weights, not a new inference runtime) on the workspace `xberg` dependency. Extended
+  `HaciendaFacade::redact_structured_fields` (P7) to cover the four new fields these
+  populate: `extracted_keywords[].text`, `summary.text`, and (previously silently
+  unwalked entirely, not just X1-new) `images[].caption`/`.description`/`.qr_codes[].
+  payload`/`.ocr_result` (a full nested `ExtractedDocument`, redacted recursively like an
+  archive member, sharing the same depth budget). `static-embeddings` is compile-only for
+  now — nothing in `hacienda-rag`/`hacienda-api` yet constructs the config needed to reach
+  it, and reaching it safely needs a `GuardedLlm`-shaped ingestion-time guard that turned
+  out not to exist yet for the vector-store embedding path (a pre-existing E4 gap, not
+  something this pass introduced — see the spec's §6 for the full writeup and the
+  `upsert_document`/`migrate_embeddings_work` call sites that need it, tracked as a
+  separate follow-up). `tree-sitter` — the spec's sixth capability — was found to hit a
+  genuine upstream compile break on this xberg pin (a `ProcessConfig` field mismatch
+  against the `tree-sitter-language-pack` version Cargo resolves) and stayed off pending
+  an upstream fix. Also fixed, found while wiring this in: enabling `candle-trocr` compiles
+  in xberg's OCR pipeline, which would have silently turned every image extraction into a
+  hard error for every caller who never configured OCR (falls through to a `"tesseract"`
+  backend that isn't registered) — `HaciendaFacade`'s new `safe_extraction_config` forces
+  `disable_ocr = true` unless the caller's own config already set `extraction.ocr`,
+  preserving the pre-existing metadata-only image behaviour by default. See
+  `superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`.
 - **Six review and compliance routes named in the specifications were never wired to
   HTTP.** Verified directly against `hacienda-api/src/routes.rs`: in both
   cases the underlying business logic already existed and was already tested —
