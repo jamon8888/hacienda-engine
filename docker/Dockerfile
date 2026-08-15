@@ -2,17 +2,19 @@
 # syntax = docker/dockerfile:1.7
 
 # 1. PLANNER - cargo-chef for cache
-# 1.78 (this image's prior pin) can no longer `cargo install cargo-chef`: current
+# 1.78 (this image's original pin) could no longer `cargo install cargo-chef`: current
 # cargo-chef releases declare `edition = "2024"` (needs 1.85+), and cargo-chef's own
 # dependency graph (cargo-platform, cargo_metadata, guppy, target-spec) needs 1.86-1.88
-# on top of that — 1.85 alone still isn't enough, confirmed by the same "rustc N.NN is
-# not supported by the following packages" error one version pin at a time. 1.90 gives
-# headroom past the highest individual requirement seen (cargo-platform's 1.88) rather
-# than re-chasing this one point release at a time again next time a dependency bumps
-# its own MSRV. Caught by ci-docker.yaml's validate-main job actually building the
-# image for the first time (previously `docker buildx build --check ... || true` never
-# ran a real build).
-FROM rust:1.90-slim AS planner
+# on top of that. 1.90 (the next pin) then failed too, one layer deeper: `xberg`/
+# `xberg-gliner` (this workspace's real dependency, resolved once `cargo chef prepare`
+# reaches actual crate metadata) require rustc 1.91, caught by ci-docker.yaml's
+# validate-main job actually building the image for the first time (previously
+# `docker buildx build --check ... || true` never ran a real build). 1.94 gives
+# headroom past the highest individual requirement seen so far, matching the
+# nightly-2026-08-06 toolchain ci-rust.yaml et al. already build and test against
+# successfully, rather than re-chasing this one point release at a time again next
+# time a dependency bumps its own MSRV.
+FROM rust:1.94-slim AS planner
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY . .
@@ -23,7 +25,7 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # 2. BUILDER - Compile deps (cached)
-FROM rust:1.90-slim AS builder
+FROM rust:1.94-slim AS builder
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
