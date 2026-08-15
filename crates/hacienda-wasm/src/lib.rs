@@ -18,11 +18,16 @@ fn to_js_err<E: std::fmt::Display>(err: E) -> JsValue {
     JsValue::from_str(&err.to_string())
 }
 
-/// Regex + NER (when a model is loaded) detection and redaction over `text`, using the
-/// default pipeline config. Returns the serialized `PipelineResult`.
+/// Regex + NER (when a model is loaded, via [`ner_model::load_ner_model`]) detection and
+/// redaction over `text`, using the default pipeline config. Returns the serialized
+/// `PipelineResult`. `with_detector` (rather than `new`) is used unconditionally: it
+/// ignores `PipelineConfig::model.enabled` and just uses whatever `Option<NerDetector>`
+/// it's handed, so this is identical to today's regex-only behaviour whenever no model
+/// is loaded (or the `ner-candle-wasm` feature is off) — no `#[cfg]` needed here.
 #[wasm_bindgen]
 pub async fn process(text: String) -> Result<JsValue, JsValue> {
-    let pipeline = PiiPipeline::new(PipelineConfig::default()).map_err(to_js_err)?;
+    let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
+        .map_err(to_js_err)?;
     let result = pipeline.process(&text).await.map_err(to_js_err)?;
     serde_wasm_bindgen::to_value(&result).map_err(to_js_err)
 }
@@ -31,7 +36,8 @@ pub async fn process(text: String) -> Result<JsValue, JsValue> {
 /// `redacted_text` equal to the input.
 #[wasm_bindgen]
 pub async fn scan(text: String) -> Result<JsValue, JsValue> {
-    let pipeline = PiiPipeline::new(PipelineConfig::default()).map_err(to_js_err)?;
+    let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
+        .map_err(to_js_err)?;
     let result = pipeline.scan(&text).await.map_err(to_js_err)?;
     serde_wasm_bindgen::to_value(&result).map_err(to_js_err)
 }
@@ -57,6 +63,62 @@ pub fn redact_empty(text: String, mode: String) -> Result<JsValue, JsValue> {
     let engine = RedactionEngine::new(config, pseudonymiser).map_err(to_js_err)?;
     let result = engine.redact(&text, &[]).map_err(to_js_err)?;
     serde_wasm_bindgen::to_value(&result).map_err(to_js_err)
+}
+
+/// Real (Candle GLiNER2) NER for `process`/`scan`, loaded from in-memory bytes rather
+/// than a filesystem model directory — see `hacienda_core::pii::NerDetector::
+/// from_candle_bytes`. `wasm32` + `ner-candle-wasm`-only: without the feature, `process`/
+/// `scan` stay regex-only exactly as before this was added (see `current_ner_detector`'s
+/// fallback below).
+#[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
+mod ner_model {
+    use super::to_js_err;
+    use hacienda_core::pii::NerDetector;
+    use std::cell::RefCell;
+    use wasm_bindgen::prelude::*;
+
+    thread_local! {
+        static DETECTOR: RefCell<Option<NerDetector>> = RefCell::new(None);
+    }
+
+    /// Load the model `process`/`scan` will use from now on, replacing any previously
+    /// loaded one. Bytes are already fully in memory (Studio fetches and IndexedDB-caches
+    /// them once, shared with its own separate entity-glossary NER pass) — this is
+    /// synchronous, no I/O happens here.
+    ///
+    /// # Errors
+    ///
+    /// Rejects if the model bytes cannot be loaded.
+    #[wasm_bindgen(js_name = loadNerModel)]
+    pub fn load_ner_model(
+        weights: Vec<u8>,
+        tokenizer: Vec<u8>,
+        encoder_config: Vec<u8>,
+    ) -> Result<(), JsValue> {
+        let detector = NerDetector::from_candle_bytes(&weights, &tokenizer, &encoder_config)
+            .map_err(to_js_err)?;
+        DETECTOR.with(|d| *d.borrow_mut() = Some(detector));
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = isNerModelLoaded)]
+    pub fn is_ner_model_loaded() -> bool {
+        DETECTOR.with(|d| d.borrow().is_some())
+    }
+
+    pub(crate) fn current() -> Option<NerDetector> {
+        DETECTOR.with(|d| d.borrow().clone())
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
+use ner_model::current as current_ner_detector;
+
+/// `process`/`scan`'s regex-only fallback: no model, on any build without both
+/// `target_arch = "wasm32"` and the `ner-candle-wasm` feature enabled.
+#[cfg(not(all(target_arch = "wasm32", feature = "ner-candle-wasm")))]
+fn current_ner_detector() -> Option<hacienda_core::pii::NerDetector> {
+    None
 }
 
 /// The browser-side tamper-evident audit chain (Track C3), backed by

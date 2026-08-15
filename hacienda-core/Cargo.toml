@@ -9,6 +9,10 @@ license.workspace = true
 default = ["jobs"]
 # Enables the Candle GLiNER2 NER backend (with LoRA adapter support) through xberg.
 ner-candle = ["xberg/ner-candle"]
+# wasm32 sibling of `ner-candle`: loads the same Candle GLiNER2 backend from in-memory
+# bytes (`NerDetector::from_candle_bytes`) instead of a filesystem model directory —
+# there's no disk to read from in a browser.
+ner-candle-wasm = ["xberg/ner-candle-wasm"]
 # Async job tracking seam for Phase 4's HTTP endpoints. On by default.
 jobs = []
 # Postgres store backend (Phase 9). Off by default so wasm32 and non-Postgres
@@ -68,14 +72,26 @@ tokio = { workspace = true }
 uuid = { workspace = true }
 xberg = { workspace = true }
 
-# wasm32 gets `xberg/wasm-target`'s components individually rather than the umbrella
-# feature itself, minus `ocr-wasm`. `ocr-wasm` builds `xberg-tesseract` against a WASI
-# SDK C toolchain (`crates/xberg-tesseract/build.rs`, `build_wasm()`) that this repo's
-# CI/dev containers don't provision yet — a `WASI_SDK_PATH` environment gap, not a Rust
-# problem, and the real published `@xberg-io/xberg-wasm` package does build it once that
-# toolchain is present. hacienda-wasm doesn't call extraction/OCR yet (see
-# `crates/hacienda-wasm`), so deferring it costs nothing today; add `ocr-wasm` back once
-# Track I needs xberg's extraction on wasm32 and WASI SDK is provisioned in CI.
+# wasm32 only reaches `xberg` through `pii/ner.rs`'s `NerBackend` trait and
+# `types::entity::{Entity, EntityCategory}` — `load_detector`'s wasm32 arm
+# (`pii/pipeline.rs`) never loads a model itself, it errors and tells the caller to
+# supply a detector via `PiiPipeline::with_detector` (an externally-implemented
+# `NerBackend`, e.g. bridged from Studio's own `@xberg-io/xberg-wasm` NER model).
+# `ner = []` is xberg's own "NER result types only; safe on every target" feature —
+# exactly the surface used here, nothing else.
+#
+# Previously this pulled the full `wasm-target` umbrella minus `ocr-wasm`
+# (`no-ort-target`, `excel-wasm`, `layout-tract`, `auto-rotate-tract`,
+# `ner-candle-wasm`): xberg's own extraction/layout/candle-NER stack, recompiled a
+# second time into `hacienda-wasm` even though `crates/hacienda-wasm` calls none of
+# it — Studio already loads that functionality once via `@xberg-io/xberg-wasm`. That
+# cost real MB in the release `.wasm` (measured 17.8 MB standalone pre-L2) for
+# nothing reachable from `hacienda-wasm`'s `#[wasm_bindgen]` surface, and ties every
+# build of this crate to fetching xberg's `test_documents` git submodule regardless.
+# Re-add whichever of those features Track I actually needs once `hacienda-wasm`
+# calls xberg's extraction directly (ideally sharing Studio's existing compiled
+# `xberg` rather than linking a second copy — see the Track L2 note in
+# `docs/superpowers/plans/2026-07-30-hacienda-program-plan.md`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
 # TEMPORARY: same jamon8888/xberg patched-commit workaround as the workspace root
@@ -83,11 +99,7 @@ uuid = { workspace = true, features = ["js"] }
 # it (same `rev`) or cargo refuses to build with "different source paths depending on
 # the build target".
 xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c1648547a4d861153d2f5c363340", default-features = false, features = [
-    "no-ort-target",
-    "excel-wasm",
-    "layout-tract",
-    "auto-rotate-tract",
-    "ner-candle-wasm",
+    "ner",
 ] }
 # `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"
 # feature is not a workaround for a bug — `AuditStore` (like every trait using bare

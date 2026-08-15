@@ -22,6 +22,7 @@ import initHaciendaWasm, {
   process as wasmProcess,
   scan as wasmScan,
   AuditHandle,
+  loadNerModel as loadWasmNerModel,
 } from "hacienda-wasm";
 import haciendaWasmUrl from "hacienda-wasm/hacienda_wasm_bg.wasm?url";
 
@@ -57,6 +58,28 @@ export function initPiiEngine(): Promise<void> {
 export async function scanForPii(text: string): Promise<PiiPipelineResult> {
   await initPiiEngine();
   return (await wasmScan(text)) as PiiPipelineResult;
+}
+
+/**
+ * Loads the Candle GLiNER2 model `process`/`scan` (and therefore `redactPii`/
+ * `scanForPii`) use from now on — before this resolves, PII detection is regex-only,
+ * exactly as it always was. Takes the same three byte buffers `createNerBackend`
+ * (`lib/asset-loader.ts`) already loads Studio's separate entity-glossary `NerModel`
+ * from — pass the same fetched bytes here rather than fetching twice. Loading is
+ * synchronous on the Rust side (bytes are already in memory), but this is `async`
+ * because `initPiiEngine()` must resolve first.
+ *
+ * Only present when `hacienda-wasm` was built with its `ner-candle-wasm` feature (see
+ * `package.json`'s `build:wasm` script) — a build without it doesn't export
+ * `loadNerModel` at all, and this call would fail to resolve the import.
+ */
+export async function loadPiiNerModel(
+  weights: Uint8Array,
+  tokenizer: Uint8Array,
+  encoderConfig: Uint8Array,
+): Promise<void> {
+  await initPiiEngine();
+  loadWasmNerModel(weights, tokenizer, encoderConfig);
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple
