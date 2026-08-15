@@ -7,10 +7,17 @@
 //! `GET /v1/audit` surface) and `pii reveal`, plus a `--glossary-out` flag on `extract`
 //! and `scan` (glossary state lives only inside a live run's facade, so there is nothing
 //! for a standalone `glossary` subcommand to read — see `ExtractArgs::glossary_out`).
-//! `review`, `compliance`, the rest of `audit`, `completions`, and the `xberg`
-//! passthrough remain deliberately absent rather than present and stubbed. A
-//! subcommand that parses and then apologises is indistinguishable from one that is
-//! broken.
+//!
+//! A further slice closes the rest of the parity gap now that the backing
+//! `hacienda-core` functionality is real rather than aspirational: `review` (operates on
+//! a durable `FileReviewStore` directory, written to by `extract`/`scan --review-out` or
+//! by another process embedding `hacienda-core` directly), `compliance` (DPIA, model
+//! card, checklist, and DORA incident reports — pure functions of configuration plus, for
+//! DORA, an `--incident` file, so these never need a facade or a store), the rest of
+//! `audit` (`list`/`export` against a durable `FileAuditStore` directory — distinct from
+//! `verify`, which reads the flat `--audit-out` export), and `completions`. The `xberg`
+//! passthrough remains deliberately absent — a separate, larger design question this
+//! slice does not settle.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::net::SocketAddr;
@@ -58,6 +65,18 @@ pub enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Operations on the human review queue (AI Act Art. 14 human oversight).
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
+    /// Generate GDPR/AI-Act/DORA compliance artefacts.
+    Compliance {
+        #[command(subcommand)]
+        command: ComplianceCommand,
+    },
+    /// Print a shell completion script to stdout.
+    Completions(CompletionsArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -96,6 +115,26 @@ pub enum AuditCommand {
     /// `write_audit_chain`'s own doc comment in `commands.rs` for the same call applied
     /// to writing.
     Verify(AuditVerifyArgs),
+
+    /// Page through a durable `FileAuditStore`'s history.
+    ///
+    /// Distinct from `verify`: this reads the segmented, per-writer store
+    /// `FileAuditStore::open` produces (a `root/{node}/` layout of sealed and open
+    /// segments), not the flat `audit.json` array `--audit-out` writes. Nothing in this
+    /// CLI creates that layout today — `hacienda serve` still audits in-memory only, and
+    /// `extract`/`scan --audit-out` deliberately stay on the flat, single-run export (see
+    /// `write_audit_chain`) — so this command reads whatever a `FileAuditStore` another
+    /// process (a library embedding `hacienda-core` directly, or a future `serve`
+    /// enhancement) already wrote there.
+    List(AuditListArgs),
+
+    /// Export a durable `FileAuditStore`'s full history to a file.
+    ///
+    /// Same store shape as `list`, not `--audit-out`'s flat export. Pages the entire
+    /// history via `AuditStore::history` and hands it to the same `hacienda_core::audit`
+    /// export functions `extract --audit-out` and the HTTP API's `/v1/audit/export` both
+    /// call — one export implementation, three callers.
+    Export(AuditExportArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -107,6 +146,268 @@ pub struct AuditVerifyArgs {
     /// Output format for the verification result.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
+}
+
+/// Shared by `audit list` and `audit export`: which segment directory to open.
+#[derive(Debug, Parser)]
+pub struct AuditStoreArgs {
+    /// Root directory of a durable `FileAuditStore` (as passed to `FileAuditStore::open`).
+    #[arg(value_name = "DIR")]
+    pub dir: PathBuf,
+
+    /// The writer identity whose segment directory to open, i.e. `<DIR>/<NODE>/`.
+    ///
+    /// Segments are per-writer (see `AuditStore::history`'s own "this node, not this
+    /// deployment" doc) — there is no way to discover a NodeId from the directory alone
+    /// without guessing, and guessing wrong would silently open (and start writing an
+    /// empty segment into) the wrong writer's history. Required rather than defaulted for
+    /// the same reason `--i-accept-unredacted-pii` has no implicit default: naming the
+    /// writer is the caller's job, not this command's to infer.
+    #[arg(long, value_name = "ID")]
+    pub node: String,
+
+    /// The config hash this invocation opens the store under.
+    ///
+    /// Only load-bearing if the node directory holds an *unsealed* segment from a
+    /// previous run — `FileAuditStore::open` replays it and rejects entries minted under
+    /// a different config hash (`AuditError::ConfigMismatch`). Defaults to `"default"`,
+    /// matching `write_audit_chain`'s own fallback when no `[pii.audit] config_hash` was
+    /// configured for the run that wrote the store.
+    #[arg(long, value_name = "HASH", default_value = "default")]
+    pub config_hash: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct AuditListArgs {
+    #[command(flatten)]
+    pub store: AuditStoreArgs,
+
+    /// Resume from the `next` cursor a previous `audit list` call printed.
+    ///
+    /// Opaque — see `AuditCursor`'s own doc. Omit to start from the beginning of this
+    /// node's history.
+    #[arg(long, value_name = "CURSOR")]
+    pub after: Option<hacienda::audit::AuditCursor>,
+
+    /// Maximum entries to return in this page.
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    pub limit: usize,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct AuditExportArgs {
+    #[command(flatten)]
+    pub store: AuditStoreArgs,
+
+    /// File to write the export to.
+    #[arg(long, value_name = "FILE")]
+    pub out: PathBuf,
+
+    #[arg(long, value_enum, default_value_t = AuditExportFormat::Json)]
+    pub format: AuditExportFormat,
+}
+
+/// A local mirror of `hacienda_core::audit::ExportFormat`, matching `Mode`'s precedent for
+/// keeping `clap::ValueEnum` out of `hacienda-core` — converted at the call site in
+/// `commands.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AuditExportFormat {
+    Json,
+    Csv,
+    JsonLines,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReviewCommand {
+    /// List items in a review queue, optionally filtered by status.
+    List(ReviewListArgs),
+    /// Show a single review item by id.
+    Show(ReviewShowArgs),
+    /// Claim a pending item for review, moving it to `in_review`.
+    Assign(ReviewAssignArgs),
+    /// Record a reviewer's decision on an item.
+    Decide(ReviewDecideArgs),
+    /// Print queue counts by status.
+    Stats(ReviewStatsArgs),
+}
+
+/// Shared by every `review` subcommand: which durable queue to open.
+#[derive(Debug, Parser)]
+pub struct ReviewStoreArgs {
+    /// Directory holding the review queue's event log (`<DIR>/review.jsonl`).
+    ///
+    /// Written by `extract`/`scan --review-out <DIR>` (see `ExtractArgs::review_out`), or
+    /// by another process embedding `hacienda-core::review::FileReviewStore` directly. If
+    /// `<DIR>/review.jsonl` does not exist yet, it is created empty — matching
+    /// `FileReviewStore::open`'s own "create if absent" behaviour — so `review list` on a
+    /// fresh directory reports zero items rather than failing.
+    #[arg(value_name = "DIR")]
+    pub dir: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+pub struct ReviewListArgs {
+    #[command(flatten)]
+    pub store: ReviewStoreArgs,
+
+    /// Restrict to items in this status. Omit to list every item regardless of status.
+    #[arg(long, value_enum)]
+    pub status: Option<ReviewStatusArg>,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct ReviewShowArgs {
+    #[command(flatten)]
+    pub store: ReviewStoreArgs,
+
+    /// The review item's id, as printed by `review list`.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct ReviewAssignArgs {
+    #[command(flatten)]
+    pub store: ReviewStoreArgs,
+
+    /// The review item's id, as printed by `review list`.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Identifies the reviewer claiming this item. Recorded verbatim, not authenticated —
+    /// the CLI is in-process and trusted (the same `Caller::Trusted` precedent `pii
+    /// reveal` documents: the process boundary is the trust boundary), so there is no
+    /// caller identity to derive this from.
+    #[arg(long)]
+    pub reviewer: String,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct ReviewDecideArgs {
+    #[command(flatten)]
+    pub store: ReviewStoreArgs,
+
+    /// The review item's id, as printed by `review list`.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    #[arg(long, value_enum)]
+    pub decision: ReviewDecisionArg,
+
+    /// Identifies the reviewer making this decision. See `ReviewAssignArgs::reviewer` for
+    /// why this is an unauthenticated free-text field in the CLI.
+    #[arg(long)]
+    pub reviewer: String,
+
+    /// Free-text rationale, stored alongside the decision.
+    #[arg(long, default_value = "")]
+    pub comment: String,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct ReviewStatsArgs {
+    #[command(flatten)]
+    pub store: ReviewStoreArgs,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+/// A local mirror of `hacienda_core::review::ReviewStatus`. `ReviewStatus` already
+/// implements `FromStr`, but its `Err` is a plain `String`, which does not satisfy
+/// clap's blanket `value_parser` inference (`Into<Box<dyn Error + Send + Sync>>`) — and a
+/// local `ValueEnum` gets `--help` to enumerate the four choices for free, which a bare
+/// `FromStr` parser would not. Same precedent as `Mode`/`AuditExportFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReviewStatusArg {
+    Pending,
+    InReview,
+    Approved,
+    Rejected,
+    Modified,
+}
+
+/// A local mirror of `hacienda_core::review::ReviewDecision`. See `ReviewStatusArg` for
+/// why this is not just `#[arg(value_parser = ...)]` over the core type's `FromStr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReviewDecisionArg {
+    Approve,
+    Reject,
+    Modify,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ComplianceCommand {
+    /// Generate a Data Protection Impact Assessment (GDPR Art. 35).
+    Dpia(ComplianceFormatArgs),
+    /// Generate a model card (AI Act Art. 11 technical documentation).
+    ModelCard(ComplianceFormatArgs),
+    /// Generate the GDPR/AI-Act/DORA article-to-control checklist.
+    Checklist(ComplianceFormatArgs),
+    /// Generate a DORA major-incident report from a PII incident description.
+    Dora(ComplianceDoraArgs),
+    /// Generate the full compliance pack (every report named in `[compliance]
+    /// enabled_reports`).
+    Report(ComplianceReportArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct ComplianceFormatArgs {
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct ComplianceDoraArgs {
+    /// Path to a JSON-encoded `PiiIncident` (`summary`, `timeline`, `root_cause`,
+    /// `detected_at`, `contained_at`, `resolved_at`, `actions_taken`,
+    /// `lessons_learned`).
+    ///
+    /// A DORA report describes a specific event; there is no live incident data in a
+    /// one-shot CLI run to draw one from, so it is read from a file rather than
+    /// synthesised. This is not optional the way it is on `compliance report`: an
+    /// operator who ran `compliance dora` asked for exactly this report, so a missing
+    /// incident is refused rather than silently producing nothing.
+    #[arg(long, value_name = "FILE")]
+    pub incident: PathBuf,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct ComplianceReportArgs {
+    /// Same `PiiIncident` JSON shape as `compliance dora --incident`. Optional here:
+    /// `ComplianceGenerator::report` already omits the DORA section when no incident is
+    /// given (rather than erroring), so this command exposes that behaviour as-is instead
+    /// of forcing every report to carry incident data it does not have.
+    #[arg(long, value_name = "FILE")]
+    pub incident: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct CompletionsArgs {
+    /// The shell to generate a completion script for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Parser)]
@@ -199,6 +500,22 @@ pub struct ExtractArgs {
     #[arg(long, value_name = "DIR")]
     pub glossary_out: Option<PathBuf>,
 
+    /// Materialise this run's review submissions into a durable queue at
+    /// `<DIR>/review.jsonl`, readable and actionable afterwards via `hacienda review
+    /// list|show|assign|decide|stats <DIR>`.
+    ///
+    /// Unlike `--audit-out` and `--glossary-out`, which overwrite their target on every
+    /// run, this *accumulates*: `FileReviewStore::open` replays whatever this directory
+    /// already holds before this run's submissions are appended, so repeated
+    /// `extract --review-out` runs build one durable reviewer inbox rather than each
+    /// silently discarding the last run's queue. Materialises a `[review]` config
+    /// section (`ReviewConfig::default`) if none was loaded, mirroring
+    /// `--glossary-out`'s materialisation of `[glossary]` — see
+    /// `ExtractArgs::glossary_out`. Refused when combined with `--no-redact`, which skips
+    /// the PII stage this flag depends on — see `--audit-out`'s identical guard.
+    #[arg(long, value_name = "DIR")]
+    pub review_out: Option<PathBuf>,
+
     /// Emit unredacted text. Refused on its own — see `--i-accept-unredacted-pii`.
     #[arg(long)]
     pub no_redact: bool,
@@ -231,6 +548,14 @@ pub struct ScanArgs {
     /// offering this here does not violate scan's "no document text" contract.
     #[arg(long, value_name = "DIR")]
     pub glossary_out: Option<PathBuf>,
+
+    /// Materialise this run's review submissions into a durable queue at
+    /// `<DIR>/review.jsonl`. See `ExtractArgs::review_out` — same artefact, same
+    /// accumulate-across-runs behaviour. `scan` already runs full PII detection, so it
+    /// populates the same queue the same way; there is no `--no-redact` on `scan` to
+    /// conflict with it.
+    #[arg(long, value_name = "DIR")]
+    pub review_out: Option<PathBuf>,
 
     #[command(flatten)]
     pub concurrency: ConcurrencyArgs,

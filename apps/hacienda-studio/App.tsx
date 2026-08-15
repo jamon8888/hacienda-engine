@@ -23,6 +23,12 @@ import { DEFAULT_CONFIG } from "./lib/types";
 import type { Screen } from "./lib/screens";
 import type { AppConfig, OnboardingState, ProcessedFile, ProgressUpdate } from "./lib/types";
 import type { PiiEntity } from "./lib/pii-engine";
+// Type-only: erased at compile time, so this does not pull `@remotion/whisper-web` into the
+// bundle just for the type. The runtime class is loaded with a dynamic `import()` the first
+// time a "transcribe-request" actually arrives (see `handleTranscribeRequest` below) — most
+// sessions never enable transcription, and whisper-web's wasm/JS should not load for them.
+import type { WhisperBridge } from "./lib/transcription/whisper-bridge";
+import type { TranscriptionConfig, TranscriptionResult } from "./lib/transcription/types";
 
 function downloadZip(blob: Blob): void {
   const url = URL.createObjectURL(blob);
@@ -145,6 +151,13 @@ export function App() {
     };
   }, []);
 
+  // Track D3's follow-up (see `worker/transcribe-bridge.ts`'s header): the one `WhisperBridge`
+  // instance for this tab, created lazily on the first "transcribe-request" the worker sends
+  // and reused for every request after that — instance reuse is what makes `load()`'s
+  // idempotency (skip re-download/re-init once a model is loaded) actually apply across a
+  // whole batch, and across batches, instead of just within a single call.
+  const whisperBridgeRef = useRef<WhisperBridge | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -210,11 +223,91 @@ export function App() {
       setWorkerReady(true);
     }
 
+    // Track D3's fix, completed: the worker cannot run `@remotion/whisper-web` itself (see
+    // `worker/transcribe-bridge.ts`'s header for exactly why) so it asks this main thread to
+    // do it instead, and this is that request's handler — the other half of the RPC whose
+    // worker side is `TranscriptionRequestBridge.request()`. Always replies with a
+    // "transcribe-response" carrying either `result` or `error`, even when something here
+    // throws before `WhisperBridge` itself runs (e.g. the dynamic `import()` failing) —
+    // an unanswered request is exactly the failure mode `transcriptionBridge`'s own timeout
+    // exists to catch, but answering promptly here means that file's real error reaches the
+    // UI in milliseconds, not after a 15-minute wait.
+    async function handleTranscribeRequest(data: {
+      requestId: string;
+      file: string;
+      audioBytes: Uint8Array<ArrayBuffer>;
+      mimeType: string;
+      config: TranscriptionConfig;
+    }): Promise<void> {
+      const worker = workerRef.current;
+      if (!worker) {
+        console.error(
+          "[App] transcribe-request received with no worker to reply to — dropping",
+          data.requestId,
+        );
+        return;
+      }
+      try {
+        if (!whisperBridgeRef.current) {
+          const { WhisperBridge } = await import("./lib/transcription/whisper-bridge");
+          whisperBridgeRef.current = new WhisperBridge();
+        }
+        const result: TranscriptionResult = await whisperBridgeRef.current.transcribeAudio(
+          data.audioBytes,
+          data.mimeType,
+          data.config,
+          (phase, fraction) => {
+            // Resample and transcribe share this file's progress card, split into two
+            // halves of the same 0-100 bar (10 is where the worker's own "extract" stage
+            // left off for an audio/video file; 60 is where its "ner" stage picks back up
+            // once this resolves — see `processFile`'s transcription branch) — an
+            // approximation (resampling is not really a fixed 30% of the work), but it
+            // turns an opaque wait into a moving bar with a real, monotonically increasing
+            // percentage instead of a fabricated one.
+            const percent =
+              phase === "resample" ? 10 + fraction * 30 : 40 + fraction * 50;
+            setProgress((prev) =>
+              new Map(prev).set(data.file, {
+                file: data.file,
+                stage: "transcribe",
+                percent,
+                message:
+                  phase === "resample"
+                    ? `Resampling audio (${Math.round(fraction * 100)}%)`
+                    : `Transcribing (${Math.round(fraction * 100)}%)`,
+              }),
+            );
+          },
+        );
+        worker.postMessage({ type: "transcribe-response", requestId: data.requestId, result });
+      } catch (e) {
+        worker.postMessage({
+          type: "transcribe-response",
+          requestId: data.requestId,
+          error: e instanceof Error ? e.message : "Unknown error",
+        });
+      }
+    }
+
     function handleWorkerMessage(event: MessageEvent) {
       const { type, ...data } = event.data;
       switch (type) {
         case "progress":
           setProgress((prev) => new Map(prev).set(data.file, data as ProgressUpdate));
+          break;
+        case "transcribe-request":
+          // Fire-and-forget from this switch's point of view: `handleTranscribeRequest`
+          // always settles by posting its own "transcribe-response" (success or error)
+          // back to the worker, so nothing here needs to await or otherwise react to it.
+          void handleTranscribeRequest(
+            data as {
+              requestId: string;
+              file: string;
+              audioBytes: Uint8Array<ArrayBuffer>;
+              mimeType: string;
+              config: TranscriptionConfig;
+            },
+          );
           break;
         case "file-complete":
           setResults((prev) => [...prev, data as ProcessedFile]);

@@ -91,6 +91,7 @@ pub async fn get_review(
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
 
     let queue = state
         .facade
@@ -98,7 +99,7 @@ pub async fn get_review(
         .map_err(ApiError::from)?;
 
     let items = match queue {
-        Some(q) => q.list(None).await.unwrap_or_default(),
+        Some(q) => q.list(&tenant_ctx, None).await.unwrap_or_default(),
         None => Vec::new(),
     };
 
@@ -136,6 +137,7 @@ pub async fn decide_review(
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
 
     let queue = state
         .facade
@@ -144,7 +146,13 @@ pub async fn decide_review(
         .ok_or_else(|| ApiError::invalid_request("review queue not configured"))?;
 
     let item = queue
-        .decide(&id, body.decision.into(), &body.reviewer, &body.comment)
+        .decide(
+            &tenant_ctx,
+            &id,
+            body.decision.into(),
+            &body.reviewer,
+            &body.comment,
+        )
         .await
         .map_err(ApiError::from)?;
 

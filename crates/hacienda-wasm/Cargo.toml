@@ -10,6 +10,13 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Real Candle GLiNER2 NER, loaded from in-memory bytes — see
+# `hacienda-core`'s `ner-candle-wasm` feature and `NerDetector::from_candle_bytes`. Off
+# by default so the lean regex-only artifact stays buildable without pulling in the
+# candle/xberg-gliner dependency chain.
+ner-candle-wasm = ["hacienda-core/ner-candle-wasm"]
+
 [dependencies]
 hacienda-core = { path = "../../hacienda-core", default-features = false }
 serde-wasm-bindgen = "0.6"

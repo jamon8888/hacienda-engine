@@ -189,6 +189,14 @@ pub struct ApiKey {
     pub capabilities: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The tenant this key was issued under (S1). Scopes
+    /// [`ApiKeyStore::revoke`](crate::auth::ApiKeyStore::revoke) and
+    /// [`ApiKeyStore::list`](crate::auth::ApiKeyStore::list) — a caller in one tenant
+    /// cannot revoke or enumerate another tenant's keys. Deliberately *not* used to
+    /// scope [`ApiKeyStore::get_by_lookup_hash`](crate::auth::ApiKeyStore::get_by_lookup_hash):
+    /// that lookup is how a presented raw key resolves to its tenant in the first
+    /// place, so it must stay tenant-agnostic.
+    pub tenant_id: String,
 }
 
 #[cfg(test)]

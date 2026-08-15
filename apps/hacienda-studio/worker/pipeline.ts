@@ -29,6 +29,7 @@ import {
   initPiiEngine,
   redactPii,
   scanForPii,
+  loadPiiNerModel,
   type PiiEntity,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
@@ -37,8 +38,9 @@ import {
   loadVerticalTaxonomy,
   VerticalEntityMetadata,
 } from "../lib/verticals/index";
-import { BatchEntityRegistry } from "../lib/registry";
-import { WhisperBridge } from "../lib/transcription/whisper-bridge";
+import { BatchEntityRegistry, type RegistryEntity } from "../lib/registry";
+import { KGExporter } from "../lib/kg-export";
+import { TranscriptionRequestBridge } from "./transcribe-bridge";
 import type { TranscriptionResult } from "../lib/transcription/types";
 import {
   relativeEntityLink,
@@ -70,6 +72,25 @@ let wasmReady: Promise<void> | null = null;
 // mid-batch would overwrite this before the first batch's zip request lands.
 let lastBatch: ZipBatch | null = null;
 
+// Worker-side half of the whisper transcription bridge — see `worker/transcribe-bridge.ts`'s
+// header for why transcription has to be requested from the main thread rather than run
+// here. Module-scope (not per-batch): `self.onmessage`'s "transcribe-response" case below
+// needs the same instance `processFile` called `.request()` on, and a single worker instance
+// legitimately outlives one "process" batch (the user can upload again without a page
+// reload), so requestIds must stay unique across batches too — `TranscriptionRequestBridge`
+// only guarantees that for calls against the same instance.
+const transcriptionBridge = new TranscriptionRequestBridge((message, transfer) =>
+  // Not `self.postMessage(message, transfer ?? [])`: this file's tsconfig has no
+  // "webworker" lib (App.tsx, sharing the same tsconfig, needs "DOM" instead — the two
+  // are mutually exclusive in one `lib` array), so TypeScript types `self` as `Window`
+  // here, not `DedicatedWorkerGlobalScope`. `Window.postMessage`'s array-transfer overload
+  // requires a `targetOrigin` string first, which makes no sense for a worker; its
+  // options-object overload (`{ transfer }`) has no such requirement and is also exactly
+  // what `DedicatedWorkerGlobalScope.postMessage` accepts at runtime — valid under both
+  // the (slightly wrong) compile-time type and the real one.
+  self.postMessage(message, { transfer }),
+);
+
 // Track B1/B2: `createNerBackend()` targets xberg-wasm's neural `NerModel` — multilingual,
 // PII-specific, and already the model the onboarding screen downloads. `null` means the
 // model failed to load (or was never cached), in which case `selectNerBridge` falls back to
@@ -83,6 +104,24 @@ async function initNerBackend(): Promise<void> {
     const { model, tokenizer, encoderConfig } = await loadNerModel();
     nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
     console.log("[Worker] Neural NER backend loaded");
+
+    // Feeds the same already-fetched bytes into hacienda-wasm's own PII pipeline so
+    // `redactPii`/`scanForPii` (below) detect with the real model instead of regex
+    // alone — no second download. This is a separate try/catch on purpose: a build of
+    // `hacienda-wasm` without the `ner-candle-wasm` feature doesn't export
+    // `loadNerModel` at all, and that must not take down the entity-glossary NER pass
+    // above, which is otherwise unrelated. Accepted cost: the model now runs twice per
+    // document — once here for the entity glossary, once inside hacienda-wasm's own
+    // pipeline for PII redaction — sharing the fetched bytes but not the inference call.
+    try {
+      await loadPiiNerModel(model, tokenizer, encoderConfig);
+      console.log("[Worker] hacienda-wasm PII NER backend loaded");
+    } catch (e) {
+      console.warn(
+        "[Worker] hacienda-wasm PII NER backend unavailable, PII detection stays regex-only:",
+        e,
+      );
+    }
   } catch (e) {
     console.warn(
       "[Worker] Neural NER backend unavailable, using regex/compromise fallback:",
@@ -283,7 +322,6 @@ async function processFile(
   verticalDict: VerticalDictionary,
   registry: BatchEntityRegistry,
   docId: string,
-  whisperBridge: WhisperBridge,
   /** Derived once per batch in `processFiles`; `null` unless `redactionMode` is
    * `"pseudonymize"` and a passphrase was given. */
   pseudonymKeyHex: string | null,
@@ -304,8 +342,9 @@ async function processFile(
   let transcriptionResult: TranscriptionResult | null = null;
 
   if ((isAudio || isVideo) && config.enableTranscription) {
-    console.log(`[Worker] Transcribing ${input.name}...`);
-    transcriptionResult = await whisperBridge.transcribeAudio(
+    console.log(`[Worker] Requesting transcription of ${input.name} from the main thread...`);
+    transcriptionResult = await transcriptionBridge.request(
+      input.name,
       new Uint8Array(input.bytes),
       input.type,
       {
@@ -619,26 +658,20 @@ async function processFiles(
   }
   const registry = new BatchEntityRegistry();
 
-  // Initialize transcription bridge
-  //
-  // Track D3 found this awaited outside every per-file try/catch below and
-  // outside processFiles' own caller (self.onmessage), so a rejection here —
-  // which is the *current, unconditional* outcome: @remotion/whisper-web's
-  // canUseWhisperWeb() requires `window`, which does not exist in a Worker —
-  // was an unhandled rejection that silently hung the entire batch with no
-  // error message, no download, and no user-visible feedback at all. Caught
-  // here instead: each audio file's own transcribeAudio() call retries
-  // load() (it is idempotent — WhisperBridge.load() no-ops once loaded) and
-  // its failure surfaces through the normal per-file catch in the loop
-  // below, exactly like every other per-file failure.
-  const whisperBridge = new WhisperBridge();
-  if (config.enableTranscription) {
-    try {
-      await whisperBridge.load(config.transcriptionModel);
-    } catch (e) {
-      console.warn("[Worker] Whisper model preload failed:", e);
-    }
-  }
+  // Transcription (Track D3, superseded by the main-thread migration `transcribe-bridge.ts`'s
+  // header describes): no per-batch setup happens here anymore. This module holds no
+  // `WhisperBridge` instance at all — `processFile`'s transcription branch calls
+  // `transcriptionBridge.request()`, which asks `App.tsx`'s own long-lived `WhisperBridge`
+  // (main thread only — see that class's header for why) to do the work and awaits the
+  // reply. That instance's `load()` is idempotent per model size and outlives this function
+  // (it is a ref in `App.tsx`, not constructed per batch), so "don't redownload/reinitialize
+  // the model per file" still holds — main-thread instance reuse provides it now, instead of
+  // the upfront preload this comment used to describe. That preload also used to run
+  // whenever `enableTranscription` was on even if this batch had zero audio/video files;
+  // requesting lazily, only when a file actually needs it, fixes that for free. Each file's
+  // own request surfaces its own failure through the normal per-file catch in the loop below
+  // (Track D3's isolation guarantee, unchanged), whether that failure is a real transcription
+  // error or `transcriptionBridge.request()`'s own timeout guarding against a lost reply.
 
   // Track F1/F2: derived once for the whole batch — PBKDF2 is deliberately expensive
   // (600,000 iterations), so this must not run per file or per finding. `null` leaves
@@ -683,7 +716,6 @@ async function processFiles(
         verticalDict,
         registry,
         docId,
-        whisperBridge,
         pseudonymKeyHex,
       );
       const elapsed = performance.now() - startTime;
@@ -738,6 +770,21 @@ async function processFiles(
 self.onmessage = async (event: MessageEvent) => {
   const { type, files, config } = event.data;
   console.log("[Worker] Received message:", type, files?.length);
+
+  // `App.tsx`'s reply to a `transcribe-request` this worker sent via `transcriptionBridge`
+  // (see that module's header). Handled before the `init`/`process` branches below and
+  // returns immediately after: a batch can be mid-flight when this arrives (it is, in fact,
+  // the common case — `processFile` is `await`ing exactly this), and it must not wait its
+  // turn behind whatever `process`/`init` handling happens to be in progress.
+  if (type === "transcribe-response") {
+    const { requestId, result, error } = event.data;
+    if (error) {
+      transcriptionBridge.reject(requestId, error);
+    } else {
+      transcriptionBridge.resolve(requestId, result);
+    }
+    return;
+  }
 
   if (type === "init") {
     try {

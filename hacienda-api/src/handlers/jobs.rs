@@ -50,6 +50,7 @@ pub async fn get_job(
 ) -> Result<Json<JobResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
 
     let job = state
         .jobs
@@ -61,13 +62,17 @@ pub async fn get_job(
         })?
         .ok_or_else(ApiError::not_found)?;
 
-    // Ownership check: see module-level doc for the 404-not-403 rationale.
+    // Ownership check: see module-level doc for the 404-not-403 rationale. Tenant match
+    // is required alongside owner match (S1) — two different tenants can otherwise mint
+    // callers with the same `owner`/principal-id string, and without this check one
+    // would see the other's job (`cross_tenant_read_is_404_not_403`, S1 spec §9).
     match (caller.principal_id(), &job.owner) {
-        // Trusted in-process caller can see all jobs.
+        // Trusted in-process caller can see all jobs, in every tenant.
         (None, _) => {}
-        // Authenticated principal must match the job's owner.
-        (Some(caller_id), Some(owner_id)) if caller_id == owner_id => {}
-        // Mismatch OR the job has no owner (trusted-only) — return 404.
+        // Authenticated principal must match the job's owner *and* tenant.
+        (Some(caller_id), Some(owner_id))
+            if caller_id == owner_id && job.tenant_id == tenant_ctx.tenant.as_str() => {}
+        // Mismatch, cross-tenant, OR the job has no owner (trusted-only) — return 404.
         _ => {
             return Err(ApiError::not_found());
         }
@@ -107,6 +112,7 @@ pub async fn list_jobs(
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let caller_id = caller.principal_id();
+    let tenant_ctx = caller.tenant_ctx();
 
     let jobs = state.jobs.list(query.status).await.map_err(|e| {
         tracing::error!(error = %e, "job store error");
@@ -117,7 +123,9 @@ pub async fn list_jobs(
         .into_iter()
         .filter(|job| match (caller_id, &job.owner) {
             (None, _) => true,
-            (Some(caller_id), Some(owner_id)) => caller_id == owner_id,
+            (Some(caller_id), Some(owner_id)) => {
+                caller_id == owner_id && job.tenant_id == tenant_ctx.tenant.as_str()
+            }
             (Some(_), None) => false,
         })
         .collect();
@@ -167,6 +175,7 @@ pub async fn get_job_result(
 ) -> Result<Json<JobResultResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
 
     let job = state
         .jobs
@@ -178,9 +187,11 @@ pub async fn get_job_result(
         })?
         .ok_or_else(ApiError::not_found)?;
 
+    // Mirrors get_job's ownership + tenant check above.
     match (caller.principal_id(), &job.owner) {
         (None, _) => {}
-        (Some(caller_id), Some(owner_id)) if caller_id == owner_id => {}
+        (Some(caller_id), Some(owner_id))
+            if caller_id == owner_id && job.tenant_id == tenant_ctx.tenant.as_str() => {}
         _ => {
             return Err(ApiError::not_found());
         }
@@ -208,9 +219,10 @@ mod tests {
     use hacienda_core::{
         auth::{
             authn::{InMemoryTokenStore, Token},
-            AuthState, Capability, CapabilitySet,
+            AuthContext, AuthExtension, AuthState, Capability, CapabilitySet,
         },
         jobs::InMemoryJobStore,
+        tenancy::{ActorId, TenantCtx, TenantId},
         HaciendaConfig, HaciendaFacade,
     };
     use std::sync::Arc;
@@ -480,5 +492,65 @@ mod tests {
             }
             other => panic!("unexpected job status: {other}"),
         }
+    }
+
+    /// S1 §9: `cross_tenant_read_is_404_not_403`.
+    ///
+    /// `two_tenant_app`'s `alice`/`bob` fixtures cannot exercise this: `authn::Token`
+    /// resolution always lands a caller on the default tenant today (a separate,
+    /// pre-existing gap — see `handlers::rag::tests`' `parts_for` doc comment), so every
+    /// principal minted through that path shares one tenant regardless of name. This
+    /// test instead builds `Parts` with a hand-attached `AuthExtension`, the same way
+    /// `auth_middleware` would, so it can put the *same* principal id in two *different*
+    /// tenants — the case `handlers/jobs.rs`'s pre-S1 owner-only check missed: two
+    /// tenants minting a caller with the same principal id would otherwise see each
+    /// other's jobs.
+    fn parts_for(principal_id: &str, tenant: &str) -> axum::http::request::Parts {
+        let ctx = AuthContext::with_tenant(
+            principal_id,
+            TenantId::new(tenant),
+            CapabilitySet::new([Capability::DocumentsProcess]),
+        );
+        let mut parts = Request::new(()).into_parts().0;
+        parts.extensions.insert(AuthExtension(Arc::new(ctx)));
+        parts
+    }
+
+    #[tokio::test]
+    async fn cross_tenant_read_is_404_not_403() {
+        use super::get_job;
+        use crate::state::ApiState;
+        use axum::extract::{Path, State};
+        use hacienda_core::jobs::InMemoryJobStore;
+
+        let facade = Arc::new(HaciendaFacade::new(HaciendaConfig::default()).unwrap());
+        let job_store = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(InMemoryTokenStore::new())).with_enabled(false);
+        let state = ApiState::new(facade, Arc::clone(&job_store), auth, ApiLimits::default());
+
+        // Same principal id, "alice", in two different tenants — the collision the
+        // pre-S1 owner-only check could not distinguish.
+        let acme_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
+        let job = job_store
+            .create(&acme_ctx, Some("alice".to_string()))
+            .await
+            .expect("create must succeed");
+
+        let cross_tenant = get_job(
+            State(state.clone()),
+            parts_for("alice", "globex"),
+            Path(job.id.clone()),
+        )
+        .await;
+        assert!(
+            matches!(&cross_tenant, Err(e) if e.code == crate::error::ApiErrorCode::NotFound),
+            "alice-in-globex must not see acme's job, even though the principal id matches"
+        );
+
+        let same_tenant = get_job(State(state), parts_for("alice", "acme"), Path(job.id)).await;
+        assert!(
+            same_tenant.is_ok(),
+            "alice-in-acme must still see her own job"
+        );
     }
 }

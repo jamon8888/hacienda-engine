@@ -198,16 +198,19 @@ describe("validateFile", () => {
  * path can be exercised for real, not mocked.
  */
 describe("loadTessdata", () => {
+  // `getDB()` (asset-loader.ts) opens a connection per call and never closes it — fine for a
+  // long-lived browser tab, but it means `indexedDB.deleteDatabase` here would block forever
+  // waiting for a versionchange on a connection nothing ever closes. Clearing the object
+  // store instead only needs a same-version transaction, which doesn't require exclusivity.
   afterEach(async () => {
     vi.unstubAllGlobals();
-    // `loadTessdata` (via `getDB()` in asset-loader.ts) opens a connection to this
-    // database and never closes it — harmless in a long-lived browser tab, but it
-    // means `indexedDB.deleteDatabase(...)` would block forever waiting for a
-    // versionchange on a connection nothing ever closed. Clear the object store
-    // instead (a same-version transaction, no exclusivity required), and close our
-    // own connection afterward so it doesn't leak into the next test either.
     const db = await openDB("xberg-studio-assets", 1);
     try {
+      // Guards against a DB opened (by this very call, absent an upgrade callback) with
+      // no "tessdata" store yet — possible if a test's own setup throws before ever
+      // calling loadTessdata (which creates both stores). clear() would throw
+      // NotFoundError in that case; without the try/finally that would also skip
+      // db.close(), leaking the connection into the next test.
       await db.clear("tessdata");
     } finally {
       db.close();

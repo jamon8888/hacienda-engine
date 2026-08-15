@@ -21,6 +21,16 @@ pub struct ReviewQueueItem {
     pub decided_by: Option<String>,
     pub decided_at: Option<String>,
     pub comment: Option<String>,
+    /// The tenant this item belongs to (S1). Set by
+    /// [`ReviewQueue::submit`](crate::review::ReviewQueue::submit) — always `"default"`
+    /// until a caller uses
+    /// [`ReviewQueue::submit_for_tenant`](crate::review::ReviewQueue::submit_for_tenant).
+    #[serde(default = "default_tenant_id")]
+    pub tenant_id: String,
+}
+
+fn default_tenant_id() -> String {
+    crate::tenancy::DEFAULT_TENANT.to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

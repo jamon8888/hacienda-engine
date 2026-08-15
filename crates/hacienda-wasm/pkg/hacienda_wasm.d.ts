@@ -44,34 +44,27 @@ export class AuditHandle {
     verify(): Promise<void>;
 }
 
-/**
- * Compresses multiple entries into a 7z archive in WebAssembly environment.
- *
- * This function creates a compressed archive from multiple file entries,
- * designed specifically for WASM targets.
- *
- * # Arguments
- * * `entries` - Vector of JavaScript strings representing file names/paths
- * * `datas` - Vector of Uint8Arrays containing the file data corresponding to entries
- */
-export function compress(entries: string[], datas: Uint8Array[]): Uint8Array;
+export function isNerModelLoaded(): boolean;
 
 /**
- * Decompresses a 7z archive in WebAssembly environment.
+ * Load the model `process`/`scan` will use from now on, replacing any previously
+ * loaded one. Bytes are already fully in memory (Studio fetches and IndexedDB-caches
+ * them once, shared with its own separate entity-glossary NER pass) — this is
+ * synchronous, no I/O happens here.
  *
- * This function is specifically designed for WASM targets and uses JavaScript interop
- * to handle the decompression process with a callback function.
+ * # Errors
  *
- * # Arguments
- * * `src` - Uint8Array containing the compressed archive data
- * * `pwd` - Password string for encrypted archives (use empty string for unencrypted)
- * * `f` - JavaScript callback function to handle extracted entries
+ * Rejects if the model bytes cannot be loaded.
  */
-export function decompress(src: Uint8Array, pwd: string, f: Function): void;
+export function loadNerModel(weights: Uint8Array, tokenizer: Uint8Array, encoder_config: Uint8Array): void;
 
 /**
- * Regex + NER (when a model is loaded) detection and redaction over `text`, using the
- * default pipeline config. Returns the serialized `PipelineResult`.
+ * Regex + NER (when a model is loaded, via [`ner_model::load_ner_model`]) detection and
+ * redaction over `text`, using the default pipeline config. Returns the serialized
+ * `PipelineResult`. `with_detector` (rather than `new`) is used unconditionally: it
+ * ignores `PipelineConfig::model.enabled` and just uses whatever `Option<NerDetector>`
+ * it's handed, so this is identical to today's regex-only behaviour whenever no model
+ * is loaded (or the `ner-candle-wasm` feature is off) — no `#[cfg]` needed here.
  */
 export function process(text: string): Promise<any>;
 
@@ -97,23 +90,23 @@ export interface InitOutput {
     readonly audithandle_recordResult: (a: number, b: any) => any;
     readonly audithandle_tip: (a: number) => any;
     readonly audithandle_verify: (a: number) => any;
+    readonly isNerModelLoaded: () => number;
+    readonly loadNerModel: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly process: (a: number, b: number) => any;
     readonly redact_empty: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly scan: (a: number, b: number) => any;
-    readonly compress: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly decompress: (a: any, b: number, c: number, d: any) => [number, number];
-    readonly wasm_bindgen_dfe9ebb593cb7bad___convert__closures_____invoke___wasm_bindgen_dfe9ebb593cb7bad___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_dfe9ebb593cb7bad___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_dfe9ebb593cb7bad___convert__closures_____invoke___web_sys_861182ea0de7500c___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_dfe9ebb593cb7bad___JsValue___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_dfe9ebb593cb7bad___convert__closures_____invoke___js_sys_c8702d64e55b495e___Function_fn_wasm_bindgen_dfe9ebb593cb7bad___JsValue_____wasm_bindgen_dfe9ebb593cb7bad___sys__Undefined___js_sys_c8702d64e55b495e___Function_fn_wasm_bindgen_dfe9ebb593cb7bad___JsValue_____wasm_bindgen_dfe9ebb593cb7bad___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
-    readonly wasm_bindgen_dfe9ebb593cb7bad___convert__closures_____invoke___web_sys_861182ea0de7500c___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_dfe9ebb593cb7bad___convert__closures_____invoke_______true_: (a: number, b: number) => void;
-    readonly __wbindgen_malloc_command_export: (a: number, b: number) => number;
-    readonly __wbindgen_realloc_command_export: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_exn_store_command_export: (a: number) => void;
-    readonly __externref_table_alloc_command_export: () => number;
+    readonly wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___wasm_bindgen_cbc57a76bbbebc35___JsValue__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_cbc57a76bbbebc35___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___web_sys_3d3beebc3740e975___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_cbc57a76bbbebc35___JsValue___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___js_sys_7f8c806926947354___Function_fn_wasm_bindgen_cbc57a76bbbebc35___JsValue_____wasm_bindgen_cbc57a76bbbebc35___sys__Undefined___js_sys_7f8c806926947354___Function_fn_wasm_bindgen_cbc57a76bbbebc35___JsValue_____wasm_bindgen_cbc57a76bbbebc35___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___web_sys_3d3beebc3740e975___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke_______true_: (a: number, b: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_destroy_closure_command_export: (a: number, b: number) => void;
-    readonly __externref_table_dealloc_command_export: (a: number) => void;
+    readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }
 
