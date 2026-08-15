@@ -592,11 +592,26 @@ async fn get_or_create_open_segment(
         return Ok((row.segment_id, row.config_hash));
     }
 
-    // No open segment, create one
+    // No open segment, create one. `prev_seal_hash` must link to whatever segment is
+    // currently the latest sealed one — the *only* other place a segment gets created,
+    // `rotate()`'s inline "create new open segment" insert, already does this (it has
+    // `prev_seal_hash` on hand from computing the segment it just sealed). This path is
+    // reached whenever `append` finds no open segment at all — notably right after a
+    // bare `close()` (which seals without opening a successor) — and used to leave
+    // `prev_seal_hash` unset. That produced a segment whose *own* seal, once this one is
+    // itself later sealed, is computed against the true latest seal hash (`rotate`/
+    // `close` both derive it fresh via `get_latest_seal_hash`) but whose stored
+    // `prev_seal_hash` column — the value `verify()` reads back — stayed `NULL`,
+    // permanently failing `check_seal_integrity` for that segment regardless of any
+    // tampering.
+    let prev_seal_hash = get_latest_seal_hash(tx).await?;
+
     let row = sqlx::query!(
-        "INSERT INTO audit_segments (node_id, config_hash) VALUES ($1, $2) RETURNING segment_id",
+        "INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash) VALUES ($1, $2, $3) \
+         RETURNING segment_id",
         format!("hacienda-{}", std::process::id()),
-        config_hash
+        config_hash,
+        prev_seal_hash
     )
     .fetch_one(&mut **tx)
     .await?;
@@ -782,24 +797,47 @@ mod tests {
     // a test bug) — running audit tests concurrently with each other would race on that
     // shared open segment.
     //
-    // KNOWN ISSUE (skipped in `ci-postgres.yaml`, tracked as follow-up):
-    // `should_detect_a_tampered_entry_in_a_sealed_segment`,
-    // `should_report_a_missing_entry_as_a_count_mismatch`,
-    // `should_serialise_concurrent_appends_without_breaking_the_chain`,
-    // `should_survive_a_process_restart_against_the_same_database`, and
-    // `should_verify_after_a_rotation` all fail `verify()` with the *same* corrupted
-    // segment_id/hash `SegmentIntegrity` mismatch when the full suite runs back to
-    // back, regardless of what each test individually exercises — proof they're
-    // inheriting one broken seal from earlier in the run rather than failing on their
-    // own logic. Every field `compute_seal_hash`/`check_seal_integrity` cover has been
-    // traced by hand without finding the discrepancy; it needs a live Postgres session
-    // to instrument further. This is the first time this suite has ever run as a
-    // whole against real Postgres (previously `#[ignore]`d, never wired into CI), so
-    // it's a pre-existing latent bug this CI job's own job is to surface — not a
-    // regression from wiring it up.
+    // Two independent bugs used to make this suite fail as a whole (all five tests
+    // below the count previously listed here). Both are fixed now:
+    //
+    // 1. `get_or_create_open_segment` (production code) never set the new segment's
+    //    `prev_seal_hash` column when creating one outside of `rotate`'s own inline
+    //    path — notably right after a bare `close()`, which seals without opening a
+    //    successor. That segment's *own* seal, computed later by `rotate`/`close` via
+    //    `get_latest_seal_hash` (the true latest seal at sealing time), then never
+    //    matched what `verify()` read back from the stale-`NULL` column — a permanent
+    //    `SegmentIntegrity` mismatch with no tampering involved. Fixed by having
+    //    `get_or_create_open_segment` populate `prev_seal_hash` the same way `rotate`
+    //    already does.
+    // 2. Tests below that assert on an entry's *position* within its segment (e.g.
+    //    "the tampered entry is at index 1") assumed they owned a fresh, empty open
+    //    segment — not true in this shared-database suite (see below), where an
+    //    earlier test's un-rotated entries are still sitting in the same open segment.
+    //    Fixed by [`start_fresh_segment`] sealing away any such leftovers before a test
+    //    that needs exclusive ownership of what it appends next.
 
     async fn test_store() -> PostgresAuditStore {
         PostgresAuditStore::new(test_support::shared().await.pool())
+    }
+
+    /// Seal away any entries an earlier test in this shared suite left in the open
+    /// segment, so whatever this test appends next lands in a brand-new, empty segment
+    /// of its own — required by any test that asserts on entry position/count within
+    /// "its" segment rather than just on `verify()` succeeding. A no-op if the open
+    /// segment is already empty (including if none is open at all, e.g. right after a
+    /// bare `close()` — `entries()` reports that as empty, not an error).
+    async fn start_fresh_segment(store: &PostgresAuditStore) {
+        if !store
+            .entries()
+            .await
+            .expect("reading the open segment")
+            .is_empty()
+        {
+            store
+                .rotate()
+                .await
+                .expect("sealing away a leftover open segment");
+        }
     }
 
     /// A label suffixed with a fresh UUID. `audit_entries.id` is a real `TEXT PRIMARY KEY`
@@ -894,7 +932,9 @@ mod tests {
     #[ignore]
     fn should_serialise_concurrent_appends_without_breaking_the_chain() {
         test_support::block_on_shared(async {
-            let store = Arc::new(test_store().await);
+            let store = test_store().await;
+            start_fresh_segment(&store).await;
+            let store = Arc::new(store);
             let config_hash = format!("cfg-{}", Uuid::new_v4());
 
             // Bootstrap an open segment up front so every racing append targets the same
@@ -950,14 +990,17 @@ mod tests {
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
 
+            let rotated_segment_id;
             {
                 let store = test_store().await;
+                start_fresh_segment(&store).await;
                 let inputs = ids
                     .iter()
                     .map(|id| test_input(id, &config_hash))
                     .collect::<Vec<_>>();
                 store.append(inputs).await.expect("append failed");
-                store.rotate().await.expect("rotate failed");
+                let seal = store.rotate().await.expect("rotate failed");
+                rotated_segment_id = seal.segment_id;
                 store
                     .append(vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
                     .await
@@ -968,15 +1011,18 @@ mod tests {
             let restarted_pool = connect(&database_url).await.expect("reconnect failed");
             let restarted = PostgresAuditStore::new(restarted_pool);
 
+            // Not `seals.len() == 1`: this suite shares one Postgres instance across
+            // every test in the module (see the module doc comment), so other tests'
+            // sealed segments legitimately coexist here. What must be true is that
+            // *this* test's own rotated segment is among them.
             let seals = restarted.seals().await.expect("seals failed");
-            assert_eq!(
-                seals.len(),
-                1,
-                "the rotated segment's seal must survive a restart"
-            );
+            let seal = seals
+                .iter()
+                .find(|s| s.segment_id == rotated_segment_id)
+                .expect("the rotated segment's seal must survive a restart");
 
             let sealed_entries = restarted
-                .get_segment_entries(&seals[0].segment_id)
+                .get_segment_entries(&seal.segment_id)
                 .await
                 .expect("sealed entries failed");
             for id in &ids {
@@ -1027,6 +1073,7 @@ mod tests {
     fn should_verify_after_a_rotation() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            start_fresh_segment(&store).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
                 .append(vec![test_input(&unique_id("pre-rotate"), &config_hash)])
@@ -1134,6 +1181,7 @@ mod tests {
     fn should_detect_a_tampered_entry_in_a_sealed_segment() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            start_fresh_segment(&store).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (t1, t2) = (unique_id("t1"), unique_id("t2"));
             store
@@ -1195,6 +1243,7 @@ mod tests {
     fn should_report_a_missing_entry_as_a_count_mismatch() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            start_fresh_segment(&store).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (c1, c2) = (unique_id("c1"), unique_id("c2"));
             store

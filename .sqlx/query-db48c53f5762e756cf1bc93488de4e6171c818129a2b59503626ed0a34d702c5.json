@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO audit_segments (node_id, config_hash) VALUES ($1, $2) RETURNING segment_id",
+  "query": "INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash) VALUES ($1, $2, $3) RETURNING segment_id",
   "describe": {
     "columns": [
       {
@@ -12,6 +12,7 @@
     "parameters": {
       "Left": [
         "Text",
+        "Text",
         "Text"
       ]
     },
@@ -19,5 +20,5 @@
       false
     ]
   },
-  "hash": "5d2ef7cdc5ff89f7ac2935ba6df9536f4bd5105ae780855717d9030655056131"
+  "hash": "db48c53f5762e756cf1bc93488de4e6171c818129a2b59503626ed0a34d702c5"
 }
