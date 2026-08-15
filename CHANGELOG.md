@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`PostgresAuditStore` could permanently corrupt a segment's seal with no tampering
+  involved.** `get_or_create_open_segment` never set a newly-created segment's
+  `prev_seal_hash` column when creating one outside of `rotate()`'s own inline path —
+  notably right after a bare `close()`, which seals without opening a successor. That
+  segment's own seal, computed later by `rotate`/`close` against the *true* latest seal
+  hash at sealing time, then never matched what `verify()` read back from the
+  stale-`NULL` column, a permanent `SegmentIntegrity` mismatch in production, not just
+  in tests. Fixed by having `get_or_create_open_segment` populate `prev_seal_hash` the
+  same way `rotate` already does.
+- **The 5 `postgres-store-tests` skipped since the job's first run now pass and are no
+  longer `--skip`-listed in CI.** Two independent causes, both fixed: the production bug
+  above, plus several tests asserting on an entry's position/count within "their"
+  segment without accounting for this suite's deliberately shared Postgres instance
+  (`test_support::shared`, mirroring the single-writer production design) — an earlier
+  test's un-rotated entries could still be sitting in the same open segment. Fixed by
+  sealing away any such leftovers before a test that needs exclusive ownership of what
+  it appends next, and by `should_survive_a_process_restart_against_the_same_database`
+  looking up its own rotated segment by id instead of assuming it's the only sealed
+  segment in the database. Verified against a real local Postgres 16, not just
+  `SQLX_OFFLINE` compile checks: 22/22 `store::postgres::*` tests passing, reproduced
+  clean across repeated fresh-schema runs.
 - **`hacienda-studio`'s audio/video transcription now actually runs, instead of failing
   synchronously in every environment.** `worker/pipeline.ts` runs inside a Web Worker and
   constructed `@remotion/whisper-web`'s `WhisperBridge` directly; that package's own
@@ -55,8 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.sqlx` cache instead. Five further `hacienda-core::store::postgres::audit` tests still
   fail on an unrelated, pre-existing `SegmentIntegrity` bug (all five fail on the *same*
   corrupted seal regardless of what each individually exercises — see the comment above
-  `postgres-store-tests` in `ci-postgres.yaml` and next to the audit test module) and are
-  skipped from CI pending further investigation with a live Postgres session.
+  `postgres-store-tests` in `ci-postgres.yaml` and next to the audit test module) were
+  skipped from CI pending further investigation with a live Postgres session; root-caused
+  and fixed, see the `PostgresAuditStore`/`postgres-store-tests` entries above.
 - **`POST /v1/documents` no longer silently drops every document when no PII pipeline is
   configured.** `process_documents` zipped `body.documents`, `result.extraction.results`,
   and `result.pii` three ways; `Iterator::zip` truncates to the shortest input, and
