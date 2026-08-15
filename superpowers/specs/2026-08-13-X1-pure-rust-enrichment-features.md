@@ -159,14 +159,18 @@ introduces — X1 only surfaces it because `static-embeddings` would be a second
 needing the same guard `P6`'s `GuardedLlm` (`crates/hacienda-rag/src/stream.rs:133-186`)
 already provides for the query-time LLM-answer path.
 
-Given that, `static-embeddings` is enabled on the workspace `xberg` dependency in this
-pass (so it compiles) but deliberately **not** threaded through `hacienda-rag`/
-`hacienda-api`'s own Cargo features or config surface: nothing today constructs the
-`EmbeddingModelType::Preset { name: "lightweight" }` config needed to reach the static
-backend through `xberg::embed_texts`/`embed_texts_async`, so this stays compile-only and
-does not newly expose an unguarded ingestion path. Building an ingestion-time guard
-(`GuardedLlm`-shaped, wrapping the embed call sites in `upsert_document` and
-`migrate_embeddings_work`) is real, separate work, tracked as its own follow-up rather
+First landed as a compile-only feature flip on the workspace `xberg` dependency (nothing
+today constructs the `EmbeddingModelType::Preset { name: "lightweight" }` config needed to
+reach it through `xberg::embed_texts`/`embed_texts_async`) — then removed again on
+CodeRabbit review: this repo's own contributing guidelines require a Cargo feature
+addition to `xberg` to have a matching call site, and "compiles but nothing can call it
+yet" doesn't meet that bar regardless of how well-documented the gap is. `static-embeddings`
+is **not** enabled in this pass. Re-enabling it needs two things together, not one: a real
+call site in `hacienda-rag`/`hacienda-api` constructing that `Preset` config, and the
+ingestion-time guard (`GuardedLlm`-shaped, wrapping the embed call sites in
+`upsert_document` and `migrate_embeddings_work`) the paragraph above shows doesn't exist
+yet — building the call site without the guard first would be the unguarded-path exposure
+this section exists to avoid. Both are real, separate work, tracked as a follow-up rather
 than folded into this pass.
 
 **`keywords`/`summarization`/`qr-codes`/`candle-trocr` are reachable today.** Unlike

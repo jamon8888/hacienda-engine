@@ -118,25 +118,33 @@ web-time = "1"
 # set), so hacienda's `ExtractionConfig` passthrough already round-trips them even
 # before those backends are wired in.
 #
-# X1 (`superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`): five of
+# X1 (`superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`): four of
 # the spec's six capabilities need no ONNX Runtime, no native system library, and
-# (bar a one-time model fetch for two of them) no model download.
+# (for one of them) no model download.
 # `keywords`/`summarization` are pure-Rust text transforms (YAKE/RAKE, extractive
 # TextRank); `qr-codes` decodes via `rqrr` (already pulled in transitively by
-# `pdf`'s `image` dep). Both are off by default at the *config* level too
+# `pdf`'s `image` dep). All three are off by default at the *config* level too
 # (`ExtractionConfig.keywords` / `.summarization` / `.qr_codes` default to `None`)
 # — enabling the Cargo feature only makes the capability reachable via
 # `[extraction]` config, it does not turn it on for every document.
-# `static-embeddings` is model2vec dense
-# embedding inference (no ORT) — enabled here so it compiles, but nothing in
-# `hacienda-rag`/`hacienda-api` yet constructs the `EmbeddingModelType::Preset {
-# name: "lightweight" }` config needed to reach it, so this is compile-only for
-# now (see X1 spec's own non-objective: product-facing configuration is separate
-# follow-up work). `candle-trocr` is one backend of xberg's candle-based VLM OCR
+# `candle-trocr` is one backend of xberg's candle-based VLM OCR
 # (`candle-ocr` umbrella) — hacienda already vendors candle for its GLiNER2 NER
 # backend, so this is new model weights, not a new inference runtime; TrOCR is the
 # smallest/best-understood backend, picked over the full `candle-vlm-ocr` umbrella
 # for the first pass per the spec's §3.
+#
+# `static-embeddings` (the spec's fifth capability) is deliberately NOT enabled here,
+# unlike the four above: this repo's own contributing guidelines require a Cargo
+# feature addition to the `xberg` dependency to have a matching call site, and none
+# exists — nothing in `hacienda-rag`/`hacienda-api` constructs the
+# `EmbeddingModelType::Preset { name: "lightweight" }` config needed to reach it
+# through `xberg::embed_texts`/`embed_texts_async`. Enabling it would only grow the
+# native build surface for a capability nothing can call. See the X1 spec's §6 for
+# the fuller reasoning — it also documents a separate finding, that reaching this
+# safely needs an ingestion-time redaction guard (`GuardedLlm`-shaped) that doesn't
+# exist yet for the vector-store embedding path, a pre-existing E4 gap. Re-enable once
+# both a call site and that guard exist. Found by CodeRabbit review on this branch;
+# caught before merge.
 #
 # `candle-trocr` gotcha: enabling it compiles in xberg's `ocr-pipeline`, which
 # changes `extractors::image`'s behaviour even for callers who never touch OCR —
@@ -216,7 +224,6 @@ xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c16
     "keywords",
     "summarization",
     "qr-codes",
-    "static-embeddings",
     "candle-trocr",
 ] }
 # Key material must not survive a drop. `PseudonymKey` holds the secret that

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tenant-name sanitisation for pseudonym keys was still not injective after the
+  previous fix — `acme` and `Acme` could resolve the same key.** `scoped_var_name`
+  accepted `[A-Za-z0-9_]` and uppercased the result unconditionally, so two tenant ids
+  differing only in case (e.g. `acme`/`Acme`) both produced `HACIENDA_TENANT_ACME_...`
+  — the same cross-tenant key-sharing leak the punctuation-folding fix above closed,
+  reopened through case-folding instead. Fixed by accepting only `[a-z0-9_]` (lowercase
+  only) before uppercasing, so the transform is injective end to end. Found by
+  CodeRabbit review on this branch; caught before merge.
+- **`static-embeddings` was enabled on the `xberg` dependency with no call site
+  anywhere in the workspace, violating this repo's own contributing convention that a
+  Cargo feature addition needs a matching call site.** Removed from X1's feature list
+  (`Cargo.toml`) until both a real call site and the ingestion-time redaction guard it
+  needs (see the X1 spec's §6) exist. Found by CodeRabbit review on this branch.
+- **`PostgresJobStore::finish`/`fail` and the tenant-map `AuditError::Internal` sites
+  (`store_file.rs`/`store_idb.rs`) reported a bare error string with no operation,
+  job/tenant id, or root cause.** Both now include the operation name and tenant id in
+  the message, matching this repo's error-message convention. Found by CodeRabbit
+  review on this branch.
 - **Tenant-name sanitisation for pseudonym keys was not injective — `acme-corp` and
   `acme_corp` could resolve the same key.** `scoped_var_name` (P3a) folded every
   character outside `[A-Za-z0-9_]` in a tenant id to `_` before uppercasing, so

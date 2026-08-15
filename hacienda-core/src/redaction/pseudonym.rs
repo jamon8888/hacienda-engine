@@ -59,14 +59,18 @@ pub enum PseudonymError {
     #[error("category '{category}' cannot appear in a pseudonym token: {reason}")]
     UnsupportedCategory { category: String, reason: String },
 
-    /// A non-default tenant id contains characters outside `[a-z0-9_]` (case-insensitive).
+    /// A non-default tenant id contains characters outside `[a-z0-9_]` — lowercase only.
     ///
-    /// [`scoped_var_name`] folds every character outside that set to `_` before
-    /// uppercasing, and that fold is not injective: `acme-corp`, `acme_corp`, and
-    /// `acme.corp` would all resolve the same `HACIENDA_TENANT_ACME_CORP_...` variable
-    /// and therefore share key material — the exact cross-tenant correlation leak P3a
-    /// exists to close. Rejecting the id outright is the same discipline
-    /// [`KeyId::new`] already applies to `-` in a key id, extended to tenant ids.
+    /// [`scoped_var_name`] uppercases the accepted characters unconditionally to build
+    /// `HACIENDA_TENANT_<TENANT>_<base>`. Accepting uppercase input too (`[A-Za-z0-9_]`,
+    /// an earlier version of this check) would make that uppercasing step non-injective:
+    /// `acme` and `Acme` would both resolve to `HACIENDA_TENANT_ACME_...` and therefore
+    /// share key material — the exact cross-tenant correlation leak P3a exists to close,
+    /// just reached through case-folding instead of the punctuation-folding an even
+    /// earlier version had (`acme-corp`/`acme_corp`/`acme.corp` all resolving to one
+    /// variable). Restricting the accepted alphabet to exactly the one case the output
+    /// uses is the same discipline [`KeyId::new`] already applies to `-` in a key id,
+    /// extended to tenant ids.
     #[error(
         "tenant id '{tenant}' cannot be used to name a pseudonym key variable: \
          expected characters from [a-z0-9_] so that no two tenant ids map to the \
@@ -389,17 +393,23 @@ pub struct EnvKeyResolver {
 ///
 /// [`PseudonymError::UnsupportedTenantId`] if `tenant` (other than the default tenant,
 /// which never reaches this encoding at all) contains any character outside
-/// `[A-Za-z0-9_]`. The encoding uppercases and passes matching characters through
-/// unchanged — never folds one character to another — so two different tenant ids
-/// never produce the same variable name. Folding instead of rejecting (the earlier
-/// version of this function) would let `acme-corp` and `acme_corp` share one variable,
-/// and therefore one tenant's key material.
+/// `[a-z0-9_]`. Only lowercase is accepted, not `[A-Za-z0-9_]` uppercased on the way
+/// out: accepting both cases and uppercasing them would make `acme` and `Acme` collide
+/// on the same `ACME` component — the same one-key-shared-by-two-tenants leak this
+/// encoding exists to prevent, just moved from punctuation-folding (the original
+/// version of this function) to case-folding. Restricting the accepted alphabet to
+/// exactly the one case that survives the uppercase step keeps the whole encoding
+/// injective. Found by CodeRabbit review on this branch; caught before merge.
 fn scoped_var_name(tenant: &TenantId, base: &str) -> Result<String, PseudonymError> {
     if *tenant == TenantId::default_tenant() {
         return Ok(base.to_string());
     }
     let raw = tenant.as_str();
-    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+    if raw.is_empty()
+        || !raw
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
         return Err(PseudonymError::UnsupportedTenantId {
             tenant: raw.to_string(),
         });
@@ -982,6 +992,20 @@ mod key_tests {
             resolver.active(&TenantId::new("acme-corp")).unwrap_err(),
             PseudonymError::UnsupportedTenantId { .. }
         ));
+    }
+
+    /// A second cross-tenant collision class, distinct from the punctuation-folding one
+    /// above: accepting uppercase input (`[A-Za-z0-9_]`) and then unconditionally
+    /// uppercasing it for the variable name would make `acme` and `Acme` resolve the same
+    /// `HACIENDA_TENANT_ACME_...` variable, sharing key material — found by CodeRabbit
+    /// review on this branch, caught before merge. Rejecting any uppercase byte outright
+    /// (accepting only `[a-z0-9_]`) closes it the same way the punctuation case was
+    /// closed: reject, don't fold.
+    #[test]
+    fn should_reject_an_uppercase_tenant_id_that_would_collide_with_its_lowercase_form() {
+        let resolver = EnvKeyResolver::with_lookup(|_| None);
+        let err = resolver.active(&TenantId::new("Acme")).unwrap_err();
+        assert!(matches!(err, PseudonymError::UnsupportedTenantId { tenant } if tenant == "Acme"));
     }
 }
 

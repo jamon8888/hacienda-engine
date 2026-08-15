@@ -308,9 +308,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             let (result, snapshot) = {
                 let mut map = self.state();
                 let state = map.get_mut(&tenant).ok_or_else(|| {
-                    AuditError::Internal(
-                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                    )
+                    AuditError::Internal(format!(
+                        "append: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
                 })?;
                 let segment = state.open.as_mut().ok_or(AuditError::StoreClosed {
                     operation: "append",
@@ -333,9 +334,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
             let state = map.get(&tenant).ok_or_else(|| {
-                AuditError::Internal(
-                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                )
+                AuditError::Internal(format!(
+                        "entries: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
             })?;
             Ok(state
                 .open
@@ -362,9 +364,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
             let state = map.get(&tenant).ok_or_else(|| {
-                AuditError::Internal(
-                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                )
+                AuditError::Internal(format!(
+                        "history: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
             })?;
 
             let mut extents: Vec<(&str, u64)> = state
@@ -397,9 +400,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
             let state = map.get(&tenant).ok_or_else(|| {
-                AuditError::Internal(
-                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                )
+                AuditError::Internal(format!(
+                        "tip: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
             })?;
             match state.open.as_ref() {
                 Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
@@ -419,9 +423,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             self.ensure_tenant_loaded(&tenant).await?;
             let map = self.state();
             let state = map.get(&tenant).ok_or_else(|| {
-                AuditError::Internal(
-                    "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                )
+                AuditError::Internal(format!(
+                        "seals: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
             })?;
             Ok(state.sealed.iter().map(|(seal, _)| seal.clone()).collect())
         };
@@ -435,9 +440,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             let (sealed, open_entries, open_tip) = {
                 let map = self.state();
                 let state = map.get(&tenant).ok_or_else(|| {
-                    AuditError::Internal(
-                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                    )
+                    AuditError::Internal(format!(
+                        "verify: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
                 })?;
                 let (entries, tip) = match state.open.as_ref() {
                     Some(segment) => (segment.entries().to_vec(), segment.tip().to_owned()),
@@ -465,9 +471,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             let (seal, snapshot) = {
                 let mut map = self.state();
                 let state = map.get_mut(&tenant).ok_or_else(|| {
-                    AuditError::Internal(
-                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                    )
+                    AuditError::Internal(format!(
+                        "rotate: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
                 })?;
                 let old = state.open.take().ok_or(AuditError::StoreClosed {
                     operation: "rotate",
@@ -497,9 +504,10 @@ impl super::AuditStore for IndexedDbAuditStore {
             let (seal, snapshot) = {
                 let mut map = self.state();
                 let state = map.get_mut(&tenant).ok_or_else(|| {
-                    AuditError::Internal(
-                        "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                    )
+                    AuditError::Internal(format!(
+                        "close: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
+                        tenant = tenant.as_str()
+                    ))
                 })?;
 
                 if let Some(seal) = &state.closed_seal {
