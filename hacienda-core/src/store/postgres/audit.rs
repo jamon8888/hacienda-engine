@@ -442,7 +442,7 @@ impl AuditStore for PostgresAuditStore {
     }
 }
 
-// ── row <-> domain conversions ────────────────────────────────────────────────
+// ── row <-> domain conversions ───────────────────────────────────────
 
 /// Confidence is stored as `DOUBLE PRECISION` (f64) because Postgres has no native f32,
 /// but the domain type is `f32` (matches [`AuditEntryInput::confidence`]). `as f32` is a
@@ -556,7 +556,7 @@ struct SealRow {
     sealed_at: Option<DateTime<Utc>>,
 }
 
-// ── helper functions ────────────────────────────────────────────────────────
+// ── helper functions ─────────────────────────────────────────
 
 /// Returns the currently open segment's id and *its* `config_hash` — not
 /// necessarily `config_hash`, which is only used to seed a brand-new segment.
@@ -599,11 +599,26 @@ async fn get_or_create_open_segment(
         return Ok((row.segment_id, row.config_hash));
     }
 
-    // No open segment, create one
+    // No open segment, create one. `prev_seal_hash` must link to whatever segment is
+    // currently the latest sealed one — the *only* other place a segment gets created,
+    // `rotate()`'s inline "create new open segment" insert, already does this (it has
+    // `prev_seal_hash` on hand from computing the segment it just sealed). This path is
+    // reached whenever `append` finds no open segment at all — notably right after a
+    // bare `close()` (which seals without opening a successor) — and used to leave
+    // `prev_seal_hash` unset. That produced a segment whose *own* seal, once this one is
+    // itself later sealed, is computed against the true latest seal hash (`rotate`/
+    // `close` both derive it fresh via `get_latest_seal_hash`) but whose stored
+    // `prev_seal_hash` column — the value `verify()` reads back — stayed `NULL`,
+    // permanently failing `check_seal_integrity` for that segment regardless of any
+    // tampering.
+    let prev_seal_hash = get_latest_seal_hash(tx).await?;
+
     let row = sqlx::query!(
-        "INSERT INTO audit_segments (node_id, config_hash) VALUES ($1, $2) RETURNING segment_id",
+        "INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash) VALUES ($1, $2, $3) \
+         RETURNING segment_id",
         format!("hacienda-{}", std::process::id()),
-        config_hash
+        config_hash,
+        prev_seal_hash
     )
     .fetch_one(&mut **tx)
     .await?;
@@ -774,6 +789,7 @@ mod tests {
     use super::*;
     use crate::store::postgres::connection::connect;
     use crate::store::postgres::test_support;
+    use sqlx::Row;
     use std::sync::Arc;
 
     // These tests are ignored by default because they take real wall-clock time to spin
@@ -788,24 +804,47 @@ mod tests {
     // a test bug) — running audit tests concurrently with each other would race on that
     // shared open segment.
     //
-    // KNOWN ISSUE (skipped in `ci-postgres.yaml`, tracked as follow-up):
-    // `should_detect_a_tampered_entry_in_a_sealed_segment`,
-    // `should_report_a_missing_entry_as_a_count_mismatch`,
-    // `should_serialise_concurrent_appends_without_breaking_the_chain`,
-    // `should_survive_a_process_restart_against_the_same_database`, and
-    // `should_verify_after_a_rotation` all fail `verify()` with the *same* corrupted
-    // segment_id/hash `SegmentIntegrity` mismatch when the full suite runs back to
-    // back, regardless of what each test individually exercises — proof they're
-    // inheriting one broken seal from earlier in the run rather than failing on their
-    // own logic. Every field `compute_seal_hash`/`check_seal_integrity` cover has been
-    // traced by hand without finding the discrepancy; it needs a live Postgres session
-    // to instrument further. This is the first time this suite has ever run as a
-    // whole against real Postgres (previously `#[ignore]`d, never wired into CI), so
-    // it's a pre-existing latent bug this CI job's own job is to surface — not a
-    // regression from wiring it up.
+    // Two independent bugs used to make this suite fail as a whole (all five tests
+    // below the count previously listed here). Both are fixed now:
+    //
+    // 1. `get_or_create_open_segment` (production code) never set the new segment's
+    //    `prev_seal_hash` column when creating one outside of `rotate`'s own inline
+    //    path — notably right after a bare `close()`, which seals without opening a
+    //    successor. That segment's *own* seal, computed later by `rotate`/`close` via
+    //    `get_latest_seal_hash` (the true latest seal at sealing time), then never
+    //    matched what `verify()` read back from the stale-`NULL` column — a permanent
+    //    `SegmentIntegrity` mismatch with no tampering involved. Fixed by having
+    //    `get_or_create_open_segment` populate `prev_seal_hash` the same way `rotate`
+    //    already does.
+    // 2. Tests below that assert on an entry's *position* within its segment (e.g.
+    //    "the tampered entry is at index 1") assumed they owned a fresh, empty open
+    //    segment — not true in this shared-database suite (see below), where an
+    //    earlier test's un-rotated entries are still sitting in the same open segment.
+    //    Fixed by [`start_fresh_segment`] sealing away any such leftovers before a test
+    //    that needs exclusive ownership of what it appends next.
 
     async fn test_store() -> PostgresAuditStore {
         PostgresAuditStore::new(test_support::shared().await.pool())
+    }
+
+    /// Seal away any entries an earlier test in this shared suite left in the open
+    /// segment, so whatever this test appends next lands in a brand-new, empty segment
+    /// of its own — required by any test that asserts on entry position/count within
+    /// "its" segment rather than just on `verify()` succeeding. A no-op if the open
+    /// segment is already empty (including if none is open at all, e.g. right after a
+    /// bare `close()` — `entries()` reports that as empty, not an error).
+    async fn start_fresh_segment(store: &PostgresAuditStore) {
+        if !store
+            .entries()
+            .await
+            .expect("reading the open segment")
+            .is_empty()
+        {
+            store
+                .rotate()
+                .await
+                .expect("sealing away a leftover open segment");
+        }
     }
 
     /// A label suffixed with a fresh UUID. `audit_entries.id` is a real `TEXT PRIMARY KEY`
@@ -900,7 +939,9 @@ mod tests {
     #[ignore]
     fn should_serialise_concurrent_appends_without_breaking_the_chain() {
         test_support::block_on_shared(async {
-            let store = Arc::new(test_store().await);
+            let store = test_store().await;
+            start_fresh_segment(&store).await;
+            let store = Arc::new(store);
             let config_hash = format!("cfg-{}", Uuid::new_v4());
 
             // Bootstrap an open segment up front so every racing append targets the same
@@ -956,14 +997,17 @@ mod tests {
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
 
+            let rotated_segment_id;
             {
                 let store = test_store().await;
+                start_fresh_segment(&store).await;
                 let inputs = ids
                     .iter()
                     .map(|id| test_input(id, &config_hash))
                     .collect::<Vec<_>>();
                 store.append(inputs).await.expect("append failed");
-                store.rotate().await.expect("rotate failed");
+                let seal = store.rotate().await.expect("rotate failed");
+                rotated_segment_id = seal.segment_id;
                 store
                     .append(vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
                     .await
@@ -974,15 +1018,18 @@ mod tests {
             let restarted_pool = connect(&database_url).await.expect("reconnect failed");
             let restarted = PostgresAuditStore::new(restarted_pool);
 
+            // Not `seals.len() == 1`: this suite shares one Postgres instance across
+            // every test in the module (see the module doc comment), so other tests'
+            // sealed segments legitimately coexist here. What must be true is that
+            // *this* test's own rotated segment is among them.
             let seals = restarted.seals().await.expect("seals failed");
-            assert_eq!(
-                seals.len(),
-                1,
-                "the rotated segment's seal must survive a restart"
-            );
+            let seal = seals
+                .iter()
+                .find(|s| s.segment_id == rotated_segment_id)
+                .expect("the rotated segment's seal must survive a restart");
 
             let sealed_entries = restarted
-                .get_segment_entries(&seals[0].segment_id)
+                .get_segment_entries(&seal.segment_id)
                 .await
                 .expect("sealed entries failed");
             for id in &ids {
@@ -1033,6 +1080,7 @@ mod tests {
     fn should_verify_after_a_rotation() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            start_fresh_segment(&store).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
                 .append(vec![test_input(&unique_id("pre-rotate"), &config_hash)])
@@ -1124,11 +1172,23 @@ mod tests {
     /// sealed entry directly via SQL (bypassing the store's own API, exactly like an
     /// out-of-band editor of the underlying table would) and requires the error to name
     /// the sealed segment's chain.
+    ///
+    /// Restores the tampered row before returning. `entries()`/`verify()` deliberately
+    /// scan the *whole* database, store-wide (mirroring the single-writer production
+    /// design — see this module's doc comment), not just this test's own segment; every
+    /// test in this file shares one Postgres instance (`test_support::shared`), so a
+    /// tamper left in place here would fail every later test's `verify()` on a
+    /// corruption that has nothing to do with what that test exercises. This was the
+    /// root cause of the `SegmentIntegrity`-mismatch bug this suite used to hit as a
+    /// whole (see `ci-postgres.yaml`'s former `--skip` list for these five tests) — not a
+    /// bug in the seal-chain logic itself, which `store_file.rs`'s equivalent test (a
+    /// fresh `TempDir` per test, so nothing to leak) already proved sound.
     #[test]
     #[ignore]
     fn should_detect_a_tampered_entry_in_a_sealed_segment() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            start_fresh_segment(&store).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (t1, t2) = (unique_id("t1"), unique_id("t2"));
             store
@@ -1141,13 +1201,13 @@ mod tests {
             store.rotate().await.expect("rotate seals the segment");
             store.verify().await.expect("clean chain verifies");
 
-            sqlx::query!(
-                "UPDATE audit_entries SET category = 'CreditCard' WHERE id = $1",
-                t2
-            )
-            .execute(&store.pool)
-            .await
-            .expect("tamper update failed");
+            // Plain (non-macro) query: no `.sqlx` offline-cache entry needed for a
+            // query this narrowly test-only, unlike the tamper/restore pair below it.
+            sqlx::query("UPDATE audit_entries SET category = 'CreditCard' WHERE id = $1")
+                .bind(&t2)
+                .execute(&store.pool)
+                .await
+                .expect("tamper update failed");
 
             let err = store
                 .verify()
@@ -1157,6 +1217,21 @@ mod tests {
                 matches!(err, AuditError::ChainIntegrity { index: 1, .. }),
                 "expected ChainIntegrity at index 1, got {err:?}"
             );
+
+            // Restore — see the doc comment above for why this must not be skipped.
+            // `test_input`'s `category` is always `"email"`; this is the one and only
+            // value this test ever tampers it to away from, so restoring to that
+            // literal (rather than capturing-and-restoring, as the delete test below
+            // must) is exact and sufficient.
+            sqlx::query("UPDATE audit_entries SET category = 'email' WHERE id = $1")
+                .bind(&t2)
+                .execute(&store.pool)
+                .await
+                .expect("restore after tamper failed");
+            store
+                .verify()
+                .await
+                .expect("chain must verify again once the tamper is undone");
         });
     }
 
@@ -1164,11 +1239,18 @@ mod tests {
     /// makes "holds 1 entry, seal records 2" actionable instead of an opaque hash
     /// mismatch — see Design Decision D2. Deletes a row directly via SQL, mirroring
     /// `should_detect_a_tampered_entry_in_a_sealed_segment`'s out-of-band-edit approach.
+    ///
+    /// Restores the deleted row before returning — see the sibling test's doc comment
+    /// for why leaving a tamper in place corrupts every later test in this shared-database
+    /// suite, not just this one. Deletion can't be undone with a literal like the sibling
+    /// test's `UPDATE ... SET category = 'email'`: the whole row is gone, so this captures
+    /// every column beforehand and re-inserts it verbatim afterward.
     #[test]
     #[ignore]
     fn should_report_a_missing_entry_as_a_count_mismatch() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            start_fresh_segment(&store).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (c1, c2) = (unique_id("c1"), unique_id("c2"));
             store
@@ -1180,7 +1262,19 @@ mod tests {
                 .expect("append");
             store.rotate().await.expect("rotate");
 
-            sqlx::query!("DELETE FROM audit_entries WHERE id = $1", c2)
+            let captured = sqlx::query(
+                "SELECT id, segment_id, sequence_num, category, action, span_hash, \
+                 span_length, confidence, source, pipeline_version, config_hash, \
+                 principal, chain_hash, created_at \
+                 FROM audit_entries WHERE id = $1",
+            )
+            .bind(&c2)
+            .fetch_one(&store.pool)
+            .await
+            .expect("capturing the row before deleting it failed");
+
+            sqlx::query("DELETE FROM audit_entries WHERE id = $1")
+                .bind(&c2)
                 .execute(&store.pool)
                 .await
                 .expect("tamper delete failed");
@@ -1198,6 +1292,36 @@ mod tests {
                 }
                 other => panic!("expected SegmentEntryCount, got {other:?}"),
             }
+
+            // Restore — see the doc comment above.
+            sqlx::query(
+                "INSERT INTO audit_entries \
+                 (id, segment_id, sequence_num, category, action, span_hash, span_length, \
+                  confidence, source, pipeline_version, config_hash, principal, chain_hash, \
+                  created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            )
+            .bind(captured.get::<String, _>("id"))
+            .bind(captured.get::<Uuid, _>("segment_id"))
+            .bind(captured.get::<i64, _>("sequence_num"))
+            .bind(captured.get::<String, _>("category"))
+            .bind(captured.get::<String, _>("action"))
+            .bind(captured.get::<String, _>("span_hash"))
+            .bind(captured.get::<i64, _>("span_length"))
+            .bind(captured.get::<Option<f64>, _>("confidence"))
+            .bind(captured.get::<String, _>("source"))
+            .bind(captured.get::<String, _>("pipeline_version"))
+            .bind(captured.get::<String, _>("config_hash"))
+            .bind(captured.get::<Option<String>, _>("principal"))
+            .bind(captured.get::<String, _>("chain_hash"))
+            .bind(captured.get::<DateTime<Utc>, _>("created_at"))
+            .execute(&store.pool)
+            .await
+            .expect("restoring the deleted row failed");
+            store
+                .verify()
+                .await
+                .expect("chain must verify again once the row is restored");
         });
     }
 }
