@@ -298,6 +298,30 @@ hacienda pii reveal <TOKEN> [--format json|text]
 
 # Audit chain verification (flat export from --audit-out)
 hacienda audit verify <dir> [--format json|text]
+
+# Audit chain history and export (durable FileAuditStore directory, not --audit-out)
+hacienda audit list <dir> --node <id> [--config-hash <hash>] [--after <cursor>] \
+  [--limit 50] [--format json|text]
+hacienda audit export <dir> --node <id> --out <file> [--config-hash <hash>] \
+  [--format json|csv|json-lines]
+
+# Human review queue (AI Act Art. 14) — <dir> is written by extract/scan --review-out
+hacienda review list <dir> [--status pending|in-review|approved|rejected|modified] [--format json|text]
+hacienda review show <dir> <id> [--format json|text]
+hacienda review assign <dir> <id> --reviewer <name> [--format json|text]
+hacienda review decide <dir> <id> --decision approve|reject|modify --reviewer <name> \
+  [--comment <text>] [--format json|text]
+hacienda review stats <dir> [--format json|text]
+
+# GDPR/AI-Act/DORA compliance artefacts (pure functions of [compliance] config)
+hacienda compliance dpia [--format json|text]
+hacienda compliance model-card [--format json|text]
+hacienda compliance checklist [--format json|text]
+hacienda compliance dora --incident <file> [--format json|text]
+hacienda compliance report [--incident <file>] [--format json|text]
+
+# Shell completions
+hacienda completions bash|zsh|fish|powershell|elvish
 ```
 
 ### Key CLI Flags
@@ -310,8 +334,14 @@ hacienda audit verify <dir> [--format json|text]
 | `--audit-out`                 | Write audit chain to directory                        |
 | `--vault`                     | Export Track I2 vault (documents/, pii-registry.json) |
 | `--glossary-out`              | Write entity glossary to directory                    |
+| `--review-out`                | Materialise this run's low-confidence detections into a durable review queue |
 | `--no-redact`                 | Emit unredacted text (requires `--i-accept-unredacted-pii`) |
 | `--concurrency`               | PII pipeline worker count (default: CPU count)        |
+
+`audit list`/`audit export --node <id>` is required, not defaulted: `FileAuditStore` segments
+are per-writer (`root/<node>/`), so there is no directory-only way to discover which writer's
+history to open without guessing wrong and silently opening (and writing an empty segment
+into) a different node's history.
 
 ## Development
 

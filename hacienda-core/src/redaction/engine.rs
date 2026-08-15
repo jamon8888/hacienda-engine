@@ -230,7 +230,8 @@ mod tests {
             "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
             _ => None,
         });
-        Some(Arc::new(Pseudonymiser::new(&resolver, &[]).unwrap()))
+        let ctx = crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
+        Some(Arc::new(Pseudonymiser::new(&ctx, &resolver, &[]).unwrap()))
     }
 
     /// Shorthand for the common case: redaction that is expected to succeed.

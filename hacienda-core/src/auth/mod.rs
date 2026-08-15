@@ -317,6 +317,7 @@ pub trait ApiKeyStore: Send + Sync {
     /// [`Self::get_by_lookup_hash`] to find this record from a presented key.
     async fn create(
         &self,
+        ctx: &crate::tenancy::TenantCtx,
         key_hash: &str,
         lookup_hash: &str,
         owner: &str,
@@ -330,16 +331,34 @@ pub trait ApiKeyStore: Send + Sync {
     /// freshly computed `key_hash` for a presented key never matches the stored one.
     /// Callers must still call `crate::auth::keys::verify_key` against the returned
     /// record's `key_hash` before trusting the match.
+    ///
+    /// Deliberately **not** scoped by tenant (S1): a presented raw key is how a caller's
+    /// tenant is discovered in the first place, so this must search across every tenant.
     async fn get_by_lookup_hash(
         &self,
         lookup_hash: &str,
     ) -> Result<Option<ApiKey>, crate::auth::keys::ApiKeyError>;
 
-    /// Revoke an API key by ID.
-    async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError>;
+    /// Revoke an API key by ID, scoped to `ctx`'s tenant (S1).
+    ///
+    /// Revoking an id that does not exist, was already revoked, or belongs to a
+    /// different tenant are all indistinguishable no-ops — same idempotency contract as
+    /// before S1, now also closing a cross-tenant gap: without the tenant filter, any
+    /// caller holding `auth:manage` could revoke another tenant's key by guessing its
+    /// id, since ids are never exposed to non-owners. See `crate::tenancy` module docs,
+    /// D-S1-6 (cross-tenant absence looks identical to non-existence).
+    async fn revoke(
+        &self,
+        ctx: &crate::tenancy::TenantCtx,
+        id: uuid::Uuid,
+    ) -> Result<(), crate::auth::keys::ApiKeyError>;
 
-    /// List API keys for an owner.
-    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError>;
+    /// List API keys for an owner within `ctx`'s tenant (S1).
+    async fn list(
+        &self,
+        ctx: &crate::tenancy::TenantCtx,
+        owner: &str,
+    ) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError>;
 }
 
 /// In-memory implementation of [`ApiKeyStore`] for testing.
@@ -358,6 +377,7 @@ impl InMemoryApiKeyStore {
 impl ApiKeyStore for InMemoryApiKeyStore {
     async fn create(
         &self,
+        ctx: &crate::tenancy::TenantCtx,
         key_hash: &str,
         lookup_hash: &str,
         owner: &str,
@@ -373,6 +393,7 @@ impl ApiKeyStore for InMemoryApiKeyStore {
             capabilities: serde_json::to_value(capabilities).unwrap(),
             created_at: now,
             revoked_at: None,
+            tenant_id: ctx.tenant.to_string(),
         };
         // Keyed by `lookup_hash`, the deterministic digest — `key_hash` is salted and
         // would never match a freshly hashed presented key. See the `keys` module docs.
@@ -390,21 +411,32 @@ impl ApiKeyStore for InMemoryApiKeyStore {
         Ok(self.keys.lock().unwrap().get(lookup_hash).cloned())
     }
 
-    async fn revoke(&self, id: uuid::Uuid) -> Result<(), crate::auth::keys::ApiKeyError> {
+    async fn revoke(
+        &self,
+        ctx: &crate::tenancy::TenantCtx,
+        id: uuid::Uuid,
+    ) -> Result<(), crate::auth::keys::ApiKeyError> {
         let mut keys = self.keys.lock().unwrap();
-        if let Some(key) = keys.values_mut().find(|k| k.id == id) {
+        if let Some(key) = keys
+            .values_mut()
+            .find(|k| k.id == id && k.tenant_id == ctx.tenant.as_str())
+        {
             key.revoked_at = Some(chrono::Utc::now());
         }
         Ok(())
     }
 
-    async fn list(&self, owner: &str) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError> {
+    async fn list(
+        &self,
+        ctx: &crate::tenancy::TenantCtx,
+        owner: &str,
+    ) -> Result<Vec<ApiKey>, crate::auth::keys::ApiKeyError> {
         Ok(self
             .keys
             .lock()
             .unwrap()
             .values()
-            .filter(|k| k.owner == owner)
+            .filter(|k| k.owner == owner && k.tenant_id == ctx.tenant.as_str())
             .cloned()
             .collect())
     }
