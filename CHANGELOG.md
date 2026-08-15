@@ -166,8 +166,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MissingPseudonymKey` whenever that mode has no pseudonymiser). Conditional on mode,
   not unconditional: `Pseudonymiser::new` resolves the active key eagerly, so wiring it
   in on every run would break every non-pseudonymize invocation on a host with no
-  `HACIENDA_PSEUDONYM_ACTIVE_KEY` set. `hacienda serve` has the identical gap and is not
-  fixed by this change — known, not yet addressed.
+  `HACIENDA_PSEUDONYM_ACTIVE_KEY` set. `hacienda serve` had the identical gap; see the
+  next entry.
+- **`hacienda serve` now works in pseudonymize mode.** `run_serve` called
+  `HaciendaFacade::new(config)` directly instead of the `build_facade` helper the entry
+  above added — the same conditional-on-mode key-resolver wiring `run_extract`/`run_scan`
+  already used, just not called from `run_serve`. `HaciendaFacade::build` resolves the
+  pseudonymiser eagerly (`PiiPipeline::with_pseudonymiser` → `RedactionEngine::new`,
+  propagated through `.transpose()?`), so a server configured with
+  `[pii.redaction] mode = "pseudonymize"` failed at facade construction and never got as
+  far as binding its socket — it exited before printing its "serving on" line, not merely
+  on first request. Fixed by routing `run_serve` through the same `build_facade` helper.
+  Covered by a new regression test (`hacienda-cli/tests/serve_pseudonymize.rs`) that
+  starts `hacienda serve` in pseudonymize mode with a key configured and asserts the
+  process reaches its "serving on" line rather than exiting first.
 - **`hacienda pii reveal <token>` (CLI/API parity).** Reverses a pseudonym token via
   `HaciendaFacade::reveal_token_with_auth` as `Caller::Trusted` (the CLI's process
   boundary is the trust boundary, same precedent `serve` documents). Every
