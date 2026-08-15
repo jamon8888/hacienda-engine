@@ -35,7 +35,9 @@ use crate::{
     dto::AnswerRequest,
     error::ApiError,
     extract::Json as SafeJson,
-    handlers::{caller_from_arc, extract_auth_context, rag::require_store},
+    handlers::{
+        caller_from_arc, extract_auth_context, rag::require_store, rag::scope_collection_name,
+    },
     state::ApiState,
 };
 
@@ -66,10 +68,12 @@ pub async fn answer(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+    let scoped_name = scope_collection_name(&tenant_ctx, &name);
 
     let store = require_store(&state)?;
     let spec = store
-        .get_collection(&name)
+        .get_collection(&scoped_name)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
@@ -80,7 +84,7 @@ pub async fn answer(
     body.retrieve.validate(&spec).map_err(ApiError::from)?;
 
     let output = store
-        .retrieve(&name, &body.retrieve)
+        .retrieve(&scoped_name, &body.retrieve)
         .await
         .map_err(ApiError::from)?;
 

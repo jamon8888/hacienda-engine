@@ -71,3 +71,42 @@ class JobTimeoutError(Exception):
         self.job_id = job_id
         self.timeout = timeout
         super().__init__(f"job {job_id!r} did not reach a terminal state within {timeout:.1f}s")
+
+
+def _unwrap_json(response: Any) -> Any:
+    """Like `_unwrap`, but for routes whose OpenAPI response schema is `serde_json::Value`.
+
+    `hacienda-api/src/handlers/rag.rs`'s `retrieve`, `create_collection`, and
+    `get_collection` all declare their 200/201 response as `body = serde_json::Value`
+    in their `#[utoipa::path]` annotation (their `CollectionSpec`/`RetrieveOutput`
+    types aren't `utoipa::ToSchema`-registered) — this resolves to an empty `{}`
+    schema in the generated OpenAPI document. Given nothing to construct a typed
+    object from, `openapi-python-client`'s generated `_parse_response` for these
+    routes unconditionally returns `None` on success, discarding the real response
+    body entirely — confirmed by reading both the generated
+    `_generated/api/rag/{retrieve,create_collection,get_collection}.py` and the raw
+    OpenAPI document's `"schema": {}` for these routes. `response.content` (the raw
+    bytes) is still populated correctly; only `.parsed` is lost. This falls back to
+    parsing `response.content` directly whenever `.parsed` came back empty on a 2xx,
+    and behaves exactly like `_unwrap` for every other route/status.
+    """
+    status = int(response.status_code)
+    if 200 <= status < 300:
+        if response.parsed is not None:
+            return response.parsed
+        if not response.content:
+            return None
+        try:
+            return json.loads(response.content)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Mirror `_unwrap`'s error-path handling: an undecodable body on a
+            # 2xx response (backend bug, mangling proxy, ...) should still
+            # surface as the documented `HaciendaApiError` contract, not a raw
+            # parse exception.
+            raise HaciendaApiError(
+                status_code=status,
+                code=None,
+                message=f"could not parse response body as JSON: {exc}",
+            ) from exc
+
+    return _unwrap(response)

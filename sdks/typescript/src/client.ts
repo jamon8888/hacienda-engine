@@ -13,6 +13,12 @@
  */
 
 import createClient, { type Client } from "openapi-fetch";
+// `dist/client.d.ts` re-exports this import verbatim, so any real consumer building
+// against `dist/` needs `dist/_generated/api.d.ts` to exist — `tsc` does not emit it
+// there on its own (`_generated/api.d.ts` is `openapi-typescript` output: an ambient
+// `.d.ts` with no matching `.ts` source, and `tsc` only writes declarations for
+// sources it compiles, never copies a plain `.d.ts` input to `outDir`). See package.json's
+// `postbuild` script, which copies it across after `tsc` runs.
 import type { components, paths } from "./_generated/api.js";
 import { JobTimeoutError, unwrap } from "./errors.js";
 

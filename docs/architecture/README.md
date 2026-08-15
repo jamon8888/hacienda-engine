@@ -50,6 +50,13 @@ Tous dans `superpowers/specs/`.
 PR #42/#43 dont elles prolongent les mesures), E1–E5 (attendent P1 livré et éprouvé par E0).
 Elles restent définies par le programme. Voir son §2 bis.
 
+### Durcissement opérationnel (hors découpage P/S/E)
+
+| Document | Rôle |
+| --- | --- |
+| [`2026-08-08-production-readiness-hardening.md`](../../superpowers/specs/2026-08-08-production-readiness-hardening.md) | Quatre écarts entre ce qui est documenté/déployé et ce que le code fait réellement : mode pseudonymize cassé sur `hacienda serve`, chemin de déploiement Docker non fonctionnel, tests d'audit Postgres isolés en CI, absence de télémétrie réelle malgré `docker-compose.yml` |
+| [`2026-08-08-production-readiness-hardening-implementation.md`](../../superpowers/plans/2026-08-08-production-readiness-hardening-implementation.md) | Plan d'implémentation en quatre PR indépendantes |
+
 ### Specs antérieures dont ce travail dépend
 
 | Document | Ce qu'il apporte |
@@ -89,10 +96,10 @@ sa licence, son mode de distribution et sa gouvernance.
 
 **Exception temporaire à « ne doit jamais entrer dans le graphe de dépendances » (2026-08-08).**
 Le sous-module git `test_documents` du commit `xberg-io/xberg` épinglé par `tag = "v1.0.2"`
-(`9dcc864d`) pointe vers un commit qui n'existe plus sur `xberg-io/test_documents` — vérifié par
+(`9dcc864d`) pointe vers un commit qui n’existe plus sur `xberg-io/test_documents` — vérifié par
 un `git fetch <sha>` direct, qui renvoie « not our ref », et vrai de **chaque** tag `xberg-io/xberg`
-de v1.0.2 à v1.0.14 : ce n'est pas réparable en changeant de version. `cargo` récupère
-inconditionnellement les sous-modules d'une dépendance git lors de la résolution, donc ceci casse
+de v1.0.2 à v1.0.14 : ce n’est pas réparable en changeant de version. `cargo` récupère
+inconditionnellement les sous-modules d’une dépendance git lors de la résolution, donc ceci casse
 `cargo build` pour tout le workspace, sur `main` comme sur toute branche. Le workaround adopté :
 `jamon8888/xberg@fix/test-documents-submodule-pin` — arbre identique au commit `9dcc864d`, avec
 uniquement ce gitlink repointé vers le HEAD valide actuel de `test_documents`. `Cargo.toml` et

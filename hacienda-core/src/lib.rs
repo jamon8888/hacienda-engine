@@ -54,7 +54,11 @@ pub mod redaction;
 pub mod review;
 #[cfg(all(any(feature = "postgres", feature = "s3"), not(target_arch = "wasm32")))]
 pub mod store;
-#[cfg(not(target_arch = "wasm32"))]
+// Not native-only despite living near `auth`/`facade`: `tenancy`'s types are plain
+// `String` newtypes plus serde, and `redaction::pseudonym` — wasm-safe, see above — takes
+// a `TenantCtx` parameter on `KeyResolver`/`Pseudonymiser` (S1). Gating this behind
+// `not(target_arch = "wasm32")` would make the browser build's own `Pseudonymiser::new`
+// call site (`crates/hacienda-wasm/src/lib.rs`) uncompilable.
 pub mod tenancy;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -67,5 +71,4 @@ pub use error::HaciendaError;
 pub use facade::{
     HaciendaFacade, HaciendaMetadata, HaciendaResult, SpanText, TextRedactResult, TextScanResult,
 };
-#[cfg(not(target_arch = "wasm32"))]
 pub use tenancy::{ActorId, ProjectId, TenantCtx, TenantId};

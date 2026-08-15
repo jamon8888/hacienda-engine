@@ -31,6 +31,33 @@ export async function mockNerModelAssets(page: Page): Promise<void> {
   );
 }
 
+/**
+ * Same rationale as `mockNerModelAssets` above, for `@remotion/whisper-web`'s own model
+ * download (`ggml-{model}.bin`, `get-model-url.ts`): the real `tiny.en` weights alone are
+ * ~74MB (`SIZES` in `@remotion/whisper-web/dist/constants.js`), so fetching them for real in
+ * this suite would be exactly the slow, non-deterministic network dependency the NER mock
+ * above exists to avoid — independent of whether a given sandbox can even reach
+ * huggingface.co at all (this one cannot; see `audio.spec.ts`'s header).
+ *
+ * The fake bytes this returns are not a valid ggml model, so they only stand in for
+ * *reaching* `downloadWhisperModel()`/`WhisperBridge.load()` on the main thread without a
+ * real fetch — proving `canUseWhisperWeb()` no longer rejects on `window` being undefined
+ * (Track D3's bug). Exercising a real download against genuinely valid model weights, and
+ * real inference against them, is — like the NER model's real-download path above — left to
+ * a separate, manually-triggered run against real network access, not this suite.
+ */
+export async function mockWhisperModelAssets(page: Page): Promise<void> {
+  await page.route(
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/**",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/octet-stream",
+        body: Buffer.from([0, 1, 2, 3]),
+      }),
+  );
+}
+
 /** Mocks NER assets and marks onboarding as already dismissed, but does not navigate. */
 export async function skipOnboarding(page: Page): Promise<void> {
   await mockNerModelAssets(page);

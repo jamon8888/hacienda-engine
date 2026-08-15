@@ -4,7 +4,8 @@
   "private": true,
   "workspaces": [
     "apps/*",
-    "sdks/typescript"
+    "sdks/typescript",
+    "integrations/node/*"
   ],
   "scripts": {
     "dev": "turbo run dev",
