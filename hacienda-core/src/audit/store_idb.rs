@@ -199,6 +199,7 @@ fn rehydrate(snapshot: Snapshot, node_id: &NodeId, config_hash: &str) -> Result<
         Some(open) => {
             let mut segment = Segment::open_with_id(
                 open.segment_id,
+                crate::tenancy::TenantId::default_tenant(),
                 node_id.clone(),
                 config_hash.to_owned(),
                 prev_seal_hash,

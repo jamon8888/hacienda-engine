@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                   priority, assigned_reviewer, decided_by, decided_at, decision, comment,\n                   deadline, created_at\n            FROM review_items\n            WHERE id = $1\n            ",
+  "query": "\n            SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                   priority, assigned_reviewer, decided_by, decided_at, decision, comment,\n                   deadline, created_at, tenant_id\n            FROM review_items\n            WHERE id = $1 AND tenant_id = $2\n            ",
   "describe": {
     "columns": [
       {
@@ -82,10 +82,16 @@
         "ordinal": 15,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "tenant_id",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -105,8 +111,9 @@
       true,
       true,
       true,
+      false,
       false
     ]
   },
-  "hash": "8ef755ca5ca03dd6dfb98acaaaef152b146aff3c56ff0563f19bf64b05a5199a"
+  "hash": "64a11d370a1eef961366d8487dc0fe41a8e0e3ffef90b365ddb8d2eda56c3557"
 }

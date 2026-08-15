@@ -13,6 +13,7 @@ use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineR
 use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionError};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
+use crate::tenancy::{ActorId, TenantCtx};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
@@ -173,9 +174,14 @@ impl HaciendaFacade {
             .map(KeyId::new)
             .transpose()
             .map_err(key_error)?;
+        // S1 (tenancy) has not yet been threaded through the facade's PII pipeline — this
+        // constructor keeps today's single-tenant behavior exactly, resolving under the
+        // default tenant. A per-tenant pipeline is a larger change than the `KeyResolver`
+        // signature update alone (see the Vague 2 plan's S1 task #6 note).
+        let ctx = TenantCtx::default_tenant(ActorId::new("facade"));
         let pseudonymiser = match configured {
-            Some(id) => Pseudonymiser::with_active(resolver, id, retired),
-            None => Pseudonymiser::new(resolver, retired),
+            Some(id) => Pseudonymiser::with_active(&ctx, resolver, id, retired),
+            None => Pseudonymiser::new(&ctx, resolver, retired),
         }
         .map_err(key_error)?;
         Self::build(config, Some(Arc::new(pseudonymiser)), None, None, None)
@@ -334,7 +340,13 @@ impl HaciendaFacade {
         })?;
         let pair = crate::auth::keys::generate_key()?;
         let key = store
-            .create(&pair.key_hash, &pair.lookup_hash, owner, capabilities)
+            .create(
+                &caller.tenant_ctx(),
+                &pair.key_hash,
+                &pair.lookup_hash,
+                owner,
+                capabilities,
+            )
             .await?;
         Ok((pair, key))
     }
@@ -357,7 +369,7 @@ impl HaciendaFacade {
         let store = self.api_key_store.as_ref().ok_or_else(|| {
             crate::auth::keys::ApiKeyError::Hashing("no API key store configured".into())
         })?;
-        store.revoke(key_id).await?;
+        store.revoke(&caller.tenant_ctx(), key_id).await?;
         Ok(())
     }
 
@@ -1362,33 +1374,46 @@ mod tests {
             self.inner.submit(item).await
         }
 
-        async fn assign(&self, id: &str, reviewer: &str) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.assign(id, reviewer).await
+        async fn assign(
+            &self,
+            ctx: &TenantCtx,
+            id: &str,
+            reviewer: &str,
+        ) -> Result<ReviewQueueItem, ReviewError> {
+            self.inner.assign(ctx, id, reviewer).await
         }
 
         async fn decide(
             &self,
+            ctx: &TenantCtx,
             id: &str,
             decision: ReviewDecision,
             reviewer: &str,
             comment: &str,
         ) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.decide(id, decision, reviewer, comment).await
+            self.inner
+                .decide(ctx, id, decision, reviewer, comment)
+                .await
         }
 
         async fn list(
             &self,
+            ctx: &TenantCtx,
             filter: Option<ReviewStatus>,
         ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
-            self.inner.list(filter).await
+            self.inner.list(ctx, filter).await
         }
 
-        async fn get(&self, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
-            self.inner.get(id).await
+        async fn get(
+            &self,
+            ctx: &TenantCtx,
+            id: &str,
+        ) -> Result<Option<ReviewQueueItem>, ReviewError> {
+            self.inner.get(ctx, id).await
         }
 
-        async fn stats(&self) -> Result<QueueStats, ReviewError> {
-            self.inner.stats().await
+        async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
+            self.inner.stats(ctx).await
         }
 
         async fn close(&self) -> Result<(), ReviewError> {
@@ -1522,7 +1547,8 @@ mod tests {
         assert!(content.contains("[EMAIL:k1:"), "{content}");
 
         // The whole point of the mode: the value is recoverable by a key holder.
-        let pseudonymiser = Pseudonymiser::new(&key_resolver(), &[]).unwrap();
+        let ctx = TenantCtx::default_tenant(ActorId::new("test"));
+        let pseudonymiser = Pseudonymiser::new(&ctx, &key_resolver(), &[]).unwrap();
         assert_eq!(
             pseudonymiser.reveal(token_in(content)).unwrap(),
             "bob@example.com"
@@ -1657,7 +1683,7 @@ mod tests {
             facade
                 .review_queue()
                 .expect("review queue is configured")
-                .stats()
+                .stats(&TenantCtx::default_tenant(ActorId::new("test")))
                 .await
                 .expect("stats")
                 .pending,
@@ -1893,7 +1919,13 @@ mod tests {
             item_id = item.id.clone();
 
             queue
-                .decide(&item_id, ReviewDecision::Approve, "amy", "looks right")
+                .decide(
+                    &TenantCtx::default_tenant(ActorId::new("test")),
+                    &item_id,
+                    ReviewDecision::Approve,
+                    "amy",
+                    "looks right",
+                )
                 .await
                 .expect("decide first run");
 
@@ -1917,7 +1949,7 @@ mod tests {
             let item = facade
                 .review_queue()
                 .expect("queue after restart")
-                .get(&item_id)
+                .get(&TenantCtx::default_tenant(ActorId::new("test")), &item_id)
                 .await
                 .expect("get after restart")
                 .expect("the item written in the first run must still exist");
@@ -1981,7 +2013,14 @@ mod tests {
             .await
             .expect("submit must reach the supplied store");
 
-        assert_eq!(queue.stats().await.expect("stats").total, 1);
+        assert_eq!(
+            queue
+                .stats(&TenantCtx::default_tenant(ActorId::new("test")))
+                .await
+                .expect("stats")
+                .total,
+            1
+        );
     }
 
     /// `verify_audit` on a facade with no audit store returns `Ok(())`.
@@ -2744,6 +2783,60 @@ mod tests {
         assert!(
             resolved_after_revoke.is_none(),
             "a revoked key must not authenticate"
+        );
+    }
+
+    /// S1: a caller in one tenant must not be able to revoke a key issued under a
+    /// different tenant, even though both hold `auth:manage` — closes the gap where
+    /// `ApiKeyStore::revoke` used to take only an id, with no tenant (or owner) check at
+    /// all. The revoke call itself must not error (same idempotent-no-op contract as
+    /// revoking an unknown id — see `ApiKeyStore::revoke`'s doc comment), and the key
+    /// must keep authenticating afterwards.
+    #[tokio::test]
+    async fn a_caller_cannot_revoke_a_different_tenants_key() {
+        let (facade, store) = facade_with_key_store();
+        let acme_ctx = AuthContext::with_tenant(
+            "acme-admin",
+            crate::tenancy::TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([Capability::AuthManage]),
+        );
+        let acme_caller = Caller::Principal(&acme_ctx);
+
+        let (pair, record) = facade
+            .issue_key_with_auth(acme_caller, "owner-1", vec![Capability::DocumentsProcess])
+            .await
+            .expect("issue must succeed");
+
+        let globex_ctx = AuthContext::with_tenant(
+            "globex-admin",
+            crate::tenancy::TenantId::new("globex"),
+            crate::auth::CapabilitySet::new([Capability::AuthManage]),
+        );
+        let globex_caller = Caller::Principal(&globex_ctx);
+
+        facade
+            .revoke_key_with_auth(globex_caller, record.id)
+            .await
+            .expect("cross-tenant revoke must not error — same no-op contract as an unknown id");
+
+        let resolver = crate::auth::authn::ApiKeyTokenResolver::new(
+            Arc::clone(&store) as Arc<dyn ApiKeyStore>
+        );
+        assert!(
+            resolver.resolve(&pair.raw_key).await.unwrap().is_some(),
+            "a different tenant's revoke call must not revoke this key"
+        );
+
+        // Positive control: a filter that rejected every revoke unconditionally would
+        // also pass the assertion above. Confirm the issuing tenant can still revoke
+        // its own key, so this test pins both halves of the contract.
+        facade
+            .revoke_key_with_auth(acme_caller, record.id)
+            .await
+            .expect("the issuing tenant must be able to revoke its own key");
+        assert!(
+            resolver.resolve(&pair.raw_key).await.unwrap().is_none(),
+            "the issuing tenant's revoke must take effect"
         );
     }
 

@@ -5,6 +5,7 @@ use crate::jobs::{
     types::{Job, JobStatus},
     JobStore,
 };
+use crate::tenancy::TenantCtx;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -26,6 +27,7 @@ struct JobRow {
     id: String,
     status: String,
     owner: Option<String>,
+    tenant_id: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     result_json: Option<String>,
@@ -42,6 +44,7 @@ fn row_to_job(row: JobRow) -> Job {
         id: row.id,
         status: row.status.parse().unwrap_or(JobStatus::Queued),
         owner: row.owner,
+        tenant_id: row.tenant_id,
         created_at: row.created_at.to_rfc3339(),
         updated_at: row.updated_at.to_rfc3339(),
         result_json: row.result_json,
@@ -65,6 +68,7 @@ struct JobRowWithProgress {
     id: String,
     status: String,
     owner: Option<String>,
+    tenant_id: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     result_json: Option<String>,
@@ -77,6 +81,7 @@ fn row_to_job_with_progress(row: JobRowWithProgress) -> Job {
         id: row.id,
         status: row.status.parse().unwrap_or(JobStatus::Queued),
         owner: row.owner,
+        tenant_id: row.tenant_id,
         created_at: row.created_at.to_rfc3339(),
         updated_at: row.updated_at.to_rfc3339(),
         result_json: row.result_json,
@@ -87,18 +92,20 @@ fn row_to_job_with_progress(row: JobRowWithProgress) -> Job {
 
 #[async_trait]
 impl JobStore for PostgresJobStore {
-    async fn create(&self, owner: Option<String>) -> Result<Job, JobError> {
+    async fn create(&self, ctx: &TenantCtx, owner: Option<String>) -> Result<Job, JobError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let tenant_id = ctx.tenant.to_string();
 
         sqlx::query!(
             r#"
-            INSERT INTO jobs (id, status, owner, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO jobs (id, status, owner, tenant_id, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
             "#,
             id,
             JobStatus::Queued.to_string(),
             owner,
+            tenant_id,
             now,
             now
         )
@@ -110,6 +117,7 @@ impl JobStore for PostgresJobStore {
             id,
             status: JobStatus::Queued,
             owner,
+            tenant_id,
             created_at: now.to_rfc3339(),
             updated_at: now.to_rfc3339(),
             result_json: None,
@@ -124,7 +132,7 @@ impl JobStore for PostgresJobStore {
         // live-Postgres `.sqlx/` cache regeneration for this one query. See
         // `JobRowWithProgress`'s doc comment.
         let row: Option<JobRowWithProgress> = sqlx::query_as(
-            "SELECT id, status, owner, created_at, updated_at, result_json, error, progress_json FROM jobs WHERE id = $1",
+            "SELECT id, status, owner, tenant_id, created_at, updated_at, result_json, error, progress_json FROM jobs WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -142,7 +150,7 @@ impl JobStore for PostgresJobStore {
             UPDATE jobs
             SET progress_json = $1, updated_at = $2
             WHERE id = $3
-            RETURNING id, status, owner, created_at, updated_at, result_json, error, progress_json
+            RETURNING id, status, owner, tenant_id, created_at, updated_at, result_json, error, progress_json
             "#,
         )
         .bind(progress_json)
@@ -165,7 +173,7 @@ impl JobStore for PostgresJobStore {
             UPDATE jobs
             SET status = $1, updated_at = $2
             WHERE id = $3 AND status = $4
-            RETURNING id, status, owner, created_at, updated_at, result_json, error
+            RETURNING id, status, owner, tenant_id, created_at, updated_at, result_json, error
             "#,
             to.to_string(),
             now,
@@ -193,7 +201,7 @@ impl JobStore for PostgresJobStore {
             UPDATE jobs
             SET status = $1, result_json = $2, updated_at = $3
             WHERE id = $4
-            RETURNING id, status, owner, created_at, updated_at, result_json, error
+            RETURNING id, status, owner, tenant_id, created_at, updated_at, result_json, error
             "#,
             JobStatus::Succeeded.to_string(),
             result_json,
@@ -216,7 +224,7 @@ impl JobStore for PostgresJobStore {
             UPDATE jobs
             SET status = $1, error = $2, updated_at = $3
             WHERE id = $4
-            RETURNING id, status, owner, created_at, updated_at, result_json, error
+            RETURNING id, status, owner, tenant_id, created_at, updated_at, result_json, error
             "#,
             JobStatus::Failed.to_string(),
             error,
@@ -236,7 +244,7 @@ impl JobStore for PostgresJobStore {
                 sqlx::query_as!(
                     JobRow,
                     r#"
-                    SELECT id, status, owner, created_at, updated_at, result_json, error
+                    SELECT id, status, owner, tenant_id, created_at, updated_at, result_json, error
                     FROM jobs
                     WHERE status = $1
                     ORDER BY created_at, id
@@ -250,7 +258,7 @@ impl JobStore for PostgresJobStore {
                 sqlx::query_as!(
                     JobRow,
                     r#"
-                    SELECT id, status, owner, created_at, updated_at, result_json, error
+                    SELECT id, status, owner, tenant_id, created_at, updated_at, result_json, error
                     FROM jobs
                     ORDER BY created_at, id
                     "#
@@ -269,12 +277,17 @@ impl JobStore for PostgresJobStore {
 mod tests {
     use super::*;
     use crate::store::postgres::test_support;
+    use crate::tenancy::ActorId;
     use std::sync::Arc;
 
     // Ignored by default — shares one Postgres instance with the other postgres-feature
     // test modules (see `test_support::shared`), so needs `--test-threads=1`. Run with:
     //   cargo test -p hacienda-core --features postgres \
     //     --lib store::postgres::jobs -- --ignored --test-threads=1
+
+    fn ctx() -> TenantCtx {
+        TenantCtx::default_tenant(ActorId::new("test"))
+    }
 
     async fn test_store() -> PostgresJobStore {
         PostgresJobStore::new(test_support::shared().await.pool())
@@ -287,11 +300,12 @@ mod tests {
             let store = test_store().await;
 
             let job = store
-                .create(Some("tenant-a".to_owned()))
+                .create(&ctx(), Some("tenant-a".to_owned()))
                 .await
                 .expect("create failed");
             assert_eq!(job.status, JobStatus::Queued);
             assert_eq!(job.owner.as_deref(), Some("tenant-a"));
+            assert_eq!(job.tenant_id, "default");
 
             let fetched = store
                 .get(&job.id)
@@ -308,7 +322,7 @@ mod tests {
     fn should_let_exactly_one_concurrent_claim_win() {
         test_support::block_on_shared(async {
             let store = Arc::new(test_store().await);
-            let job = store.create(None).await.expect("create failed");
+            let job = store.create(&ctx(), None).await.expect("create failed");
 
             let mut handles = Vec::new();
             for _ in 0..8 {

@@ -11,6 +11,7 @@
 use hacienda_core::pii::{PiiPipeline, PipelineConfig};
 use hacienda_core::redaction::pseudonym::{EnvKeyResolver, Pseudonymiser};
 use hacienda_core::redaction::{RedactionConfig, RedactionEngine, RedactionMode};
+use hacienda_core::tenancy::{ActorId, TenantCtx};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -50,8 +51,12 @@ pub fn redact_empty(text: String, mode: String) -> Result<JsValue, JsValue> {
     let mode: RedactionMode = mode.parse().map_err(to_js_err)?;
     let pseudonymiser = if mode == RedactionMode::Pseudonymize {
         let resolver = EnvKeyResolver::new();
+        // Browser-side Studio has no tenant concept of its own — one in-process,
+        // single-tenant pipeline per page load, same as every other wasm entry point
+        // in this file.
+        let ctx = TenantCtx::default_tenant(ActorId::new("wasm"));
         Some(Arc::new(
-            Pseudonymiser::new(&resolver, &[]).map_err(to_js_err)?,
+            Pseudonymiser::new(&ctx, &resolver, &[]).map_err(to_js_err)?,
         ))
     } else {
         None

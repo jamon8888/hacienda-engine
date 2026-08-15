@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at\n            FROM api_keys\n            WHERE owner = $1\n            ORDER BY created_at DESC\n            ",
+  "query": "\n            INSERT INTO api_keys (key_hash, lookup_hash, owner, capabilities, tenant_id)\n            VALUES ($1, $2, $3, $4, $5)\n            RETURNING id, key_hash, lookup_hash, owner, capabilities, created_at, revoked_at, tenant_id\n            ",
   "describe": {
     "columns": [
       {
@@ -37,10 +37,19 @@
         "ordinal": 6,
         "name": "revoked_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "tenant_id",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
         "Text"
       ]
     },
@@ -51,8 +60,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "364412ee2124fc024b56598daa3b0949f64a9e8b19b10123d6d05fce29464b89"
+  "hash": "ef9cfdcb56cf70309fb3062b7aca2930bda1c2be07861c5d7672b02d3f7412b9"
 }

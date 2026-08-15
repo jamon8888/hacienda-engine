@@ -9,6 +9,8 @@ use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::RagStore;
 use std::sync::Arc;
 
+use crate::quota::InMemoryQuotaStore;
+
 /// Body / batch limits applied uniformly to every request.
 ///
 /// The defaults — 32 MiB for a body, 64 documents per batch — match the brief and
@@ -71,6 +73,10 @@ pub struct ApiState {
     /// `UsageStore`'s only implementation queries `audit_entries` directly (Postgres-only),
     /// so this is opt-in the same way.
     pub(crate) usage_store: Option<Arc<dyn UsageStore>>,
+    /// Per-tenant request-rate quota (S1 spec §7), enforced by `quota::quota_middleware`
+    /// before `DefaultBodyLimit`/any body decode. `None` means quotas are not enforced —
+    /// today's behaviour, and opt-in the same way every other store above is.
+    pub(crate) quota_store: Option<Arc<InMemoryQuotaStore>>,
 }
 
 impl ApiState {
@@ -90,6 +96,7 @@ impl ApiState {
             version_store: None,
             object_store: None,
             usage_store: None,
+            quota_store: None,
         }
     }
 
@@ -132,6 +139,15 @@ impl ApiState {
     #[must_use]
     pub fn with_usage_store(mut self, usage_store: Arc<dyn UsageStore>) -> Self {
         self.usage_store = Some(usage_store);
+        self
+    }
+
+    /// Enable per-tenant request-rate quota enforcement (S1 spec §7) by attaching a
+    /// quota store. Builder-style, mirroring `with_usage_store` exactly, so existing
+    /// call sites are unaffected — quotas stay off until an embedder opts in.
+    #[must_use]
+    pub fn with_quota_store(mut self, quota_store: Arc<InMemoryQuotaStore>) -> Self {
+        self.quota_store = Some(quota_store);
         self
     }
 }

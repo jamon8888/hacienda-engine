@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE review_items\n            SET status = 'in_review', assigned_reviewer = $1\n            WHERE id = $2 AND status = 'pending'\n            RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                      priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,\n                      decision, comment\n            ",
+  "query": "\n            UPDATE review_items\n            SET status = $1, decided_by = $2, decided_at = $3, decision = $4, comment = $5\n            WHERE id = $6 AND tenant_id = $7 AND decision IS NULL\n            RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,\n                      priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,\n                      decision, comment, tenant_id\n            ",
   "describe": {
     "columns": [
       {
@@ -82,10 +82,20 @@
         "ordinal": 15,
         "name": "comment",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "tenant_id",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text",
         "Text",
         "Text"
       ]
@@ -106,8 +116,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "bf7333518cefd50d0c2a2e64c4c7ddc70a32d37caaf3c00ec152310164609b3c"
+  "hash": "cedd353e0bf90b143e9e89dabcbb936227b6293dc7d1ecfbc45ef4f30ed92685"
 }
