@@ -18,6 +18,7 @@ use hacienda::HaciendaConfig;
 use hacienda_core::glossary::GlossaryConfig;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::RedactionMode;
+use hacienda_core::review::ReviewConfig;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -210,6 +211,18 @@ fn apply_cli_overrides(
     if wants_glossary {
         config.glossary.get_or_insert_with(GlossaryConfig::default);
     }
+
+    // `--review-out` reads `HaciendaFacade::review_queue`, which is only ever built when
+    // `config.review` is `Some` (`HaciendaFacade::build`'s `(None, Some(cfg)) =>
+    // ReviewQueue::new(cfg)` arm) — the same "flag parsed, then discarded" failure shape
+    // `[pii]` and `[glossary]` materialisation above already guard against.
+    // `ReviewConfig::default()` is a real, working default (0.5 confidence threshold, a
+    // 24-hour deadline), not a placeholder.
+    let wants_review = extract_args.is_some_and(|a| a.review_out.is_some())
+        || scan_args.is_some_and(|a| a.review_out.is_some());
+    if wants_review {
+        config.review.get_or_insert_with(ReviewConfig::default);
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +320,7 @@ mod tests {
             audit_out: None,
             vault: None,
             glossary_out: None,
+            review_out: None,
             no_redact: false,
             i_accept_unredacted_pii: false,
             concurrency: crate::cli::ConcurrencyArgs { concurrency: None },
@@ -317,6 +331,38 @@ mod tests {
             .pii
             .expect("--mode must materialise a [pii] section even without a config file");
         assert_eq!(pii.redaction.mode, RedactionMode::Hash);
+    }
+
+    #[test]
+    fn should_materialise_review_config_from_review_out_when_no_review_section_was_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hacienda.toml");
+        std::fs::write(&path, "").unwrap();
+
+        let extract_args = ExtractArgs {
+            inputs: vec!["doc.txt".into()],
+            mode: None,
+            threshold: None,
+            model_dir: None,
+            lora_dir: None,
+            format: crate::cli::Format::Text,
+            audit_out: None,
+            vault: None,
+            glossary_out: None,
+            review_out: Some(dir.path().join("review")),
+            no_redact: false,
+            i_accept_unredacted_pii: false,
+            concurrency: crate::cli::ConcurrencyArgs { concurrency: None },
+        };
+
+        let config = load_config(Some(path), None, Some(&extract_args), None).unwrap();
+        let review = config
+            .review
+            .expect("--review-out must materialise a [review] section even without a config file");
+        assert_eq!(
+            review.confidence_threshold,
+            ReviewConfig::default().confidence_threshold
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ import type { ProgressUpdate } from "../lib/types";
 
 const stageLabels: Record<ProgressUpdate["stage"], string> = {
   extract: "Extracting text",
+  transcribe: "Transcribing audio",
   ner: "Finding entities",
   pii: "Scanning for PII",
   link: "Linking entities",
