@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`hacienda-studio`'s audio/video transcription now actually runs, instead of failing
+  synchronously in every environment.** `worker/pipeline.ts` runs inside a Web Worker and
+  constructed `@remotion/whisper-web`'s `WhisperBridge` directly; that package's own
+  `canUseWhisperWeb()` checks `typeof window === "undefined"` and refuses to run otherwise —
+  a Worker has `self`, not `window`, so every `WhisperBridge.load()`/`transcribeAudio()` call
+  threw `"Whisper Web is not supported: `window` is not defined"` unconditionally, regardless
+  of network access or which model was selected. Fixed architecturally, not patched:
+  `WhisperBridge` (`lib/transcription/whisper-bridge.ts`) now runs only on the main thread
+  (a `WhisperBridge` instance owned by `App.tsx`), and the worker requests a transcription
+  over `postMessage` and awaits the reply — a small request/response correlation map
+  (`worker/transcribe-bridge.ts`'s `TranscriptionRequestBridge`, unit-tested in isolation)
+  keyed by `requestId`, with its own timeout so a lost or never-sent reply fails just that one
+  file (through the existing per-file `try`/`catch` in `processFiles`) instead of hanging the
+  whole batch — the same isolation guarantee a prior fix already gave the old, always-broken
+  code path. `WhisperBridge.transcribeAudio()`'s resample/transcribe progress callbacks are
+  now threaded into the existing per-file progress UI (a new `"transcribe"` `ProgressUpdate`
+  stage) instead of only reaching `console.log`. `tests/e2e/audio.spec.ts`, which previously
+  pinned the exact broken-in-every-environment error message as the expected outcome, now
+  asserts the opposite: that message must never appear again, and (via a mocked model host,
+  the same pattern already used for the NER model's real download) that the model download
+  is actually attempted on the main thread — real inference against real model weights is
+  intentionally left to a manual run, not this suite, for the same reason the NER model's
+  real ~600MB download already is.
 - **`postgres-store-tests` (new CI job) no longer fails on a connection-pool leak or a
   segment-creation race.** These `hacienda-core` Postgres-backed store tests were
   `#[ignore]`d and had never run in CI before; wiring them up (this changelog's "Postgres
