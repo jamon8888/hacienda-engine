@@ -971,7 +971,7 @@ async fn write_review_queue(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
          apply_cli_overrides in hacienda-cli/src/config.rs)",
     )?;
     let items = queue
-        .list(None)
+        .list(&Caller::Trusted.tenant_ctx(), None)
         .await
         .context("reading this run's review queue")?;
 
@@ -1075,7 +1075,10 @@ fn print_review_item(item: &ReviewQueueItem, format: Format) -> Result<()> {
 pub async fn run_review_list(args: ReviewListArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let items = queue
-        .list(args.status.map(review_status_from_arg))
+        .list(
+            &Caller::Trusted.tenant_ctx(),
+            args.status.map(review_status_from_arg),
+        )
         .await
         .context("listing the review queue")?;
 
@@ -1105,7 +1108,7 @@ pub async fn run_review_list(args: ReviewListArgs) -> Result<()> {
 pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .get(&args.id)
+        .get(&Caller::Trusted.tenant_ctx(), &args.id)
         .await
         .context("reading the review item")?
         .ok_or_else(|| anyhow::anyhow!("no review item with id '{}'", args.id))?;
@@ -1116,7 +1119,7 @@ pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
 pub async fn run_review_assign(args: ReviewAssignArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .assign(&args.id, &args.reviewer)
+        .assign(&Caller::Trusted.tenant_ctx(), &args.id, &args.reviewer)
         .await
         .with_context(|| format!("assigning review item '{}'", args.id))?;
     print_review_item(&item, args.format)
@@ -1127,6 +1130,7 @@ pub async fn run_review_decide(args: ReviewDecideArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
         .decide(
+            &Caller::Trusted.tenant_ctx(),
             &args.id,
             review_decision_from_arg(args.decision),
             &args.reviewer,
@@ -1140,7 +1144,10 @@ pub async fn run_review_decide(args: ReviewDecideArgs) -> Result<()> {
 /// Run `hacienda review stats <dir>`.
 pub async fn run_review_stats(args: ReviewStatsArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
-    let stats = queue.stats().await.context("reading review queue stats")?;
+    let stats = queue
+        .stats(&Caller::Trusted.tenant_ctx())
+        .await
+        .context("reading review queue stats")?;
 
     match args.format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
