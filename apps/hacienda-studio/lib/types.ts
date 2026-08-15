@@ -57,7 +57,16 @@ export interface ProcessedFile {
 
 export interface ProgressUpdate {
   file: string;
-  stage: "extract" | "ner" | "pii" | "link" | "complete" | "error";
+  /**
+   * `"transcribe"` is posted from `App.tsx` directly, not relayed through the worker's
+   * `postProgress` — the worker only ever emits `progress` messages for stages it runs
+   * itself, but transcription now runs on the main thread (see
+   * `worker/transcribe-bridge.ts`'s header for why), and `App.tsx` already owns the
+   * `progress` state this feeds. Its `percent`/`message` come from `WhisperBridge`'s
+   * `onProgress` (resample and transcribe phases), so this is real progress, not a fixed
+   * placeholder — same guarantee every other stage here already gives the UI.
+   */
+  stage: "extract" | "transcribe" | "ner" | "pii" | "link" | "complete" | "error";
   percent: number;
   message?: string;
 }
