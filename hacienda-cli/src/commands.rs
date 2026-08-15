@@ -28,6 +28,7 @@ use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::{EnvKeyResolver, RedactionMode};
+use hacienda_core::tenancy::{ActorId, TenantCtx};
 use hacienda_rag::InMemoryVectorStore;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -971,7 +972,7 @@ async fn write_review_queue(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
          apply_cli_overrides in hacienda-cli/src/config.rs)",
     )?;
     let items = queue
-        .list(None)
+        .list(&trusted_tenant_ctx(), None)
         .await
         .context("reading this run's review queue")?;
 
@@ -1003,6 +1004,15 @@ async fn write_review_queue(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
 /// gate `Capability::ReviewDecide`/`AuditRead` against, and going through a full
 /// `HaciendaFacade` just to reach a `ReviewQueue` it would build identically would add
 /// indirection without adding a check that means anything for this caller.
+/// The `TenantCtx` every `review` subcommand's `ReviewQueue` call uses. Mirrors
+/// `Caller::Trusted`'s own mapping (`hacienda_core::auth::mod::AuthState`) — the CLI is
+/// in-process, so there is no remote caller to scope a tenant to, same reasoning
+/// `open_review_queue`'s doc comment already gives for skipping the facade/capability
+/// check entirely.
+fn trusted_tenant_ctx() -> TenantCtx {
+    TenantCtx::default_tenant(ActorId::new("trusted"))
+}
+
 fn open_review_queue(store: &ReviewStoreArgs) -> Result<ReviewQueue> {
     let log_path = store.dir.join("review.jsonl");
     let backend = FileReviewStore::open(&log_path)
@@ -1075,7 +1085,7 @@ fn print_review_item(item: &ReviewQueueItem, format: Format) -> Result<()> {
 pub async fn run_review_list(args: ReviewListArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let items = queue
-        .list(args.status.map(review_status_from_arg))
+        .list(&trusted_tenant_ctx(), args.status.map(review_status_from_arg))
         .await
         .context("listing the review queue")?;
 
@@ -1105,7 +1115,7 @@ pub async fn run_review_list(args: ReviewListArgs) -> Result<()> {
 pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .get(&args.id)
+        .get(&trusted_tenant_ctx(), &args.id)
         .await
         .context("reading the review item")?
         .ok_or_else(|| anyhow::anyhow!("no review item with id '{}'", args.id))?;
@@ -1116,7 +1126,7 @@ pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
 pub async fn run_review_assign(args: ReviewAssignArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .assign(&args.id, &args.reviewer)
+        .assign(&trusted_tenant_ctx(), &args.id, &args.reviewer)
         .await
         .with_context(|| format!("assigning review item '{}'", args.id))?;
     print_review_item(&item, args.format)
@@ -1127,6 +1137,7 @@ pub async fn run_review_decide(args: ReviewDecideArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
         .decide(
+            &trusted_tenant_ctx(),
             &args.id,
             review_decision_from_arg(args.decision),
             &args.reviewer,
@@ -1140,7 +1151,10 @@ pub async fn run_review_decide(args: ReviewDecideArgs) -> Result<()> {
 /// Run `hacienda review stats <dir>`.
 pub async fn run_review_stats(args: ReviewStatsArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
-    let stats = queue.stats().await.context("reading review queue stats")?;
+    let stats = queue
+        .stats(&trusted_tenant_ctx())
+        .await
+        .context("reading review queue stats")?;
 
     match args.format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
