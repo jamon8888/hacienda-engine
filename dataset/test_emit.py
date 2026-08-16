@@ -101,6 +101,20 @@ def test_an_empty_span_is_rejected():
     assert raised
 
 
+def test_a_whitespace_only_span_is_rejected():
+    # A span covering only whitespace tokenizes to zero GLiNER2 tokens, which would
+    # otherwise pass the bounds check and silently drop the whole entity type.
+    chunk = "Acme  Corp."
+    start = chunk.index("  ")
+    try:
+        to_gliner2_record(chunk, [(start, start + 2, "party")])
+        raised = False
+    except ValueError:
+        raised = True
+
+    assert raised
+
+
 def test_the_record_survives_a_json_round_trip():
     import json
 

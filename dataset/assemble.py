@@ -9,8 +9,9 @@ mention strings**, not spans, and resolves them to word spans internally via
 `ExtractorDataset._load_dict_list` raises `ValueError("Unknown dict format...")` on
 anything else, which is what the older `to_word_span_record` emits — that is GLiNER
 **v1**'s `{"tokenized_text", "ner"}` shape (spec 2026-08-15 §1.1). It is retained
-only for its round-trip discipline, now re-pointed as a preflight in
-`training/dataset_preflight.py`; nothing feeds the trainer from it.
+only for its round-trip discipline (`training/dataset_preflight.py` independently
+covers the same width/resolvability failure modes against `to_gliner2_record`'s
+output); nothing feeds the trainer from it.
 
 Mentions are sliced straight out of `chunk_text` rather than rebuilt from tokens.
 Rebuilding collapses runs of whitespace and drops punctuation, and GLiNER2's matcher
@@ -48,6 +49,11 @@ def to_gliner2_record(
                 f"Python slicing would clamp it into a silently shorter mention"
             )
         mention = chunk_text[start:end]
+        if not mention.strip():
+            raise ValueError(
+                f"span ({start}, {end}) is whitespace-only; it tokenizes to zero "
+                f"GLiNER2 tokens and would silently drop the {label!r} entity type"
+            )
         # Duplicates add no supervision: GLiNER2 resolves a mention to every
         # occurrence in the text, not to the one span it came from.
         mentions = entities.setdefault(label, [])
