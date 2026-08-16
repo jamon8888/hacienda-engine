@@ -36,6 +36,7 @@ from safetensors.numpy import save_file
 DEFAULT_TARGET_MODULES = ["query_proj", "key_proj", "value_proj"]
 
 _LORA_SUFFIXES = (".lora_A.weight", ".lora_B.weight")
+_PEFT_PREFIX = "base_model.model."
 
 
 def base_model_name_for(model_dir: str | pathlib.Path) -> str:
@@ -89,11 +90,15 @@ def module_paths_from_tensor_keys(lora_tensors: dict[str, np.ndarray]) -> list[s
     """The module paths `merge_into_base` will look up, derived from PEFT tensor keys.
 
     Mirrors `parse_lora_key` (`candle/lora.rs:172-185`): strip the
-    `base_model.model.` prefix, then the `.lora_{A,B}.weight` suffix.
+    `base_model.model.` prefix, then the `.lora_{A,B}.weight` suffix. Keys missing the
+    prefix are skipped — `removeprefix` is a no-op on them, and treating the bare
+    suffix-stripped key as a module path can spuriously match an unrelated base key.
     """
     paths = set()
     for key in lora_tensors:
-        stripped = key.removeprefix("base_model.model.")
+        if not key.startswith(_PEFT_PREFIX):
+            continue
+        stripped = key[len(_PEFT_PREFIX) :]
         for suffix in _LORA_SUFFIXES:
             if stripped.endswith(suffix):
                 paths.add(stripped[: -len(suffix)])
@@ -117,20 +122,28 @@ def write_adapter(
     Tensors are cast to F32 here rather than trusted to already be F32, since the
     training dtype is a property of the run, not of this call.
     """
-    if r == 0:
-        raise ValueError("r=0 is rejected at load (candle/lora.rs:94)")
+    if r <= 0:
+        raise ValueError(f"r={r} is rejected at load (candle/lora.rs:94)")
 
     target_modules = target_modules or DEFAULT_TARGET_MODULES
 
     model_id = base_model_name_for(base_model_dir)
-    if not passes_base_model_guard(model_id, model_id):
-        raise ValueError(f"unusable base model id: {model_id!r}")
+    if not model_id:
+        raise ValueError(
+            f"base model directory {base_model_dir!r} resolves to an empty basename; "
+            f"an empty base_model_name_or_path passes the loader's substring guard "
+            f"vacuously against any deployed model, silently disabling it"
+        )
 
-    bad_keys = [k for k in lora_tensors if not k.endswith(_LORA_SUFFIXES)]
+    bad_keys = [
+        k
+        for k in lora_tensors
+        if not (k.startswith(_PEFT_PREFIX) and k.endswith(_LORA_SUFFIXES))
+    ]
     if bad_keys:
         raise ValueError(
-            f"non-PEFT tensor keys {bad_keys}; expected names ending in "
-            f"{' or '.join(_LORA_SUFFIXES)}"
+            f"non-PEFT tensor keys {bad_keys}; expected names starting with "
+            f"{_PEFT_PREFIX!r} and ending in {' or '.join(_LORA_SUFFIXES)}"
         )
     if not lora_tensors:
         raise ValueError("refusing to write an adapter with no LoRA tensors")

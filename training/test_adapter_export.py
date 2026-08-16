@@ -153,6 +153,31 @@ def test_rank_zero_is_rejected(tmp_path):
         )
 
 
+def test_negative_rank_is_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        write_adapter(
+            tmp_path / "adapter",
+            make_tensors(),
+            base_model_dir=tmp_path / "gliner2-guardrails-pii-multi",
+            r=-1,
+            lora_alpha=16,
+        )
+
+
+def test_a_base_model_dir_resolving_to_an_empty_basename_is_rejected(tmp_path):
+    # base_model_name_for("/") returns "", which would pass the loader's substring
+    # guard vacuously against any deployed model, silently disabling the one
+    # cross-model check this module promises to preserve.
+    with pytest.raises(ValueError):
+        write_adapter(
+            tmp_path / "adapter",
+            make_tensors(),
+            base_model_dir="/",
+            r=8,
+            lora_alpha=16,
+        )
+
+
 def test_non_peft_tensor_keys_are_rejected(tmp_path):
     with pytest.raises(ValueError):
         write_adapter(
@@ -162,6 +187,30 @@ def test_non_peft_tensor_keys_are_rejected(tmp_path):
             r=8,
             lora_alpha=16,
         )
+
+
+def test_a_suffix_valid_key_missing_the_peft_prefix_is_rejected(tmp_path):
+    # removeprefix is a no-op when the base_model.model. prefix is absent, so a key
+    # with only the LoRA suffix can still resolve to a module path that spuriously
+    # matches an unrelated base key — the exporter must catch this, not just the
+    # loader's parse_lora_key at load time.
+    with pytest.raises(ValueError):
+        write_adapter(
+            tmp_path / "adapter",
+            {f"{QUERY_PROJ}.lora_A.weight": np.zeros((8, 768), dtype=np.float32)},
+            base_model_dir=tmp_path / "gliner2-guardrails-pii-multi",
+            r=8,
+            lora_alpha=16,
+        )
+
+
+def test_module_paths_from_tensor_keys_skips_keys_missing_the_peft_prefix():
+    keys = {
+        f"{QUERY_PROJ}.lora_A.weight": np.zeros((8, 768), dtype=np.float32),
+        f"base_model.model.{QUERY_PROJ}.lora_B.weight": np.zeros((768, 8), dtype=np.float32),
+    }
+
+    assert module_paths_from_tensor_keys(keys) == [QUERY_PROJ]
 
 
 def test_an_empty_adapter_is_rejected(tmp_path):
