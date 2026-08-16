@@ -93,8 +93,21 @@ pub enum AuditError {
     /// immediately after should never fail. Reported rather than asserted with
     /// `expect` — a panic in a library takes the whole process down with it, and an
     /// audit write is exactly the operation that must not do that.
-    #[error("audit store invariant violated: {0}")]
-    Internal(String),
+    ///
+    /// Structured (rather than a bare `String`) so every call site is forced to name
+    /// the operation and tenant it was serving, matching this enum's other variants —
+    /// an operator debugging "audit store invariant violated" alone has no way to tell
+    /// which tenant's data is affected or which store method to look at first.
+    #[error("audit store invariant violated during '{operation}' for tenant '{tenant}': {cause}")]
+    Internal {
+        /// The [`AuditStore`](crate::audit::AuditStore) method that discovered the
+        /// broken invariant, e.g. `"append"` or `"history"`.
+        operation: &'static str,
+        /// The tenant whose state the invariant check was for.
+        tenant: String,
+        /// What was expected to hold and did not.
+        cause: String,
+    },
 }
 
 /// Lets Postgres backend code use `?` directly on `sqlx::Error` instead of a

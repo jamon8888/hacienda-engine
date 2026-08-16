@@ -238,6 +238,15 @@ impl std::fmt::Display for KeyId {
 
 /// One key's identity and rotation status, with no key material — the shape
 /// [`GET /v1/keys`](crate::HaciendaFacade::list_keys_with_auth) reports (D-P3-3).
+///
+/// # Tenant scoping
+///
+/// `KeyStatus` itself carries no tenant field — the scoping happens one layer up.
+/// [`HaciendaFacade::list_keys_with_auth`](crate::HaciendaFacade::list_keys_with_auth)
+/// resolves the caller's [`Pseudonymiser`] for their own tenant before calling
+/// [`Pseudonymiser::key_statuses`], so the `Vec<KeyStatus>` a caller receives already
+/// contains only the keys loaded for *their* tenant. Two tenants configured with
+/// disjoint key sets never see each other's `id`s through this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyStatus {
     pub id: KeyId,

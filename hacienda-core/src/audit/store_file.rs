@@ -471,10 +471,11 @@ impl AuditStore for FileAuditStore {
         let (entries, bytes, path, should_sync) = {
             let mut map = self.state();
             let state = map.get_mut(tenant).ok_or_else(|| {
-                AuditError::Internal(format!(
-                    "append: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                    tenant = tenant.as_str()
-                ))
+                AuditError::Internal {
+                    operation: "append",
+                    tenant: tenant.as_str().to_string(),
+                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                }
             })?;
 
             let segment = state.open.as_mut().ok_or(AuditError::StoreClosed {
@@ -549,10 +550,11 @@ impl AuditStore for FileAuditStore {
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
         let state = map.get(tenant).ok_or_else(|| {
-            AuditError::Internal(format!(
-                    "entries: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                    tenant = tenant.as_str()
-                ))
+            AuditError::Internal {
+                operation: "entries",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+            }
         })?;
         Ok(state
             .open
@@ -598,10 +600,11 @@ impl AuditStore for FileAuditStore {
         let (sealed, open) = {
             let map = self.state();
             let state = map.get(tenant).ok_or_else(|| {
-                AuditError::Internal(format!(
-                    "history: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                    tenant = tenant.as_str()
-                ))
+                AuditError::Internal {
+                    operation: "history",
+                    tenant: tenant.as_str().to_string(),
+                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                }
             })?;
             let open = state
                 .open
@@ -637,10 +640,11 @@ impl AuditStore for FileAuditStore {
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
         let state = map.get(tenant).ok_or_else(|| {
-            AuditError::Internal(format!(
-                "tip: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                tenant = tenant.as_str()
-            ))
+            AuditError::Internal {
+                operation: "tip",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+            }
         })?;
         match state.open.as_ref() {
             Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
@@ -658,10 +662,11 @@ impl AuditStore for FileAuditStore {
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
         let state = map.get(tenant).ok_or_else(|| {
-            AuditError::Internal(format!(
-                    "seals: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                    tenant = tenant.as_str()
-                ))
+            AuditError::Internal {
+                operation: "seals",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+            }
         })?;
         Ok(state.sealed.clone())
     }
@@ -675,10 +680,11 @@ impl AuditStore for FileAuditStore {
         let (sealed, open_entries, open_tip, tenant_dir) = {
             let map = self.state();
             let state = map.get(tenant).ok_or_else(|| {
-                AuditError::Internal(format!(
-                    "verify: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                    tenant = tenant.as_str()
-                ))
+                AuditError::Internal {
+                    operation: "verify",
+                    tenant: tenant.as_str().to_string(),
+                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                }
             })?;
             let (entries, tip) = match state.open.as_ref() {
                 Some(s) => (s.entries().to_vec(), s.tip().to_owned()),
@@ -718,10 +724,11 @@ impl AuditStore for FileAuditStore {
         let (seal, seal_bytes, seal_path, new_path) = {
             let mut map = self.state();
             let state = map.get_mut(tenant).ok_or_else(|| {
-                AuditError::Internal(format!(
-                    "rotate: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                    tenant = tenant.as_str()
-                ))
+                AuditError::Internal {
+                    operation: "rotate",
+                    tenant: tenant.as_str().to_string(),
+                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                }
             })?;
 
             let old = state.open.take().ok_or(AuditError::StoreClosed {
@@ -795,10 +802,11 @@ impl AuditStore for FileAuditStore {
         let (seal, seal_bytes, sp, already_closed) = {
             let mut map = self.state();
             let state = map.get_mut(tenant).ok_or_else(|| {
-                AuditError::Internal(format!(
-                    "close: tenant map entry disappeared after ensure_tenant_loaded for tenant {tenant}",
-                    tenant = tenant.as_str()
-                ))
+                AuditError::Internal {
+                    operation: "close",
+                    tenant: tenant.as_str().to_string(),
+                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
+                }
             })?;
 
             if let Some(existing) = &state.closed_seal {
