@@ -6,10 +6,11 @@ Both are cheap to measure on CPU before a run, so they are measured here (spec
 2026-08-15 §1.7, §3.3):
 
 - **Width.** `model.py:594-604` sets a span label only when
-  `0 <= width < scores.shape[3]`, where the bound is `max_width = 8` *tokens*. Wider
-  spans are dropped with no error and can never be learned. A vertical whose key
-  entity is routinely wider needs a different plan, not more epochs — so this reports
-  the affected labels, not just a count.
+  `0 <= width < scores.shape[3]`, where `width = end_word_idx - start_word_idx` and
+  the bound is `max_width = 8`. An N-token mention has width `N - 1`, so mentions
+  *over* `max_width` tokens are dropped with no error and can never be learned. A
+  vertical whose key entity is routinely wider needs a different plan, not more
+  epochs — so this reports the affected labels, not just a count.
 - **Resolvability.** GLiNER2 resolves mentions by contiguous sublist search over
   lowercased tokens (`SchemaTransformer._find_sublist`). `sanitize()` drops the
   **entire entity type** for a record on a single miss (`data.py:756`, `:796`), so one
@@ -61,15 +62,17 @@ def _iter_mentions(records: list[dict]):
 
 
 def width_violations(records: list[dict], max_width: int = MAX_WIDTH) -> list[Finding]:
-    """Mentions at or above `max_width` tokens, which are silently unlearnable.
+    """Mentions over `max_width` tokens, which are silently unlearnable.
 
-    The bound is exclusive in the model, so a mention of exactly `max_width` tokens is
-    already lost.
+    GLiNER2 computes `width = end_word_idx - start_word_idx`, so an N-token mention has
+    width `N - 1`. The model's bound is `0 <= width < max_width`, so a mention of
+    exactly `max_width` tokens (width `max_width - 1`) is still learnable — only
+    mentions with *more* than `max_width` tokens are lost.
     """
     return [
         Finding(index, label, mention)
         for index, label, mention in _iter_mentions(records)
-        if len(gliner2_tokens(mention)) >= max_width
+        if len(gliner2_tokens(mention)) > max_width
     ]
 
 
@@ -104,7 +107,16 @@ def assert_split_integrity(splits: dict[str, list[dict]]) -> None:
     seen: dict[str, str] = {}
     leaked: list[str] = []
     for split_name, records in splits.items():
-        for doc_id in {r["doc_id"] for r in records}:
+        doc_ids = set()
+        for index, r in enumerate(records):
+            if "doc_id" not in r:
+                raise ValueError(
+                    f"record {index} in split {split_name!r} has no doc_id; a record "
+                    f"cannot be assigned to a split without one — check the emitter "
+                    f"that produced this corpus"
+                )
+            doc_ids.add(r["doc_id"])
+        for doc_id in doc_ids:
             if seen.setdefault(doc_id, split_name) != split_name:
                 leaked.append(f"{doc_id!r} in both {seen[doc_id]!r} and {split_name!r}")
 

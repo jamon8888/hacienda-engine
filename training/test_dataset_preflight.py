@@ -11,24 +11,26 @@ def record(text: str, entities: dict[str, list[str]], doc_id: str = "d0") -> dic
     return {"input": text, "output": {"entities": entities}, "doc_id": doc_id}
 
 
-def test_a_span_at_the_width_cap_is_reported_because_the_bound_is_exclusive():
-    # model.py:594-604 sets a label only when `0 <= width < scores.shape[3]`, so a
-    # span of exactly max_width tokens is already unlearnable, not borderline.
+def test_a_span_at_the_width_cap_is_not_reported_because_width_is_end_minus_start():
+    # model.py:594-604 sets a label only when `0 <= width < scores.shape[3]`, and
+    # width = end_word_idx - start_word_idx, so an 8-token mention has width 7 and
+    # is still learnable under max_width=8.
     mention = " ".join(f"w{i}" for i in range(8))
+    assert width_violations([record(mention, {"clause": [mention]})], max_width=8) == []
+
+
+def test_a_span_one_token_over_the_cap_is_reported():
+    mention = " ".join(f"w{i}" for i in range(9))
     findings = width_violations([record(mention, {"clause": [mention]})], max_width=8)
 
     assert [f.mention for f in findings] == [mention]
 
 
-def test_a_span_one_token_under_the_cap_is_not_reported():
-    mention = " ".join(f"w{i}" for i in range(7))
-    assert width_violations([record(mention, {"clause": [mention]})], max_width=8) == []
-
-
 def test_width_is_counted_in_gliner2_tokens_not_whitespace_words():
-    # Punctuation is its own token, so this is 8 tokens to GLiNER2 but 5 to str.split().
-    mention = "Acme, Globex, Initech, and Umbrella"
-    assert len(mention.split()) < 8
+    # Punctuation is its own token, so this is 10 tokens to GLiNER2 but 6 to str.split() —
+    # over max_width=8 either way, but only the token count proves the right unit is used.
+    mention = "Acme, Globex, Initech, Umbrella, and Waystar"
+    assert len(mention.split()) <= 8
     findings = width_violations([record(mention, {"party": [mention]})], max_width=8)
 
     assert len(findings) == 1, "counting whitespace words understates the real width"
@@ -128,6 +130,16 @@ def test_the_same_doc_id_appearing_twice_within_one_split_is_fine():
     splits = {"train": [record("a", {}, doc_id="d1"), record("b", {}, doc_id="d1")], "val": []}
 
     assert_split_integrity(splits)
+
+
+def test_a_record_missing_doc_id_raises_a_contract_error_not_a_bare_key_error():
+    # A user-supplied corpus (e.g. loaded straight from JSONL) may not carry doc_id.
+    # It cannot be assigned to a split safely, so this must fail loudly and clearly,
+    # not with a bare KeyError and no record index.
+    splits = {"train": [{"input": "a", "output": {"entities": {}}}], "val": []}
+
+    with pytest.raises(ValueError, match="doc_id"):
+        assert_split_integrity(splits)
 
 
 def test_width_and_resolvability_report_rather_than_raise():
