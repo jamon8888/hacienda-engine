@@ -1,14 +1,22 @@
-"""Assemble accepted character-offset spans into GLiNER2's word-token training format.
+"""Assemble accepted character-offset spans into GLiNER2's training format.
 
-GLiNER2 trains on word-token spans, not character offsets (spec §8):
+`to_gliner2_record` is the emitter the trainer consumes. GLiNER2 takes **verbatim
+mention strings**, not spans, and resolves them to word spans internally via
+`SchemaTransformer._find_sublist` over lowercased tokenized text:
 
-    {"tokenized_text": [...], "ner": [[start_word_idx, end_word_idx, label], ...]}
+    {"input": "...", "output": {"entities": {"party": ["Acme"], ...}}}
 
-A char-to-word remapping that drifts by one token has no error signal by default —
-it just silently corrupts a slice of the training set. `to_word_span_record` asserts
-the round trip internally (re-rendering the chosen word range must reproduce the
-original character span) rather than trusting the index arithmetic, since that's
-exactly the kind of drift a future refactor could reintroduce without failing loudly.
+`ExtractorDataset._load_dict_list` raises `ValueError("Unknown dict format...")` on
+anything else, which is what the older `to_word_span_record` emits — that is GLiNER
+**v1**'s `{"tokenized_text", "ner"}` shape (spec 2026-08-15 §1.1). It is retained
+only for its round-trip discipline (`training/dataset_preflight.py` independently
+covers the same width/resolvability failure modes against `to_gliner2_record`'s
+output); nothing feeds the trainer from it.
+
+Mentions are sliced straight out of `chunk_text` rather than rebuilt from tokens.
+Rebuilding collapses runs of whitespace and drops punctuation, and GLiNER2's matcher
+is verbatim — a mention it cannot find causes `sanitize()` to drop that entity type
+for the whole record, with no error.
 """
 
 import random
@@ -19,6 +27,45 @@ _WORD_RE = re.compile(r"\S+")
 
 def _words_with_offsets(text: str) -> list[tuple[str, int, int]]:
     return [(m.group(), m.start(), m.end()) for m in _WORD_RE.finditer(text)]
+
+
+def to_gliner2_record(
+    chunk_text: str,
+    char_spans: list[tuple[int, int, str]],
+    *,
+    doc_id: str = "",
+    source: str = "auto_labeled",
+) -> dict:
+    """Group accepted `(start, end, label)` spans into GLiNER2's `input`/`output` record.
+
+    `doc_id` and `source` ride along unchanged so `train_val_test_split` keeps working;
+    GLiNER2 ignores keys it does not recognise.
+    """
+    entities: dict[str, list[str]] = {}
+    for start, end, label in char_spans:
+        if not 0 <= start < end <= len(chunk_text):
+            raise ValueError(
+                f"span ({start}, {end}) is out of range for a {len(chunk_text)}-char chunk; "
+                f"Python slicing would clamp it into a silently shorter mention"
+            )
+        mention = chunk_text[start:end]
+        if not mention.strip():
+            raise ValueError(
+                f"span ({start}, {end}) is whitespace-only; it tokenizes to zero "
+                f"GLiNER2 tokens and would silently drop the {label!r} entity type"
+            )
+        # Duplicates add no supervision: GLiNER2 resolves a mention to every
+        # occurrence in the text, not to the one span it came from.
+        mentions = entities.setdefault(label, [])
+        if mention not in mentions:
+            mentions.append(mention)
+
+    return {
+        "input": chunk_text,
+        "output": {"entities": entities},
+        "doc_id": doc_id,
+        "source": source,
+    }
 
 
 def to_word_span_record(

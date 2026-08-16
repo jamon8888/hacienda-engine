@@ -146,7 +146,6 @@ impl JobStore for InMemoryJobStore {
         let now = now_rfc3339();
         let job = Job {
             id: id.clone(),
-            tenant: tenant.clone(),
             status: JobStatus::Queued,
             created_at: now.clone(),
             updated_at: now,
@@ -154,6 +153,7 @@ impl JobStore for InMemoryJobStore {
             error: None,
             progress_json: None,
             owner,
+            tenant_id: tenant.to_string(),
         };
         // Take the guard, insert, drop — no .await while held.
         let mut guard = self
@@ -173,7 +173,7 @@ impl JobStore for InMemoryJobStore {
         // tenant after, means a cross-tenant id falls straight into the same `None` a
         // nonexistent id produces — the not-found-not-forbidden property (D-S1b-1) falls
         // out of the lookup itself.
-        Ok(guard.get(id).filter(|j| j.tenant == *tenant).cloned())
+        Ok(guard.get(id).filter(|j| j.tenant_id == tenant.as_str()).cloned())
     }
 
     async fn transition(
@@ -189,7 +189,7 @@ impl JobStore for InMemoryJobStore {
             .map_err(|_| JobError::Internal("lock poisoned".into()))?;
         let job = guard
             .get_mut(id)
-            .filter(|j| j.tenant == *tenant)
+            .filter(|j| j.tenant_id == tenant.as_str())
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
         if job.status != from {
             return Err(JobError::StatusMismatch {
@@ -215,7 +215,7 @@ impl JobStore for InMemoryJobStore {
             .map_err(|_| JobError::Internal("lock poisoned".into()))?;
         let job = guard
             .get_mut(id)
-            .filter(|j| j.tenant == *tenant)
+            .filter(|j| j.tenant_id == tenant.as_str())
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
         job.status = JobStatus::Succeeded;
         job.result_json = Some(result_json);
@@ -230,7 +230,7 @@ impl JobStore for InMemoryJobStore {
             .map_err(|_| JobError::Internal("lock poisoned".into()))?;
         let job = guard
             .get_mut(id)
-            .filter(|j| j.tenant == *tenant)
+            .filter(|j| j.tenant_id == tenant.as_str())
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
         job.status = JobStatus::Failed;
         job.error = Some(error);
@@ -250,7 +250,7 @@ impl JobStore for InMemoryJobStore {
             .map_err(|_| JobError::Internal("lock poisoned".into()))?;
         let job = guard
             .get_mut(id)
-            .filter(|j| j.tenant == *tenant)
+            .filter(|j| j.tenant_id == tenant.as_str())
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
         job.progress_json = Some(progress_json);
         job.updated_at = now_rfc3339();
@@ -269,7 +269,7 @@ impl JobStore for InMemoryJobStore {
         let mut jobs: Vec<Job> = guard
             .values()
             .filter(|j| {
-                j.tenant == *tenant && filter.map(|status| j.status == status).unwrap_or(true)
+                j.tenant_id == tenant.as_str() && filter.map(|status| j.status == status).unwrap_or(true)
             })
             .cloned()
             .collect();
@@ -321,6 +321,17 @@ mod tests {
         // get round-trips the owner unchanged
         let fetched = store.get(&t(), &job.id).await.unwrap().unwrap();
         assert_eq!(fetched.owner.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn should_stamp_the_creating_tenant_onto_the_job() {
+        let store = InMemoryJobStore::new();
+        let acme = TenantId::new("acme");
+        let job = store.create(&acme, None).await.unwrap();
+        assert_eq!(job.tenant_id, "acme");
+
+        let fetched = store.get(&acme, &job.id).await.unwrap().unwrap();
+        assert_eq!(fetched.tenant_id, "acme");
     }
 
     #[tokio::test]

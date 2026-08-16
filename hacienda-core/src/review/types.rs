@@ -1,13 +1,12 @@
 //! Core types for the human review queue.
 
-use crate::tenancy::TenantId;
 use serde::{Deserialize, Serialize};
 
 /// A single item awaiting (or having received) human review.
 ///
 /// # Tenant scoping (S1b)
 ///
-/// `tenant` travels with the item rather than being a repeated parameter on every
+/// `tenant_id` travels with the item rather than being a repeated parameter on every
 /// [`crate::review::store::ReviewStore`] method — see that trait's doc and
 /// `tenancy.rs`'s module doc (decision D-S1-1) for why a store method still takes
 /// `&TenantId` explicitly wherever it cannot resolve the tenant from an item it already
@@ -15,15 +14,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewQueueItem {
     pub id: String,
-    /// Defaults to [`TenantId::default_tenant`] when absent on deserialization — a
-    /// record written by `FileReviewStore` before S1b shipped this field has no
-    /// `tenant` key in its JSONL line at all, and every such record was, in effect,
-    /// created for the single pre-tenancy deployment that field now names explicitly.
-    /// Without this default, `FileReviewStore::open`'s replay would fail outright on
-    /// any log written before this change (`review/store_file.rs` reads exactly this
-    /// struct back via `serde_json`).
-    #[serde(default = "TenantId::default_tenant")]
-    pub tenant: TenantId,
     pub text_snippet: String,
     pub category: String,
     pub start: u32,
@@ -39,6 +29,23 @@ pub struct ReviewQueueItem {
     pub decided_by: Option<String>,
     pub decided_at: Option<String>,
     pub comment: Option<String>,
+    /// The tenant this item belongs to (S1). Set by
+    /// [`ReviewQueue::submit`](crate::review::ReviewQueue::submit) — always `"default"`
+    /// until a caller uses
+    /// [`ReviewQueue::submit_for_tenant`](crate::review::ReviewQueue::submit_for_tenant).
+    ///
+    /// Defaulted on deserialize: a record written by `FileReviewStore` before S1b
+    /// shipped this field has no `tenant_id` key in its JSONL line at all, and every
+    /// such record was, in effect, created for the single pre-tenancy deployment this
+    /// default names explicitly. Without it, `FileReviewStore::open`'s replay would
+    /// fail outright on any log written before this change (`review/store_file.rs`
+    /// reads exactly this struct back via `serde_json`).
+    #[serde(default = "default_tenant_id")]
+    pub tenant_id: String,
+}
+
+fn default_tenant_id() -> String {
+    crate::tenancy::DEFAULT_TENANT.to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,8 +198,8 @@ impl Default for ReviewConfig {
 mod tests {
     use super::*;
 
-    /// A JSONL line written by `FileReviewStore` before S1b shipped the `tenant` field
-    /// has no `tenant` key at all. Without `#[serde(default = "TenantId::default_tenant")]`
+    /// A JSONL line written by `FileReviewStore` before S1b shipped the `tenant_id`
+    /// field has no `tenant_id` key at all. Without `#[serde(default = "default_tenant_id")]`
     /// this fails to deserialize, and `FileReviewStore::open`'s replay of an
     /// existing log from before this change would error on its very first line.
     #[test]
@@ -217,17 +224,17 @@ mod tests {
         }"#;
 
         let item: ReviewQueueItem = serde_json::from_str(legacy_json).unwrap();
-        assert_eq!(item.tenant, TenantId::default_tenant());
+        assert_eq!(item.tenant_id, default_tenant_id());
     }
 
-    /// A record that does carry a `tenant` key still deserializes to that tenant, not
-    /// the default — the `#[serde(default = ...)]` must only kick in when the key is
-    /// absent, never override an explicit value.
+    /// A record that does carry a `tenant_id` key still deserializes to that tenant,
+    /// not the default — the `#[serde(default = ...)]` must only kick in when the key
+    /// is absent, never override an explicit value.
     #[test]
     fn record_with_an_explicit_tenant_key_keeps_it() {
         let json = r#"{
             "id": "item-1",
-            "tenant": "acme",
+            "tenant_id": "acme",
             "text_snippet": "jane@example.com",
             "category": "email",
             "start": 0,
@@ -246,6 +253,6 @@ mod tests {
         }"#;
 
         let item: ReviewQueueItem = serde_json::from_str(json).unwrap();
-        assert_eq!(item.tenant, TenantId::new("acme"));
+        assert_eq!(item.tenant_id, "acme");
     }
 }

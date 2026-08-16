@@ -42,9 +42,9 @@ struct JobRow {
 fn row_to_job(row: JobRow) -> Job {
     Job {
         id: row.id,
-        tenant: TenantId::new(row.tenant_id),
         status: row.status.parse().unwrap_or(JobStatus::Queued),
         owner: row.owner,
+        tenant_id: row.tenant_id,
         created_at: row.created_at.to_rfc3339(),
         updated_at: row.updated_at.to_rfc3339(),
         result_json: row.result_json,
@@ -79,9 +79,9 @@ struct JobRowWithProgress {
 fn row_to_job_with_progress(row: JobRowWithProgress) -> Job {
     Job {
         id: row.id,
-        tenant: TenantId::new(row.tenant_id),
         status: row.status.parse().unwrap_or(JobStatus::Queued),
         owner: row.owner,
+        tenant_id: row.tenant_id,
         created_at: row.created_at.to_rfc3339(),
         updated_at: row.updated_at.to_rfc3339(),
         result_json: row.result_json,
@@ -115,9 +115,9 @@ impl JobStore for PostgresJobStore {
 
         Ok(Job {
             id,
-            tenant: tenant.clone(),
             status: JobStatus::Queued,
             owner,
+            tenant_id: tenant_id.to_owned(),
             created_at: now.to_rfc3339(),
             updated_at: now.to_rfc3339(),
             result_json: None,

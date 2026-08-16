@@ -17,6 +17,9 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+# `hacienda completions <shell>` — generates a completion script from the same `Cli`
+# clap already parses with, so the two can never drift out of sync with each other.
+clap_complete = "4"
 # Config discovery falls back to the platform config directory when no project-local
 # hacienda.{toml,yaml,json} is found — see hacienda-cli/src/config.rs. Mirrors
 # xberg's own ExtractionConfig::discover().
@@ -44,3 +47,6 @@ xberg = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Only used by tests/audit_store.rs to compute a span hash while seeding a FileAuditStore
+# directly (the same value hacienda-core computes internally for a real redaction).
+blake3 = { workspace = true }

@@ -117,6 +117,33 @@ impl NerDetector {
         Ok(Self::new(backend))
     }
 
+    /// [`from_candle_local`](Self::from_candle_local)'s wasm32 sibling: loads the same
+    /// Candle GLiNER2 backend from in-memory bytes rather than a filesystem model
+    /// directory — a browser has no disk to read `model_dir` from. The caller (Studio)
+    /// already fetches and IndexedDB-caches these three buffers for its own NER pass;
+    /// this does not fetch anything itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded.
+    #[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
+    pub fn from_candle_bytes(
+        weights: &[u8],
+        tokenizer_json: &[u8],
+        encoder_config_json: &[u8],
+    ) -> Result<Self, PiiError> {
+        let backend = xberg::text::ner::candle::CandleBackend::from_bytes(
+            weights,
+            tokenizer_json,
+            encoder_config_json,
+        )
+        .map_err(|source| PiiError::Ner {
+            message: "loading Candle GLiNER2 from in-memory bytes".into(),
+            source: Box::new(source),
+        })?;
+        Ok(Self::new(Arc::new(backend)))
+    }
+
     /// Detect entities in `text`.
     ///
     /// # Errors

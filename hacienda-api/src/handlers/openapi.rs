@@ -68,6 +68,7 @@ use crate::state::ApiState;
         crate::handlers::rag::get_collection,
         crate::handlers::rag::delete_collection,
         crate::handlers::rag::upsert_document,
+        crate::handlers::rag::reindex_document,
         crate::handlers::rag::retrieve,
         crate::handlers::rag::list_collections,
         crate::handlers::rag::list_documents,

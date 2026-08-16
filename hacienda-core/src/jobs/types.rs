@@ -5,7 +5,6 @@
 //! establishes the vocabulary before the endpoints build on it so they are not
 //! retrofitting a design onto a finished API surface.
 
-use crate::tenancy::TenantId;
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of an async document-processing job.
@@ -63,16 +62,6 @@ impl std::str::FromStr for JobStatus {
 pub struct Job {
     /// Stable identifier — UUID v4, assigned on creation.
     pub id: String,
-    /// Which customer's data this job touches (S1b). Set once at [`super::store::JobStore::create`]
-    /// and never changed. Distinct from `owner`: `owner` answers "whose job is this"
-    /// (actor-level — a user can't see another user's jobs), `tenant` answers "which
-    /// customer's data did touching this job disclose" (tenant-level — an org's admin has
-    /// no way to see their own org's jobs collectively without it, and an owner-less
-    /// `Caller::Trusted` job had no isolation at all before this field existed). See
-    /// `hacienda-core/src/tenancy.rs`'s module doc (decision D-S1-1) and
-    /// `superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`
-    /// §1.3.
-    pub tenant: TenantId,
     /// Current lifecycle state.
     pub status: JobStatus,
     /// RFC 3339 timestamp when the job was created.
@@ -104,4 +93,19 @@ pub struct Job {
     /// requests another tenant's job, preventing IDOR (OWASP A01). The store
     /// records the value; enforcement is the transport's responsibility.
     pub owner: Option<String>,
+    /// The tenant this job belongs to (S1). Unlike `owner` (a principal *within* a
+    /// tenant, optional for trusted callers), every job has exactly one tenant —
+    /// `Caller::Trusted`'s `tenant_ctx()` resolves to the `default` tenant, the same
+    /// one every pre-S1 job is attributed to.
+    ///
+    /// Defaulted on deserialize (mirroring `review::types::ReviewQueueItem::tenant_id`):
+    /// `Job` is not currently persisted via `serde_json` in any production backend, but
+    /// carrying the same default keeps the type safe to serialize/deserialize should a
+    /// future store do so.
+    #[serde(default = "default_tenant_id")]
+    pub tenant_id: String,
+}
+
+fn default_tenant_id() -> String {
+    crate::tenancy::DEFAULT_TENANT.to_owned()
 }

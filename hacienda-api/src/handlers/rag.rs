@@ -3,9 +3,12 @@
 //! Create/get/delete a collection, upsert a document, retrieve, list collections,
 //! list a collection's documents, and kick off (plus poll) an async
 //! `migrate-embeddings` job — every method `RagStore`
-//! (crates/hacienda-rag/src/store.rs) exposes now has a route. All routes require
-//! `documents:process` and are 400 (`ApiError::invalid_request`) when no store is
-//! configured (`ApiState::rag_store` is `None`).
+//! (crates/hacienda-rag/src/store.rs) exposes now has a route. `reindex_document`
+//! is the one route with no dedicated `RagStore` method: it composes
+//! `get_document_chunks` and `upsert_document`, both of which already have routes
+//! of their own. All routes require `documents:process` and are 400
+//! (`ApiError::invalid_request`) when no store is configured (`ApiState::rag_store`
+//! is `None`).
 
 use axum::{
     extract::{Path, State},
@@ -13,7 +16,8 @@ use axum::{
     Json,
 };
 use hacienda_core::jobs::JobStatus;
-use hacienda_rag::{CollectionSpec, RetrieveOutput, RetrieveQuery};
+use hacienda_core::tenancy::TenantCtx;
+use hacienda_rag::{CollectionSpec, DocumentId, RetrieveOutput, RetrieveQuery};
 use std::sync::Arc;
 
 use crate::{
@@ -64,6 +68,58 @@ pub(crate) fn require_store(
         .ok_or_else(|| ApiError::invalid_request("RAG is not enabled on this server."))
 }
 
+/// Prefix a caller-facing collection name with `ctx`'s tenant before it reaches
+/// `RagStore` (S1).
+///
+/// `hacienda-rag` is deliberately tenant-policy-free (see its crate-level doc
+/// comment) — it has no `tenant_id` column or field anywhere in its trait or types.
+/// Cloisonnement therefore happens here, at the API layer: every name-addressed
+/// `RagStore` call goes through this so two tenants can each create a collection
+/// named `"contracts"` without colliding or reading each other's data. Every handler
+/// in this module that accepts or returns a collection name must scope it on the way
+/// in and strip it on the way out — never let a scoped name reach a response body.
+///
+/// The default tenant's names are left unprefixed — same backward-compatibility rule
+/// `hacienda_core::redaction::pseudonym::EnvKeyResolver` and
+/// `hacienda_core::audit::segment::compute_seal_hash` both apply elsewhere in S1.
+/// `POST /v1/rag/collections` shipped (unscoped) before this PR, on `main` today — a
+/// deployment upgrading with existing collections must keep reaching them under their
+/// original, unprefixed names, not have this migration make them invisible.
+pub(crate) fn scope_collection_name(ctx: &TenantCtx, name: &str) -> String {
+    if ctx.tenant.as_str() == hacienda_core::tenancy::DEFAULT_TENANT {
+        name.to_owned()
+    } else {
+        format!("{}:{name}", ctx.tenant)
+    }
+}
+
+/// Inverse of [`scope_collection_name`]: strip `ctx`'s tenant prefix from a name
+/// read back from the store, returning `None` if `scoped_name` does not belong to
+/// this tenant (used to filter `RagStore::list_collections`, which has no
+/// tenant-aware filter of its own — see [`scope_collection_name`]'s doc comment).
+///
+/// For the default tenant, a name is its own — unless it contains `:`, treated as
+/// belonging to a non-default tenant's scoped name instead (the only shape
+/// [`scope_collection_name`] ever produces for one). A default-tenant collection
+/// literally named with a `:` in it is the one edge case this cannot distinguish from
+/// another tenant's scoped name — accepted for the same reason
+/// `redaction::pseudonym::sanitize_env_suffix` accepts a narrower case-only collision:
+/// a full reserved-character validation on collection names is a larger, separate
+/// change.
+fn strip_tenant_prefix(ctx: &TenantCtx, scoped_name: &str) -> Option<String> {
+    if ctx.tenant.as_str() == hacienda_core::tenancy::DEFAULT_TENANT {
+        if scoped_name.contains(':') {
+            None
+        } else {
+            Some(scoped_name.to_owned())
+        }
+    } else {
+        scoped_name
+            .strip_prefix(&format!("{}:", ctx.tenant))
+            .map(str::to_owned)
+    }
+}
+
 /// `POST /v1/rag/collections` — create a collection if it does not already exist.
 #[utoipa::path(
     post,
@@ -79,11 +135,18 @@ pub(crate) fn require_store(
 )]
 pub async fn create_collection(
     State(state): State<ApiState>,
+    parts: Parts,
     SafeJson(spec): SafeJson<CollectionSpec>,
 ) -> Result<(StatusCode, Json<CollectionSpec>), ApiError> {
     let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+
+    let mut scoped_spec = spec.clone();
+    scoped_spec.name = scope_collection_name(&tenant_ctx, &spec.name);
     store
-        .ensure_collection(&spec)
+        .ensure_collection(&scoped_spec)
         .await
         .map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(spec)))
@@ -105,14 +168,20 @@ pub async fn create_collection(
 )]
 pub async fn get_collection(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(name): Path<String>,
 ) -> Result<Json<CollectionSpec>, ApiError> {
     let store = require_store(&state)?;
-    let spec = store
-        .get_collection(&name)
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+
+    let mut spec = store
+        .get_collection(&scope_collection_name(&tenant_ctx, &name))
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
+    spec.name = name;
     Ok(Json(spec))
 }
 
@@ -131,10 +200,18 @@ pub async fn get_collection(
 )]
 pub async fn delete_collection(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let store = require_store(&state)?;
-    store.drop_collection(&name).await.map_err(ApiError::from)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+
+    store
+        .drop_collection(&scope_collection_name(&tenant_ctx, &name))
+        .await
+        .map_err(ApiError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -161,10 +238,14 @@ pub async fn delete_collection(
 )]
 pub async fn upsert_document(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(name): Path<String>,
     SafeJson(body): SafeJson<UpsertDocumentRequest>,
 ) -> Result<(StatusCode, Json<UpsertDocumentResponse>), ApiError> {
     let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
 
     let chunks = if body.chunks.is_empty() {
         // Off the async runtime: `chunk_text` is synchronous, CPU-bound work over
@@ -185,13 +266,92 @@ pub async fn upsert_document(
     };
 
     let document_id = store
-        .upsert_document(&name, &body.document, &chunks)
+        .upsert_document(
+            &scope_collection_name(&tenant_ctx, &name),
+            &body.document,
+            &chunks,
+        )
         .await
         .map_err(ApiError::from)?;
     Ok((
         StatusCode::CREATED,
         Json(UpsertDocumentResponse { document_id }),
     ))
+}
+
+/// `POST /v1/rag/collections/{name}/documents/{id}/reindex` — re-derive an
+/// existing document's chunks from its already-stored `full_text`, without the
+/// caller resubmitting content.
+///
+/// Hacienda-only addition closing the xberg-sdks `reindex_rag_document` gap
+/// (platform-parity design spec §3.1/§4.1). No new `RagStore` method needed:
+/// this reuses `get_document_chunks` (fetch) and the same `chunk_full_text`
+/// path `upsert_document` already runs when `chunks` is omitted, then
+/// re-upserts under the document's own identity.
+///
+/// Requires the document to have been upserted with `external_id` set.
+/// `RagStore::upsert_document`'s identity rule is "match by `external_id` when
+/// present, otherwise insert as a new document" — silently re-upserting a
+/// record that has no `external_id` would not update it in place, it would
+/// create a duplicate. Returns 400 for that case rather than doing that
+/// silently.
+#[utoipa::path(
+    post,
+    path = "/v1/rag/collections/{name}/documents/{id}/reindex",
+    tag = "rag",
+    operation_id = "reindexDocument",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "Collection name"),
+        ("id" = String, Path, description = "Document id")
+    ),
+    responses(
+        (status = 200, description = "Document re-chunked and re-upserted", body = UpsertDocumentResponse),
+        (status = 400, description = "RAG is not enabled on this server, or the document has no external_id to reindex against"),
+        (status = 404, description = "No such collection or document")
+    )
+)]
+pub async fn reindex_document(
+    State(state): State<ApiState>,
+    parts: Parts,
+    Path((name, id)): Path<(String, String)>,
+) -> Result<Json<UpsertDocumentResponse>, ApiError> {
+    let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+    let scoped_name = scope_collection_name(&tenant_ctx, &name);
+    let document_id = DocumentId(id);
+
+    let (document, _existing_chunks) = store
+        .get_document_chunks(&scoped_name, &document_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(ApiError::not_found)?;
+
+    if document.external_id.is_none() {
+        return Err(ApiError::invalid_request(
+            "this document has no external_id, so it cannot be reindexed in place: \
+             RagStore::upsert_document matches existing documents by external_id, and \
+             re-upserting one without it would create a duplicate rather than update it.",
+        ));
+    }
+
+    let full_text = document.full_text.clone();
+    let chunks = tokio::task::spawn_blocking(move || {
+        let config = hacienda_rag::ChunkingConfig::default();
+        hacienda_rag::chunk_full_text(&full_text, &config)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(ApiError::from)?;
+
+    let document_id = store
+        .upsert_document(&scoped_name, &document, &chunks)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(UpsertDocumentResponse { document_id }))
 }
 
 /// `POST /v1/rag/collections/{name}/retrieve`.
@@ -216,18 +376,24 @@ pub async fn upsert_document(
 )]
 pub async fn retrieve(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(name): Path<String>,
     SafeJson(query): SafeJson<RetrieveQuery>,
 ) -> Result<Json<RetrieveOutput>, ApiError> {
     let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+    let scoped_name = scope_collection_name(&tenant_ctx, &name);
+
     let spec = store
-        .get_collection(&name)
+        .get_collection(&scoped_name)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
     query.validate(&spec).map_err(ApiError::from)?;
     let output = store
-        .retrieve(&name, &query)
+        .retrieve(&scoped_name, &query)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(output))
@@ -236,9 +402,20 @@ pub async fn retrieve(
 /// `GET /v1/rag/collections` — list collections, paginated, newest-first.
 ///
 /// `limit` defaults to 50 and is capped at 100, matching the real xberg-sdks
-/// `ListCollectionsResponse` contract. Pagination is pushed into the backend
-/// (`RagStore::list_collections`), not sliced in-process — see that method's
-/// doc comment for why.
+/// `ListCollectionsResponse` contract.
+///
+/// # Tenant scoping (S1)
+///
+/// `RagStore::list_collections` has no tenant-aware filter — `hacienda-rag` is
+/// deliberately tenant-policy-free (see [`scope_collection_name`]) — so this pages
+/// through the *entire* store, filters down to collections whose name carries the
+/// caller's tenant prefix, and paginates the filtered result in-process rather than
+/// pushing `limit`/`offset` straight to the backend. That is a real cost (a full
+/// store scan per call) accepted for correctness: pushing pagination to the backend
+/// would either leak other tenants' collections into a page or silently skip/miscount
+/// this tenant's own collections whenever other tenants have any. Fine at the
+/// collection counts one deployment realistically has; a store-level tenant filter
+/// would need a `hacienda-rag` trait change, out of scope here.
 #[utoipa::path(
     get,
     path = "/v1/rag/collections",
@@ -256,19 +433,51 @@ pub async fn retrieve(
 )]
 pub async fn list_collections(
     State(state): State<ApiState>,
+    parts: Parts,
     Query(query): Query<RagListQuery>,
 ) -> Result<Json<ListCollectionsResponse>, ApiError> {
     let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+
     let limit = query
         .limit
         .unwrap_or(DEFAULT_RAG_LIST_LIMIT)
         .min(MAX_RAG_LIST_LIMIT);
     let offset = query.offset.unwrap_or(0);
-    let (collections, total) = store
-        .list_collections(limit, offset)
-        .await
-        .map_err(ApiError::from)?;
-    Ok(Json(ListCollectionsResponse { collections, total }))
+
+    const STORE_SCAN_PAGE_SIZE: u32 = 200;
+    let mut matched = 0u32;
+    let mut page = Vec::new();
+    let mut store_offset = 0u32;
+    loop {
+        let (batch, store_total) = store
+            .list_collections(STORE_SCAN_PAGE_SIZE, store_offset)
+            .await
+            .map_err(ApiError::from)?;
+        if batch.is_empty() {
+            break;
+        }
+        for mut spec in batch {
+            if let Some(unscoped_name) = strip_tenant_prefix(&tenant_ctx, &spec.name) {
+                if matched >= offset && (page.len() as u32) < limit {
+                    spec.name = unscoped_name;
+                    page.push(spec);
+                }
+                matched += 1;
+            }
+        }
+        store_offset += STORE_SCAN_PAGE_SIZE;
+        if u64::from(store_offset) >= store_total {
+            break;
+        }
+    }
+
+    Ok(Json(ListCollectionsResponse {
+        collections: page,
+        total: u64::from(matched),
+    }))
 }
 
 /// `GET /v1/rag/collections/{name}/documents` — list a collection's documents,
@@ -295,17 +504,22 @@ pub async fn list_collections(
 )]
 pub async fn list_documents(
     State(state): State<ApiState>,
+    parts: Parts,
     Path(name): Path<String>,
     Query(query): Query<RagListQuery>,
 ) -> Result<Json<ListDocumentsResponse>, ApiError> {
     let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+
     let limit = query
         .limit
         .unwrap_or(DEFAULT_RAG_DOCUMENT_LIST_LIMIT)
         .min(MAX_RAG_DOCUMENT_LIST_LIMIT);
     let offset = query.offset.unwrap_or(0);
     let (documents, total) = store
-        .list_documents(&name, limit, offset)
+        .list_documents(&scope_collection_name(&tenant_ctx, &name), limit, offset)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ListDocumentsResponse { documents, total }))
@@ -363,9 +577,13 @@ pub async fn migrate_embeddings(
     SafeJson(body): SafeJson<MigrateEmbeddingsRequest>,
 ) -> Result<(StatusCode, Json<MigrateEmbeddingsResponse>), ApiError> {
     let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant_ctx = caller.tenant_ctx();
+    let scoped_name = scope_collection_name(&tenant_ctx, &name);
 
     let spec = store
-        .get_collection(&name)
+        .get_collection(&scoped_name)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
@@ -390,9 +608,7 @@ pub async fn migrate_embeddings(
         )));
     }
 
-    let ctx = extract_auth_context(&parts);
-    let caller = caller_from_arc(&ctx);
-    let tenant = caller.tenant_ctx().tenant;
+    let tenant = tenant_ctx.tenant.clone();
     let owner = caller.principal_id().map(str::to_owned);
 
     let job = state.jobs.create(&tenant, owner).await.map_err(|e| {
@@ -405,7 +621,8 @@ pub async fn migrate_embeddings(
     let task_jobs = state.jobs.clone();
     let task_job_id = job_id.clone();
     let task_tenant = tenant.clone();
-    let task_collection = name.clone();
+    let task_collection = scoped_name.clone();
+    let task_caller_facing_name = name.clone();
     let task_to_source = body.to_source.clone();
     let task_to_version = body.to_version;
 
@@ -416,6 +633,7 @@ pub async fn migrate_embeddings(
             task_tenant,
             task_job_id,
             task_collection,
+            task_caller_facing_name,
             task_to_source,
             task_to_version,
         )
@@ -449,6 +667,7 @@ async fn run_migrate_embeddings_job(
     tenant: hacienda_core::tenancy::TenantId,
     job_id: String,
     collection: String,
+    caller_facing_name: String,
     to_source: String,
     to_version: u32,
 ) {
@@ -483,7 +702,7 @@ async fn run_migrate_embeddings_job(
                 return;
             }
             let result_json = serde_json::json!({
-                "collection": collection,
+                "collection": caller_facing_name,
                 "to_source": to_source,
                 "to_version": to_version,
             })
@@ -676,4 +895,209 @@ pub async fn get_migrate_status(
         progress,
         error: job.error,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hacienda_core::auth::{authn::DevTokenResolver, AuthContext, AuthExtension, AuthState};
+    use hacienda_core::jobs::InMemoryJobStore;
+    use hacienda_core::tenancy::{ActorId, TenantId};
+    use hacienda_core::{CapabilitySet, HaciendaConfig, HaciendaFacade};
+    use hacienda_rag::{InMemoryVectorStore, RagStore};
+
+    fn tenant_ctx(tenant: &str) -> TenantCtx {
+        TenantCtx::new(TenantId::new(tenant), ActorId::new("test"))
+    }
+
+    #[test]
+    fn scope_collection_name_round_trips_through_strip_tenant_prefix() {
+        let ctx = tenant_ctx("acme");
+        let scoped = scope_collection_name(&ctx, "contracts");
+        assert_eq!(scoped, "acme:contracts");
+        assert_eq!(
+            strip_tenant_prefix(&ctx, &scoped).as_deref(),
+            Some("contracts")
+        );
+    }
+
+    #[test]
+    fn strip_tenant_prefix_rejects_a_different_tenants_scoped_name() {
+        let acme_scoped = scope_collection_name(&tenant_ctx("acme"), "contracts");
+        assert_eq!(
+            strip_tenant_prefix(&tenant_ctx("globex"), &acme_scoped),
+            None
+        );
+    }
+
+    /// `POST /v1/rag/collections` shipped (unscoped) before this PR. A deployment
+    /// upgrading with existing default-tenant collections must keep reaching them
+    /// under their original, unprefixed names.
+    #[test]
+    fn default_tenant_collection_names_stay_unprefixed_for_backward_compatibility() {
+        let ctx = tenant_ctx(hacienda_core::tenancy::DEFAULT_TENANT);
+        let scoped = scope_collection_name(&ctx, "contracts");
+        assert_eq!(scoped, "contracts", "must not gain a 'default:' prefix");
+        assert_eq!(
+            strip_tenant_prefix(&ctx, &scoped).as_deref(),
+            Some("contracts")
+        );
+    }
+
+    #[test]
+    fn default_tenant_does_not_see_another_tenants_scoped_collection() {
+        let acme_scoped = scope_collection_name(&tenant_ctx("acme"), "contracts");
+        assert_eq!(
+            strip_tenant_prefix(
+                &tenant_ctx(hacienda_core::tenancy::DEFAULT_TENANT),
+                &acme_scoped
+            ),
+            None
+        );
+    }
+
+    fn state_with_rag() -> ApiState {
+        let facade = Arc::new(HaciendaFacade::new(HaciendaConfig::default()).unwrap());
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
+        let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
+        ApiState::new(facade, jobs, auth, crate::state::ApiLimits::default()).with_rag_store(store)
+    }
+
+    /// Build `Parts` carrying an `AuthContext` scoped to `tenant`, the way the real auth
+    /// middleware would attach one via `AuthExtension` — bypasses the token resolver
+    /// pipeline entirely so the test can exercise two different tenants without needing
+    /// `authn::Token`/`ApiKeyTokenResolver` to thread tenant identity (a separate,
+    /// pre-existing gap: today every resolved token lands on the default tenant via
+    /// `AuthContext::new` — out of scope for this RAG-collection-scoping task).
+    fn parts_for(tenant: &str) -> Parts {
+        let ctx = AuthContext::with_tenant(
+            "test-principal",
+            TenantId::new(tenant),
+            CapabilitySet::new([hacienda_core::auth::Capability::DocumentsProcess]),
+        );
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+        parts.extensions.insert(AuthExtension(Arc::new(ctx)));
+        parts
+    }
+
+    /// S1: two tenants each creating a collection named `"contracts"` must not collide,
+    /// and neither can read, list, or delete the other's collection by name — the core
+    /// property `scope_collection_name`/`strip_tenant_prefix` exist to guarantee, since
+    /// `RagStore` itself has no notion of tenant (see the module doc on
+    /// [`scope_collection_name`]).
+    #[tokio::test]
+    async fn two_tenants_can_use_the_same_collection_name_without_colliding() {
+        let state = state_with_rag();
+        let spec = CollectionSpec::new("contracts", 3);
+
+        let (status, acme_spec) = create_collection(
+            State(state.clone()),
+            parts_for("acme"),
+            SafeJson(spec.clone()),
+        )
+        .await
+        .expect("acme create must succeed");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(acme_spec.0.name, "contracts");
+
+        let (status, globex_spec) =
+            create_collection(State(state.clone()), parts_for("globex"), SafeJson(spec))
+                .await
+                .expect("globex create must succeed");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(globex_spec.0.name, "contracts");
+
+        // acme cannot delete globex's "contracts" by name, and vice versa: each tenant's
+        // collection survives the other tenant's delete call.
+        delete_collection(
+            State(state.clone()),
+            parts_for("acme"),
+            Path("contracts".to_string()),
+        )
+        .await
+        .expect("delete must not error");
+
+        let globex_after_acme_delete = get_collection(
+            State(state.clone()),
+            parts_for("globex"),
+            Path("contracts".to_string()),
+        )
+        .await
+        .expect("globex's collection must still exist after acme deleted its own");
+        assert_eq!(globex_after_acme_delete.0.name, "contracts");
+
+        let acme_after_delete = get_collection(
+            State(state.clone()),
+            parts_for("acme"),
+            Path("contracts".to_string()),
+        )
+        .await;
+        assert!(
+            acme_after_delete.is_err(),
+            "acme's own collection must be gone after its own delete"
+        );
+    }
+
+    /// `GET /v1/rag/collections` must only ever return the calling tenant's own
+    /// collections, with names reported unscoped — the store-wide prefix must never
+    /// leak into a response.
+    #[tokio::test]
+    async fn list_collections_only_returns_the_callers_own_tenant() {
+        let state = state_with_rag();
+
+        let _ = create_collection(
+            State(state.clone()),
+            parts_for("acme"),
+            SafeJson(CollectionSpec::new("alpha", 3)),
+        )
+        .await
+        .expect("create must succeed");
+        let _ = create_collection(
+            State(state.clone()),
+            parts_for("acme"),
+            SafeJson(CollectionSpec::new("beta", 3)),
+        )
+        .await
+        .expect("create must succeed");
+        let _ = create_collection(
+            State(state.clone()),
+            parts_for("globex"),
+            SafeJson(CollectionSpec::new("gamma", 3)),
+        )
+        .await
+        .expect("create must succeed");
+
+        let acme_list = list_collections(
+            State(state.clone()),
+            parts_for("acme"),
+            Query(RagListQuery {
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await
+        .expect("list must succeed");
+        assert_eq!(acme_list.total, 2);
+        let mut acme_names: Vec<&str> = acme_list
+            .collections
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        acme_names.sort_unstable();
+        assert_eq!(acme_names, vec!["alpha", "beta"]);
+
+        let globex_list = list_collections(
+            State(state.clone()),
+            parts_for("globex"),
+            Query(RagListQuery {
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await
+        .expect("list must succeed");
+        assert_eq!(globex_list.total, 1);
+        assert_eq!(globex_list.collections[0].name, "gamma");
+    }
 }

@@ -10,6 +10,8 @@
 use hacienda_core::audit::{AuditEntryInput, AuditStore, InMemoryAuditStore};
 use hacienda_core::pii::{PiiPipeline, PipelineConfig};
 use hacienda_core::tenancy::TenantId;
+#[cfg(feature = "ner-candle-wasm")]
+use hacienda_core::pii::NerDetector;
 use uuid::Uuid;
 use wasm_bindgen_test::*;
 
@@ -96,5 +98,21 @@ async fn redaction_round_trip_has_a_real_clock_and_uuid_on_wasm32() {
         opened_at.timestamp() as u64 > NOT_EPOCH,
         "segment opened_at {} looks like the wasm32 epoch fallback, not `Utc::now()`",
         seal.opened_at
+    );
+}
+
+/// `NerDetector::from_candle_bytes` (the wasm32 sibling of `from_candle_local`, loading
+/// the Candle GLiNER2 backend from in-memory bytes instead of a filesystem model
+/// directory) must at least *link and run* on wasm32 and reject cleanly on bad input.
+/// Real GLiNER2 weights are ~600MB — infeasible as a CI fixture — so this only exercises
+/// the error path; model-accuracy verification with real weights is manual (see the
+/// 2026-08-09 wasm NER plan).
+#[cfg(feature = "ner-candle-wasm")]
+#[wasm_bindgen_test]
+fn from_candle_bytes_rejects_garbage_input_on_wasm32() {
+    let result = NerDetector::from_candle_bytes(&[], &[], &[]);
+    assert!(
+        result.is_err(),
+        "empty/garbage model bytes must fail to load, not silently produce a usable detector"
     );
 }

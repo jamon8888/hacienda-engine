@@ -87,7 +87,6 @@ impl ReviewQueue {
 
         let item = ReviewQueueItem {
             id: Uuid::new_v4().to_string(),
-            tenant: tenant.clone(),
             priority: Self::priority_from_confidence(request.confidence),
             text_snippet: request.text_snippet,
             category: request.category,
@@ -103,16 +102,18 @@ impl ReviewQueue {
             decided_by: None,
             decided_at: None,
             comment: None,
+            tenant_id: tenant.to_string(),
         };
 
         self.store.submit(tenant, item).await
     }
 
-    /// Record a reviewer's decision, moving the item to its terminal status.
+    /// Record a reviewer's decision, scoped to `tenant` (S1).
     ///
     /// # Errors
     ///
-    /// - [`ReviewError::NotFound`] if no item has that id.
+    /// - [`ReviewError::NotFound`] if no item has that id in `tenant` — including an
+    ///   id that exists but belongs to a different tenant, see [`ReviewStore::assign`]'s doc.
     /// - [`ReviewError::AlreadyDecided`] if the item already carries a decision.
     pub async fn decide(
         &self,
@@ -127,7 +128,8 @@ impl ReviewQueue {
             .await
     }
 
-    /// Assign a reviewer, moving a pending item to [`ReviewStatus::InReview`].
+    /// Assign a reviewer, moving a pending item to [`ReviewStatus::InReview`], scoped to
+    /// `tenant` (S1).
     ///
     /// # Errors
     ///
@@ -145,7 +147,7 @@ impl ReviewQueue {
         self.store.assign(tenant, id, reviewer).await
     }
 
-    /// List items, optionally restricted to a single status.
+    /// List `tenant`'s items, optionally restricted to a single status (S1).
     ///
     /// # Errors
     ///
@@ -163,7 +165,7 @@ impl ReviewQueue {
         self.store.list(tenant, filter).await
     }
 
-    /// Retrieve a single item by id.
+    /// Retrieve a single item by id, scoped to `tenant` (S1).
     ///
     /// # Errors
     ///

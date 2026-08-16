@@ -59,7 +59,7 @@ pub trait ReviewStore: Send + Sync {
     ///
     /// The item is constructed by [`ReviewQueue::submit`] which generates the id, priority,
     /// deadline, and timestamps before calling here. The store records what it receives,
-    /// after overwriting `item.tenant` with `tenant` — `tenant` is the parameter every
+    /// after overwriting `item.tenant_id` with `tenant` — `tenant` is the parameter every
     /// other method on this trait enforces isolation through, and `submit` matches that
     /// discipline rather than trusting the caller to have already labelled `item`
     /// correctly.
@@ -71,7 +71,8 @@ pub trait ReviewStore: Send + Sync {
         item: ReviewQueueItem,
     ) -> Result<ReviewQueueItem, ReviewError>;
 
-    /// Atomic compare-and-swap: move `id` from `Pending` to `InReview`.
+    /// Atomic compare-and-swap: move `id` from `Pending` to `InReview`, scoped to
+    /// `tenant` (S1).
     ///
     /// Succeeds only if the item's current status is `Pending` **and** its tenant is
     /// `tenant`. An id that belongs to a different tenant is reported exactly like an
@@ -88,7 +89,8 @@ pub trait ReviewStore: Send + Sync {
         reviewer: &str,
     ) -> Result<ReviewQueueItem, ReviewError>;
 
-    /// Atomic compare-and-swap: record a decision when none exists yet.
+    /// Atomic compare-and-swap: record a decision when none exists yet, scoped to
+    /// `tenant` (S1).
     ///
     /// Succeeds only if the item has no existing decision **and** its tenant is
     /// `tenant` — same not-found-not-forbidden discipline as [`Self::assign`]. Returns
@@ -199,7 +201,7 @@ impl ReviewStore for InMemoryReviewStore {
         tenant: &TenantId,
         mut item: ReviewQueueItem,
     ) -> Result<ReviewQueueItem, ReviewError> {
-        item.tenant = tenant.clone();
+        item.tenant_id = tenant.to_string();
         // Guard acquired, item pushed, guard dropped before returning. No .await while held.
         self.lock().push(item.clone());
         Ok(item)
@@ -224,7 +226,7 @@ impl ReviewStore for InMemoryReviewStore {
         let mut items = self.lock();
         let item = items
             .iter_mut()
-            .find(|i| i.id == id && i.tenant == *tenant)
+            .find(|i| i.id == id && i.tenant_id == tenant.as_str())
             .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
         if item.status != ReviewStatus::Pending {
@@ -256,7 +258,7 @@ impl ReviewStore for InMemoryReviewStore {
         let mut items = self.lock();
         let item = items
             .iter_mut()
-            .find(|i| i.id == id && i.tenant == *tenant)
+            .find(|i| i.id == id && i.tenant_id == tenant.as_str())
             .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
         if item.decision.is_some() {
@@ -285,7 +287,8 @@ impl ReviewStore for InMemoryReviewStore {
         let result = items
             .iter()
             .filter(|i| {
-                i.tenant == *tenant && filter.map(|status| i.status == status).unwrap_or(true)
+                i.tenant_id == tenant.as_str()
+                    && filter.map(|status| i.status == status).unwrap_or(true)
             })
             .cloned()
             .collect();
@@ -300,13 +303,16 @@ impl ReviewStore for InMemoryReviewStore {
         Ok(self
             .lock()
             .iter()
-            .find(|i| i.id == id && i.tenant == *tenant)
+            .find(|i| i.id == id && i.tenant_id == tenant.as_str())
             .cloned())
     }
 
     async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
         let items = self.lock();
-        let mine: Vec<&ReviewQueueItem> = items.iter().filter(|i| i.tenant == *tenant).collect();
+        let mine: Vec<&ReviewQueueItem> = items
+            .iter()
+            .filter(|i| i.tenant_id == tenant.as_str())
+            .collect();
         let count = |status: ReviewStatus| mine.iter().filter(|i| i.status == status).count();
         Ok(QueueStats {
             total: mine.len(),
@@ -338,7 +344,7 @@ mod tests {
     fn make_item(id: &str, tenant: TenantId) -> ReviewQueueItem {
         ReviewQueueItem {
             id: id.to_string(),
-            tenant,
+            tenant_id: tenant.to_string(),
             text_snippet: "John Smith".to_string(),
             category: "PersonName".to_string(),
             start: 0,

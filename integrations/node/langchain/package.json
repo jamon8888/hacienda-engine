@@ -1,0 +1,66 @@
+{
+  "name": "@hacienda-engine/langchain-hacienda",
+  "version": "0.1.0",
+  "description": "LangChain.js document loader for hacienda-engine — redacted extraction with PII entities and audit-chain provenance as first-class Document metadata.",
+  "keywords": [
+    "langchain",
+    "langchainjs",
+    "document-loader",
+    "hacienda",
+    "pii",
+    "redaction",
+    "pseudonymization",
+    "compliance",
+    "audit",
+    "rag"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/jamon8888/hacienda-engine/tree/main/integrations/node/langchain",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamon8888/hacienda-engine.git",
+    "directory": "integrations/node/langchain"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "@hacienda-engine/sdk": "^0.1.0",
+    "fast-glob": "^3.3.2",
+    "mime-types": "^2.1.35"
+  },
+  "peerDependencies": {
+    "@langchain/core": ">=1.1.29"
+  },
+  "devDependencies": {
+    "@langchain/core": "^1.2.0",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

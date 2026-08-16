@@ -116,7 +116,7 @@ impl FileState {
     /// the not-found-not-forbidden property (D-S1b-1) fall out of the lookup itself
     /// rather than needing a second branch at every call site to enforce it.
     fn get_mut_for_tenant(&mut self, tenant: &TenantId, id: &str) -> Option<&mut ReviewQueueItem> {
-        self.by_id.get_mut(id).filter(|item| item.tenant == *tenant)
+        self.by_id.get_mut(id).filter(|item| item.tenant_id == tenant.as_str())
     }
 
     fn insert(&mut self, item: ReviewQueueItem) {
@@ -316,7 +316,7 @@ impl ReviewStore for FileReviewStore {
         tenant: &TenantId,
         mut item: ReviewQueueItem,
     ) -> Result<ReviewQueueItem, ReviewError> {
-        item.tenant = tenant.clone();
+        item.tenant_id = tenant.to_string();
         self.check_not_poisoned()?;
 
         // Acquire io_order first, then the state lock — always this order.
@@ -485,7 +485,7 @@ impl ReviewStore for FileReviewStore {
         let mine = state
             .items_in_order()
             .into_iter()
-            .filter(|i| i.tenant == *tenant);
+            .filter(|i| i.tenant_id == tenant.as_str());
         let result = match filter {
             Some(status) => mine.filter(|i| i.status == status).collect(),
             None => mine.collect(),
@@ -503,7 +503,7 @@ impl ReviewStore for FileReviewStore {
             .state()
             .by_id
             .get(id)
-            .filter(|item| item.tenant == *tenant)
+            .filter(|item| item.tenant_id == tenant.as_str())
             .cloned())
     }
 
@@ -513,7 +513,7 @@ impl ReviewStore for FileReviewStore {
         let all: Vec<ReviewQueueItem> = state
             .items_in_order()
             .into_iter()
-            .filter(|i| i.tenant == *tenant)
+            .filter(|i| i.tenant_id == tenant.as_str())
             .collect();
         let count = |status: ReviewStatus| all.iter().filter(|i| i.status == status).count();
         Ok(QueueStats {
@@ -724,7 +724,6 @@ mod tests {
     fn make_item(id: &str) -> ReviewQueueItem {
         ReviewQueueItem {
             id: id.to_string(),
-            tenant: t(),
             text_snippet: "John Smith".to_string(),
             category: "PersonName".to_string(),
             start: 0,
@@ -740,6 +739,7 @@ mod tests {
             decided_by: None,
             decided_at: None,
             comment: None,
+            tenant_id: t().to_string(),
         }
     }
 

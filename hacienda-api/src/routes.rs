@@ -27,6 +27,7 @@ use crate::{
         audit, audit_review, auth, documents, info, jobs, keys, openapi, pii, presets, rag,
         rag_stream, uploads, usage, versions,
     },
+    quota::quota_middleware,
     state::ApiState,
 };
 
@@ -274,6 +275,14 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(rag::list_documents).post(rag::upsert_document),
     },
+    // Hacienda-only addition closing the xberg-sdks `reindex_rag_document` gap
+    // (platform-parity design spec §3.1/§4.1) — see `handlers::rag::reindex_document`'s
+    // doc comment. Same `DocumentsProcess` capability as every other RAG route.
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/documents/{id}/reindex",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(rag::reindex_document),
+    },
     RouteSpec {
         path: "/v1/rag/collections/{name}/retrieve",
         access: Access::Capability(Capability::DocumentsProcess),
@@ -396,10 +405,24 @@ pub fn build_auth_state(base: AuthState) -> AuthState {
     builder.build()
 }
 
-/// Build the axum `Router` from the route table, applying body limits and auth middleware.
+/// Build the axum `Router` from the route table, applying body limits, quota, and auth
+/// middleware.
+///
+/// # Layer ordering
+///
+/// `.layer()` calls wrap outward-in: the *last* one added runs *first* on an incoming
+/// request. So `auth_middleware` (added last) runs first and attaches the caller's
+/// `AuthExtension`; `quota_middleware` (added second-to-last) runs next and reads that
+/// extension to enforce the S1 §7 per-tenant request-rate quota; `DefaultBodyLimit` runs
+/// after that, and the handler's own body-decoding extractors run last of all. A quota
+/// rejection therefore always happens before the body is read — the S1 spec's
+/// `quota_exceeded_returns_429_before_body_decode` exit criterion — because
+/// `quota_middleware` returns its own `429` response directly instead of calling
+/// `next.run(request)`.
 pub fn build_router(state: ApiState) -> Router {
     // Build the AuthState from the table — same source, so they cannot drift.
     let auth = build_auth_state(state.auth.clone());
+    let quota = state.quota_store.clone();
 
     let mut router = Router::new();
     for spec in ROUTE_TABLE {
@@ -408,6 +431,7 @@ pub fn build_router(state: ApiState) -> Router {
 
     router
         .layer(DefaultBodyLimit::max(state.limits.max_body_bytes))
+        .layer(middleware::from_fn_with_state(quota, quota_middleware))
         .layer(middleware::from_fn_with_state(auth, auth_middleware))
         .with_state(state)
 }
@@ -890,6 +914,58 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_ne!(response.status().as_u16(), 413);
+    }
+
+    /// S1 §9: `quota_exceeded_returns_429_before_body_decode`.
+    ///
+    /// The request body is malformed JSON — if the handler's extractor ever saw it,
+    /// the response would be `400` (the existing `extractor_rejections_use_the_json_envelope`
+    /// behaviour in `error.rs`'s test module). Getting `429` instead proves
+    /// `quota_middleware` rejected the request before `next.run` ever handed control to
+    /// an extractor, exactly as the ordering comment on `build_router` documents.
+    #[tokio::test]
+    async fn quota_exceeded_returns_429_before_body_decode() {
+        use crate::quota::{InMemoryQuotaStore, QuotaLimits};
+
+        let quota = Arc::new(InMemoryQuotaStore::new(QuotaLimits {
+            requests_per_minute: 1,
+        }));
+        let app = build_router(test_state_no_auth().with_quota_store(quota));
+
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/pii/redact")
+                .header("content-type", "application/json")
+                .body(Body::from("{not valid json"))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(
+            first.status().as_u16(),
+            400,
+            "the first request is within quota, so the malformed body reaches the extractor"
+        );
+
+        let second = app.oneshot(request()).await.unwrap();
+        assert_eq!(
+            second.status().as_u16(),
+            429,
+            "the second request exceeds the one-per-minute quota"
+        );
+        assert!(
+            second.headers().contains_key("retry-after"),
+            "a 429 must carry Retry-After"
+        );
+        let body = axum::body::to_bytes(second.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(
+            text.contains("\"code\":\"rate_limited\""),
+            "429 must use the error envelope, got: {text}"
+        );
     }
 
     /// Reveal route requires `pii:reveal` capability, not just `documents:process`.
@@ -1513,8 +1589,18 @@ pub(crate) mod tests {
         let document_id: hacienda_rag::DocumentId =
             serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
 
+        // The API scopes collection names by tenant (S1) before they reach `RagStore` —
+        // an unauthenticated caller resolves to the default tenant, so the store holds
+        // this collection under "default:c1", not the caller-facing "c1". See
+        // `handlers::rag::scope_collection_name`.
+        let scoped_name = crate::handlers::rag::scope_collection_name(
+            &hacienda_core::tenancy::TenantCtx::default_tenant(
+                hacienda_core::tenancy::ActorId::new("test"),
+            ),
+            "c1",
+        );
         let (_document, chunks) = store
-            .get_document_chunks("c1", &document_id)
+            .get_document_chunks(&scoped_name, &document_id)
             .await
             .expect("get_document_chunks")
             .expect("document must exist");
@@ -1526,6 +1612,119 @@ pub(crate) mod tests {
             assert_eq!(chunk.ordinal, i as u32, "chunks must be stored in order");
             assert!(!chunk.content.is_empty());
         }
+    }
+
+    /// Reindexing a document with `external_id` set re-chunks its stored
+    /// `full_text` and re-upserts under the same identity, not a duplicate.
+    #[tokio::test]
+    async fn rag_reindex_document_rechunks_in_place() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let upsert_body = serde_json::json!({
+            "document": {"external_id": "doc-1", "full_text": "hello world"},
+        });
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upsert.status().as_u16(), 201);
+        let upsert = json_body(upsert).await;
+        let document_id: hacienda_rag::DocumentId =
+            serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
+
+        let reindex = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/rag/collections/c1/documents/{}/reindex",
+                        document_id.0
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reindex.status().as_u16(), 200);
+        let reindex = json_body(reindex).await;
+        let reindexed_id: hacienda_rag::DocumentId =
+            serde_json::from_value(reindex["document_id"].clone()).expect("document_id");
+        assert_eq!(
+            reindexed_id, document_id,
+            "reindex must update the same document (matched by external_id), not create a new one"
+        );
+    }
+
+    /// Reindexing a document with no `external_id` must be refused (400), not
+    /// silently create a duplicate — see `handlers::rag::reindex_document`'s doc.
+    #[tokio::test]
+    async fn rag_reindex_document_without_external_id_is_400() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let upsert_body = serde_json::json!({
+            "document": {"full_text": "hello world"},
+        });
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upsert.status().as_u16(), 201);
+        let upsert = json_body(upsert).await;
+        let document_id: hacienda_rag::DocumentId =
+            serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
+
+        let reindex = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/rag/collections/c1/documents/{}/reindex",
+                        document_id.0
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reindex.status().as_u16(), 400);
+    }
+
+    /// `POST .../reindex` on a document that does not exist must be 404.
+    #[tokio::test]
+    async fn rag_reindex_missing_document_is_404() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let reindex = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents/missing/reindex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reindex.status().as_u16(), 404);
     }
 
     /// `GET` on a collection that was never created must be 404, not 500 or 200
@@ -2690,7 +2889,6 @@ pub(crate) mod tests {
                 &hacienda_core::tenancy::TenantId::default_tenant(),
                 ReviewQueueItem {
                     id: review_id.clone(),
-                    tenant: hacienda_core::tenancy::TenantId::default_tenant(),
                     text_snippet: "jane@example.com".to_string(),
                     category: "email".to_string(),
                     start: 0,
@@ -2706,6 +2904,7 @@ pub(crate) mod tests {
                     decided_by: None,
                     decided_at: None,
                     comment: None,
+                    tenant_id: "default".to_string(),
                 },
             )
             .await

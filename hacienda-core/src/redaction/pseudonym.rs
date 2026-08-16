@@ -9,6 +9,7 @@ use aes_siv::siv::Aes256Siv;
 use aes_siv::{Key, KeyInit};
 use data_encoding::{BASE32_NOPAD, HEXLOWER_PERMISSIVE};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
@@ -529,6 +530,11 @@ pub(crate) fn category_label(category: &PiiCategory) -> Result<String, Pseudonym
 /// personal data, and anyone holding the key can reverse the whole corpus offline. Do not
 /// treat a pseudonymised document as safe to publish.
 pub struct Pseudonymiser {
+    /// The tenant this instance was resolved for (S1). Not itself a secret — kept only
+    /// so [`Pseudonymiser::key`]'s error can name the environment variable a missing
+    /// key would need, and so [`Debug`] can show which tenant a cached instance belongs
+    /// to without exposing key material.
+    tenant: TenantId,
     active: PseudonymKey,
     retired: HashMap<KeyId, PseudonymKey>,
 }
@@ -536,9 +542,9 @@ pub struct Pseudonymiser {
 impl Pseudonymiser {
     /// Load `tenant`'s active key and any retired keys still needed to read old tokens.
     ///
-    /// All keys are resolved eagerly. Discovering at startup that a retired key is
+    /// All keys are resolved eagerly. Discovering at admission that a retired key is
     /// unreadable is a configuration error someone can fix; discovering it when a data
-    /// subject exercises a right of access is an incident.
+    /// subject exercises a right of access is an incident (decision D-S1-4).
     ///
     /// # Errors
     ///
@@ -585,7 +591,11 @@ impl Pseudonymiser {
             .filter(|id| **id != *active.id())
             .map(|id| Ok((id.clone(), resolver.resolve(tenant, id)?)))
             .collect::<Result<HashMap<_, _>, PseudonymError>>()?;
-        Ok(Self { active, retired })
+        Ok(Self {
+            tenant: tenant.clone(),
+            active,
+            retired,
+        })
     }
 
     /// Mint the token for `text` in `category`, under the active key.
@@ -681,12 +691,13 @@ impl Pseudonymiser {
         if id == self.active.id() {
             return Ok(&self.active);
         }
-        self.retired
-            .get(id)
-            .ok_or_else(|| PseudonymError::KeyNotFound {
-                id: id.to_string(),
-                variable: id.env_var(),
-            })
+        if let Some(key) = self.retired.get(id) {
+            return Ok(key);
+        }
+        Err(PseudonymError::KeyNotFound {
+            id: id.to_string(),
+            variable: id.env_var(&self.tenant)?,
+        })
     }
 
     /// Build a cipher for one operation.
@@ -701,14 +712,108 @@ impl Pseudonymiser {
     }
 }
 
-/// Names the keys held, never their material.
+/// Names the tenant and keys held, never key material.
 impl std::fmt::Debug for Pseudonymiser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut retired: Vec<&str> = self.retired.keys().map(KeyId::as_str).collect();
         retired.sort_unstable();
         f.debug_struct("Pseudonymiser")
+            .field("tenant", &self.tenant)
             .field("active", &self.active.id())
             .field("retired", &retired)
+            .finish()
+    }
+}
+
+/// Per-tenant cache of resolved [`Pseudonymiser`]s.
+///
+/// A [`Pseudonymiser`] eagerly resolves and caches all its key material at construction
+/// (decision D-S1-4: fail at admission, never at first use). Multi-tenancy widens
+/// "construction" from "process startup" to "tenant admission" — this registry is where
+/// that admission happens, once per tenant, so a request never pays a resolver
+/// round-trip and a tenant with broken key configuration is refused before it can
+/// process any content, not discovered mid-request.
+///
+/// Lock poisoning is recovered from, not propagated as a panic: every access below
+/// takes the guard with `.unwrap_or_else(PoisonError::into_inner)` rather than
+/// `.expect(..)`. A panic while holding this lock can only occur inside a plain
+/// `HashMap` read/insert, which leaves the map itself in a valid state even if some
+/// unrelated code panicked mid-access elsewhere while holding it — so treating poison
+/// as fatal here would only turn one thread's panic into every future tenant lookup
+/// panicking too, for no added safety.
+#[derive(Default)]
+pub struct TenantPseudonymiserRegistry {
+    by_tenant: RwLock<HashMap<TenantId, Arc<Pseudonymiser>>>,
+}
+
+impl TenantPseudonymiserRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve and cache `tenant`'s pseudonymiser.
+    ///
+    /// Idempotent, and safe to call again for an already-admitted tenant — the existing
+    /// entry is replaced with a freshly resolved one. That is the path a key rotation
+    /// takes (see P3): re-admit the tenant after the resolver reports a new active key.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `resolver` returns for a missing or malformed key — see
+    /// [`Pseudonymiser::new`] / [`Pseudonymiser::with_active`].
+    pub fn admit(
+        &self,
+        tenant: &TenantId,
+        resolver: &dyn KeyResolver,
+        active: Option<KeyId>,
+        retired: &[KeyId],
+    ) -> Result<(), PseudonymError> {
+        let pseudonymiser = match active {
+            Some(id) => Pseudonymiser::with_active(resolver, tenant, id, retired)?,
+            None => Pseudonymiser::new(resolver, tenant, retired)?,
+        };
+        self.by_tenant
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tenant.clone(), Arc::new(pseudonymiser));
+        Ok(())
+    }
+
+    /// The admitted pseudonymiser for `tenant`, if any.
+    ///
+    /// `None` means the tenant was never admitted (or its last admission attempt
+    /// failed and nothing was cached) — a caller must treat this the same as
+    /// "pseudonymization is not configured for this tenant", never invent a key.
+    pub fn get(&self, tenant: &TenantId) -> Option<Arc<Pseudonymiser>> {
+        self.by_tenant
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tenant)
+            .cloned()
+    }
+
+    /// Whether `tenant` has been admitted.
+    pub fn contains(&self, tenant: &TenantId) -> bool {
+        self.by_tenant
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(tenant)
+    }
+}
+
+/// Names the admitted tenants, never key material.
+impl std::fmt::Debug for TenantPseudonymiserRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut tenants: Vec<String> = self
+            .by_tenant
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .map(TenantId::to_string)
+            .collect();
+        tenants.sort_unstable();
+        f.debug_struct("TenantPseudonymiserRegistry")
+            .field("admitted_tenants", &tenants)
             .finish()
     }
 }
@@ -1316,6 +1421,127 @@ mod pseudonymiser_tests {
             Pseudonymiser::new(&resolver("k1"), &t(), &[k("gone")]),
             Err(PseudonymError::KeyNotFound { .. })
         ));
+    }
+
+    #[test]
+    fn two_tenants_admitted_from_the_same_env_resolver_get_independent_keys() {
+        // Registry-level analogue of S1 spec §9's
+        // `two_tenants_same_value_get_different_tokens`: two tenants pointed at the
+        // same resolver still end up with distinct key material, because each supplies
+        // its own suffixed env vars.
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_A" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_A" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_B" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_B" => Some("a9".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let tenant_a = crate::tenancy::TenantId::new("tenant_a");
+        let tenant_b = crate::tenancy::TenantId::new("tenant_b");
+        registry.admit(&tenant_a, &resolver, None, &[]).unwrap();
+        registry.admit(&tenant_b, &resolver, None, &[]).unwrap();
+
+        let a = registry.get(&tenant_a).unwrap();
+        let b = registry.get(&tenant_b).unwrap();
+        assert_ne!(
+            a.token(&PiiCategory::Email, "same@value.io").unwrap(),
+            b.token(&PiiCategory::Email, "same@value.io").unwrap()
+        );
+    }
+
+    /// S1 spec §9: `retired_key_of_one_tenant_reveals_nothing_of_another`.
+    #[test]
+    fn retired_key_of_one_tenant_reveals_nothing_of_another() {
+        // Two tenants each name a key "k1", but with independent material via separate
+        // suffixed env vars — a shared key *id* must never imply shared key *material*
+        // across tenants. Tenant A's token, minted under k1 and still revealable after
+        // k1 is retired in favour of k2, must stay unreadable to tenant B even though B
+        // also has a key literally named k1.
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_A" => Some("k2".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_A" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_PSEUDONYM_KEY_K2__TENANT_A" => Some("11".repeat(KEY_BYTES)),
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_B" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_B" => Some("a9".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        let tenant_a = crate::tenancy::TenantId::new("tenant_a");
+        let tenant_b = crate::tenancy::TenantId::new("tenant_b");
+
+        // Mint under k1 while it is (explicitly) the minting key, then build a second
+        // instance where k1 has been retired in favour of k2 — rotation is additive, so
+        // the token must still be revealable by tenant A.
+        let a_minting = Pseudonymiser::with_active(&resolver, &tenant_a, k("k1"), &[]).unwrap();
+        let token = a_minting.token(&PiiCategory::Email, "a@b.io").unwrap();
+        let a_after_rotation = Pseudonymiser::new(&resolver, &tenant_a, &[k("k1")]).unwrap();
+        assert_eq!(a_after_rotation.reveal(&token).unwrap(), "a@b.io");
+
+        // Tenant B has a key with the same id "k1", but it is a different key: different
+        // material, resolved from tenant B's own suffixed env vars.
+        let b = Pseudonymiser::new(&resolver, &tenant_b, &[]).unwrap();
+        assert!(
+            b.reveal(&token).is_err(),
+            "tenant B must not be able to reveal a token minted under tenant A's key material"
+        );
+    }
+
+    /// S1 spec §9: `missing_tenant_key_fails_admission_not_first_request` (D-S1-4).
+    #[test]
+    fn missing_tenant_key_fails_admission_not_first_request() {
+        // A tenant admitted with unresolvable key material must fail at admission time,
+        // not surface only when the first token()/reveal() call for that tenant happens
+        // — discovering a corpus is unreadable at the moment of a right-of-access request
+        // is exactly the failure mode D-S1-4 forbids.
+        let empty = EnvKeyResolver::with_lookup(|_| None);
+        let tenant = crate::tenancy::TenantId::new("ghost_tenant");
+
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let result = registry.admit(&tenant, &empty, None, &[]);
+
+        assert!(
+            result.is_err(),
+            "admission must fail immediately when the tenant's key material cannot be resolved"
+        );
+        assert!(
+            !registry.contains(&tenant),
+            "a failed admission must not leave a usable (or partially usable) entry behind"
+        );
+    }
+
+    #[test]
+    fn registry_get_is_none_for_a_tenant_that_was_never_admitted() {
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let unknown = crate::tenancy::TenantId::new("ghost");
+        assert!(registry.get(&unknown).is_none());
+        assert!(!registry.contains(&unknown));
+    }
+
+    #[test]
+    fn registry_recovers_from_a_poisoned_lock_instead_of_panicking() {
+        // Simulate a panic elsewhere while holding the write lock, then confirm every
+        // other method still works instead of panicking on the poison flag.
+        let registry = super::TenantPseudonymiserRegistry::new();
+        let tenant = crate::tenancy::TenantId::new("acme");
+        let resolver = EnvKeyResolver::with_lookup(|name| match name {
+            "HACIENDA_PSEUDONYM_ACTIVE_KEY__ACME" => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1__ACME" => Some("07".repeat(KEY_BYTES)),
+            _ => None,
+        });
+        registry.admit(&tenant, &resolver, None, &[]).unwrap();
+
+        let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.by_tenant.write().unwrap();
+            panic!("simulated panic while holding the registry lock");
+        }));
+        assert!(poison_result.is_err());
+        assert!(registry.by_tenant.is_poisoned());
+
+        // Every method below must recover, not panic, despite the poisoned lock.
+        assert!(registry.contains(&tenant));
+        assert!(registry.get(&tenant).is_some());
+        assert!(registry.admit(&tenant, &resolver, None, &[]).is_ok());
+        let _ = format!("{registry:?}");
     }
 
     #[test]

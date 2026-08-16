@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::audit::chain::AuditChain;
 use crate::audit::entry::{AuditEntry, AuditEntryInput};
 use crate::audit::error::AuditError;
+use crate::tenancy::TenantId;
 
 // ── NodeId ────────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,13 @@ fn resolve_hostname() -> String {
 pub struct Segment {
     /// uuid v4 string — unique per segment, stored in the seal for reference.
     segment_id: String,
+    /// The tenant this segment belongs to (S1 spec §5: segments are named `(tenant,
+    /// node)`, not just `node`). Defaults to the pre-S1 `default` tenant via
+    /// [`open`](Self::open) — real per-tenant construction goes through
+    /// [`open_for_tenant`](Self::open_for_tenant), unused until the stores that build
+    /// `Segment`s are themselves threaded with a real `TenantCtx` (tracked separately;
+    /// see the Vague 2 plan's S1 task notes).
+    tenant_id: TenantId,
     node_id: NodeId,
     config_hash: String,
     /// Seal hash of the immediately preceding segment on this node, or `None` for the
@@ -140,8 +148,24 @@ impl Segment {
         config_hash: impl Into<String>,
         prev_seal_hash: Option<String>,
     ) -> Self {
+        Self::open_for_tenant(
+            TenantId::default_tenant(),
+            node_id,
+            config_hash,
+            prev_seal_hash,
+        )
+    }
+
+    /// As [`open`](Self::open), scoped to an explicit tenant (S1 spec §5).
+    pub fn open_for_tenant(
+        tenant_id: TenantId,
+        node_id: NodeId,
+        config_hash: impl Into<String>,
+        prev_seal_hash: Option<String>,
+    ) -> Self {
         Self::open_with_id(
             Uuid::new_v4().to_string(),
+            tenant_id,
             node_id,
             config_hash,
             prev_seal_hash,
@@ -156,6 +180,7 @@ impl Segment {
     /// mint a new uuid v4, which would not match the file the entries came from.
     pub(crate) fn open_with_id(
         segment_id: impl Into<String>,
+        tenant_id: TenantId,
         node_id: NodeId,
         config_hash: impl Into<String>,
         prev_seal_hash: Option<String>,
@@ -163,6 +188,7 @@ impl Segment {
         let config_hash = config_hash.into();
         Self {
             segment_id: segment_id.into(),
+            tenant_id,
             node_id,
             chain: AuditChain::new(config_hash.clone()),
             config_hash,
@@ -186,11 +212,13 @@ impl Segment {
         let sealed_at = Utc::now().to_rfc3339();
         let sealed_tip = self.chain.tip().to_owned();
         let entry_count = self.chain.len() as u64;
+        let tenant_id_str = self.tenant_id.as_str().to_owned();
         let node_id_str = self.node_id.as_str().to_owned();
 
         let seal_hash = compute_seal_hash(
             self.prev_seal_hash.as_deref(),
             &self.segment_id,
+            &tenant_id_str,
             &node_id_str,
             &self.config_hash,
             &sealed_tip,
@@ -201,6 +229,7 @@ impl Segment {
 
         SegmentSeal {
             segment_id: self.segment_id,
+            tenant_id: tenant_id_str,
             node_id: node_id_str,
             config_hash: self.config_hash,
             prev_seal_hash: self.prev_seal_hash,
@@ -220,6 +249,11 @@ impl Segment {
     /// The node that owns this segment.
     pub fn node_id(&self) -> &NodeId {
         &self.node_id
+    }
+
+    /// The tenant this segment belongs to.
+    pub fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
     }
 
     /// Chain hash of the most recent entry, or `GENESIS_HASH` when empty.
@@ -292,6 +326,16 @@ impl Segment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentSeal {
     pub segment_id: String,
+    /// The tenant this segment belongs to (S1 spec §5). Always `"default"` until the
+    /// store that produced this seal is itself threaded with a real tenant context —
+    /// see [`Segment::tenant_id`]'s doc comment.
+    ///
+    /// Defaulted on deserialize (mirroring `review::types::ReviewQueueItem::tenant_id`):
+    /// a `*.seal.json` file written by any pre-S1 build has no `tenant_id` key at all, so
+    /// without this, loading it back would fail outright with a missing-field error
+    /// instead of defaulting to `"default"`.
+    #[serde(default = "default_tenant_id_string")]
+    pub tenant_id: String,
     pub node_id: String,
     pub config_hash: String,
     /// Seal hash of the immediately preceding segment on this node, or `None` for the
@@ -311,6 +355,10 @@ pub struct SegmentSeal {
     pub seal_hash: String,
 }
 
+fn default_tenant_id_string() -> String {
+    crate::tenancy::DEFAULT_TENANT.to_owned()
+}
+
 // ── compute_seal_hash ─────────────────────────────────────────────────────────
 
 /// Compute the blake3 hash that seals a segment's metadata.
@@ -324,13 +372,14 @@ pub struct SegmentSeal {
 /// The field order and encoding here is the canonical definition of the seal hash for
 /// this crate. Changing either breaks all stored seals.
 ///
-/// The eight arguments map one-to-one to the eight `SegmentSeal` fields that the hash
+/// The nine arguments map one-to-one to the nine `SegmentSeal` fields that the hash
 /// covers. Wrapping them in a struct would force callers to construct one just to call this
 /// function; keeping them flat is both more legible and consistent with `compute_chain_hash`.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_seal_hash(
     prev_seal_hash: Option<&str>,
     segment_id: &str,
+    tenant_id: &str,
     node_id: &str,
     config_hash: &str,
     sealed_tip: &str,
@@ -354,6 +403,7 @@ pub fn compute_seal_hash(
     }
 
     hash_str(&mut hasher, segment_id);
+    hash_str(&mut hasher, tenant_id);
     hash_str(&mut hasher, node_id);
     hash_str(&mut hasher, config_hash);
     hash_str(&mut hasher, sealed_tip);
@@ -369,6 +419,54 @@ fn hash_str(hasher: &mut blake3::Hasher, s: &str) {
     let bytes = s.as_bytes();
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
+}
+
+/// The pre-S1 seal hash: [`compute_seal_hash`] without `tenant_id` in the preimage.
+///
+/// S1 added `tenant_id` to `compute_seal_hash`'s preimage (S1 spec §5), but every seal
+/// sealed before that migration has a `seal_hash` on disk that was computed without it —
+/// migration 0005 backfills `tenant_id = "default"` onto those rows' *column*, but cannot
+/// retroactively change the *hash* already committed to disk/database. Without this
+/// fallback, `check_seal_integrity` would recompute a different hash for every
+/// pre-existing seal and report `AuditError::SegmentIntegrity` — a false "tampered" on an
+/// upgrading deployment's entire historical audit trail, not an actual tamper.
+///
+/// Only ever tried for a `"default"`-tenant seal (see [`check_seal_integrity`]) — S1
+/// shipped with every existing deployment on the default tenant by construction (spec
+/// §8), so a non-default tenant id can only belong to a segment sealed after this
+/// migration, which must satisfy the current, tenant-aware hash.
+#[allow(clippy::too_many_arguments)]
+fn compute_legacy_seal_hash(
+    prev_seal_hash: Option<&str>,
+    segment_id: &str,
+    node_id: &str,
+    config_hash: &str,
+    sealed_tip: &str,
+    entry_count: u64,
+    opened_at: &str,
+    sealed_at: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+
+    match prev_seal_hash {
+        None => {
+            hasher.update(&[0u8]);
+        }
+        Some(h) => {
+            hasher.update(&[1u8]);
+            hash_str(&mut hasher, h);
+        }
+    }
+
+    hash_str(&mut hasher, segment_id);
+    hash_str(&mut hasher, node_id);
+    hash_str(&mut hasher, config_hash);
+    hash_str(&mut hasher, sealed_tip);
+    hasher.update(&entry_count.to_le_bytes());
+    hash_str(&mut hasher, opened_at);
+    hash_str(&mut hasher, sealed_at);
+
+    hasher.finalize().to_hex().to_string()
 }
 
 // ── verify_seal_chain ─────────────────────────────────────────────────────────
@@ -408,10 +506,14 @@ pub fn verify_seal_chain(seals: &[SegmentSeal]) -> Result<(), AuditError> {
 }
 
 /// Check that a seal's recorded hash matches what `compute_seal_hash` produces.
+///
+/// Falls back to [`compute_legacy_seal_hash`] for a `"default"`-tenant seal that doesn't
+/// match the current (tenant-aware) formula — see that function's doc comment for why.
 fn check_seal_integrity(seal: &SegmentSeal) -> Result<(), AuditError> {
     let expected = compute_seal_hash(
         seal.prev_seal_hash.as_deref(),
         &seal.segment_id,
+        &seal.tenant_id,
         &seal.node_id,
         &seal.config_hash,
         &seal.sealed_tip,
@@ -420,15 +522,31 @@ fn check_seal_integrity(seal: &SegmentSeal) -> Result<(), AuditError> {
         &seal.sealed_at,
     );
 
-    if seal.seal_hash != expected {
-        return Err(AuditError::SegmentIntegrity {
-            segment_id: seal.segment_id.clone(),
-            expected,
-            actual: seal.seal_hash.clone(),
-        });
+    if seal.seal_hash == expected {
+        return Ok(());
     }
 
-    Ok(())
+    if seal.tenant_id == crate::tenancy::DEFAULT_TENANT {
+        let legacy_expected = compute_legacy_seal_hash(
+            seal.prev_seal_hash.as_deref(),
+            &seal.segment_id,
+            &seal.node_id,
+            &seal.config_hash,
+            &seal.sealed_tip,
+            seal.entry_count,
+            &seal.opened_at,
+            &seal.sealed_at,
+        );
+        if seal.seal_hash == legacy_expected {
+            return Ok(());
+        }
+    }
+
+    Err(AuditError::SegmentIntegrity {
+        segment_id: seal.segment_id.clone(),
+        expected,
+        actual: seal.seal_hash.clone(),
+    })
 }
 
 /// Check that a seal's `prev_seal_hash` points to its predecessor's `seal_hash`.
@@ -534,6 +652,38 @@ mod tests {
     }
 
     #[test]
+    fn should_default_new_segments_to_the_default_tenant() {
+        let seg = Segment::open(node(), config(), None);
+        assert_eq!(seg.tenant_id(), &crate::tenancy::TenantId::default_tenant());
+        assert_eq!(seg.seal().tenant_id, "default");
+    }
+
+    #[test]
+    fn should_scope_a_segment_to_an_explicit_tenant() {
+        let seg = Segment::open_for_tenant(
+            crate::tenancy::TenantId::new("acme"),
+            node(),
+            config(),
+            None,
+        );
+        assert_eq!(seg.seal().tenant_id, "acme");
+    }
+
+    /// S1 spec §5: segments are named `(tenant, node)`, not just `node` — the seal
+    /// hash must commit to `tenant_id` so that relabelling a segment onto a different
+    /// tenant after the fact is detected exactly like any other seal tamper.
+    #[test]
+    fn should_detect_a_seal_relabelled_onto_a_different_tenant() {
+        let (mut seals, _) = build_seal_chain(1);
+        seals[0].tenant_id = "attacker-tenant".to_owned();
+        let err = verify_seal_chain(&seals).expect_err("relabelled tenant_id must be rejected");
+        assert!(
+            matches!(err, AuditError::SegmentIntegrity { .. }),
+            "expected SegmentIntegrity, got {err:?}"
+        );
+    }
+
+    #[test]
     fn should_accept_a_correctly_linked_run_of_seals() {
         let (seals, _) = build_seal_chain(3);
         verify_seal_chain(&seals).expect("well-formed chain must verify");
@@ -614,6 +764,94 @@ mod tests {
             matches!(err, AuditError::SegmentLink { .. }),
             "expected SegmentLink, got {err:?}"
         );
+    }
+
+    /// S1 added `tenant_id` to the seal hash preimage. A seal sealed before that
+    /// migration has a `seal_hash` on disk computed *without* `tenant_id` — migration
+    /// 0005 backfills the `tenant_id` *column* to `"default"`, but cannot rewrite the
+    /// hash already committed. Such a seal must still verify (via
+    /// `compute_legacy_seal_hash`'s fallback), or every pre-existing deployment's audit
+    /// trail would report as tampered on the first `verify` after upgrading.
+    #[test]
+    fn should_accept_a_pre_s1_seal_hashed_without_tenant_id() {
+        let legacy_hash = compute_legacy_seal_hash(
+            None,
+            "legacy-segment",
+            node().as_str(),
+            config(),
+            "legacy-tip",
+            2,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:01:00Z",
+        );
+        let legacy_seal = SegmentSeal {
+            segment_id: "legacy-segment".to_owned(),
+            tenant_id: crate::tenancy::DEFAULT_TENANT.to_owned(),
+            node_id: node().as_str().to_owned(),
+            config_hash: config().to_owned(),
+            prev_seal_hash: None,
+            sealed_tip: "legacy-tip".to_owned(),
+            entry_count: 2,
+            opened_at: "2026-01-01T00:00:00Z".to_owned(),
+            sealed_at: "2026-01-01T00:01:00Z".to_owned(),
+            seal_hash: legacy_hash,
+        };
+
+        check_seal_integrity(&legacy_seal).expect("a pre-S1 seal must still verify");
+    }
+
+    /// The legacy fallback must not become a second way to forge a seal: a genuinely
+    /// tampered `"default"`-tenant seal has to fail both the current and the legacy
+    /// formula, since tampering the same field breaks both.
+    #[test]
+    fn legacy_fallback_does_not_accept_a_genuinely_tampered_default_tenant_seal() {
+        let legacy_hash = compute_legacy_seal_hash(
+            None,
+            "legacy-segment",
+            node().as_str(),
+            config(),
+            "legacy-tip",
+            2,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:01:00Z",
+        );
+        let mut tampered = SegmentSeal {
+            segment_id: "legacy-segment".to_owned(),
+            tenant_id: crate::tenancy::DEFAULT_TENANT.to_owned(),
+            node_id: node().as_str().to_owned(),
+            config_hash: config().to_owned(),
+            prev_seal_hash: None,
+            sealed_tip: "legacy-tip".to_owned(),
+            entry_count: 2,
+            opened_at: "2026-01-01T00:00:00Z".to_owned(),
+            sealed_at: "2026-01-01T00:01:00Z".to_owned(),
+            seal_hash: legacy_hash,
+        };
+        tampered.entry_count = 99;
+
+        let err =
+            check_seal_integrity(&tampered).expect_err("tampered legacy seal must be rejected");
+        assert!(matches!(err, AuditError::SegmentIntegrity { .. }));
+    }
+
+    /// A `*.seal.json` written by a pre-S1 build has no `"tenant_id"` key at all —
+    /// deserializing it must default to `"default"`, not fail with a missing-field
+    /// error.
+    #[test]
+    fn should_default_tenant_id_when_deserializing_a_pre_s1_seal_file() {
+        let json = r#"{
+            "segment_id": "legacy-segment",
+            "node_id": "legacy-node",
+            "config_hash": "config-hash-abc",
+            "prev_seal_hash": null,
+            "sealed_tip": "legacy-tip",
+            "entry_count": 2,
+            "opened_at": "2026-01-01T00:00:00Z",
+            "sealed_at": "2026-01-01T00:01:00Z",
+            "seal_hash": "deadbeef"
+        }"#;
+        let seal: SegmentSeal = serde_json::from_str(json).expect("pre-S1 seal must still parse");
+        assert_eq!(seal.tenant_id, crate::tenancy::DEFAULT_TENANT);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

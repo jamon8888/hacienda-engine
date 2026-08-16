@@ -29,9 +29,8 @@ impl ReviewStore for PostgresReviewStore {
         tenant: &TenantId,
         mut item: ReviewQueueItem,
     ) -> Result<ReviewQueueItem, ReviewError> {
-        item.tenant = tenant.clone();
+        item.tenant_id = tenant.to_string();
         let deadline = parse_optional_rfc3339(item.deadline.as_deref())?;
-        let tenant_id = item.tenant.as_str();
 
         sqlx::query!(
             r#"
@@ -39,7 +38,7 @@ impl ReviewStore for PostgresReviewStore {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
             item.id,
-            tenant_id,
+            item.tenant_id,
             item.text_snippet,
             item.category,
             item.start as i64,
@@ -71,7 +70,7 @@ impl ReviewStore for PostgresReviewStore {
             WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
             RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                       priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,
-                      decision, comment
+                      decision, comment, tenant_id
             "#,
             reviewer,
             id,
@@ -81,7 +80,7 @@ impl ReviewStore for PostgresReviewStore {
         .await?;
 
         match row {
-            Some(row) => row_to_item(row, tenant.clone()),
+            Some(row) => row_to_item(row),
             None => {
                 // The item exists (for this tenant) but was not `pending`, or no such
                 // item exists for this tenant at all. Distinguish the two so the caller
@@ -123,7 +122,7 @@ impl ReviewStore for PostgresReviewStore {
             WHERE id = $6 AND tenant_id = $7 AND decision IS NULL
             RETURNING id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                       priority, assigned_reviewer, deadline, created_at, decided_by, decided_at,
-                      decision, comment
+                      decision, comment, tenant_id
             "#,
             status.to_string(),
             reviewer,
@@ -137,7 +136,7 @@ impl ReviewStore for PostgresReviewStore {
         .await?;
 
         match row {
-            Some(row) => row_to_item(row, tenant.clone()),
+            Some(row) => row_to_item(row),
             None => {
                 // Either already decided, or no such item exists for this tenant.
                 match self.get(tenant, id).await? {
@@ -160,7 +159,7 @@ impl ReviewStore for PostgresReviewStore {
                 r#"
                 SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                        priority, assigned_reviewer, decided_by, decided_at, decision, comment,
-                       deadline, created_at
+                       deadline, created_at, tenant_id
                 FROM review_items
                 WHERE tenant_id = $1 AND status = $2
                 ORDER BY created_at
@@ -171,7 +170,7 @@ impl ReviewStore for PostgresReviewStore {
             .fetch_all(&self.pool)
             .await?;
             rows.into_iter()
-                .map(|row| row_to_item(row, tenant.clone()))
+                .map(row_to_item)
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             let rows = sqlx::query_as!(
@@ -179,7 +178,7 @@ impl ReviewStore for PostgresReviewStore {
                 r#"
                 SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                        priority, assigned_reviewer, decided_by, decided_at, decision, comment,
-                       deadline, created_at
+                       deadline, created_at, tenant_id
                 FROM review_items
                 WHERE tenant_id = $1
                 ORDER BY created_at
@@ -189,7 +188,7 @@ impl ReviewStore for PostgresReviewStore {
             .fetch_all(&self.pool)
             .await?;
             rows.into_iter()
-                .map(|row| row_to_item(row, tenant.clone()))
+                .map(row_to_item)
                 .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -207,7 +206,7 @@ impl ReviewStore for PostgresReviewStore {
             r#"
             SELECT id, text_snippet, category, start_pos, end_pos, confidence, source, status,
                    priority, assigned_reviewer, decided_by, decided_at, decision, comment,
-                   deadline, created_at
+                   deadline, created_at, tenant_id
             FROM review_items
             WHERE id = $1 AND tenant_id = $2
             "#,
@@ -217,7 +216,7 @@ impl ReviewStore for PostgresReviewStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        row.map(|row| row_to_item(row, tenant.clone())).transpose()
+        row.map(row_to_item).transpose()
     }
 
     async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
@@ -274,15 +273,12 @@ struct ReviewItemRow {
     comment: Option<String>,
     deadline: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
+    tenant_id: String,
 }
 
-/// `tenant` is passed in rather than selected as a column: every caller already knows it
-/// (it came from the `WHERE tenant_id = $n` predicate that produced this row), so
-/// selecting it back out would just be a second place for it to disagree with the query.
-fn row_to_item(row: ReviewItemRow, tenant: TenantId) -> Result<ReviewQueueItem, ReviewError> {
+fn row_to_item(row: ReviewItemRow) -> Result<ReviewQueueItem, ReviewError> {
     Ok(ReviewQueueItem {
         id: row.id,
-        tenant,
         text_snippet: row.text_snippet,
         category: row.category,
         start: row.start_pos as u32,
@@ -308,6 +304,7 @@ fn row_to_item(row: ReviewItemRow, tenant: TenantId) -> Result<ReviewQueueItem, 
         decided_by: row.decided_by,
         decided_at: row.decided_at.map(|d| d.to_rfc3339()),
         comment: row.comment,
+        tenant_id: row.tenant_id,
     })
 }
 
@@ -345,7 +342,6 @@ mod tests {
     fn test_item(id: &str) -> ReviewQueueItem {
         ReviewQueueItem {
             id: id.to_owned(),
-            tenant: t(),
             text_snippet: "jane@example.com".to_owned(),
             category: "email".to_owned(),
             start: 0,
@@ -361,6 +357,7 @@ mod tests {
             decided_by: None,
             decided_at: None,
             comment: None,
+            tenant_id: "default".to_owned(),
         }
     }
 
