@@ -696,7 +696,7 @@ impl Pseudonymiser {
         }
         Err(PseudonymError::KeyNotFound {
             id: id.to_string(),
-            variable: id.env_var(&self.tenant)?,
+            variable: scoped_var_name(&self.tenant, &id.env_var())?,
         })
     }
 

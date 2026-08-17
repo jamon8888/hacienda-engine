@@ -335,7 +335,7 @@ impl AuditStore for PostgresAuditStore {
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
             &segment_row.segment_id.to_string(),
-            &segment_row.tenant_id,
+            tenant_id,
             &segment_row.node_id,
             &segment_row.config_hash,
             &tip,
@@ -346,7 +346,7 @@ impl AuditStore for PostgresAuditStore {
 
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
-            tenant_id: segment_row.tenant_id.clone(),
+            tenant_id: tenant_id.to_string(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
             prev_seal_hash,
@@ -439,7 +439,7 @@ impl AuditStore for PostgresAuditStore {
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
             &segment_row.segment_id.to_string(),
-            &segment_row.tenant_id,
+            tenant_id,
             &segment_row.node_id,
             &segment_row.config_hash,
             &tip,
@@ -450,7 +450,7 @@ impl AuditStore for PostgresAuditStore {
 
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
-            tenant_id: segment_row.tenant_id.clone(),
+            tenant_id: tenant_id.to_string(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
             prev_seal_hash,
