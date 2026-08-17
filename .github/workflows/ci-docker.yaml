@@ -47,6 +47,10 @@ jobs:
           smoke_config="$(mktemp)"
           sed "s/replace-me-before-deploying/$(openssl rand -hex 32)/" \
             config/production.toml > "$smoke_config"
+          # mktemp defaults to 0600 (owner-only); the image runs as
+          # `nonroot` (see docker/Dockerfile's USER directive), which
+          # can't read a root-owned 0600 file through the bind mount.
+          chmod 0644 "$smoke_config"
           docker run -d --name hacienda-smoke -p 18787:8787 \
             -v "$smoke_config:/app/config/production.toml:ro" \
             hacienda:ci-check
