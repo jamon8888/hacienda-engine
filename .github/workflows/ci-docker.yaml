@@ -40,8 +40,15 @@ jobs:
         run: docker buildx build -f docker/Dockerfile -t hacienda:ci-check .
       - name: Smoke-test the image starts and serves /health
         run: |
+          # config/production.toml ships a placeholder static auth token
+          # (documented as such — replace before deploying). check_bind_policy
+          # correctly refuses to bind 0.0.0.0 with that placeholder still in
+          # place, so the smoke test needs its own config with a real token.
+          smoke_config="$(mktemp)"
+          sed "s/replace-me-before-deploying/$(openssl rand -hex 32)/" \
+            config/production.toml > "$smoke_config"
           docker run -d --name hacienda-smoke -p 18787:8787 \
-            -v "$(pwd)/config/production.toml:/app/config/production.toml:ro" \
+            -v "$smoke_config:/app/config/production.toml:ro" \
             hacienda:ci-check
           for i in $(seq 1 10); do
             if curl -sf http://localhost:18787/health; then
