@@ -532,7 +532,7 @@ mod tests {
         // pre-S1 owner-only check could not distinguish.
         let acme_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
         let job = job_store
-            .create(&acme_ctx, Some("alice".to_string()))
+            .create(&acme_ctx.tenant, Some("alice".to_string()))
             .await
             .expect("create must succeed");
 
