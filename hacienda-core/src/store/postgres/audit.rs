@@ -442,7 +442,7 @@ impl AuditStore for PostgresAuditStore {
     }
 }
 
-// ── row <-> domain conversions ────────────────────────────────────────────────
+// ── row <-> domain conversions ───────────────────────────────────────
 
 /// Confidence is stored as `DOUBLE PRECISION` (f64) because Postgres has no native f32,
 /// but the domain type is `f32` (matches [`AuditEntryInput::confidence`]). `as f32` is a
@@ -556,7 +556,7 @@ struct SealRow {
     sealed_at: Option<DateTime<Utc>>,
 }
 
-// ── helper functions ────────────────────────────────────────────────────────
+// ── helper functions ─────────────────────────────────────────
 
 /// Returns the currently open segment's id and *its* `config_hash` — not
 /// necessarily `config_hash`, which is only used to seed a brand-new segment.

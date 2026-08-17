@@ -6,14 +6,14 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     ports:
-      - "8080:8080"
-      - "9090:9090"
-      - "8081:8081"
+      # docker/Dockerfile's CMD binds the app to 0.0.0.0:8787 — see docs/configuration.md.
+      - "8787:8787"
     environment:
       - RUST_LOG=info,hacienda=debug
-      - HACIENDA_JWT_SECRET=${HACIENDA_JWT_SECRET}
-      - HACIENDA_FPE_KEY=${HACIENDA_FPE_KEY}
-      - HACIENDA_MODELS_DIR=/var/lib/hacienda/models
+      # HACIENDA_JWT_SECRET/HACIENDA_FPE_KEY/HACIENDA_MODELS_DIR were never read by any
+      # env var lookup in the binary (see docs/configuration.md's "Environment variables"
+      # section) and were removed. Pseudonymisation keys are read via
+      # HACIENDA_PSEUDONYM_ACTIVE_KEY / HACIENDA_PSEUDONYM_KEY_<ID> if that mode is used.
     volumes:
       - hacienda-models:/var/lib/hacienda/models
       - hacienda-audit:/var/log/hacienda
