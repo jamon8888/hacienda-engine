@@ -15,6 +15,17 @@ for entity in result.entities:
 An async client is available as `AsyncHaciendaClient`, mirroring every method as a
 coroutine.
 
+## Async jobs
+
+`documents.process_documents_background(...)` returns a job id immediately; poll it
+yourself via `jobs.get_job_result(...)`, or use the `extract_and_wait(...)` /
+`wait_for_job(...)` / `wait_for_jobs(...)` convenience methods on the client, which poll
+for you and raise `JobTimeoutError` if the job hasn't finished within `timeout` seconds:
+
+```python
+result = client.extract_and_wait(body, poll_interval=1.0, timeout=300.0)
+```
+
 ## Retries
 
 Both clients retry a request on `429`, `502`, `503`, and `504` (configurable via

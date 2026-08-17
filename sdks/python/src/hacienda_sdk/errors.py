@@ -60,6 +60,19 @@ def _unwrap(response: Any) -> Any:
     raise HaciendaApiError(status_code=status, code=code, message=message)
 
 
+class JobTimeoutError(Exception):
+    """Raised by `wait_for_job`/`wait_for_jobs`/`extract_and_wait` when a job has
+    not reached a terminal state (`succeeded` or `failed`) within the given
+    `timeout`. The job itself is still running server-side; this only means the
+    client stopped waiting.
+    """
+
+    def __init__(self, job_id: str, timeout: float) -> None:
+        self.job_id = job_id
+        self.timeout = timeout
+        super().__init__(f"job {job_id!r} did not reach a terminal state within {timeout:.1f}s")
+
+
 def _unwrap_json(response: Any) -> Any:
     """Like `_unwrap`, but for routes whose OpenAPI response schema is `serde_json::Value`.
 
