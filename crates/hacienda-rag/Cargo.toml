@@ -41,7 +41,7 @@ sqlx = { workspace = true, optional = true }
 # pgvector's `sqlx` feature registers `pgvector::Vector` as a sqlx-encodable
 # Postgres `vector` column type. Not a workspace dependency yet (this is its
 # first consumer in the workspace).
-pgvector = { version = "0.4", features = ["sqlx"], optional = true }
+pgvector = { version = "=0.4.1", features = ["sqlx"], optional = true }
 uuid = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 # Streaming answer synthesis (Phase 12 Track 3). Gated behind the `streaming` feature.

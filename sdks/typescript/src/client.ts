@@ -20,7 +20,7 @@ import createClient, { type Client } from "openapi-fetch";
 // sources it compiles, never copies a plain `.d.ts` input to `outDir`). See package.json's
 // `postbuild` script, which copies it across after `tsc` runs.
 import type { components, paths } from "./_generated/api.js";
-import { unwrap } from "./errors.js";
+import { JobTimeoutError, unwrap } from "./errors.js";
 
 export type { HaciendaApiError } from "./errors.js";
 
@@ -44,6 +44,24 @@ const RETRY_JITTER_MS = 100;
 // endpoints (revokeKey, deleteCollection, deletePreset) are idempotent by
 // design: repeating them against an already-deleted resource is a no-op.
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS", "DELETE"]);
+
+// Terminal states for `waitForJob(s)`/`extractAndWait` — see `JobStatus` in
+// `hacienda-core/src/jobs/types.rs`. A `failed` job is still terminal: it is
+// returned to the caller, not thrown, since the job itself finished running.
+const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed"]);
+const DEFAULT_POLL_INTERVAL_MS = 1000;
+const DEFAULT_JOB_TIMEOUT_MS = 300_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface WaitOptions {
+  /** Milliseconds between polls of the job endpoint. Default 1000. */
+  pollIntervalMs?: number;
+  /** Total milliseconds to wait before throwing `JobTimeoutError`. Default 300000. */
+  timeoutMs?: number;
+}
 
 export interface HaciendaClientOptions {
   baseUrl: string;
@@ -138,6 +156,35 @@ export class HaciendaClient {
     // Backed by the richer `/v1/audit/verify` (broken-chain-as-200, names the
     // offending entry/seal) — see hacienda-api/src/routes.rs's `/v1/audit*` comment.
     verifyAudit(): Promise<Schemas["VerifyResponse"]>;
+    /**
+     * `GET /v1/audit/entries` — one page of this node's history, oldest
+     * first. Page until you receive an **empty page**, not until
+     * `next_cursor` is absent — see
+     * `hacienda-api/src/handlers/audit.rs`'s module doc.
+     */
+    getAuditEntries(query?: {
+      limit?: number;
+      cursor?: string;
+    }): Promise<Schemas["NodeAuditPage"]>;
+    /** `GET /v1/audit/seals` — every segment seal this node holds, oldest first. */
+    getAuditSeals(): Promise<Schemas["NodeSealsResponse"]>;
+    /**
+     * `GET /v1/audit/export` — the whole history as bytes. `format` is
+     * `json` (default) or `jsonl` (both verifiable offline via chain_hash
+     * recomputation) or `csv` (a tabular extract, not verifiable). Requires
+     * `audit:export`.
+     *
+     * Typed as `unknown`: the response body's shape (and content-type)
+     * depends on `format` — `json`/`jsonl` are JSON, `csv` is a plain-text
+     * table — which openapi-fetch's generated types cannot express as one
+     * schema. Callers requesting `csv` may need to read the raw response
+     * text rather than relying on this being parsed JSON.
+     */
+    exportAudit(query?: {
+      format?: "json" | "jsonl" | "csv";
+    }): Promise<unknown>;
+    /** `GET /v1/audit/tip` — the current head of this node's chain. */
+    getAuditTip(): Promise<Schemas["AuditTipResponse"]>;
   };
 
   readonly review: {
@@ -182,6 +229,17 @@ export class HaciendaClient {
       name: string,
       body: Schemas["UpsertDocumentRequest"],
     ): Promise<Schemas["UpsertDocumentResponse"]>;
+    /**
+     * `POST /v1/rag/collections/{name}/documents/{id}/reindex` — re-derives
+     * the document's chunks from its stored `full_text` without resubmitting
+     * content. Requires the document to have been upserted with
+     * `external_id` set — see the route's own doc comment
+     * (`hacienda-api/src/handlers/rag.rs`) for why.
+     */
+    reindexDocument(
+      name: string,
+      id: string,
+    ): Promise<Schemas["UpsertDocumentResponse"]>;
     retrieve(name: string, body: unknown): Promise<unknown>;
     migrateEmbeddings(
       name: string,
@@ -191,6 +249,20 @@ export class HaciendaClient {
       name: string,
       jobId: string,
     ): Promise<Schemas["MigrateStatusResponse"]>;
+    /**
+     * `POST /v1/rag/collections/{name}/answer` — streaming RAG answer
+     * synthesis over already-retrieved, PII-redaction-gated chunks.
+     *
+     * Typed as `unknown`: the response is `text/event-stream` (SSE
+     * `citation`/`token`/`usage`/`done`/`error` events), which openapi-fetch's
+     * typed JSON layer does not model. Mirrors `sdks/python`'s existing
+     * `rag.answer()`, which has the same limitation — neither client parses
+     * the SSE frames yet; both hand back the raw response body. A caller
+     * that needs real token-by-token streaming should call the endpoint
+     * directly with `fetch` and parse `text/event-stream` itself until a
+     * typed SSE reader ships here.
+     */
+    answer(name: string, body: Schemas["AnswerRequest"]): Promise<unknown>;
   };
 
   readonly presets: {
@@ -296,6 +368,12 @@ export class HaciendaClient {
     this.audit = {
       getAudit: async () => unwrap(await api.GET("/v1/audit")),
       verifyAudit: async () => unwrap(await api.GET("/v1/audit/verify")),
+      getAuditEntries: async (query) =>
+        unwrap(await api.GET("/v1/audit/entries", { params: { query } })),
+      getAuditSeals: async () => unwrap(await api.GET("/v1/audit/seals")),
+      exportAudit: async (query) =>
+        unwrap(await api.GET("/v1/audit/export", { params: { query } })),
+      getAuditTip: async () => unwrap(await api.GET("/v1/audit/tip")),
     };
 
     this.review = {
@@ -361,6 +439,12 @@ export class HaciendaClient {
             body,
           }),
         ),
+      reindexDocument: async (name, id) =>
+        unwrap(
+          await api.POST("/v1/rag/collections/{name}/documents/{id}/reindex", {
+            params: { path: { name, id } },
+          }),
+        ),
       retrieve: async (name, body) =>
         unwrap(
           await api.POST("/v1/rag/collections/{name}/retrieve", {
@@ -383,6 +467,13 @@ export class HaciendaClient {
               params: { path: { name, job_id: jobId } },
             },
           ),
+        ),
+      answer: async (name, body) =>
+        unwrap(
+          await api.POST("/v1/rag/collections/{name}/answer", {
+            params: { path: { name } },
+            body,
+          }),
         ),
     };
 
@@ -445,5 +536,87 @@ export class HaciendaClient {
    */
   async whoami(): Promise<Schemas["WhoamiResponse"]> {
     return this.auth.getWhoami();
+  }
+
+  /**
+   * Poll `GET /v1/jobs/{id}/result` until `jobId` reaches a terminal state.
+   *
+   * Mirrors xberg-sdks' `wait_for_job`. Resolves with the terminal
+   * `JobResultResponse` — a `failed` job resolves, it does not reject, since
+   * the job itself finished running; its `error` field carries the reason.
+   *
+   * Throws {@link JobTimeoutError} if `timeoutMs` elapses first; the job may
+   * still be running server-side when that happens.
+   */
+  async waitForJob(
+    jobId: string,
+    options: WaitOptions = {},
+  ): Promise<Schemas["JobResultResponse"]> {
+    const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_JOB_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const result = await this.jobs.getJobResult(jobId);
+      if (TERMINAL_JOB_STATUSES.has(result.status)) {
+        return result;
+      }
+      if (Date.now() >= deadline) {
+        throw new JobTimeoutError(jobId, timeoutMs);
+      }
+      await sleep(pollIntervalMs);
+    }
+  }
+
+  /**
+   * `waitForJob` for several jobs at once, sharing one deadline.
+   *
+   * Resolves with a `Map` keyed by job id, same jobs as `jobIds`. Throws
+   * {@link JobTimeoutError} naming one still-pending job if `timeoutMs`
+   * elapses before every job reaches a terminal state.
+   */
+  async waitForJobs(
+    jobIds: string[],
+    options: WaitOptions = {},
+  ): Promise<Map<string, Schemas["JobResultResponse"]>> {
+    const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_JOB_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    const results = new Map<string, Schemas["JobResultResponse"]>();
+    let pending = [...jobIds];
+    while (pending.length > 0) {
+      const stillPending: string[] = [];
+      for (const jobId of pending) {
+        const result = await this.jobs.getJobResult(jobId);
+        if (TERMINAL_JOB_STATUSES.has(result.status)) {
+          results.set(jobId, result);
+        } else {
+          stillPending.push(jobId);
+        }
+      }
+      pending = stillPending;
+      if (pending.length === 0) break;
+      if (Date.now() >= deadline) {
+        throw new JobTimeoutError(pending[0], timeoutMs);
+      }
+      await sleep(pollIntervalMs);
+    }
+    return results;
+  }
+
+  /**
+   * Submit `body` to `POST /v1/documents/async` and poll until it finishes.
+   *
+   * Convenience composing `documents.processDocumentsBackground` and
+   * `waitForJob`, mirroring xberg-sdks' `extract_and_wait`. For a batch small
+   * enough to process inline, prefer `documents.processDocuments` instead —
+   * this exists for batches you would otherwise have to submit-then-poll by
+   * hand.
+   */
+  async extractAndWait(
+    body: Schemas["ProcessDocumentsRequest"],
+    options: WaitOptions = {},
+  ): Promise<Schemas["JobResultResponse"]> {
+    const job = await this.documents.processDocumentsBackground(body);
+    return this.waitForJob(job.job_id, options);
   }
 }

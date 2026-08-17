@@ -235,6 +235,14 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(rag::list_documents).post(rag::upsert_document),
     },
+    // Hacienda-only addition closing the xberg-sdks `reindex_rag_document` gap
+    // (platform-parity design spec §3.1/§4.1) — see `handlers::rag::reindex_document`'s
+    // doc comment. Same `DocumentsProcess` capability as every other RAG route.
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/documents/{id}/reindex",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(rag::reindex_document),
+    },
     RouteSpec {
         path: "/v1/rag/collections/{name}/retrieve",
         access: Access::Capability(Capability::DocumentsProcess),
@@ -1175,6 +1183,119 @@ pub(crate) mod tests {
             assert_eq!(chunk.ordinal, i as u32, "chunks must be stored in order");
             assert!(!chunk.content.is_empty());
         }
+    }
+
+    /// Reindexing a document with `external_id` set re-chunks its stored
+    /// `full_text` and re-upserts under the same identity, not a duplicate.
+    #[tokio::test]
+    async fn rag_reindex_document_rechunks_in_place() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let upsert_body = serde_json::json!({
+            "document": {"external_id": "doc-1", "full_text": "hello world"},
+        });
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upsert.status().as_u16(), 201);
+        let upsert = json_body(upsert).await;
+        let document_id: hacienda_rag::DocumentId =
+            serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
+
+        let reindex = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/rag/collections/c1/documents/{}/reindex",
+                        document_id.0
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reindex.status().as_u16(), 200);
+        let reindex = json_body(reindex).await;
+        let reindexed_id: hacienda_rag::DocumentId =
+            serde_json::from_value(reindex["document_id"].clone()).expect("document_id");
+        assert_eq!(
+            reindexed_id, document_id,
+            "reindex must update the same document (matched by external_id), not create a new one"
+        );
+    }
+
+    /// Reindexing a document with no `external_id` must be refused (400), not
+    /// silently create a duplicate — see `handlers::rag::reindex_document`'s doc.
+    #[tokio::test]
+    async fn rag_reindex_document_without_external_id_is_400() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let upsert_body = serde_json::json!({
+            "document": {"full_text": "hello world"},
+        });
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upsert.status().as_u16(), 201);
+        let upsert = json_body(upsert).await;
+        let document_id: hacienda_rag::DocumentId =
+            serde_json::from_value(upsert["document_id"].clone()).expect("document_id");
+
+        let reindex = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/rag/collections/c1/documents/{}/reindex",
+                        document_id.0
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reindex.status().as_u16(), 400);
+    }
+
+    /// `POST .../reindex` on a document that does not exist must be 404.
+    #[tokio::test]
+    async fn rag_reindex_missing_document_is_404() {
+        let app = build_router(state_with_rag());
+        assert_eq!(create_collection(&app, "c1", 0).await, 201);
+
+        let reindex = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/documents/missing/reindex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reindex.status().as_u16(), 404);
     }
 
     /// `GET` on a collection that was never created must be 404, not 500 or 200
