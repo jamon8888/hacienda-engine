@@ -311,3 +311,98 @@ signal. Work the phases in dependency order; anything not gated on S1 can be pic
 - [ ] **C3.5** Validate: `dsh --profile hacienda --dump-config` → no errors, all rows present; boot on a fresh port; confirm Exa+Ollama+Artifacts+M2 all live.
 - [ ] **C3.6** Release: tag + local tarball/private registry; document `dsh --profile hacienda` and `launch-web-exa.sh` (fresh port; key via launch env).
 - **Acceptance:** one profile reproduces the full stack; `--dump-config` clean.
+
+---
+
+## 18. C3 web build — wiring the real @extend-ai viewers + CodeMirror into a loadable GUI client bundle
+
+**Goal:** make the Files/Artifacts view render real documents (DOCX/PPTX/XLSX/PDF via
+`@extend-ai` + the Studio viewers) and redacted markdown (CodeMirror), by producing a loadable
+client bundle for the GUI.
+
+**Verified reality (2026-08-18):** this cannot be built in the *installed* environment — the npx
+checkout is an installed-package tree (no `vite`/`rollup`, no source, no build scripts). The DSH
+client modules are served as **prebuilt CJS factory bundles** at `exports["./client"]`, produced by
+the **`deepseek-harness` source repo's** `pnpm run build:web`. Blocked here until that source is
+cloned.
+
+### 18.1 The exact bundle format to produce (verified from a shipped built client)
+
+`pnpm run build:web` wraps a client plugin's entry into a rollup CJS **factory**, served at
+`/plugins/<id>/client.js`:
+
+```js
+window.__ModuleLoader__.load({
+  id: "@deepseek-ai/<pkg>",
+  factory: (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
+    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+    let react = require("react");
+    let react_jsx_runtime = require("react/jsx-runtime");
+    let runtime = require("@deepseek-ai/dsh-client-runtime/client");
+    // ... UI deps (dsh-client-ui-slots, cordis, @hugeicons, @extend-ai, @codemirror, @pierre, ...)
+    // are either inlined into this bundle or externalized per the build config.
+    // Then the plugin's default export.
+  }
+})
+```
+
+- The package must expose `exports["./client"]` → the built file (`./lib/client.js`), and be listed
+  in a `dsh.client` **roster row** (in the bundle's `cordis.patch.yml`) so `dsh-client-modules` scans
+  it and serves it: `- id: hacienda-artifacts` / `name: '@hacienda/dsh-client-hacienda'`.
+- The DSH evaluator injects `React`, `host.call`, `styles.insert`, `ctx`, `slots`, `console`; a
+  plugin's browser code consumes them (and imports the runtime seam). The Client **must not** use
+  `import`-transformed JSX in the final artifact — the build handles JSX/TS; the runtime source
+  stays plain JS or TS compiled by that build.
+
+### 18.2 Pre-requisites
+
+- A **full clone of `github.com/deepseek-ai/deepseek-harness`** (the source repo with
+  `packages/`, `pnpm-workspace.yaml`, the web build scripts) — this is the only environment that
+  has it. The installed npx tree here does not.
+- pnpm ≥ 9 + Node 22 (the harness already uses these).
+- The `@extend-ai` + CodeMirror + tree deps are already pinned in `apps/hacienda-studio/package.json`
+  (`@extend-ai/react-docx@0.8.1`, `react-pptx`, `react-xlsx`, `@codemirror/lang-markdown@6`,
+  `@embedpdf/*`, `@pierre/trees`, `@hugeicons/*`, `@tanstack/react-virtual`) — the exact component
+  set the Studio `components/extend/*` viewers use.
+
+### 18.3 Steps (in a `deepseek-harness` source checkout)
+
+1. **Add the client package** under `packages/` (mirroring `dsh-client-*` layout): `packages/client/
+   dsh-hacienda/` with `package.json` exposing `exports["./client"]` → `./lib/client.js`, `main`
+   (host), and `dsh.bundle.patch` → its `cordis.patch.yml`. Add it to `pnpm-workspace.yaml` /
+   the root workspace.
+2. **Port the Artifacts view into the client source** (`lib/client.js`): keep the current plain-JS
+   logic, and add the lazy viewers:
+   - `import { DocxEditorViewer } from '@extend-ai/react-docx'`, `@extend-ai/react-pptx`,
+     `@extend-ai/react-xlsx`, the Studio `pdf-viewer`, for `viewerKindForFile` dispatch
+     (pdf/docx/pptx/xlsx/image) — mirroring `apps/hacienda-studio/components/extend/file-system.tsx`.
+   - `import { EditorView } from '@codemirror/view'` + `@codemirror/lang-markdown` + one-dark for
+     the redacted-markdown pane, with a decoration overlay from the `scan-artifacts` RPC (§11.4).
+   - Host RPCs (`list-workspace`, `read-file-text`, `file-download-url`, `scan-artifacts`) stay as
+     the package-private bridge; large PDF/DOCX bytes flow via a `ctx.webServer` GET route
+     (C1.2-final) rather than the small data URL.
+3. **Roster + patch**: add the `dsh.client` roster row for `hacienda-artifacts` and keep the host
+   row (`hacienda-host`) in the bundle's `cordis.patch.yml`.
+4. **Build**: `pnpm install && pnpm run build:web` — this rewrites `lib/client.js` into the
+   `__ModuleLoader__.load({id, factory})` CJS factory (the dev watcher `pnpm run dev:web` does the
+   same on change).
+5. **Boot + verify**: `dsh --profile hacienda` (or the launcher on a fresh port), open the Files
+   tab, open a `.md` (CodeMirror + PII highlight), a `.docx`/`.xlsx`/`.pptx`/`.pdf` (the extend /
+   embedpdf viewers), and an image. Confirm the produced-file chip + review-queue integration.
+
+### 18.4 Deferred-in-this-env (blocked) vs. done
+
+| Piece | Where it lives now | Status |
+|---|---|---|
+| Host RPCs + scan tool + PII regex | `integrations/node/dsh-hacienda/lib/host.js` (committed, PR #87) | ✅ done, loadable |
+| Plain-JS Finder view + file preview + PII highlight | `.../lib/client.js` (committed, PR #87) | ✅ done in source; loads as a dynamic plugin now |
+| `@extend-ai` DOCX/PPTX/XLSX/PDF + CodeMirror in a loadable GUI bundle | needs §18.3 in the `deepseek-harness` source repo | ⏸ blocked here (no source/build toolchain) |
+| C2 GLiNER2 worker pool, S2 safe-ZIP | plan (Phases C2/S2) | ⏸ pending (S2 gated on P7) |
+
+### 18.5 Next actions an executor takes (only in a source checkout)
+
+- Clone `deepseek-harness`, port `lib/client.js` + host into `packages/client/dsh-hacienda` with
+  the `@extend-ai`/CodeMirror imports (deps already pinned), add the `dsh.client` roster row, then
+  `pnpm run build:web && dsh --profile hacienda`.
