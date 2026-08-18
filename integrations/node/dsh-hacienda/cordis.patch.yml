@@ -1,0 +1,64 @@
+# @hacienda/dsh-hacienda bundle patch — applied after dsh-base + dsh-web-app.
+# Composes the hacienda-engine plugin's rows into the profile. Rows here are
+# added with `- insert:` (a plain `- id:` entry can only override an existing
+# row, so new rows must be inserted).
+#
+# Exa key note: the Exa provider reads process.env.EXA_API_KEY at boot; no key
+# belongs in this file. See the design spec §16.
+
+# ── Host: the hacienda RPCs + scan_folder tool ──────────────────────────────
+- insert:
+    - id: hacienda-host
+      name: '@hacienda/dsh-hacienda'
+
+    # Ollama local models (config-only; keyless): hand-declared pi-ai route so
+    # Gemma is selectable in the model picker via the shipped llm-pi-ai adapter.
+    - id: llm-pi-ai-ollama
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          ollama:
+            displayName: Ollama (local)
+            api: openai-completions
+            baseURL: http://localhost:11434/v1
+            models:
+              - id: gemma2:2b
+                name: Gemma 2 2B (local)
+                contextWindow: 8192
+              - id: gemma3:4b
+                name: Gemma 3 4B (local)
+                contextWindow: 32768
+
+    # Exa deep search + anonymous URL fetch (binary packages installed by this
+    # package's dependencies).
+    - id: web-search-exa
+      name: '@deepseek-ai/dsh-web-search-exa'
+      config:
+        apiKey: !!js process.env.EXA_API_KEY
+    - id: web-fetch-http
+      name: '@deepseek-ai/dsh-web-fetch-http'
+      config:
+        timeoutMs: 30000
+        maxRedirects: 5
+
+# Select Exa as the web-search provider (overrides the base `web` row).
+- id: web
+  config:
+    searchProvider: exa
+
+# Enable the model-facing web tools (base ships tool-web disabled + fetch:false).
+- id: tool-web
+  disabled: false
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+
+# ── Browser roster (client half) ─────────────────────────────────────────────
+# The "Files / Artifacts" view's browser code ships as a prebuilt bundle served
+# by dsh-client-modules under /plugins/<id>/client.js. That bundle is produced
+# by the C3 web build (`pnpm run build:web` over @hacienda/dsh-hacienda's client
+# entry, lib/client.js). The roster row below is declared so the modules node
+# half scans it once the build emits the artifact; a build that has not run yet
+# yields no browser UI (the Host RPCs and scan_folder tool work regardless).
+# - dsh.client:
+#     - hacienda-artifacts: '@hacienda/dsh-hacienda'
