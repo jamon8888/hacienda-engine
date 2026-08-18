@@ -75,6 +75,54 @@ export default {
       return i <= 0 ? '' : t.slice(0, i)
     }
 
+    // PII span highlight (regex feedback tier from scan-artifacts).
+    const CAT_COLOR = {
+      email: '#e5484d',
+      phone: '#f76b15',
+      iban: '#8e4ec6',
+      url: '#1d4ed8',
+      card: '#d1242f',
+    }
+    function renderText(text, spans) {
+      if (!spans || spans.length === 0)
+        return React.createElement(
+          'pre',
+          { style: { flex: 1, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '12px', padding: '8px' } },
+          text,
+        )
+      const sorted = spans.slice().sort(function (a, b) { return a.start - b.start })
+      const parts = []
+      let idx = 0
+      for (const s of sorted) {
+        if (s.start < idx) continue
+        if (s.start > idx) parts.push(React.createElement('span', { key: idx }, text.slice(idx, s.start)))
+        const color = CAT_COLOR[s.category] || '#e5484d'
+        parts.push(
+          React.createElement(
+            'mark',
+            {
+              key: 's' + s.start,
+              style: {
+                background: color + '33',
+                borderBottom: '2px solid ' + color,
+                borderRadius: '3px',
+                padding: '0 1px',
+              },
+              title: (s.category || 'pii') + ' conf=' + (typeof s.confidence === 'number' ? s.confidence.toFixed(2) : '?'),
+            },
+            text.slice(s.start, s.end),
+          ),
+        )
+        idx = s.end
+      }
+      if (idx < text.length) parts.push(React.createElement('span', { key: 'end' }, text.slice(idx)))
+      return React.createElement(
+        'pre',
+        { style: { flex: 1, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '12px', padding: '8px' } },
+        parts,
+      )
+    }
+
     function ArtifactsView(props) {
       const [state, setState] = React.useState({ loading: true, items: [], error: null, path: '' })
       const [target, setTarget] = React.useState('')
@@ -118,8 +166,19 @@ export default {
           host
             .call('read-file-text', { path: item.path })
             .then(function (r) {
-              if (r && r.error) setErr(r.error)
-              else setPreview({ path: item.path, kind: 'text', text: r.text })
+              if (r && r.error) {
+                setErr(r.error)
+                return
+              }
+              // Fetch PII spans for the preview highlight (regex feedback tier).
+              host
+                .call('scan-artifacts', { path: item.path })
+                .then(function (s) {
+                  setPreview({ path: item.path, kind: 'text', text: r.text, spans: (s && s.spans) || [] })
+                })
+                .catch(function () {
+                  setPreview({ path: item.path, kind: 'text', text: r.text, spans: [] })
+                })
             })
             .catch(function (e) {
               setErr(String((e && e.message) || e))
@@ -163,12 +222,14 @@ export default {
             },
             React.createElement('button', { onClick: function () { setPreview(null) } }, '← back'),
             React.createElement('span', { style: { fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, preview.path),
-            preview.kind === 'download' && preview.url
-              ? React.createElement('a', { href: preview.url, download: true, style: { marginLeft: 'auto' } }, 'download')
-              : null,
+            preview.kind === 'text' && preview.spans && preview.spans.length
+              ? React.createElement('span', { style: { marginLeft: 'auto', color: 'var(--dsw-alias-state-warn-primary, #f76b15)', fontSize: '11px', fontWeight: 600 } }, preview.spans.length + ' PII detected')
+              : preview.kind === 'download' && preview.url
+                ? React.createElement('a', { href: preview.url, download: true, style: { marginLeft: 'auto' } }, 'download')
+                : null,
           ),
           preview.kind === 'text'
-            ? React.createElement('pre', { style: { flex: 1, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '12px', padding: '8px' } }, preview.text)
+            ? renderText(preview.text, preview.spans)
             : preview.kind === 'img'
               ? React.createElement('img', { src: preview.url, style: { maxWidth: '100%', marginTop: '8px' } })
               : React.createElement('div', { style: { padding: '8px', color: 'var(--dsw-alias-label-secondary, #666)' } }, 'Binary file — a viewer is wired in the C1.4 slice.'),

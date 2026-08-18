@@ -79,13 +79,43 @@ export default {
       }
     })
 
-    // RPC 4 — PII span overlay for a file. Placeholder until the P7-corrected
-    // facade / GLiNER2 worker is wired (authoritative pass stays server-side).
-    harness.handle('scan-artifacts', async (args) => ({
-      path: args && args.path,
-      spans: [],
-      status: 'review-only-not-wired',
-    }))
+    // RPC 4 — PII span overlay for a file. Regex feedback tier (no P7 dep) so
+    // the Artifacts preview can highlight detected PII now. The AUTHORITATIVE
+    // pass (P7-corrected HaciendaFacade / GLiNER2 worker) replaces this later;
+    // in-preview highlighting is the interactive feedback tier (§11.4).
+    const PII_PATTERNS = [
+      { category: 'email', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, conf: 0.95 },
+      { category: 'iban', re: /\b[A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]{4}){3,7}\b/g, conf: 0.9 },
+      { category: 'url', re: /https?:\/\/[^\s]+/g, conf: 0.9 },
+      { category: 'phone', re: /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, conf: 0.8 },
+      { category: 'card', re: /\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?:[ ]?[0-9]{4})?\b/g, conf: 0.85 },
+    ]
+    function scanText(text) {
+      if (!text) return []
+      const spans = []
+      for (const p of PII_PATTERNS) {
+        p.re.lastIndex = 0
+        let m
+        while ((m = p.re.exec(text)) !== null) {
+          spans.push({ start: m.index, end: m.index + m[0].length, category: p.category, confidence: p.conf })
+        }
+      }
+      spans.sort(function (a, b) { return a.start - b.start })
+      return spans
+    }
+    harness.handle('scan-artifacts', async (args) => {
+      if (!fsSvc) return { error: 'ctx.fs unavailable' }
+      const path = args && args.path
+      if (!path) return { error: 'missing path' }
+      try {
+        const isTextLike = !/(\.(png|jpe?g|gif|webp|svg|pdf|docx|xlsx|pptx|zip|gz))$/i.test(path)
+        if (!isTextLike) return { path, spans: [], binary: true }
+        const text = await fsSvc.readText(await resolvePath(path))
+        return { path, spans: scanText(text), detector: 'regex-feedback-tier' }
+      } catch (err) {
+        return { error: String((err && err.message) || err) }
+      }
+    })
 
     // Model-facing tool: scan_folder (S2.1 shape).
     harness.registerTool(
