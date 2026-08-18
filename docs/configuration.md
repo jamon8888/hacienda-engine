@@ -1,348 +1,155 @@
-# hacienda Configuration Examples
+# hacienda Configuration
 
-## Basic Configuration (hacienda.toml)
+This document describes the real, current configuration surface — every section maps
+directly to a `#[serde(deny_unknown_fields)]` struct in `hacienda-core`, so a typo'd key
+fails to load instead of silently doing nothing (see `hacienda-core/src/config.rs`'s
+module doc for why that trade was made). `hacienda config show` prints the *effective*
+configuration for any given file, with the provenance of each value — the fastest way to
+check what a config actually resolves to, rather than reading source.
+
+## Full example (`hacienda.toml`)
 
 ```toml
 [extraction]
-output_format = "json"
+# xberg's own ExtractionConfig — output format, concurrency, etc. See xberg's docs.
 
 [pii]
+regex_first = true
+model_threshold_default = 0.5
+merge_overlap_threshold = 0.5
+concurrency = 1
+
+[pii.redaction]
+mode = "mask"  # mask | hash | pseudonymize | remove | custom
+preserve_format = false
+
+[pii.audit]
 enabled = true
-redaction_profile = "GDPR"
-model = { enabled = true, model_id = "fastino/GLiNER2-Guardrails-PII-Multi" }
+
+[pii.vertical]
+id = "business_law"
+labels = ["ContractParty", "Court", "Statute"]
 
 [compliance]
-enabled = true
 model_name = "hacienda-pii-v1"
-enabled_reports = ["DPIA", "ModelCard", "DORA", "AIAct", "Checklist"]
-
-[audit]
-enabled = true
+enabled_reports = ["dpia", "model_card", "dora", "checklist"]
 
 [review]
-enabled = true
-auto_assign = false
+confidence_threshold = 0.5
 deadline_hours = 24
 
 [glossary]
 enabled = true
-link_style = "Markdown"
+link_style = "markdown"  # markdown | html | wiki
 min_confidence = 0.5
+min_count = 1
+
+[auth]
+enabled = false  # required (with a non-loopback bind) to run `hacienda serve` off localhost
+resolver = "memory"  # memory | dev
+
+[[auth.static_tokens]]
+id = "example"
+token = "replace-me"
+principal_id = "example"
+capabilities = ["documents:process"]
 ```
 
-## Profiles
+Every top-level section except `extraction` and `auth` is optional — omit a section to
+skip that stage entirely (`pii` absent means extraction runs with no PII detection at
+all, not "detection disabled but still reported"). `auth` is always present; its default
+(`enabled = false`, `resolver = "dev"`) is correct for the CLI and a desktop app, where
+the process boundary *is* the trust boundary — see `[auth]` below for when it must be
+turned on.
 
-### Default
+### `[auth]` — required reading before running `hacienda serve` off localhost
 
-Basic PII detection with standard redaction modes.
+`hacienda serve` refuses to bind any address that isn't loopback (`127.0.0.0/8`, `::1`)
+unless `auth.enabled = true` — there is no override flag, because "reachable from the
+network, no authentication" has no legitimate use on a product built around redacting
+personal data. See `docker/Dockerfile`/`config/production.toml` for a working example
+(the Docker image binds `0.0.0.0`, so its config sets `auth.enabled = true`).
 
-### PCI-DSS
+## Environment variables
 
-```toml
-[pii]
-redaction_profile = "PCI"
-```
+| Variable | Description |
+| --- | --- |
+| `HACIENDA_PSEUDONYM_ACTIVE_KEY` | ID of the pseudonymisation key new tokens are minted under. Required for `mode = "pseudonymize"`. |
+| `HACIENDA_PSEUDONYM_KEY_<ID>` | Hex-encoded key material for pseudonymisation key `<ID>` (uppercased). |
+| `RUST_LOG` | Standard `tracing`/`env_logger`-style log filter, e.g. `info` or `hacienda=debug`. |
 
-Detects: Credit card numbers, PANs, CVV, expiration dates
+There is no `HACIENDA_CONFIG`/`HACIENDA_JWT_SECRET`/`HACIENDA_FPE_KEY`/`HACIENDA_MODELS_DIR`
+env var — config discovery is `--config <path>` (a global CLI flag) or the platform config
+directory (see `hacienda-cli/src/config.rs`), and there is no JWT-based auth resolver or
+FPE mode today.
 
-### HIPAA
+## CLI reference
 
-```toml
-[pii]
-redaction_profile = "HIPAA"
-```
-
-Detects: SSN, MRN, PHI identifiers, dates, phone numbers
-
-### GDPR
-
-```toml
-[pii]
-redaction_profile = "GDPR"
-```
-
-Detects: Email, phone, IP, names, addresses, personal identifiers
-
-### Custom
-
-```toml
-[pii]
-redaction_profile = "Custom"
-custom_patterns = [
-    r"INVOICE-\d{6}",
-    r"PO-\d{4}-\d{3}"
-]
-custom_terms = [
-    "CONFIDENTIAL",
-    "PROPRIETARY"
-]
-```
-
-## Production Configuration
-
-```toml
-[server]
-bind_address = "0.0.0.0:8080"
-workers = 4
-request_body_limit = "50mb"
-timeout = 30
-
-[security]
-jwt_secret = "${HACIENDA_JWT_SECRET}"
-cors_origins = ["https://app.example.com"]
-rate_limit_rpm = 100
-
-[audit]
-enabled = true
-
-[models]
-cache_dir = "/var/lib/hacienda/models"
-auto_download = true
-
-[observability]
-metrics_port = 9090
-log_level = "info"
-log_format = "json"
-tracing_enabled = true
-```
-
-## Environment Variables
-
-| Variable              | Description                 | Default             |
-| --------------------- | --------------------------- | ------------------- |
-| `HACIENDA_CONFIG`     | Path to config file         | `./hacienda.toml`   |
-| `HACIENDA_JWT_SECRET` | JWT signing secret          | Required            |
-| `HACIENDA_FPE_KEY`    | FPE encryption key (base64) | Optional            |
-| `RUST_LOG`            | Log level                   | `info`              |
-| `HACIENDA_MODELS_DIR` | Model cache directory       | `~/.cache/hacienda` |
-
-## CLI Usage
+The real commands, from `hacienda-cli/src/cli.rs` (deliberately closed — a subcommand that
+doesn't exist is absent from `--help`, not present-and-stubbed):
 
 ```bash
-# Scan text
-hacienda pii scan "Contact john@example.com"
+hacienda extract <inputs...> [--mode mask|hash|pseudonymize|remove] [--threshold 0.7] \
+  [--model-dir ./model] [--lora-dir ./lora] [--format json|text] [--audit-out ./audit] \
+  [--vault ./vault] [--glossary-out ./glossary] [--concurrency 4]
 
-# Redact file
-hacienda pii redact input.txt -o redacted.txt
+hacienda scan <inputs...> [--threshold 0.7] [--format json|text] [--glossary-out ./glossary]
 
-# Batch process
-hacienda pii batch input/ -o output/
+hacienda config show [--format json|text]
 
-# Generate compliance report
-hacienda compliance report --model hacienda-pii-v1
+hacienda serve [--bind 127.0.0.1:8787]
 
-# Manage review queue
-hacienda review list --status pending
-hacienda review decide <id> --decision approve --reviewer alice
+hacienda pii reveal <TOKEN> [--format json|text]
 
-# Audit operations
-hacienda audit query --from 2024-01-01 --to 2024-01-31
-hacienda audit export --format csv --from 2024-01-01
-hacienda audit verify
+hacienda audit verify <DIR> [--format json|text]
 ```
 
-## Programmatic Usage
+`--config <path>` / `--config-json <json>` are global flags, valid before or after the
+subcommand.
 
-### Rust
-
-```rust
-use hacienda::{HaciendaFacade, HaciendaFacadeConfig, ExtractInput};
-
-let facade = HaciendaFacade::new(HaciendaFacadeConfig {
-    extraction: Default::default(),
-    pii: Some(Default::default()),
-    compliance: Some(Default::default()),
-    audit: Some(Default::default()),
-    review: Some(Default::default()),
-    glossary: Some(Default::default()),
-})?;
-
-let result = facade.process(ExtractInput::from_uri("document.pdf")).await?;
-```
-
-### Python
-
-```python
-import hacienda
-
-facade = hacienda.HaciendaFacade()
-result = facade.process(hacienda.ExtractInput.from_uri("contract.pdf"))
-print(result.pii.redacted_text)
-```
-
-### REST API
+## REST API
 
 ```bash
-curl -X POST http://localhost:8080/v1/pii/scan \
-  -H "Content-Type: application/json" \
+curl -X POST http://localhost:8787/v1/pii/redact \
   -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
   -d '{"text": "Contact john@example.com"}'
+```
 
-# Response
+```json
 {
-  "entities": [
-    {"category": "Email", "start": 8, "end": 24, "confidence": 0.99}
-  ],
-  "redacted": "Contact [EMAIL:john@example.com]"
+  "redacted_text": "Contact [EMAIL]",
+  "entity_count": 1,
+  "processing_time_ms": 4,
+  "audit_chain_tip": "5e884898da28..."
 }
 ```
 
-## Docker Compose
+See `hacienda-api/README.md` for the audit endpoints and `GET /openapi.json` (public, no
+auth) for the full schema — 44 operations across 14 tags.
 
-```yaml
-version: "3.8"
-
-services:
-  hacienda:
-    image: ghcr.io/jamon8888/hacienda:latest
-    ports:
-      - "8080:8080"
-    environment:
-      - HACIENDA_JWT_SECRET=${JWT_SECRET}
-      - RUST_LOG=info
-    volumes:
-      - ./config:/app/config:ro
-      - ./data:/app/data
-    healthcheck:
-      test: ["CMD", "hacienda", "health-check"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-          cpus: "2"
-        reservations:
-          memory: 2G
-          cpus: "1"
-```
-
-## Kubernetes Deployment
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: hacienda
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: hacienda
-  template:
-    metadata:
-      labels:
-        app: hacienda
-    spec:
-      containers:
-        - name: hacienda
-          image: ghcr.io/jamon8888/hacienda:latest
-          ports:
-            - containerPort: 8080
-            - containerPort: 9090
-          env:
-            - name: HACIENDA_JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: hacienda-secrets
-                  key: jwt-secret
-            - name: HACIENDA_MODELS_DIR
-              value: /var/lib/hacienda/models
-          resources:
-            requests:
-              memory: "2Gi"
-              cpu: "1000m"
-            limits:
-              memory: "4Gi"
-              cpu: "2000m"
-          livenessProbe:
-            httpGet:
-              path: /live
-              port: 8081
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /ready
-              port: 8081
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          volumeMounts:
-            - name: config
-              mountPath: /app/config
-            - name: models
-              mountPath: /var/lib/hacienda/models
-            - name: audit-logs
-              mountPath: /var/log/hacienda
-      volumes:
-        - name: config
-          configMap:
-            name: hacienda-config
-        - name: models
-          emptyDir: {}
-        - name: audit-logs
-          emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: hacienda
-spec:
-  selector:
-    app: hacienda
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
-    - name: metrics
-      port: 9090
-      targetPort: 9090
-    - name: health
-      port: 8081
-      targetPort: 8081
-```
-
-## Model Management
+## Docker
 
 ```bash
-# List available models
-hacienda model list
-
-# Download specific model
-hacienda model download fastino/GLiNER2-Guardrails-PII-Multi
-
-# Show model info
-hacienda model info fastino/GLiNER2-Guardrails-PII-Multi
-
-# Pin model version
-hacienda model pin fastino/GLiNER2-Guardrails-PII-Multi@v1.2.3
+docker build -f docker/Dockerfile -t hacienda .
+docker run --rm -p 8787:8787 \
+  -v $(pwd)/config/production.toml:/app/config/production.toml:ro \
+  hacienda
+curl http://localhost:8787/health
 ```
 
-## Monitoring
+`config/production.toml` in this repo is a minimal starting point (auth enabled, one
+placeholder static token) — replace the token before deploying, and add whichever
+sections above your deployment needs. There is no Docker-level `HEALTHCHECK` (the
+distroless runtime has no shell to run a probe command with) — point your orchestrator's
+own health check at `GET /health`.
 
-### Prometheus Metrics
+## What this document does not cover (yet)
 
-```yaml
-# prometheus.yml
-scrape_configs:
-  - job_name: "hacienda"
-    static_configs:
-      - targets: ["hacienda:9090"]
-```
-
-### Key Metrics
-
-| Metric                                 | Type      | Description               |
-| -------------------------------------- | --------- | ------------------------- |
-| `pii_pipeline_duration_seconds`        | Histogram | Pipeline stage latencies  |
-| `pii_entities_detected_total`          | Counter   | Entities by category      |
-| `pii_entities_redacted_total`          | Counter   | Redacted entities by mode |
-| `compliance_reports_generated_total`   | Counter   | Reports by type           |
-| `audit_writes_total`                   | Counter   | Audit log writes          |
-| `review_queue_depth`                   | Gauge     | Pending review items      |
-| `pii_model_inference_duration_seconds` | Histogram | ML model latency          |
-
-### Grafana Dashboard
-
-Import dashboard from `monitoring/grafana/hacienda-dashboard.json`
+Real-time metrics (`/metrics`), a `[server]`/`[security]`/`[observability]` config
+surface, and a Kubernetes manifest are not implemented today. `HaciendaConfig` itself
+carries `#[serde(deny_unknown_fields)]`, so any of those sections in a config file fails
+to load rather than being silently ignored — a previous version of this document
+described them anyway, which is exactly the "control looks configured, isn't" failure
+shape `deny_unknown_fields` exists to prevent, just one layer up (in documentation
+instead of in the parser).
