@@ -1,0 +1,23 @@
+# hacienda production config — minimal, safe defaults for `docker/Dockerfile`.
+#
+# This is a starting point, not a finished deployment config. Every hacienda-owned
+# section below carries `deny_unknown_fields` (see hacienda-core/src/config.rs's module
+# doc), so a misspelt key fails to load instead of silently doing nothing — see
+# docs/configuration.md for the full schema and every available section (pii,
+# compliance, review, glossary).
+#
+# [auth] is not optional here: docker/Dockerfile's CMD binds 0.0.0.0 (reachable from
+# outside the container), and `check_bind_policy` (hacienda-cli/src/commands.rs) refuses
+# any non-loopback bind when auth is disabled — every caller would otherwise be trusted
+# with unredacted PII. The static token below is a placeholder: replace `id`, `token`,
+# and `principal_id` before deploying, and prefer a secrets manager / mounted file over
+# committing a real token to any config that ships in an image layer.
+[auth]
+enabled = true
+resolver = "memory"
+
+[[auth.static_tokens]]
+id = "replace-me"
+token = "replace-me-before-deploying"
+principal_id = "replace-me"
+capabilities = ["documents:process"]

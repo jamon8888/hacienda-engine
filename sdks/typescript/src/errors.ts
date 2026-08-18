@@ -68,3 +68,21 @@ export async function unwrap<T>(result: {
 
   throw new HaciendaApiError(response.status, code, message);
 }
+
+/**
+ * Thrown by `waitForJob`/`waitForJobs`/`extractAndWait` when a job has not
+ * reached a terminal state (`succeeded` or `failed`) within the given
+ * `timeoutMs`. The job itself is still running server-side; this only means
+ * the client stopped waiting.
+ */
+export class JobTimeoutError extends Error {
+  readonly jobId: string;
+  readonly timeoutMs: number;
+
+  constructor(jobId: string, timeoutMs: number) {
+    super(`job ${jobId} did not reach a terminal state within ${timeoutMs}ms`);
+    this.name = "JobTimeoutError";
+    this.jobId = jobId;
+    this.timeoutMs = timeoutMs;
+  }
+}

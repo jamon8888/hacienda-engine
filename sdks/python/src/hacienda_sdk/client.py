@@ -24,7 +24,14 @@ from uuid import UUID
 
 import httpx
 
-from hacienda_sdk._generated.api.audit import get_audit, verify_audit
+from hacienda_sdk._generated.api.audit import (
+    export_audit,
+    get_audit,
+    get_audit_entries,
+    get_audit_seals,
+    get_audit_tip,
+    verify_audit,
+)
 from hacienda_sdk._generated.api.auth import get_auth_config, get_whoami, issue_key, revoke_key
 from hacienda_sdk._generated.api.compliance import get_compliance_dpia, get_compliance_report
 from hacienda_sdk._generated.api.documents import process_documents, process_documents_async
@@ -47,6 +54,7 @@ from hacienda_sdk._generated.api.rag import (
     list_collections,
     list_documents,
     migrate_embeddings,
+    reindex_document,
     retrieve,
     upsert_document,
 )
@@ -64,6 +72,7 @@ from hacienda_sdk._generated.models.answer_request import AnswerRequest
 from hacienda_sdk._generated.models.confirm_upload_request import ConfirmUploadRequest
 from hacienda_sdk._generated.models.create_preset_request import CreatePresetRequest
 from hacienda_sdk._generated.models.issue_key_request import IssueKeyRequest
+from hacienda_sdk._generated.models.job_result_response import JobResultResponse
 from hacienda_sdk._generated.models.migrate_embeddings_request import MigrateEmbeddingsRequest
 from hacienda_sdk._generated.models.presign_upload_request import PresignUploadRequest
 from hacienda_sdk._generated.models.process_documents_request import ProcessDocumentsRequest
@@ -73,7 +82,7 @@ from hacienda_sdk._generated.models.review_decide_request import ReviewDecideReq
 from hacienda_sdk._generated.models.scan_text_request import ScanTextRequest
 from hacienda_sdk._generated.models.upsert_document_request import UpsertDocumentRequest
 from hacienda_sdk._generated.types import UNSET, Unset
-from hacienda_sdk.errors import _unwrap, _unwrap_json
+from hacienda_sdk.errors import JobTimeoutError, _unwrap, _unwrap_json
 
 # `target: "device"` (an embedded Cactus runtime, no HTTP underneath) is Phase 15
 # of the platform-parity plan and not implemented yet. The literal is already a
@@ -92,6 +101,13 @@ _RETRY_JITTER_MAX = 0.1
 # delete_collection, delete_preset) are idempotent by design: repeating them
 # against an already-deleted resource is a no-op.
 _IDEMPOTENT_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
+
+# Terminal states for `wait_for_job(s)`/`extract_and_wait` — see `JobStatus` in
+# `hacienda-core/src/jobs/types.rs`. A `failed` job is still terminal: it is
+# returned to the caller, not raised, since the job itself finished running.
+_TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed"})
+_DEFAULT_POLL_INTERVAL = 1.0
+_DEFAULT_JOB_TIMEOUT = 300.0
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
@@ -321,6 +337,39 @@ class _AuditNamespaceSync:
     def verify_audit(self):
         return _unwrap(verify_audit.sync_detailed(client=self._client))
 
+    def audit_entries(self, limit: int | Unset = UNSET, cursor: str | Unset = UNSET):
+        """`GET /v1/audit/entries` — one page of this node's history, oldest first.
+
+        Page until you receive an **empty page**, not until `next_cursor` is
+        `None` — see `hacienda-api/src/handlers/audit.rs`'s module doc.
+        """
+        return _unwrap(
+            get_audit_entries.sync_detailed(client=self._client, limit=limit, cursor=cursor)
+        )
+
+    def audit_seals(self):
+        """`GET /v1/audit/seals` — every segment seal this node holds, oldest first."""
+        return _unwrap(get_audit_seals.sync_detailed(client=self._client))
+
+    def audit_export(self, format: str | Unset = UNSET):
+        """`GET /v1/audit/export` — the whole history as bytes.
+
+        `format` is `json` (default) or `jsonl` (both verifiable offline via
+        chain_hash recomputation) or `csv` (a tabular extract, not verifiable).
+        Requires `audit:export`.
+        """
+        # NOTE: `format_` is openapi-python-client's usual rename for a query
+        # param that shadows the `format` builtin. Verify this kwarg name
+        # against the freshly generated `_generated/api/audit/export_audit.py`
+        # the first time `scripts/generate.sh` runs against this route (it
+        # could not be regenerated in the environment this was written in —
+        # see the accompanying PR description).
+        return _unwrap(export_audit.sync_detailed(client=self._client, format_=format))
+
+    def audit_tip(self):
+        """`GET /v1/audit/tip` — the current head of this node's chain."""
+        return _unwrap(get_audit_tip.sync_detailed(client=self._client))
+
 
 class _AuditNamespaceAsync:
     def __init__(self, client):
@@ -331,6 +380,26 @@ class _AuditNamespaceAsync:
 
     async def verify_audit(self):
         return _unwrap(await verify_audit.asyncio_detailed(client=self._client))
+
+    async def audit_entries(self, limit: int | Unset = UNSET, cursor: str | Unset = UNSET):
+        """Async twin of `_AuditNamespaceSync.audit_entries`."""
+        return _unwrap(
+            await get_audit_entries.asyncio_detailed(
+                client=self._client, limit=limit, cursor=cursor
+            )
+        )
+
+    async def audit_seals(self):
+        """Async twin of `_AuditNamespaceSync.audit_seals`."""
+        return _unwrap(await get_audit_seals.asyncio_detailed(client=self._client))
+
+    async def audit_export(self, format: str | Unset = UNSET):
+        """Async twin of `_AuditNamespaceSync.audit_export`."""
+        return _unwrap(await export_audit.asyncio_detailed(client=self._client, format_=format))
+
+    async def audit_tip(self):
+        """Async twin of `_AuditNamespaceSync.audit_tip`."""
+        return _unwrap(await get_audit_tip.asyncio_detailed(client=self._client))
 
 
 class _ReviewNamespaceSync:
@@ -465,6 +534,16 @@ class _RagNamespaceSync:
     def upsert_document(self, name: str, body: UpsertDocumentRequest):
         return _unwrap(upsert_document.sync_detailed(name, client=self._client, body=body))
 
+    def reindex_document(self, name: str, id: str):
+        """`POST /v1/rag/collections/{name}/documents/{id}/reindex`.
+
+        Re-derives the document's chunks from its stored `full_text` without
+        resubmitting content. Requires the document to have been upserted with
+        `external_id` set — see the route's own doc comment
+        (`hacienda-api/src/handlers/rag.rs`) for why.
+        """
+        return _unwrap(reindex_document.sync_detailed(name, id, client=self._client))
+
 
 class _RagNamespaceAsync:
     def __init__(self, client):
@@ -511,6 +590,10 @@ class _RagNamespaceAsync:
 
     async def upsert_document(self, name: str, body: UpsertDocumentRequest):
         return _unwrap(await upsert_document.asyncio_detailed(name, client=self._client, body=body))
+
+    async def reindex_document(self, name: str, id: str):
+        """Async twin of `_RagNamespaceSync.reindex_document`."""
+        return _unwrap(await reindex_document.asyncio_detailed(name, id, client=self._client))
 
 
 class _PresetsNamespaceSync:
@@ -680,6 +763,81 @@ class HaciendaClient:
         """
         return self.auth.get_whoami()
 
+    def wait_for_job(
+        self,
+        job_id: str,
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        timeout: float = _DEFAULT_JOB_TIMEOUT,
+    ) -> JobResultResponse:
+        """Poll `GET /v1/jobs/{id}/result` until `job_id` reaches a terminal state.
+
+        Mirrors xberg-sdks' `wait_for_job`. Returns the terminal
+        `JobResultResponse` — a `failed` job is returned, not raised, since the
+        job itself finished running; its `.error` carries the reason.
+
+        Raises `JobTimeoutError` if `timeout` seconds elapse first; the job may
+        still be running server-side when that happens.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            result = self.jobs.get_job_result(job_id)
+            if result.status in _TERMINAL_JOB_STATUSES:
+                return result
+            if time.monotonic() >= deadline:
+                raise JobTimeoutError(job_id, timeout)
+            time.sleep(poll_interval)
+
+    def wait_for_jobs(
+        self,
+        job_ids: list[str],
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        timeout: float = _DEFAULT_JOB_TIMEOUT,
+    ) -> dict[str, JobResultResponse]:
+        """`wait_for_job` for several jobs at once, sharing one deadline.
+
+        Returns a dict keyed by job id, same jobs as `job_ids`. Raises
+        `JobTimeoutError` naming one still-pending job if `timeout` elapses
+        before every job reaches a terminal state.
+        """
+        deadline = time.monotonic() + timeout
+        results: dict[str, JobResultResponse] = {}
+        pending = list(job_ids)
+        while pending:
+            still_pending = []
+            for job_id in pending:
+                result = self.jobs.get_job_result(job_id)
+                if result.status in _TERMINAL_JOB_STATUSES:
+                    results[job_id] = result
+                else:
+                    still_pending.append(job_id)
+            pending = still_pending
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                raise JobTimeoutError(pending[0], timeout)
+            time.sleep(poll_interval)
+        return {job_id: results[job_id] for job_id in job_ids}
+
+    def extract_and_wait(
+        self,
+        body: ProcessDocumentsRequest,
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        timeout: float = _DEFAULT_JOB_TIMEOUT,
+    ) -> JobResultResponse:
+        """Submit `body` to `POST /v1/documents/async` and poll until it finishes.
+
+        Convenience composing `documents.process_documents_background` and
+        `wait_for_job`, mirroring xberg-sdks' `extract_and_wait`. For a batch
+        small enough to process inline, prefer `documents.process_documents`
+        instead — this exists for batches you would otherwise have to
+        submit-then-poll by hand.
+        """
+        job = self.documents.process_documents_background(body)
+        return self.wait_for_job(job.job_id, poll_interval=poll_interval, timeout=timeout)
+
     def close(self) -> None:
         self._client.get_httpx_client().close()
 
@@ -738,6 +896,65 @@ class AsyncHaciendaClient:
     async def whoami(self):
         """`GET /v1/auth/whoami` — async twin of `HaciendaClient.whoami`."""
         return await self.auth.get_whoami()
+
+    async def wait_for_job(
+        self,
+        job_id: str,
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        timeout: float = _DEFAULT_JOB_TIMEOUT,
+    ) -> JobResultResponse:
+        """Async twin of `HaciendaClient.wait_for_job` — see its docstring."""
+        import asyncio
+
+        deadline = time.monotonic() + timeout
+        while True:
+            result = await self.jobs.get_job_result(job_id)
+            if result.status in _TERMINAL_JOB_STATUSES:
+                return result
+            if time.monotonic() >= deadline:
+                raise JobTimeoutError(job_id, timeout)
+            await asyncio.sleep(poll_interval)
+
+    async def wait_for_jobs(
+        self,
+        job_ids: list[str],
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        timeout: float = _DEFAULT_JOB_TIMEOUT,
+    ) -> dict[str, JobResultResponse]:
+        """Async twin of `HaciendaClient.wait_for_jobs` — see its docstring."""
+        import asyncio
+
+        deadline = time.monotonic() + timeout
+        results: dict[str, JobResultResponse] = {}
+        pending = list(job_ids)
+        while pending:
+            still_pending = []
+            for job_id in pending:
+                result = await self.jobs.get_job_result(job_id)
+                if result.status in _TERMINAL_JOB_STATUSES:
+                    results[job_id] = result
+                else:
+                    still_pending.append(job_id)
+            pending = still_pending
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                raise JobTimeoutError(pending[0], timeout)
+            await asyncio.sleep(poll_interval)
+        return {job_id: results[job_id] for job_id in job_ids}
+
+    async def extract_and_wait(
+        self,
+        body: ProcessDocumentsRequest,
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        timeout: float = _DEFAULT_JOB_TIMEOUT,
+    ) -> JobResultResponse:
+        """Async twin of `HaciendaClient.extract_and_wait` — see its docstring."""
+        job = await self.documents.process_documents_background(body)
+        return await self.wait_for_job(job.job_id, poll_interval=poll_interval, timeout=timeout)
 
     async def close(self) -> None:
         await self._client.get_async_httpx_client().aclose()

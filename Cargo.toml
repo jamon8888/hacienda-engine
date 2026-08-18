@@ -102,11 +102,27 @@ web-time = "1"
 # Runtime (`ort`), `ndarray`, `liter-llm`, and the ICU segmenter family into the graph
 # for no benefit. Do not re-add a feature here without a call site to justify it.
 #
-# Pinned to a release tag rather than `path = "../xberg/crates/xberg"`. The sibling
+# Pinned to a commit rather than `path = "../xberg/crates/xberg"`. The sibling
 # checkout is a working tree: it sits on rc.37 and carries uncommitted edits, one of
 # which adds an `xberg::pii` module re-exporting the very `pii_*` crates this repo
 # vendored away from. Building against it made hacienda's output a function of
-# someone's unstaged work. A tag is reproducible and CI can fetch it.
+# someone's unstaged work. A commit is reproducible and CI can fetch it.
+#
+# `rev`, not `tag`, and not `v1.0.2`: every xberg release tag from `v1.0.2` through
+# at least `v1.0.14` has a `.gitmodules` gitlink for its `test_documents` submodule
+# (used only for xberg's own test fixtures — nothing this repo calls touches it) that
+# points at a commit no longer reachable in `xberg-io/test_documents` — that repo's
+# history has been rewritten since each tag was cut, orphaning every historical pin.
+# Cargo populates every submodule of a git dependency unconditionally before it will
+# build anything from it, with no per-submodule opt-out, so every tagged release
+# fails to fetch at all (confirmed on a clean checkout, not a local cache/proxy
+# artifact). `xberg`'s unreleased `main` branch has a currently-valid pin (it tracks
+# `test_documents`' actual current history), so this pins an exact commit SHA on
+# `main` — as reproducible as a tag, since a SHA cannot move — rather than the branch
+# name, which would. Re-pin to a proper release tag once xberg-io fixes the
+# submodule reference upstream, or repoints an old tag; check the tag's own gitlink
+# resolves (`git ls-tree <tag> -- test_documents`, then try fetching that commit from
+# xberg-io/test_documents directly) before trusting a newer tag number alone.
 #
 # To develop xberg and hacienda together, override locally without editing this file:
 #   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml

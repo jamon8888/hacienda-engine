@@ -51,30 +51,21 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run hacienda-core Postgres store tests
-        # The 5 skipped tests all fail on the *same* corrupted segment_id/hash pair
-        # regardless of what each individually exercises (confirmed via CI logs across
-        # two separate runs) — proof they're not failing on their own logic but on a
-        # `SegmentIntegrity` mismatch inherited from one seal produced earlier in this
-        # same run (this suite intentionally shares one Postgres instance across tests,
-        # see test_support.rs). `should_survive_a_process_restart_against_the_same_database`
-        # additionally hardcodes `seals.len() == 1`, an assumption that was only ever
-        # true in isolation and never held once every test in the file runs back to
-        # back — direct evidence this suite has never actually been executed as a whole
-        # against a real Postgres before this CI job started running it. Every field
-        # `compute_seal_hash`/`check_seal_integrity` cover has been traced by hand
-        # (segment_id, node_id, config_hash, sealed_tip, entry_count, opened_at,
-        # sealed_at, prev_seal_hash) without finding the discrepancy — resolving it
-        # needs a live Postgres session to instrument, which isn't available in the
-        # environment that authored this workflow. Skipped rather than left silently
-        # red, tracked as follow-up.
+        # Previously 5 of these tests were `--skip`-listed here: they all failed on the
+        # *same* corrupted segment_id/hash `SegmentIntegrity` mismatch regardless of what
+        # each individually exercised, which turned out to be test-isolation, not a
+        # seal-chain bug. Root cause: `should_detect_a_tampered_entry_in_a_sealed_segment`
+        # and `should_report_a_missing_entry_as_a_count_mismatch` tamper a row directly
+        # via SQL and never restored it, and every test in this suite shares one Postgres
+        # instance (see test_support.rs) — so the other three, which call
+        # `verify()`/`entries()` (deliberately store-wide, mirroring the single-writer
+        # production design), inherited corruption left behind by whichever tamper test
+        # ran first alphabetically. Fixed by having both tamper tests restore what they
+        # changed before returning (`hacienda-core/src/store/postgres/audit.rs`) — not by
+        # narrowing `verify()`'s production scope to dodge the shared state.
         run: |
           cargo test -p hacienda-core --features postgres --lib store::postgres \
-            -- --ignored --test-threads=1 \
-            --skip should_detect_a_tampered_entry_in_a_sealed_segment \
-            --skip should_report_a_missing_entry_as_a_count_mismatch \
-            --skip should_serialise_concurrent_appends_without_breaking_the_chain \
-            --skip should_survive_a_process_restart_against_the_same_database \
-            --skip should_verify_after_a_rotation
+            -- --ignored --test-threads=1
 
   # hacienda-rag's pgvector tests and hacienda-api's routes.rs Postgres-backed
   # route tests read `DATABASE_URL` directly instead of managing their own
@@ -96,7 +87,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5

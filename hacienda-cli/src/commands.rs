@@ -24,6 +24,7 @@ use hacienda::review::{
 };
 use hacienda::{HaciendaConfig, HaciendaError, HaciendaFacade, HaciendaResult};
 use hacienda_api::{ApiLimits, ApiState};
+use hacienda_core::auth::authn::AuthConfig;
 use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
@@ -1429,24 +1430,52 @@ pub fn run_completions(args: CompletionsArgs) -> Result<()> {
 /// Loopback covers `127.0.0.0/8` and `::1`. `0.0.0.0` and `::` are *not* loopback and are
 /// refused: they are the two spellings people reach for when containerising, which is
 /// exactly when this check has to hold.
-fn check_bind_policy(bind: SocketAddr, auth_enabled: bool) -> Result<()> {
-    if auth_enabled || bind.ip().is_loopback() {
+///
+/// `config/production.toml` ships a fixed, publicly-known placeholder token
+/// (`replace-me-before-deploying`) with an explicit comment telling operators to replace
+/// it. Nothing enforced that until now: since the string is public (anyone who has read
+/// this repository has it), leaving it in place on a network-reachable bind is
+/// indistinguishable from `auth.enabled = false` — a valid `documents:process` bearer
+/// token for every reader of this repo, not just the operator. Refusing this the same way
+/// a disabled-auth bind is refused closes that gap without changing behaviour for anyone
+/// who has actually replaced the placeholder.
+const PLACEHOLDER_STATIC_TOKEN: &str = "replace-me-before-deploying";
+
+fn check_bind_policy(bind: SocketAddr, auth: &AuthConfig) -> Result<()> {
+    if bind.ip().is_loopback() {
         return Ok(());
     }
-    anyhow::bail!(
-        "refusing to bind {bind}: it is reachable from the network and authentication is \
-         disabled, so every caller would be trusted with unredacted PII.\n\
-         Either bind a loopback address (the default, 127.0.0.1:8787), or enable \
-         authentication in the configuration:\n\n\
-         \x20   [auth]\n\
-         \x20   enabled = true\n\
-         \x20   resolver = \"memory\"\n\n\
-         \x20   [[auth.static_tokens]]\n\
-         \x20   id = \"studio\"\n\
-         \x20   token = \"<secret>\"\n\
-         \x20   principal_id = \"studio\"\n\
-         \x20   capabilities = [\"documents:process\"]"
-    )
+    if !auth.enabled {
+        anyhow::bail!(
+            "refusing to bind {bind}: it is reachable from the network and authentication is \
+             disabled, so every caller would be trusted with unredacted PII.\n\
+             Either bind a loopback address (the default, 127.0.0.1:8787), or enable \
+             authentication in the configuration:\n\n\
+             \x20   [auth]\n\
+             \x20   enabled = true\n\
+             \x20   resolver = \"memory\"\n\n\
+             \x20   [[auth.static_tokens]]\n\
+             \x20   id = \"studio\"\n\
+             \x20   token = \"<secret>\"\n\
+             \x20   principal_id = \"studio\"\n\
+             \x20   capabilities = [\"documents:process\"]"
+        );
+    }
+    if let Some(placeholder) = auth
+        .static_tokens
+        .iter()
+        .find(|t| t.token == PLACEHOLDER_STATIC_TOKEN)
+    {
+        anyhow::bail!(
+            "refusing to bind {bind}: static token '{}' still has the placeholder value \
+             from config/production.toml. That string is public — anyone who has read this \
+             repository already holds a valid bearer token against your deployment. \
+             Replace `token` (and `id`/`principal_id`) with a real, private secret before \
+             binding a network-reachable address.",
+            placeholder.id
+        );
+    }
+    Ok(())
 }
 
 /// Run `hacienda serve` — the HTTP API of the integration design §5.
@@ -1459,7 +1488,7 @@ pub async fn run_serve(
 
     // Before the socket, not after: a bind that succeeds and is then torn down has
     // already been reachable.
-    check_bind_policy(args.bind, config.auth.enabled)?;
+    check_bind_policy(args.bind, &config.auth)?;
 
     let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
     let auth_enabled = config.auth.enabled;
@@ -1495,20 +1524,44 @@ pub async fn run_serve(
 
 #[cfg(test)]
 mod tests {
-    use super::check_bind_policy;
+    use super::{check_bind_policy, PLACEHOLDER_STATIC_TOKEN};
+    use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
     use std::net::SocketAddr;
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
     }
 
+    fn auth(enabled: bool) -> AuthConfig {
+        AuthConfig {
+            enabled,
+            resolver: TokenResolverType::Memory,
+            static_tokens: Vec::new(),
+        }
+    }
+
+    fn auth_with_token(token: &str) -> AuthConfig {
+        AuthConfig {
+            enabled: true,
+            resolver: TokenResolverType::Memory,
+            static_tokens: vec![StaticTokenConfig {
+                id: "replace-me".to_string(),
+                token: token.to_string(),
+                principal_id: "replace-me".to_string(),
+                principal_name: None,
+                capabilities: vec!["documents:process".to_string()],
+                expires_at: None,
+            }],
+        }
+    }
+
     /// The default is loopback, so the common case must not need auth configured.
     #[test]
     fn should_allow_loopback_without_authentication() {
-        assert!(check_bind_policy(addr("127.0.0.1:8787"), false).is_ok());
-        assert!(check_bind_policy(addr("[::1]:8787"), false).is_ok());
+        assert!(check_bind_policy(addr("127.0.0.1:8787"), &auth(false)).is_ok());
+        assert!(check_bind_policy(addr("[::1]:8787"), &auth(false)).is_ok());
         // 127.0.0.0/8 in full, not just 127.0.0.1.
-        assert!(check_bind_policy(addr("127.0.0.53:8787"), false).is_ok());
+        assert!(check_bind_policy(addr("127.0.0.53:8787"), &auth(false)).is_ok());
     }
 
     /// The whole point of the check. `0.0.0.0` and `::` are the spellings a container
@@ -1516,7 +1569,7 @@ mod tests {
     #[test]
     fn should_refuse_a_network_reachable_bind_when_authentication_is_disabled() {
         for spelling in ["0.0.0.0:8787", "[::]:8787", "192.168.1.10:8787"] {
-            let error = check_bind_policy(addr(spelling), false)
+            let error = check_bind_policy(addr(spelling), &auth(false))
                 .expect_err("binding {spelling} without auth must be refused");
             let message = error.to_string();
             assert!(
@@ -1530,7 +1583,38 @@ mod tests {
     /// otherwise the check above would be indistinguishable from "never bind publicly".
     #[test]
     fn should_allow_a_network_reachable_bind_once_authentication_is_enabled() {
-        assert!(check_bind_policy(addr("0.0.0.0:8787"), true).is_ok());
-        assert!(check_bind_policy(addr("192.168.1.10:8787"), true).is_ok());
+        assert!(check_bind_policy(addr("0.0.0.0:8787"), &auth(true)).is_ok());
+        assert!(check_bind_policy(addr("192.168.1.10:8787"), &auth(true)).is_ok());
+    }
+
+    /// The gap `config/production.toml`'s placeholder token left open: a network-reachable
+    /// bind with auth "enabled" but the publicly-known literal still in place is no safer
+    /// than no auth at all.
+    #[test]
+    fn should_refuse_a_network_reachable_bind_when_a_static_token_is_still_the_placeholder() {
+        let error = check_bind_policy(addr("0.0.0.0:8787"), &auth_with_token(PLACEHOLDER_STATIC_TOKEN))
+            .expect_err("binding with the placeholder token must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("placeholder"),
+            "the refusal must name the reason, got: {message}"
+        );
+    }
+
+    /// Once the operator has actually replaced the token, the same bind must succeed —
+    /// this check must never fire on a real, private secret.
+    #[test]
+    fn should_allow_a_network_reachable_bind_once_the_placeholder_token_is_replaced() {
+        assert!(check_bind_policy(addr("0.0.0.0:8787"), &auth_with_token("a-real-secret")).is_ok());
+    }
+
+    /// Loopback is exempt from every check above, placeholder token included — replacing
+    /// the token is only required once the API is actually network-reachable.
+    #[test]
+    fn should_allow_loopback_even_with_the_placeholder_token() {
+        assert!(
+            check_bind_policy(addr("127.0.0.1:8787"), &auth_with_token(PLACEHOLDER_STATIC_TOKEN))
+                .is_ok()
+        );
     }
 }
