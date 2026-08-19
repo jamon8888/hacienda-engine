@@ -1430,10 +1430,10 @@ mod pseudonymiser_tests {
         // same resolver still end up with distinct key material, because each supplies
         // its own suffixed env vars.
         let resolver = EnvKeyResolver::with_lookup(|name| match name {
-            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_A" => Some("k1".to_string()),
-            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_A" => Some("07".repeat(KEY_BYTES)),
-            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_B" => Some("k1".to_string()),
-            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_B" => Some("a9".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_TENANT_A_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_TENANT_A_HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_TENANT_B_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_TENANT_B_HACIENDA_PSEUDONYM_KEY_K1" => Some("a9".repeat(KEY_BYTES)),
             _ => None,
         });
         let registry = super::TenantPseudonymiserRegistry::new();
@@ -1459,11 +1459,11 @@ mod pseudonymiser_tests {
         // k1 is retired in favour of k2, must stay unreadable to tenant B even though B
         // also has a key literally named k1.
         let resolver = EnvKeyResolver::with_lookup(|name| match name {
-            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_A" => Some("k2".to_string()),
-            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_A" => Some("07".repeat(KEY_BYTES)),
-            "HACIENDA_PSEUDONYM_KEY_K2__TENANT_A" => Some("11".repeat(KEY_BYTES)),
-            "HACIENDA_PSEUDONYM_ACTIVE_KEY__TENANT_B" => Some("k1".to_string()),
-            "HACIENDA_PSEUDONYM_KEY_K1__TENANT_B" => Some("a9".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_TENANT_A_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k2".to_string()),
+            "HACIENDA_TENANT_TENANT_A_HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_TENANT_A_HACIENDA_PSEUDONYM_KEY_K2" => Some("11".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_TENANT_B_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_TENANT_B_HACIENDA_PSEUDONYM_KEY_K1" => Some("a9".repeat(KEY_BYTES)),
             _ => None,
         });
         let tenant_a = crate::tenancy::TenantId::new("tenant_a");
@@ -1524,8 +1524,8 @@ mod pseudonymiser_tests {
         let registry = super::TenantPseudonymiserRegistry::new();
         let tenant = crate::tenancy::TenantId::new("acme");
         let resolver = EnvKeyResolver::with_lookup(|name| match name {
-            "HACIENDA_PSEUDONYM_ACTIVE_KEY__ACME" => Some("k1".to_string()),
-            "HACIENDA_PSEUDONYM_KEY_K1__ACME" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
             _ => None,
         });
         registry.admit(&tenant, &resolver, None, &[]).unwrap();
