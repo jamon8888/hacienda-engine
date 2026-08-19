@@ -99,7 +99,8 @@ export function isNerModelLoaded() {
  *
  * # Errors
  *
- * Rejects if the model bytes cannot be loaded.
+ * Throws if the model bytes cannot be loaded — this function is synchronous (per its
+ * own doc above), so a JS caller sees a thrown exception, not a rejected Promise.
  * @param {Uint8Array} weights
  * @param {Uint8Array} tokenizer
  * @param {Uint8Array} encoder_config

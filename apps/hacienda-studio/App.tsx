@@ -577,6 +577,16 @@ export function App() {
   // Track K/Phase 4: debounced (~1s) autosave of the open detail screen's own draft. Only
   // ever watches `openDetailResult`'s entry in `redactedDrafts` — while the detail screen
   // is open, that is the only entry `handleRedactedChange` can touch.
+  //
+  // Split into two effects on purpose. `redactedDrafts` replaces its `Map` reference on
+  // every keystroke (see `handleRedactedChange`), so a single effect keyed on it would
+  // re-run its cleanup on every keystroke too — and an unconditional flush-on-cleanup
+  // (needed so Back/switch-file within the debounce window doesn't drop the last edit)
+  // would then write on every keystroke, defeating the debounce entirely. Keeping the
+  // latest pending write in a ref lets the flush-on-cleanup effect depend on
+  // `openDetailResult` alone, so it only fires on navigation/unmount, not on typing.
+  const pendingSaveRef = useRef<{ hash: string; draft: string } | null>(null);
+
   useEffect(() => {
     if (!openDetailResult) {
       setSaveStatus(null);
@@ -586,20 +596,24 @@ export function App() {
     const hash = contentHashes.get(result.frontmatter.source);
     const draft = redactedDrafts.get(result.name);
     if (!hash || draft === undefined) return;
+    pendingSaveRef.current = { hash, draft };
     setSaveStatus("saving");
-    // A plain `clearTimeout` on teardown drops a pending save outright: navigating away
-    // (Back, or opening another file) inside the debounce window left the last edit
-    // unpersisted. Flush it instead of just cancelling the timer.
-    let flushed = false;
     const timer = setTimeout(() => {
-      flushed = true;
+      pendingSaveRef.current = null;
       saveDraft(hash, draft).then(() => setSaveStatus("saved"));
     }, 1000);
-    return () => {
-      clearTimeout(timer);
-      if (!flushed) void saveDraft(hash, draft);
-    };
+    return () => clearTimeout(timer);
   }, [openDetailResult, contentHashes, redactedDrafts]);
+
+  useEffect(() => {
+    return () => {
+      const pending = pendingSaveRef.current;
+      if (pending) {
+        pendingSaveRef.current = null;
+        void saveDraft(pending.hash, pending.draft);
+      }
+    };
+  }, [openDetailResult]);
 
   // `progress` is keyed by whatever name the worker was sent — the folder-relative path
   // for a directory upload, the basename otherwise — so lookups have to use the same key,

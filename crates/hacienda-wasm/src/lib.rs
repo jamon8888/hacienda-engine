@@ -93,7 +93,8 @@ mod ner_model {
     ///
     /// # Errors
     ///
-    /// Rejects if the model bytes cannot be loaded.
+    /// Throws if the model bytes cannot be loaded — this function is synchronous (per its
+    /// own doc above), so a JS caller sees a thrown exception, not a rejected Promise.
     #[wasm_bindgen(js_name = loadNerModel)]
     pub fn load_ner_model(
         weights: Vec<u8>,
