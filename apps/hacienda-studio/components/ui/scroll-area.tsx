@@ -33,12 +33,13 @@ function ScrollArea({
       <ScrollAreaPrimitive.Viewport
         ref={viewportRef}
         data-slot="scroll-area-viewport"
+        {...viewportProps}
         className={cn(
           "size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1",
           scrollbarGutter && "[scrollbar-gutter:stable]",
-          viewportClassName
+          viewportClassName,
+          viewportProps?.className
         )}
-        {...viewportProps}
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

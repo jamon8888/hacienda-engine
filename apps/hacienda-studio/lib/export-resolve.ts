@@ -24,9 +24,15 @@ export function reExportMarkdown(result: ProcessedFile, findings: PiiEntity[]): 
   const docPath = "documents/" + result.name;
   const linked = renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findings, docPath);
   const frontmatterMatch = result.markdown.match(/^---\n[\s\S]*?\n---/);
-  const glossaryMatch = result.markdown.match(/\n## Entities\n\n[\s\S]*$/);
   const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
-  const glossary = glossaryMatch ? glossaryMatch[0] : "";
+  // `lastIndexOf`, not a first-match regex: the pipeline appends this heading at the very
+  // end of the export, but a source document's own body can legitimately contain a "##
+  // Entities" heading of its own (e.g. a section literally titled that) earlier in the
+  // text — a first-match regex would treat everything from *that* point on as the
+  // glossary and duplicate/corrupt the body.
+  const glossaryMarker = "\n## Entities\n\n";
+  const glossaryStart = result.markdown.lastIndexOf(glossaryMarker);
+  const glossary = glossaryStart === -1 ? "" : result.markdown.slice(glossaryStart);
   return frontmatter + "\n" + linked + glossary;
 }
 
