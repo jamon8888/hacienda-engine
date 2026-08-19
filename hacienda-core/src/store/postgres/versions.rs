@@ -247,7 +247,12 @@ mod tests {
     //     --lib store::postgres::versions -- --ignored --test-threads=1
 
     async fn test_store() -> PostgresDocumentVersionStore {
-        PostgresDocumentVersionStore::new(test_support::shared().await.pool())
+        let pool = test_support::shared().await.pool();
+        // `fk_document_versions_tenant` (migration 0009) requires the tenant to
+        // already exist — only `default` is seeded by migration, so this module's
+        // shared literal tenant must be admitted before any test's first insert.
+        test_support::ensure_tenant(&pool, &t()).await;
+        PostgresDocumentVersionStore::new(pool)
     }
 
     /// The tenant every test in this module uses. Mirrors `postgres::jobs::tests::t`:
@@ -413,6 +418,7 @@ mod tests {
         test_support::block_on_shared(async {
             let store = test_store().await;
             let other_tenant = TenantId::new("pg-versions-test-tenant-other2");
+            test_support::ensure_tenant(&test_support::shared().await.pool(), &other_tenant).await;
             let document_id = Uuid::new_v4();
 
             let v1 = store

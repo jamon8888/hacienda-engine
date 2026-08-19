@@ -880,7 +880,12 @@ mod tests {
     //    that needs exclusive ownership of what it appends next.
 
     async fn test_store() -> PostgresAuditStore {
-        PostgresAuditStore::new(test_support::shared().await.pool())
+        let pool = test_support::shared().await.pool();
+        // `fk_audit_segments_tenant` (migration 0005) requires the tenant to already
+        // exist — only `default` is seeded by migration, so this module's shared
+        // literal tenant must be admitted before any test's first `append`.
+        test_support::ensure_tenant(&pool, &t()).await;
+        PostgresAuditStore::new(pool)
     }
 
     /// The tenant every test in this module uses. All tests already share one Postgres
@@ -946,8 +951,11 @@ mod tests {
     fn two_tenants_maintain_independent_seal_chains() {
         test_support::block_on_shared(async {
             let store = test_store().await;
+            let pool = test_support::shared().await.pool();
             let tenant_a = TenantId::new(format!("pg-audit-isolation-a-{}", Uuid::new_v4()));
             let tenant_b = TenantId::new(format!("pg-audit-isolation-b-{}", Uuid::new_v4()));
+            test_support::ensure_tenant(&pool, &tenant_a).await;
+            test_support::ensure_tenant(&pool, &tenant_b).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
 
             store

@@ -661,6 +661,13 @@ pub async fn migrate_embeddings(
 /// outcome. Split out of [`migrate_embeddings`] so the handler itself stays a
 /// thin validate-then-spawn shim, matching
 /// `documents::process_documents_async`'s shape.
+///
+/// Eight arguments, one per independently `.clone()`d value the caller `move`s into
+/// the spawned task (see the call site) — wrapping them in a struct would just push the
+/// same eight fields into a one-off type built solely to unpack them again here,
+/// matching this repo's existing `#[allow(clippy::too_many_arguments)]` precedent in
+/// `hacienda-core/src/audit/segment.rs`.
+#[allow(clippy::too_many_arguments)]
 async fn run_migrate_embeddings_job(
     store: Arc<dyn hacienda_rag::RagStore>,
     jobs: Arc<dyn hacienda_core::jobs::JobStore>,

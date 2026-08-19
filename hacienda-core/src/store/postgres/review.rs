@@ -329,7 +329,12 @@ mod tests {
     //     --lib store::postgres::review -- --ignored --test-threads=1
 
     async fn test_store() -> PostgresReviewStore {
-        PostgresReviewStore::new(test_support::shared().await.pool())
+        let pool = test_support::shared().await.pool();
+        // `fk_review_items_tenant` (migration 0007) requires the tenant to already
+        // exist — only `default` is seeded by migration, so this module's shared
+        // literal tenant must be admitted before any test's first insert.
+        test_support::ensure_tenant(&pool, &t()).await;
+        PostgresReviewStore::new(pool)
     }
 
     /// The tenant every test in this module uses. Mirrors `postgres::audit::tests::t`:

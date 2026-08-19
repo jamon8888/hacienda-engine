@@ -333,7 +333,12 @@ mod tests {
     //     --lib store::postgres::jobs -- --ignored --test-threads=1
 
     async fn test_store() -> PostgresJobStore {
-        PostgresJobStore::new(test_support::shared().await.pool())
+        let pool = test_support::shared().await.pool();
+        // `fk_jobs_tenant` (migration 0006) requires the tenant to already exist —
+        // only `default` is seeded by migration, so this module's shared literal
+        // tenant must be admitted before any test's first insert.
+        test_support::ensure_tenant(&pool, &t()).await;
+        PostgresJobStore::new(pool)
     }
 
     /// The tenant every test in this module uses. Mirrors `postgres::review::tests::t`:

@@ -4,12 +4,18 @@
 //! `DocumentVersionStore`, and `ObjectStore`, this route 400s when
 //! `ApiState::usage_store` is `None`.
 
-use axum::{extract::State, Json};
+use axum::{extract::State, http::request::Parts, Json};
 use std::sync::Arc;
 
 use hacienda_core::store::postgres::usage::UsageStore;
 
-use crate::{dto::UsageResponse, error::ApiError, extract::Query, state::ApiState};
+use crate::{
+    dto::UsageResponse,
+    error::ApiError,
+    extract::Query,
+    handlers::{caller_from_arc, extract_auth_context},
+    state::ApiState,
+};
 
 fn require_store(state: &ApiState) -> Result<&Arc<dyn UsageStore>, ApiError> {
     state
@@ -19,15 +25,13 @@ fn require_store(state: &ApiState) -> Result<&Arc<dyn UsageStore>, ApiError> {
 }
 
 /// `GET /v1/usage?since=&until=` — per-principal entity/byte counts over the audit
-/// chain, optionally windowed by `created_at`. Both bounds are optional and independent.
+/// chain for the caller's own tenant, optionally windowed by `created_at`. Both bounds
+/// are optional and independent.
 ///
-/// # Known gap: not tenant-scoped
-///
-/// This route currently returns usage aggregated across **every** tenant, not just the
-/// caller's — a deliberately deferred, tracked gap in
-/// [`UsageStore::summary`](hacienda_core::store::postgres::usage::UsageStore::summary),
-/// whose own doc has the full rationale. The response carries `principal` values, so
-/// this discloses which principals exist in other tenants, not only usage totals.
+/// Scoped to the caller's tenant via
+/// [`UsageStore::summary`](hacienda_core::store::postgres::usage::UsageStore::summary)'s
+/// `tenant` parameter — closes the cross-tenant principal disclosure this route used to
+/// have when `summary` aggregated across every tenant unconditionally.
 #[utoipa::path(
     get,
     path = "/v1/usage",
@@ -45,11 +49,15 @@ fn require_store(state: &ApiState) -> Result<&Arc<dyn UsageStore>, ApiError> {
 )]
 pub async fn get_usage(
     State(state): State<ApiState>,
+    parts: Parts,
     Query(query): Query<crate::dto::UsageQuery>,
 ) -> Result<Json<UsageResponse>, ApiError> {
     let store = require_store(&state)?;
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
     let records = store
-        .summary(query.since, query.until)
+        .summary(&tenant, query.since, query.until)
         .await
         .map_err(ApiError::from)?;
 

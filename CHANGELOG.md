@@ -983,7 +983,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`.
   While auditing every `audit_entries` reader for the same class of leak,
   `PostgresUsageStore::summary` (billing/usage aggregation, `GET /v1/usage`) was found to
-  have the identical gap — also not yet fixed, flagged in that spec's §7.
+  have the identical gap, flagged in that spec's §7 — since fixed, see below.
+- **`PostgresUsageStore::summary` and `GET /v1/usage` are now tenant-scoped — closing the
+  cross-tenant principal-disclosure gap flagged above.** `summary` joins `audit_entries` to
+  `audit_segments` and filters on `audit_segments.tenant_id = $1` instead of aggregating
+  every tenant's entries unconditionally; `get_usage` resolves the caller's own tenant from
+  `TenantCtx` and passes it through, the same pattern every other S1b-scoped store handler
+  already uses. A new two-tenant isolation test (`summary_is_scoped_to_the_requesting_tenant`)
+  pins the behaviour the same way `AuditStore`'s and `ReviewStore`'s isolation tests do.
 - **`ReviewStore` is now tenant-scoped — two tenants sharing one process could previously
   see, claim, and decide each other's pending review items, including unredacted
   `text_snippet` content by design.** Same root cause as the `AuditStore` gap above:

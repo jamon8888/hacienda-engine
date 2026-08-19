@@ -8,6 +8,7 @@
 use hacienda::audit::{
     AuditEntryInput, AuditStore, EntitySource, FileAuditStore, NodeId, RedactionAction,
 };
+use hacienda::hacienda_core::TenantId;
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -44,8 +45,14 @@ async fn seed(dir: &TempDir, node: &str, config_hash: &str, count: usize) {
     let inputs = (0..count)
         .map(|i| entry_input(&format!("id-{i}")))
         .collect();
-    store.append(inputs).await.expect("append seed entries");
-    store.close().await.expect("seal the segment");
+    store
+        .append(&TenantId::default_tenant(), inputs)
+        .await
+        .expect("append seed entries");
+    store
+        .close(&TenantId::default_tenant())
+        .await
+        .expect("seal the segment");
 }
 
 #[tokio::test]
