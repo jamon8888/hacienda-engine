@@ -13,6 +13,7 @@
 //! document — see Design Decision D3 in `plans/2026-07-28-phase1-store-layer.md`.
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::audit::cursor::{page_from, AuditCursor, AuditPage};
@@ -20,6 +21,7 @@ use crate::audit::entry::{AuditEntry, AuditEntryInput};
 use crate::audit::error::AuditError;
 use crate::audit::segment::verify_seal_chain;
 use crate::audit::segment::{NodeId, Segment, SegmentSeal};
+use crate::tenancy::TenantId;
 
 // ── AuditStore trait ──────────────────────────────────────────────────────────
 
@@ -33,6 +35,18 @@ use crate::audit::segment::{NodeId, Segment, SegmentSeal};
 /// across tasks and threads. Every method takes `&self` — interior mutability (via
 /// `Mutex` or equivalent) is the implementation's responsibility, not the caller's.
 ///
+/// # Tenant scoping (S1b)
+///
+/// Every method takes `&TenantId` and operates on **that tenant's own chain only** — one
+/// hash chain per `(NodeId, TenantId)`, not one chain per node filtered on read. See
+/// `superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`
+/// §1.2 for why a shared-chain-filtered-on-read design was rejected, and
+/// `hacienda-core/src/tenancy.rs`'s module doc (decision D-S1-1) for why the tenant is a
+/// parameter on every call rather than baked into the store at construction time: a
+/// parameter fails to compile at every call site that forgets it, where a
+/// one-store-per-tenant factory would let the omission (a store accidentally shared
+/// across tenants) go unnoticed.
+///
 /// # Object safety
 ///
 /// `Arc<dyn AuditStore>` is constructible. This was verified by a compile-time test
@@ -41,20 +55,24 @@ use crate::audit::segment::{NodeId, Segment, SegmentSeal};
 /// property and every call site that stores the trait object.
 #[async_trait]
 pub trait AuditStore: Send + Sync {
-    /// Mint and record a document's worth of entries in one call.
+    /// Mint and record a document's worth of entries in one call, into `tenant`'s chain.
     ///
     /// Batched deliberately: it is the transaction boundary a database backend needs,
     /// it is one fsync per document rather than per entity, and it leaves no room for
     /// the two-acquisition shape of §8 gap 5.
-    async fn append(&self, inputs: Vec<AuditEntryInput>) -> Result<Vec<AuditEntry>, AuditError>;
+    async fn append(
+        &self,
+        tenant: &TenantId,
+        inputs: Vec<AuditEntryInput>,
+    ) -> Result<Vec<AuditEntry>, AuditError>;
 
-    /// Entries in the segment currently open on this writer.
+    /// Entries in the segment currently open on this writer, for `tenant`.
     ///
     /// Returns only the open segment's entries. Sealed segments are accessible via
     /// [`seals`](Self::seals), which carries the entry count for each, or by
     /// re-reading a file backend's JSONL files. Keeping the open segment separate
     /// makes the common case (recent activity) cheap without loading all history.
-    async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError>;
+    async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError>;
 
     /// One page of the entries of every sealed segment, then of the open one, oldest
     /// first — **for this node**.
@@ -87,11 +105,12 @@ pub trait AuditStore: Send + Sync {
     /// [`entries`]: Self::entries
     async fn history(
         &self,
+        tenant: &TenantId,
         after: Option<&AuditCursor>,
         limit: usize,
     ) -> Result<AuditPage, AuditError>;
 
-    /// The current head of this store's hash chain.
+    /// The current head of `tenant`'s hash chain.
     ///
     /// Cheap by design: it reads one field rather than materialising the segment, because
     /// every content-bearing API response carries it. A client that records the tip
@@ -113,36 +132,36 @@ pub trait AuditStore: Send + Sync {
     /// yet" is a legitimate chain state.
     ///
     /// [`GENESIS_HASH`]: crate::audit::GENESIS_HASH
-    async fn tip(&self) -> Result<String, AuditError>;
+    async fn tip(&self, tenant: &TenantId) -> Result<String, AuditError>;
 
-    /// Every seal this store can see, oldest first.
+    /// Every seal `tenant` can see, oldest first.
     ///
     /// The seals form a hash chain. Pass the slice to [`verify_seal_chain`] to confirm
     /// no seal was tampered with or deleted since it was recorded.
-    async fn seals(&self) -> Result<Vec<SegmentSeal>, AuditError>;
+    async fn seals(&self, tenant: &TenantId) -> Result<Vec<SegmentSeal>, AuditError>;
 
-    /// Verify the open segment, every sealed segment, and the links between them.
+    /// Verify `tenant`'s open segment, every sealed segment, and the links between them.
     ///
     /// A store with no sealed segments and an empty open segment trivially verifies.
     /// A store whose seal chain is broken — because a segment was deleted or a field
     /// was altered — returns an error naming the segment where verification failed.
-    async fn verify(&self) -> Result<(), AuditError>;
+    async fn verify(&self, tenant: &TenantId) -> Result<(), AuditError>;
 
-    /// Seal the open segment and open a successor linked to it.
+    /// Seal `tenant`'s open segment and open a successor linked to it.
     ///
     /// Returns the seal that was just created. The successor inherits the seal hash as
     /// its `prev_seal_hash`, so the chain remains unbroken across the rotation.
     ///
     /// Rotation is how a long-running process limits segment size: seal the current run
     /// and keep writing into a new one, without interrupting verification of the whole.
-    async fn rotate(&self) -> Result<SegmentSeal, AuditError>;
+    async fn rotate(&self, tenant: &TenantId) -> Result<SegmentSeal, AuditError>;
 
-    /// Seal without opening a successor. Idempotent.
+    /// Seal `tenant`'s open segment without opening a successor. Idempotent.
     ///
     /// Calling `close` a second time returns the same seal without creating a new,
     /// empty segment. This is important for shutdown logic that may execute multiple
     /// times (e.g., a signal handler racing a normal exit path).
-    async fn close(&self) -> Result<SegmentSeal, AuditError>;
+    async fn close(&self, tenant: &TenantId) -> Result<SegmentSeal, AuditError>;
 }
 
 // ── InMemoryAuditStore ────────────────────────────────────────────────────────
@@ -152,6 +171,11 @@ pub trait AuditStore: Send + Sync {
 /// State is discarded on drop. This is the right default for testing and for short-lived
 /// CLI invocations where durability is not required. For a process that must survive a
 /// restart with its audit record intact, use the file backend from Task 3 instead.
+///
+/// One [`State`] per tenant, lazily created on that tenant's first call — not one
+/// `InMemoryAuditStore` per tenant (see the trait doc's "Tenant scoping" section for why).
+/// `node_id`/`config_hash` are shared: this is one writer node serving many tenants, each
+/// with its own independent chain.
 ///
 /// # Locking discipline
 ///
@@ -163,7 +187,7 @@ pub trait AuditStore: Send + Sync {
 /// `!Send`, which will not compile behind `Arc<dyn AuditStore>`.
 #[derive(Debug)]
 pub struct InMemoryAuditStore {
-    state: Mutex<State>,
+    state: Mutex<HashMap<TenantId, State>>,
     node_id: NodeId,
     config_hash: String,
 }
@@ -206,16 +230,10 @@ impl InMemoryAuditStore {
     /// `node_id` should be stable across restarts if the store will be recovered by a
     /// file backend, and unique across concurrent writers sharing the same backing store.
     pub fn with_node_id(node_id: NodeId, config_hash: impl Into<String>) -> Self {
-        let config_hash = config_hash.into();
-        let segment = Segment::open(node_id.clone(), config_hash.clone(), None);
         Self {
-            state: Mutex::new(State {
-                open: Some(segment),
-                sealed: Vec::new(),
-                closed_seal: None,
-            }),
+            state: Mutex::new(HashMap::new()),
             node_id,
-            config_hash,
+            config_hash: config_hash.into(),
         }
     }
 
@@ -225,20 +243,49 @@ impl InMemoryAuditStore {
     /// within a single statement sequence holding the guard — so refusing to serve later
     /// callers would discard a usable audit chain for no gain. This mirrors the same
     /// decision already taken in `facade.rs`.
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+    fn state(&self) -> std::sync::MutexGuard<'_, HashMap<TenantId, State>> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A fresh, empty, open segment for a tenant touching this store for the first time.
+    fn fresh_state(node_id: &NodeId, config_hash: &str) -> State {
+        State {
+            open: Some(Segment::open(node_id.clone(), config_hash.to_owned(), None)),
+            sealed: Vec::new(),
+            closed_seal: None,
+        }
+    }
+
+    /// Get or lazily create `tenant`'s [`State`] within an already-locked map.
+    ///
+    /// Lazy per-tenant creation on first touch, rather than requiring an explicit
+    /// "provision this tenant" call, mirrors how a freshly constructed store already
+    /// starts with an implicit open segment for its one (pre-S1b) chain.
+    fn tenant_state<'a>(
+        map: &'a mut HashMap<TenantId, State>,
+        tenant: &TenantId,
+        node_id: &NodeId,
+        config_hash: &str,
+    ) -> &'a mut State {
+        map.entry(tenant.clone())
+            .or_insert_with(|| Self::fresh_state(node_id, config_hash))
     }
 }
 
 #[async_trait]
 impl AuditStore for InMemoryAuditStore {
-    async fn append(&self, inputs: Vec<AuditEntryInput>) -> Result<Vec<AuditEntry>, AuditError> {
+    async fn append(
+        &self,
+        tenant: &TenantId,
+        inputs: Vec<AuditEntryInput>,
+    ) -> Result<Vec<AuditEntry>, AuditError> {
         // One acquisition for the whole batch. That is the entire point of the batch
         // signature: one lock per document, not per entity. The guard is dropped at the
         // end of this block and never crosses an `.await`.
-        let mut state = self.state();
+        let mut map = self.state();
+        let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
 
         let segment = state.open.as_mut().ok_or(AuditError::StoreClosed {
             operation: "append",
@@ -250,8 +297,9 @@ impl AuditStore for InMemoryAuditStore {
             .collect())
     }
 
-    async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
-        let state = self.state();
+    async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
+        let mut map = self.state();
+        let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
         Ok(state
             .open
             .as_ref()
@@ -270,10 +318,12 @@ impl AuditStore for InMemoryAuditStore {
     /// length would define that discrepancy out of existence.
     async fn history(
         &self,
+        tenant: &TenantId,
         after: Option<&AuditCursor>,
         limit: usize,
     ) -> Result<AuditPage, AuditError> {
-        let state = self.state();
+        let mut map = self.state();
+        let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
 
         let mut extents: Vec<(&str, u64)> = state
             .sealed
@@ -297,8 +347,9 @@ impl AuditStore for InMemoryAuditStore {
         })
     }
 
-    async fn tip(&self) -> Result<String, AuditError> {
-        let state = self.state();
+    async fn tip(&self, tenant: &TenantId) -> Result<String, AuditError> {
+        let mut map = self.state();
+        let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
         match state.open.as_ref() {
             Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
             // Empty open segment, or no open segment at all: the newest seal is the head.
@@ -310,17 +361,19 @@ impl AuditStore for InMemoryAuditStore {
         }
     }
 
-    async fn seals(&self) -> Result<Vec<SegmentSeal>, AuditError> {
-        let state = self.state();
+    async fn seals(&self, tenant: &TenantId) -> Result<Vec<SegmentSeal>, AuditError> {
+        let mut map = self.state();
+        let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
         Ok(state.sealed.iter().map(|(seal, _)| seal.clone()).collect())
     }
 
-    async fn verify(&self) -> Result<(), AuditError> {
+    async fn verify(&self, tenant: &TenantId) -> Result<(), AuditError> {
         // Snapshot under the lock, then verify without holding it. Verification is O(n)
         // over every entry ever written; blocking all appends for its duration would make
         // a routine integrity check into an outage.
         let (sealed, open_entries, open_tip) = {
-            let state = self.state();
+            let mut map = self.state();
+            let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
             let (entries, tip) = match state.open.as_ref() {
                 Some(segment) => (segment.entries().to_vec(), segment.tip().to_owned()),
                 None => (Vec::new(), crate::audit::GENESIS_HASH.to_owned()),
@@ -342,8 +395,9 @@ impl AuditStore for InMemoryAuditStore {
         verify_open_entries(&open_entries, &open_tip, &self.config_hash)
     }
 
-    async fn rotate(&self) -> Result<SegmentSeal, AuditError> {
-        let mut state = self.state();
+    async fn rotate(&self, tenant: &TenantId) -> Result<SegmentSeal, AuditError> {
+        let mut map = self.state();
+        let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
 
         let old = state.open.take().ok_or(AuditError::StoreClosed {
             operation: "rotate",
@@ -365,8 +419,9 @@ impl AuditStore for InMemoryAuditStore {
         Ok(seal)
     }
 
-    async fn close(&self) -> Result<SegmentSeal, AuditError> {
-        let mut state = self.state();
+    async fn close(&self, tenant: &TenantId) -> Result<SegmentSeal, AuditError> {
+        let mut map = self.state();
+        let state = Self::tenant_state(&mut map, tenant, &self.node_id, &self.config_hash);
 
         // Idempotent, and idempotent under concurrency: the check and the seal happen
         // under one acquisition, so a second caller either sees the cached seal or blocks
@@ -511,6 +566,17 @@ mod tests {
         InMemoryAuditStore::with_node_id(NodeId::new("test-node"), "test-config")
     }
 
+    /// The tenant used by every test that doesn't itself care about tenant scoping —
+    /// keeps the pre-S1b test bodies unchanged apart from threading this through.
+    fn t() -> TenantId {
+        TenantId::new("tenant-a")
+    }
+
+    /// A second, distinct tenant — used only by the cross-tenant isolation tests below.
+    fn t2() -> TenantId {
+        TenantId::new("tenant-b")
+    }
+
     /// The tip is the evidence an API response hands back with every result, so it has to
     /// agree with the chain it claims to describe: genesis before anything is written,
     /// and the newest entry's `chain_hash` afterwards. A tip that lagged behind the chain
@@ -518,13 +584,13 @@ mod tests {
     #[tokio::test]
     async fn should_report_genesis_then_track_the_newest_entry() {
         let store = make_store();
-        assert_eq!(store.tip().await.unwrap(), crate::audit::GENESIS_HASH);
+        assert_eq!(store.tip(&t()).await.unwrap(), crate::audit::GENESIS_HASH);
 
-        let first = store.append(vec![make_input("a")]).await.unwrap();
-        assert_eq!(store.tip().await.unwrap(), first[0].chain_hash);
+        let first = store.append(&t(), vec![make_input("a")]).await.unwrap();
+        assert_eq!(store.tip(&t()).await.unwrap(), first[0].chain_hash);
 
-        let second = store.append(vec![make_input("b")]).await.unwrap();
-        assert_eq!(store.tip().await.unwrap(), second[0].chain_hash);
+        let second = store.append(&t(), vec![make_input("b")]).await.unwrap();
+        assert_eq!(store.tip(&t()).await.unwrap(), second[0].chain_hash);
         assert_ne!(first[0].chain_hash, second[0].chain_hash);
     }
 
@@ -534,11 +600,11 @@ mod tests {
     #[tokio::test]
     async fn should_report_the_seal_tip_after_close() {
         let store = make_store();
-        let entries = store.append(vec![make_input("a")]).await.unwrap();
-        let seal = store.close().await.unwrap();
+        let entries = store.append(&t(), vec![make_input("a")]).await.unwrap();
+        let seal = store.close(&t()).await.unwrap();
 
         assert_eq!(seal.sealed_tip, entries[0].chain_hash);
-        assert_eq!(store.tip().await.unwrap(), seal.sealed_tip);
+        assert_eq!(store.tip(&t()).await.unwrap(), seal.sealed_tip);
     }
 
     /// Rotation opens an empty successor whose own entry chain starts at genesis. The
@@ -548,15 +614,15 @@ mod tests {
     #[tokio::test]
     async fn should_not_reset_to_genesis_when_rotation_opens_an_empty_segment() {
         let store = make_store();
-        let entries = store.append(vec![make_input("a")]).await.unwrap();
-        let seal = store.rotate().await.unwrap();
+        let entries = store.append(&t(), vec![make_input("a")]).await.unwrap();
+        let seal = store.rotate(&t()).await.unwrap();
 
-        assert_eq!(store.tip().await.unwrap(), seal.sealed_tip);
-        assert_ne!(store.tip().await.unwrap(), crate::audit::GENESIS_HASH);
+        assert_eq!(store.tip(&t()).await.unwrap(), seal.sealed_tip);
+        assert_ne!(store.tip(&t()).await.unwrap(), crate::audit::GENESIS_HASH);
 
         // Once the successor has entries of its own, it takes over again.
-        let after = store.append(vec![make_input("b")]).await.unwrap();
-        assert_eq!(store.tip().await.unwrap(), after[0].chain_hash);
+        let after = store.append(&t(), vec![make_input("b")]).await.unwrap();
+        assert_eq!(store.tip(&t()).await.unwrap(), after[0].chain_hash);
         assert_ne!(after[0].chain_hash, entries[0].chain_hash);
     }
 
@@ -582,7 +648,7 @@ mod tests {
     async fn should_return_one_entry_per_input_in_order() {
         let store = make_store();
         let inputs = vec![make_input("e1"), make_input("e2"), make_input("e3")];
-        let entries = store.append(inputs).await.expect("append must succeed");
+        let entries = store.append(&t(), inputs).await.expect("append must succeed");
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].id, "e1");
         assert_eq!(entries[1].id, "e2");
@@ -593,18 +659,18 @@ mod tests {
     async fn should_chain_entries_across_two_append_calls() {
         let store = make_store();
         store
-            .append(vec![make_input("a1"), make_input("a2")])
+            .append(&t(), vec![make_input("a1"), make_input("a2")])
             .await
             .expect("first append");
         store
-            .append(vec![make_input("b1"), make_input("b2")])
+            .append(&t(), vec![make_input("b1"), make_input("b2")])
             .await
             .expect("second append");
-        let entries = store.entries().await.expect("entries");
+        let entries = store.entries(&t()).await.expect("entries");
         assert_eq!(entries.len(), 4);
         // The chain must verify internally — entries from both appends are chained.
         store
-            .verify()
+            .verify(&t())
             .await
             .expect("chain must verify after two appends");
     }
@@ -613,38 +679,38 @@ mod tests {
     async fn should_verify_after_a_rotation() {
         let store = make_store();
         store
-            .append(vec![make_input("pre-rotate")])
+            .append(&t(), vec![make_input("pre-rotate")])
             .await
             .expect("append before rotate");
-        store.rotate().await.expect("rotate");
+        store.rotate(&t()).await.expect("rotate");
         store
-            .append(vec![make_input("post-rotate")])
+            .append(&t(), vec![make_input("post-rotate")])
             .await
             .expect("append after rotate");
-        store.verify().await.expect("verify after rotation");
+        store.verify(&t()).await.expect("verify after rotation");
     }
 
     #[tokio::test]
     async fn should_link_the_new_segment_to_the_sealed_one_on_rotate() {
         let store = make_store();
         store
-            .append(vec![make_input("first")])
+            .append(&t(), vec![make_input("first")])
             .await
             .expect("append");
-        let seal = store.rotate().await.expect("rotate");
+        let seal = store.rotate(&t()).await.expect("rotate");
         // After rotation the open segment's entries come from the new segment, not the sealed one.
-        let open_entries = store.entries().await.expect("entries");
+        let open_entries = store.entries(&t()).await.expect("entries");
         assert_eq!(open_entries.len(), 0, "new segment should start empty");
         // The sealed list should now contain the one we just sealed.
-        let seals = store.seals().await.expect("seals");
+        let seals = store.seals(&t()).await.expect("seals");
         assert_eq!(seals.len(), 1);
         assert_eq!(seals[0].seal_hash, seal.seal_hash);
         // The next segment we open should record the seal hash as its predecessor.
         store
-            .append(vec![make_input("second")])
+            .append(&t(), vec![make_input("second")])
             .await
             .expect("append after rotate");
-        let seal2 = store.rotate().await.expect("second rotate");
+        let seal2 = store.rotate(&t()).await.expect("second rotate");
         assert_eq!(
             seal2.prev_seal_hash.as_deref(),
             Some(seal.seal_hash.as_str()),
@@ -656,15 +722,15 @@ mod tests {
     async fn should_report_entries_from_the_open_segment_only() {
         let store = make_store();
         store
-            .append(vec![make_input("sealed-1")])
+            .append(&t(), vec![make_input("sealed-1")])
             .await
             .expect("append");
-        store.rotate().await.expect("rotate");
+        store.rotate(&t()).await.expect("rotate");
         store
-            .append(vec![make_input("open-1"), make_input("open-2")])
+            .append(&t(), vec![make_input("open-1"), make_input("open-2")])
             .await
             .expect("append to new segment");
-        let entries = store.entries().await.expect("entries");
+        let entries = store.entries(&t()).await.expect("entries");
         // Only the open segment's entries.
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, "open-1");
@@ -679,13 +745,13 @@ mod tests {
         let store = make_store();
 
         store
-            .append(vec![make_input("m1"), make_input("m2")])
+            .append(&t(), vec![make_input("m1"), make_input("m2")])
             .await
             .expect("append");
-        store.rotate().await.expect("rotate 1");
-        store.append(vec![make_input("m3")]).await.expect("append");
-        store.rotate().await.expect("rotate 2");
-        store.append(vec![make_input("m4")]).await.expect("append");
+        store.rotate(&t()).await.expect("rotate 1");
+        store.append(&t(), vec![make_input("m3")]).await.expect("append");
+        store.rotate(&t()).await.expect("rotate 2");
+        store.append(&t(), vec![make_input("m4")]).await.expect("append");
 
         let expected = vec!["m1", "m2", "m3", "m4"];
 
@@ -693,14 +759,14 @@ mod tests {
             page.entries.iter().map(|entry| entry.id.clone()).collect()
         };
 
-        let page = store.history(None, 100).await.expect("history");
+        let page = store.history(&t(), None, 100).await.expect("history");
         assert_eq!(ids(&page), expected);
 
         // Paging one at a time crosses every segment boundary with a cursor in hand.
         let mut collected = Vec::new();
         let mut cursor = None;
         loop {
-            let page = store.history(cursor.as_ref(), 1).await.expect("history");
+            let page = store.history(&t(), cursor.as_ref(), 1).await.expect("history");
             if page.entries.is_empty() {
                 break;
             }
@@ -709,12 +775,12 @@ mod tests {
         }
         assert_eq!(collected, expected);
 
-        store.close().await.expect("close");
+        store.close(&t()).await.expect("close");
         assert!(
-            store.entries().await.expect("entries").is_empty(),
+            store.entries(&t()).await.expect("entries").is_empty(),
             "entries() reports the open segment, and close left none"
         );
-        let page = store.history(None, 100).await.expect("history after close");
+        let page = store.history(&t(), None, 100).await.expect("history after close");
         assert_eq!(
             ids(&page),
             expected,
@@ -728,14 +794,14 @@ mod tests {
     #[tokio::test]
     async fn should_reject_a_cursor_this_store_cannot_resolve() {
         let store = make_store();
-        store.append(vec![make_input("u1")]).await.expect("append");
+        store.append(&t(), vec![make_input("u1")]).await.expect("append");
 
         let foreign = crate::audit::AuditCursor {
             segment_id: "00000000-0000-4000-8000-000000000000".into(),
             index: 0,
         };
         let err = store
-            .history(Some(&foreign), 10)
+            .history(&t(), Some(&foreign), 10)
             .await
             .expect_err("an unknown segment must not be served as a fresh start");
         assert!(
@@ -747,9 +813,9 @@ mod tests {
     #[tokio::test]
     async fn should_be_idempotent_when_closed_twice() {
         let store = make_store();
-        store.append(vec![make_input("x")]).await.expect("append");
-        let seal1 = store.close().await.expect("first close");
-        let seal2 = store.close().await.expect("second close");
+        store.append(&t(), vec![make_input("x")]).await.expect("append");
+        let seal1 = store.close(&t()).await.expect("first close");
+        let seal2 = store.close(&t()).await.expect("second close");
         assert_eq!(
             seal1.seal_hash, seal2.seal_hash,
             "both close calls must return the same seal"
@@ -795,21 +861,22 @@ mod tests {
     async fn should_detect_a_tampered_entry_in_a_sealed_segment() {
         let store = make_store();
         store
-            .append(vec![make_input("t1"), make_input("t2")])
+            .append(&t(), vec![make_input("t1"), make_input("t2")])
             .await
             .expect("append");
-        store.rotate().await.expect("rotate seals the segment");
-        store.verify().await.expect("clean chain verifies");
+        store.rotate(&t()).await.expect("rotate seals the segment");
+        store.verify(&t()).await.expect("clean chain verifies");
 
         // Alter a field that is committed into the chain hash, leaving the recorded
         // `chain_hash` untouched — exactly what an editor of the log file would produce.
         {
-            let mut state = store.state();
+            let mut map = store.state();
+            let state = map.get_mut(&t()).expect("tenant state must exist");
             state.sealed[0].1[1].category = "CreditCard".into();
         }
 
         let err = store
-            .verify()
+            .verify(&t())
             .await
             .expect_err("a tampered sealed entry must fail verification");
         assert!(
@@ -827,18 +894,19 @@ mod tests {
     async fn should_report_a_missing_entry_as_a_count_mismatch() {
         let store = make_store();
         store
-            .append(vec![make_input("c1"), make_input("c2")])
+            .append(&t(), vec![make_input("c1"), make_input("c2")])
             .await
             .expect("append");
-        store.rotate().await.expect("rotate");
+        store.rotate(&t()).await.expect("rotate");
 
         {
-            let mut state = store.state();
+            let mut map = store.state();
+            let state = map.get_mut(&t()).expect("tenant state must exist");
             state.sealed[0].1.pop();
         }
 
         let err = store
-            .verify()
+            .verify(&t())
             .await
             .expect_err("a truncated sealed segment must fail verification");
         match err {
@@ -861,13 +929,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn should_be_idempotent_when_closed_concurrently() {
         let store = Arc::new(make_store());
-        store.append(vec![make_input("x")]).await.expect("append");
+        store.append(&t(), vec![make_input("x")]).await.expect("append");
 
         const CLOSERS: usize = 8;
         let mut handles = Vec::with_capacity(CLOSERS);
         for _ in 0..CLOSERS {
             let store_clone = Arc::clone(&store);
-            handles.push(tokio::spawn(async move { store_clone.close().await }));
+            handles.push(tokio::spawn(async move { store_clone.close(&t()).await }));
         }
 
         let mut hashes = Vec::with_capacity(CLOSERS);
@@ -884,7 +952,7 @@ mod tests {
             "all concurrent closes must return one seal, got {hashes:?}"
         );
         // Exactly one segment was sealed — no closer minted a second, empty one.
-        assert_eq!(store.seals().await.expect("seals").len(), 1);
+        assert_eq!(store.seals(&t()).await.expect("seals").len(), 1);
     }
 
     /// Using a closed store is a lifecycle mistake, not evidence of tampering.
@@ -894,10 +962,10 @@ mod tests {
     #[tokio::test]
     async fn should_refuse_to_append_after_close() {
         let store = make_store();
-        store.close().await.expect("close");
+        store.close(&t()).await.expect("close");
 
         let err = store
-            .append(vec![make_input("late")])
+            .append(&t(), vec![make_input("late")])
             .await
             .expect_err("append after close must fail");
         assert!(
@@ -911,7 +979,7 @@ mod tests {
         );
 
         let err = store
-            .rotate()
+            .rotate(&t())
             .await
             .expect_err("rotate after close must fail");
         assert!(
@@ -943,7 +1011,7 @@ mod tests {
                     .map(|i| make_input(&format!("task-{task}-entry-{i}")))
                     .collect();
                 store_clone
-                    .append(inputs)
+                    .append(&t(), inputs)
                     .await
                     .expect("concurrent append must succeed")
             });
@@ -956,11 +1024,88 @@ mod tests {
 
         // Every append serialised through the mutex, so the full chain must be valid.
         store
-            .verify()
+            .verify(&t())
             .await
             .expect("chain must verify after concurrent appends");
 
-        let all_entries = store.entries().await.expect("entries");
+        let all_entries = store.entries(&t()).await.expect("entries");
         assert_eq!(all_entries.len(), TASKS * ENTRIES_PER_TASK);
+    }
+
+    // ── S1b: tenant isolation ───────────────────────────────────────────────
+
+    /// Two tenants sharing one store must never observe each other's chain — the core
+    /// claim of S1b §1.2 (chains partition by `(NodeId, TenantId)`). Same node, same
+    /// process, deliberately: isolation must hold *within* one running store, not just
+    /// across separately-provisioned ones.
+    #[tokio::test]
+    async fn two_tenants_audit_chains_are_independent() {
+        let store = make_store();
+
+        store
+            .append(&t(), vec![make_input("a-1"), make_input("a-2")])
+            .await
+            .expect("tenant a append");
+        store
+            .append(&t2(), vec![make_input("b-1")])
+            .await
+            .expect("tenant b append");
+
+        let a_entries = store.entries(&t()).await.expect("tenant a entries");
+        let b_entries = store.entries(&t2()).await.expect("tenant b entries");
+        assert_eq!(a_entries.len(), 2);
+        assert_eq!(b_entries.len(), 1);
+        assert_eq!(b_entries[0].id, "b-1");
+        assert!(a_entries.iter().all(|e| e.id != "b-1"));
+
+        // Independent tips, independent chains — appending to one must not move the
+        // other's head.
+        let a_tip_before = store.tip(&t()).await.unwrap();
+        store
+            .append(&t2(), vec![make_input("b-2")])
+            .await
+            .expect("tenant b second append");
+        assert_eq!(store.tip(&t()).await.unwrap(), a_tip_before);
+
+        // Rotating one tenant's chain must not seal or otherwise disturb the other's.
+        store.rotate(&t()).await.expect("tenant a rotate");
+        assert_eq!(store.seals(&t()).await.expect("tenant a seals").len(), 1);
+        assert_eq!(store.seals(&t2()).await.expect("tenant b seals").len(), 0);
+        assert_eq!(store.entries(&t2()).await.expect("tenant b entries").len(), 2);
+
+        // Each tenant's own chain still verifies independently.
+        store.verify(&t()).await.expect("tenant a chain verifies");
+        store.verify(&t2()).await.expect("tenant b chain verifies");
+    }
+
+    /// [`AuditStore::history`] must page one tenant's segments only — a tenant with a
+    /// longer or differently-shaped run (more rotations, more entries) must never leak
+    /// extents into another tenant's page.
+    #[tokio::test]
+    async fn audit_history_never_returns_another_tenants_entries() {
+        let store = make_store();
+
+        store
+            .append(&t(), vec![make_input("a-1")])
+            .await
+            .expect("tenant a append");
+        store.rotate(&t()).await.expect("tenant a rotate");
+        store
+            .append(&t(), vec![make_input("a-2")])
+            .await
+            .expect("tenant a append 2");
+
+        store
+            .append(&t2(), vec![make_input("b-1"), make_input("b-2")])
+            .await
+            .expect("tenant b append");
+
+        let a_page = store.history(&t(), None, 100).await.expect("tenant a history");
+        let a_ids: Vec<&str> = a_page.entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(a_ids, vec!["a-1", "a-2"]);
+
+        let b_page = store.history(&t2(), None, 100).await.expect("tenant b history");
+        let b_ids: Vec<&str> = b_page.entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(b_ids, vec!["b-1", "b-2"]);
     }
 }

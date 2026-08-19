@@ -9,6 +9,7 @@
 
 use hacienda_core::audit::{AuditEntryInput, AuditStore, InMemoryAuditStore};
 use hacienda_core::pii::{PiiPipeline, PipelineConfig};
+use hacienda_core::tenancy::TenantId;
 #[cfg(feature = "ner-candle-wasm")]
 use hacienda_core::pii::NerDetector;
 use uuid::Uuid;
@@ -73,13 +74,14 @@ async fn redaction_round_trip_has_a_real_clock_and_uuid_on_wasm32() {
             vertical: None,
         })
         .collect();
+    let tenant = TenantId::default_tenant();
     store
-        .append(inputs)
+        .append(&tenant, inputs)
         .await
         .expect("appending the redaction's own audit entries must succeed");
 
     let seal = store
-        .close()
+        .close(&tenant)
         .await
         .expect("closing the store must seal its segment");
 

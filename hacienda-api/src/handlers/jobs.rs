@@ -50,11 +50,11 @@ pub async fn get_job(
 ) -> Result<Json<JobResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
-    let tenant_ctx = caller.tenant_ctx();
+    let tenant = caller.tenant_ctx().tenant;
 
     let job = state
         .jobs
-        .get(&id)
+        .get(&tenant, &id)
         .await
         .map_err(|e| {
             tracing::error!(job_id = %id, error = %e, "job store error");
@@ -71,7 +71,7 @@ pub async fn get_job(
         (None, _) => {}
         // Authenticated principal must match the job's owner *and* tenant.
         (Some(caller_id), Some(owner_id))
-            if caller_id == owner_id && job.tenant_id == tenant_ctx.tenant.as_str() => {}
+            if caller_id == owner_id && job.tenant_id == tenant.as_str() => {}
         // Mismatch, cross-tenant, OR the job has no owner (trusted-only) — return 404.
         _ => {
             return Err(ApiError::not_found());
@@ -112,9 +112,9 @@ pub async fn list_jobs(
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let caller_id = caller.principal_id();
-    let tenant_ctx = caller.tenant_ctx();
+    let tenant = caller.tenant_ctx().tenant;
 
-    let jobs = state.jobs.list(query.status).await.map_err(|e| {
+    let jobs = state.jobs.list(&tenant, query.status).await.map_err(|e| {
         tracing::error!(error = %e, "job store error");
         ApiError::internal()
     })?;
@@ -124,7 +124,7 @@ pub async fn list_jobs(
         .filter(|job| match (caller_id, &job.owner) {
             (None, _) => true,
             (Some(caller_id), Some(owner_id)) => {
-                caller_id == owner_id && job.tenant_id == tenant_ctx.tenant.as_str()
+                caller_id == owner_id && job.tenant_id == tenant.as_str()
             }
             (Some(_), None) => false,
         })
@@ -175,11 +175,11 @@ pub async fn get_job_result(
 ) -> Result<Json<JobResultResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
-    let tenant_ctx = caller.tenant_ctx();
+    let tenant = caller.tenant_ctx().tenant;
 
     let job = state
         .jobs
-        .get(&id)
+        .get(&tenant, &id)
         .await
         .map_err(|e| {
             tracing::error!(job_id = %id, error = %e, "job store error");
@@ -191,7 +191,7 @@ pub async fn get_job_result(
     match (caller.principal_id(), &job.owner) {
         (None, _) => {}
         (Some(caller_id), Some(owner_id))
-            if caller_id == owner_id && job.tenant_id == tenant_ctx.tenant.as_str() => {}
+            if caller_id == owner_id && job.tenant_id == tenant.as_str() => {}
         _ => {
             return Err(ApiError::not_found());
         }
@@ -532,7 +532,7 @@ mod tests {
         // pre-S1 owner-only check could not distinguish.
         let acme_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
         let job = job_store
-            .create(&acme_ctx, Some("alice".to_string()))
+            .create(&acme_ctx.tenant, Some("alice".to_string()))
             .await
             .expect("create must succeed");
 

@@ -1,12 +1,15 @@
 //! Handler for `POST /v1/rag/collections/{name}/answer` (Phase 12 Track 3).
 //!
 //! Streams a grounded answer over Server-Sent Events: retrieves chunks from the
-//! configured `RagStore`, redacts the caller's prompt and every retrieved chunk's
-//! content for PII, then hands the redacted context to
-//! `hacienda_rag::answer_stream`, which is deliberately not redaction-aware itself
-//! (see that function's `# Security` doc note in `crates/hacienda-rag/src/stream.rs`).
-//! This handler is the one place that gate is enforced before any document content
-//! reaches an LLM.
+//! configured `RagStore`, then hands the caller's prompt and the retrieved chunks to
+//! `hacienda_rag::GuardedLlm` (`2026-08-13-P6-llm-call-enforcement-point.md`), which
+//! redacts both through `FacadeRedactor` below before ever reaching
+//! `hacienda_rag::answer_stream` — the function that actually calls the LLM, and which is
+//! deliberately not redaction-aware itself (see its `# Security` doc note in
+//! `crates/hacienda-rag/src/stream.rs`). Before P6, this handler enforced that gate by
+//! calling `redact_text_with_auth` by hand and trusting itself to remember; now the gate is
+//! structural — `GuardedLlm::stream` cannot be called without a `Redactor`, and this is the
+//! only call site in the workspace that constructs one.
 //!
 //! # Why SSE errors don't reuse `ApiError`
 //!
@@ -29,7 +32,10 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::{Stream, StreamExt};
-use hacienda_rag::{answer_stream, AnswerEvent, LlmAnswerConfig, RagResult, RetrievedContext};
+use hacienda_core::{auth::Caller, HaciendaError, HaciendaFacade};
+use hacienda_rag::{
+    AnswerEvent, GuardedLlm, LlmAnswerConfig, RagError, RagResult, Redactor, RetrievedContext,
+};
 
 use crate::{
     dto::AnswerRequest,
@@ -40,6 +46,51 @@ use crate::{
     },
     state::ApiState,
 };
+
+/// Adapts [`hacienda::HaciendaFacade::redact_text_with_auth`] to [`hacienda_rag::Redactor`]
+/// — the seam `GuardedLlm` (P6) redacts through. `hacienda-rag` cannot depend on
+/// `hacienda-core` (see that crate's dev-dependency comment on the edge), so this adapter
+/// lives here, in the one crate that already depends on both.
+///
+/// `redact` boxes the `HaciendaError` it gets into `RagError::Backend` because
+/// `hacienda_rag::Redactor`'s return type has no room for a richer error — but boxing loses
+/// nothing: [`map_guarded_llm_error`] downcasts it back to `HaciendaError` at the one point
+/// this crate turns a `GuardedLlm::stream` failure into an [`ApiError`], recovering the same
+/// 403/400/500 classification `redact_text_with_auth`'s direct callers already get through
+/// [`ApiError`]'s `From<HaciendaError>` impl. Without that downcast, every redaction failure
+/// — including a missing `documents:process` capability, which should be 403 — would
+/// collapse to the generic `RagError::Backend` → 500 mapping.
+struct FacadeRedactor<'a> {
+    facade: &'a HaciendaFacade,
+    caller: Caller<'a>,
+}
+
+#[async_trait::async_trait]
+impl Redactor for FacadeRedactor<'_> {
+    async fn redact(&self, text: &str) -> RagResult<String> {
+        let result = self
+            .facade
+            .redact_text_with_auth(self.caller, text)
+            .await
+            .map_err(|error| RagError::Backend(Box::new(error)))?;
+        Ok(result.redacted_text)
+    }
+}
+
+/// Maps a [`GuardedLlm::stream`] failure to [`ApiError`], recovering the [`HaciendaError`]
+/// [`FacadeRedactor::redact`] boxed instead of falling through to the generic
+/// `RagError::Backend` → 500 mapping — see that struct's doc comment for why this matters.
+/// A `RagError` that did not originate from `FacadeRedactor` (a genuine RAG-store error, a
+/// filter/query problem) still goes through the ordinary `From<RagError> for ApiError`.
+fn map_guarded_llm_error(error: RagError) -> ApiError {
+    match error {
+        RagError::Backend(inner) => match inner.downcast::<HaciendaError>() {
+            Ok(hacienda_error) => ApiError::from(*hacienda_error),
+            Err(inner) => ApiError::from(RagError::Backend(inner)),
+        },
+        other => ApiError::from(other),
+    }
+}
 
 /// `POST /v1/rag/collections/{name}/answer`
 #[utoipa::path(
@@ -88,35 +139,28 @@ pub async fn answer(
         .await
         .map_err(ApiError::from)?;
 
-    // Mandatory PII redaction gate: the prompt and every chunk's content are
-    // redacted before `answer_stream` — which performs no redaction of its own —
-    // ever sees them. Same gate, same call, as `handlers::pii::redact_text`.
-    let redacted_prompt = state
-        .facade
-        .redact_text_with_auth(caller, &body.prompt)
-        .await
-        .map_err(ApiError::from)?
-        .redacted_text;
-
-    let mut chunks = output.chunks;
-    for chunk in &mut chunks {
-        if let Some(content) = chunk.content.take() {
-            let redacted = state
-                .facade
-                .redact_text_with_auth(caller, &content)
-                .await
-                .map_err(ApiError::from)?;
-            chunk.content = Some(redacted.redacted_text);
-        }
-    }
-
-    let context = RetrievedContext { chunks };
+    // Mandatory PII redaction gate: `GuardedLlm` (P6) redacts the prompt and every
+    // chunk's content through `FacadeRedactor` before `answer_stream` — which performs
+    // no redaction of its own — ever sees them. This is now enforced by `GuardedLlm`'s
+    // own construction rather than by this handler remembering to call
+    // `redact_text_with_auth` twice by hand before reaching `answer_stream` directly.
+    let context = RetrievedContext {
+        chunks: output.chunks,
+    };
     let config = LlmAnswerConfig {
         llm: body.llm,
         system_prompt: body.system_prompt,
     };
+    let redactor = FacadeRedactor {
+        facade: &state.facade,
+        caller,
+    };
+    let stream = GuardedLlm::new(&redactor)
+        .stream(context, body.prompt, config)
+        .await
+        .map_err(map_guarded_llm_error)?;
 
-    let events = answer_stream(context, redacted_prompt, config).map(to_sse_event);
+    let events = stream.map(to_sse_event);
 
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
 }

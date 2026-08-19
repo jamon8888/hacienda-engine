@@ -9,12 +9,21 @@ use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
 use crate::glossary::{EntityGlossary, GlossaryEntry};
-use crate::pii::{MergedEntity, PiiError, PiiPipeline, PipelineMetrics, PipelineResult};
-use crate::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionError};
+use crate::pii::ner::NerDetector;
+use crate::pii::pipeline::build_detector;
+use crate::pii::{
+    MergedEntity, PiiCategory, PiiError, PiiPipeline, PipelineMetrics, PipelineResult,
+};
+use crate::redaction::{
+    KeyId, KeyResolver, KeyStatus, Pseudonymiser, RedactionAuditEntry, RedactionError,
+};
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
-use crate::tenancy::{ActorId, TenantCtx};
+use crate::tenancy::TenantId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
 use xberg::{extract, ExtractInput, ExtractionResult};
@@ -22,17 +31,57 @@ use xberg::{extract, ExtractInput, ExtractionResult};
 /// Version recorded on every audit entry so a record can be tied to the code that made it.
 const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Hard ceiling on archive-member nesting [`HaciendaFacade::redact_document_recursively`]
+/// will walk, independent of xberg's own `ExtractionConfig::max_archive_depth` (default 3
+/// — `crates/xberg/src/core/config/extraction/core.rs`). Defense-in-depth, not the primary
+/// control: xberg already refuses to *extract* an archive nested deeper than its own
+/// configured limit, so `document.children` should never carry more levels than that
+/// config allows. This constant only matters if a deployment widens xberg's limit far past
+/// its default, or a future xberg version stops bounding some nesting path the same way —
+/// in either case, redaction should fail closed (an error, per I1: nothing unredacted
+/// crosses the persistence boundary) rather than let an unbounded recursive `async fn`
+/// grow the task's stack without limit.
+pub(crate) const MAX_REDACTION_DEPTH: usize = 64;
+
 pub struct HaciendaFacade {
     config: HaciendaConfig,
-    /// `Arc`-wrapped so [`Self::detect_concurrently`] can hand each spawned task its own
-    /// cheap clone without cloning the pipeline itself (`PiiPipeline` is not `Clone`).
-    pii_pipeline: Option<Arc<PiiPipeline>>,
-    /// The pseudonymiser instance used for minting and revealing tokens.
+    /// Per-tenant cache of built pipelines (P3a §3.2). `None` when `config.pii` is not
+    /// configured at all — same meaning `pii_pipeline: Option<Arc<PiiPipeline>>` had
+    /// before this existed. `Some(HashMap::new())` starts empty except for the default
+    /// tenant, which [`Self::build`] populates eagerly so a bad key configuration is
+    /// still a startup error, not a surprise on a tenant's first request (matches the
+    /// pre-P3a behaviour exactly for a single-tenant deployment).
     ///
-    /// Separate from `pii_pipeline` because token reveal is a standalone operation that
-    /// does not require running the full detection pipeline. Cloned from the same
-    /// `Arc<Pseudonymiser>` passed to the pipeline to maintain a single instance per key set.
-    pseudonymiser: Option<Arc<Pseudonymiser>>,
+    /// Reading and writing this cache is the only synchronous, `&self`-only work
+    /// [`Self::pii_pipeline_for`] does; the `Mutex` is never held across an `.await`.
+    pii_pipelines: Option<Mutex<HashMap<TenantId, Arc<PiiPipeline>>>>,
+    /// The NER backend, loaded once regardless of how many tenants pseudonymise.
+    /// `Clone` is cheap (`NerDetector`'s own doc comment) — every tenant's
+    /// [`PiiPipeline`] gets an owned clone of this instead of reloading model weights.
+    shared_detector: Option<NerDetector>,
+    /// Where a tenant's pseudonymisation key material comes from. `None` when the
+    /// facade was built via [`Self::new`]/[`Self::with_stores`] without
+    /// [`Self::with_key_resolver`] — `Pseudonymize` mode then fails to build a pipeline
+    /// for any tenant, exactly as it fails today with no resolver configured.
+    key_resolver: Option<Arc<dyn KeyResolver>>,
+    /// The active key id [`crate::redaction::RedactionConfig::key_id`] pins, if set —
+    /// applies identically to every tenant's [`Pseudonymiser`], since it names which
+    /// key new tokens mint under, not whose material is used.
+    pinned_active_key: Option<KeyId>,
+    /// Retired keys every tenant's [`Pseudonymiser`] must still be able to reveal.
+    retired_keys: Vec<KeyId>,
+    /// Per-tenant cache of standalone [`Pseudonymiser`]s, used only by
+    /// [`Self::reveal_token_with_auth`]. `None` when [`Self::key_resolver`] is `None`.
+    ///
+    /// Kept independent of [`Self::pii_pipelines`]: [`Self::with_key_resolver`] can be
+    /// called with no `[pii]` section configured at all (e.g. `hacienda pii reveal` run
+    /// against a config with no pipeline section) — reveal only needs key material, not
+    /// a full detection/redaction pipeline, so it must keep working in that case exactly
+    /// as it did before this cache existed, when `pseudonymiser` was a field independent
+    /// of `pii_pipeline`. `Some(HashMap::new())` starts empty except for the default
+    /// tenant, which [`Self::build`] populates eagerly for the same fail-fast-at-startup
+    /// reason [`Self::pii_pipelines`] does.
+    pseudonymisers: Option<Mutex<HashMap<TenantId, Arc<Pseudonymiser>>>>,
     compliance: Option<ComplianceGenerator>,
     /// The persistence backend for the tamper-evident audit log.
     ///
@@ -140,31 +189,39 @@ impl HaciendaFacade {
     ///
     /// [`FileAuditStore`]: crate::audit::FileAuditStore
     pub fn new(config: HaciendaConfig) -> Result<Self, HaciendaError> {
-        Self::build(config, None, None, None, None)
+        Self::build(config, None, None, Vec::new(), None, None, None)
     }
 
     /// Build a facade that can mint and reverse pseudonym tokens.
     ///
     /// Required when the PII configuration selects
     /// [`RedactionMode::Pseudonymize`](crate::redaction::RedactionMode::Pseudonymize).
-    /// [`HaciendaFacade::new`] passes no key and therefore *fails* for that mode; it does
-    /// not fall back to masking, because that would apply a weaker control than the one
-    /// the operator configured.
+    /// [`HaciendaFacade::new`] passes no resolver and therefore *fails* for that mode; it
+    /// does not fall back to masking, because that would apply a weaker control than the
+    /// one the operator configured.
     ///
     /// The active key comes from
     /// [`RedactionConfig::key_id`](crate::redaction::RedactionConfig::key_id) when set and
-    /// from the resolver's own notion of "active" otherwise. `retired` names keys that are
-    /// no longer minted under but whose existing tokens must stay revealable — they are
-    /// loaded eagerly, so a missing one is a startup error rather than a surprise during
-    /// a right-of-access request.
+    /// from the resolver's own notion of "active" otherwise — resolved independently per
+    /// tenant (P3a), the first time each tenant's pipeline is built. `retired` names keys
+    /// that are no longer minted under but whose existing tokens must stay revealable for
+    /// every tenant; they are resolved eagerly as part of building each tenant's
+    /// [`Pseudonymiser`], so a missing one is an error at that point rather than a
+    /// surprise during a right-of-access request.
+    ///
+    /// `resolver` is now `Arc`-wrapped rather than borrowed (P3a): the facade must be
+    /// able to call it again lazily, on a later request, for a tenant it has not seen
+    /// yet — not just once at construction, as before. The default tenant's pipeline is
+    /// still built eagerly here, so a bad key configuration for that tenant remains a
+    /// startup error exactly as it was before this change.
     ///
     /// # Errors
     ///
     /// As [`HaciendaFacade::new`], plus
-    /// [`HaciendaError::Pii`] wrapping a key resolution failure.
+    /// [`HaciendaError::Pii`] wrapping a key resolution failure for the default tenant.
     pub fn with_key_resolver(
         config: HaciendaConfig,
-        resolver: &dyn KeyResolver,
+        resolver: Arc<dyn KeyResolver>,
         retired: &[KeyId],
     ) -> Result<Self, HaciendaError> {
         let configured = config
@@ -174,17 +231,15 @@ impl HaciendaFacade {
             .map(KeyId::new)
             .transpose()
             .map_err(key_error)?;
-        // S1 (tenancy) has not yet been threaded through the facade's PII pipeline — this
-        // constructor keeps today's single-tenant behavior exactly, resolving under the
-        // default tenant. A per-tenant pipeline is a larger change than the `KeyResolver`
-        // signature update alone (see the Vague 2 plan's S1 task #6 note).
-        let ctx = TenantCtx::default_tenant(ActorId::new("facade"));
-        let pseudonymiser = match configured {
-            Some(id) => Pseudonymiser::with_active(&ctx, resolver, id, retired),
-            None => Pseudonymiser::new(&ctx, resolver, retired),
-        }
-        .map_err(key_error)?;
-        Self::build(config, Some(Arc::new(pseudonymiser)), None, None, None)
+        Self::build(
+            config,
+            Some(resolver),
+            configured,
+            retired.to_vec(),
+            None,
+            None,
+            None,
+        )
     }
 
     /// Build a facade with explicit store backends.
@@ -214,24 +269,39 @@ impl HaciendaFacade {
         review_store: Option<Arc<dyn ReviewStore>>,
         api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
-        Self::build(config, None, audit_store, review_store, api_key_store)
+        Self::build(
+            config,
+            None,
+            None,
+            Vec::new(),
+            audit_store,
+            review_store,
+            api_key_store,
+        )
     }
 
     /// Shared construction. Accepts all optional overrides and applies defaults for any
     /// that are `None`.
     fn build(
         config: HaciendaConfig,
-        pseudonymiser: Option<Arc<Pseudonymiser>>,
+        key_resolver: Option<Arc<dyn KeyResolver>>,
+        pinned_active_key: Option<KeyId>,
+        retired_keys: Vec<KeyId>,
         audit_store: Option<Arc<dyn AuditStore>>,
         review_store: Option<Arc<dyn ReviewStore>>,
         api_key_store: Option<Arc<dyn ApiKeyStore>>,
     ) -> Result<Self, HaciendaError> {
-        let pii_pipeline = config
+        // The detector is the expensive part (P3a §3.2) — built once here, regardless
+        // of how many tenants go on to pseudonymise, and cheaply `Clone`d into each
+        // tenant's own `PiiPipeline` by `pii_pipeline_for`.
+        let shared_detector = config
             .pii
-            .clone()
-            .map(|c| PiiPipeline::with_pseudonymiser(c, pseudonymiser.clone()))
+            .as_ref()
+            .map(build_detector)
             .transpose()?
-            .map(Arc::new);
+            .flatten();
+        let pii_pipelines = config.pii.is_some().then(|| Mutex::new(HashMap::new()));
+        let pseudonymisers = key_resolver.is_some().then(|| Mutex::new(HashMap::new()));
 
         // Auditing without detection would record nothing, so the store follows the
         // pipeline rather than being independently switchable.
@@ -266,7 +336,7 @@ impl HaciendaFacade {
             (None, None) => None,
         };
 
-        Ok(Self {
+        let facade = Self {
             compliance: config.compliance.clone().map(ComplianceGenerator::new),
             review_queue,
             glossary: config
@@ -274,12 +344,179 @@ impl HaciendaFacade {
                 .clone()
                 .filter(|g| g.enabled)
                 .map(|g| Mutex::new(EntityGlossary::new(g))),
-            pii_pipeline,
-            pseudonymiser,
+            pii_pipelines,
+            shared_detector,
+            key_resolver,
+            pinned_active_key,
+            retired_keys,
+            pseudonymisers,
             audit_store,
             api_key_store,
             config,
-        })
+        };
+
+        // Build and cache the default tenant's pipeline eagerly, so a bad key
+        // configuration (Pseudonymize mode with no resolvable key) is still a startup
+        // error here, exactly as it was before per-tenant pipelines existed — every
+        // other tenant is lazy (P3a §3.2), but a single-tenant deployment upgrading
+        // into this change must see identical fail-fast behaviour (spec §4).
+        if facade.pii_pipelines.is_some() {
+            facade.pii_pipeline_for(&TenantId::default_tenant())?;
+        }
+        // Same fail-fast rule for the standalone reveal-only pseudonymiser cache: a
+        // caller of `with_key_resolver` with no `[pii]` section at all (e.g. `hacienda
+        // pii reveal` with no pipeline config) must still see a bad key configuration
+        // at startup, not on first reveal.
+        if facade.pseudonymisers.is_some() {
+            facade.pseudonymiser_for(&TenantId::default_tenant())?;
+        }
+
+        Ok(facade)
+    }
+
+    /// Return the [`PiiPipeline`] for `tenant`, building and caching it on first use for
+    /// that tenant (P3a §3.2).
+    ///
+    /// Building means resolving `tenant`'s pseudonymisation key material via
+    /// [`Self::key_resolver`], if one is configured, and assembling a pipeline around
+    /// the one shared, already-loaded NER detector — never reloading the model. Two
+    /// concurrent callers racing to build the same not-yet-cached tenant both do the
+    /// resolution work, but only one's result is kept (`HashMap::entry`'s
+    /// `or_insert`), so every caller after the race settles observes the same `Arc`.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no `[pii]` section is configured at all — the
+    /// same condition `self.pii_pipeline.as_ref().ok_or(HaciendaError::PiiDisabled)`
+    /// checked before this cache existed.
+    ///
+    /// [`HaciendaError::Pii`] wrapping a [`PiiError`] if pipeline assembly fails for
+    /// `tenant` specifically — most commonly
+    /// [`RedactionError::MissingPseudonymKey`] when the mode is `Pseudonymize` and
+    /// `tenant` has no key resolvable (no [`Self::key_resolver`] configured at all, or
+    /// the resolver has no material provisioned for this tenant specifically — see
+    /// `EnvKeyResolver`'s tenant-prefixed lookup convention,
+    /// `redaction/pseudonym.rs`).
+    fn pii_pipeline_for(&self, tenant: &TenantId) -> Result<Arc<PiiPipeline>, HaciendaError> {
+        let pipelines = self
+            .pii_pipelines
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+
+        {
+            let cache = lock(pipelines);
+            if let Some(pipeline) = cache.get(tenant) {
+                return Ok(Arc::clone(pipeline));
+            }
+        }
+
+        // `pii_pipelines` is only `Some` when `config.pii` was, so this is always
+        // populated by the time any tenant reaches here.
+        let pii_config = self
+            .config
+            .pii
+            .clone()
+            .expect("pii_pipelines is Some only when config.pii is Some");
+
+        let pseudonymiser = self
+            .key_resolver
+            .as_ref()
+            .map(|resolver| Self::build_pseudonymiser(self, resolver, tenant))
+            .transpose()?;
+
+        let pipeline = Arc::new(PiiPipeline::with_detector_and_pseudonymiser(
+            pii_config,
+            self.shared_detector.clone(),
+            pseudonymiser,
+        )?);
+
+        let mut cache = lock(pipelines);
+        let pipeline = Arc::clone(cache.entry(tenant.clone()).or_insert(pipeline));
+        Ok(pipeline)
+    }
+
+    /// Resolve `tenant`'s pseudonymisation key material via `resolver`, honouring
+    /// [`Self::pinned_active_key`]/[`Self::retired_keys`] — the shared build step behind
+    /// both [`Self::pii_pipeline_for`] and [`Self::pseudonymiser_for`].
+    fn build_pseudonymiser(
+        &self,
+        resolver: &Arc<dyn KeyResolver>,
+        tenant: &TenantId,
+    ) -> Result<Arc<Pseudonymiser>, HaciendaError> {
+        let built = match &self.pinned_active_key {
+            Some(id) => Pseudonymiser::with_active(
+                resolver.as_ref(),
+                tenant,
+                id.clone(),
+                &self.retired_keys,
+            ),
+            None => Pseudonymiser::new(resolver.as_ref(), tenant, &self.retired_keys),
+        }
+        .map_err(key_error)?;
+        Ok(Arc::new(built))
+    }
+
+    /// Return the standalone, reveal-only [`Pseudonymiser`] for `tenant`, building and
+    /// caching it on first use.
+    ///
+    /// Independent of [`Self::pii_pipeline_for`]'s cache: [`Self::with_key_resolver`]
+    /// can be used with no `[pii]` section configured at all — reveal needs only key
+    /// material, not a detection/redaction pipeline — so this must keep working in that
+    /// case (see the field doc on [`Self::pseudonymisers`]).
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no [`Self::key_resolver`] is configured at all.
+    /// [`HaciendaError::Pii`] if `tenant` has no key resolvable.
+    fn pseudonymiser_for(&self, tenant: &TenantId) -> Result<Arc<Pseudonymiser>, HaciendaError> {
+        let cache = self
+            .pseudonymisers
+            .as_ref()
+            .ok_or(HaciendaError::PiiDisabled)?;
+
+        {
+            let map = lock(cache);
+            if let Some(pseudonymiser) = map.get(tenant) {
+                return Ok(Arc::clone(pseudonymiser));
+            }
+        }
+
+        // `pseudonymisers` is only `Some` when `key_resolver` was, so this is always
+        // populated by the time any tenant reaches here.
+        let resolver = self
+            .key_resolver
+            .as_ref()
+            .expect("pseudonymisers is Some only when key_resolver is Some");
+        let built = self.build_pseudonymiser(resolver, tenant)?;
+
+        let mut map = lock(cache);
+        let built = Arc::clone(map.entry(tenant.clone()).or_insert(built));
+        Ok(built)
+    }
+
+    /// Whether a `[pii]` section is configured at all, independent of any tenant's
+    /// pipeline having actually been built yet.
+    fn pii_enabled(&self) -> bool {
+        self.pii_pipelines.is_some()
+    }
+
+    /// As [`Self::pii_pipeline_for`], but PII being disabled entirely is `Ok(None)`
+    /// rather than [`HaciendaError::PiiDisabled`].
+    ///
+    /// For call sites where "no `[pii]` section configured" is a legitimate, silent
+    /// no-op — `process_batch_with_auth`'s `if let Some(pipeline) = ...` skip, matching
+    /// its pre-P3a behaviour exactly — rather than a client-facing error. Any other
+    /// failure (a tenant's key does not resolve, pipeline assembly fails) still
+    /// propagates; only the "not configured at all" case is folded into `None`.
+    fn optional_pii_pipeline_for(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<Option<Arc<PiiPipeline>>, HaciendaError> {
+        match self.pii_pipeline_for(tenant) {
+            Ok(pipeline) => Ok(Some(pipeline)),
+            Err(HaciendaError::PiiDisabled) => Ok(None),
+            Err(other) => Err(other),
+        }
     }
 
     pub fn config(&self) -> &HaciendaConfig {
@@ -414,8 +651,9 @@ impl HaciendaFacade {
         caller: Caller<'_>,
     ) -> Result<Vec<AuditEntry>, HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(store.entries().await?),
+            Some(store) => Ok(store.entries(&tenant).await?),
             None => Ok(Vec::new()),
         }
     }
@@ -431,8 +669,22 @@ impl HaciendaFacade {
     /// `None` is honest rather than convenient: a client must be able to tell "auditing
     /// is off, this result has no chain evidence" from "the chain is empty".
     pub async fn audit_tip(&self) -> Result<Option<String>, HaciendaError> {
+        self.audit_tip_with_auth(Caller::Trusted).await
+    }
+
+    /// [`Self::audit_tip`], scoped to `caller`'s tenant.
+    ///
+    /// Still deliberately not capability-guarded — see [`Self::audit_tip`]'s doc — but
+    /// the tenant is not optional: every content-bearing response attaches *its own
+    /// tenant's* chain tip, never another tenant's, so this needs `caller` even though
+    /// it needs no capability from it.
+    pub async fn audit_tip_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<String>, HaciendaError> {
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(Some(store.tip().await?)),
+            Some(store) => Ok(Some(store.tip(&tenant).await?)),
             None => Ok(None),
         }
     }
@@ -460,8 +712,9 @@ impl HaciendaFacade {
         limit: usize,
     ) -> Result<Option<AuditPage>, HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(Some(store.history(after, limit).await?)),
+            Some(store) => Ok(Some(store.history(&tenant, after, limit).await?)),
             None => Ok(None),
         }
     }
@@ -474,8 +727,9 @@ impl HaciendaFacade {
         caller: Caller<'_>,
     ) -> Result<Option<Vec<SegmentSeal>>, HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(Some(store.seals().await?)),
+            Some(store) => Ok(Some(store.seals(&tenant).await?)),
             None => Ok(None),
         }
     }
@@ -502,6 +756,7 @@ impl HaciendaFacade {
         format: ExportFormat,
     ) -> Result<Option<Vec<u8>>, HaciendaError> {
         caller.require(Capability::AuditExport)?;
+        let tenant = caller.tenant_ctx().tenant;
         let store = match &self.audit_store {
             Some(store) => store,
             None => return Ok(None),
@@ -511,7 +766,9 @@ impl HaciendaFacade {
         let mut cursor: Option<AuditCursor> = None;
         const EXPORT_PAGE_SIZE: usize = 1000;
         loop {
-            let page = store.history(cursor.as_ref(), EXPORT_PAGE_SIZE).await?;
+            let page = store
+                .history(&tenant, cursor.as_ref(), EXPORT_PAGE_SIZE)
+                .await?;
             if page.entries.is_empty() {
                 break;
             }
@@ -554,8 +811,9 @@ impl HaciendaFacade {
     /// Requires `audit:read` capability.
     pub async fn verify_audit_with_auth(&self, caller: Caller<'_>) -> Result<(), HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         match &self.audit_store {
-            Some(store) => Ok(store.verify().await?),
+            Some(store) => Ok(store.verify(&tenant).await?),
             None => Ok(()),
         }
     }
@@ -585,6 +843,18 @@ impl HaciendaFacade {
     /// the write completes. Recovery is the correct backstop; `close` is the courtesy
     /// that avoids the extra startup work.
     ///
+    /// # Multi-tenant caveat (S1b)
+    ///
+    /// Seals only `caller`'s own tenant's open segment — [`AuditStore::close`] takes a
+    /// tenant and the store has no "every tenant that ever touched me" enumeration to
+    /// close them all. A process serving several tenants that calls plain `close()`
+    /// (which acts as [`TenantId::default_tenant()`] via `Caller::Trusted`) leaves every
+    /// other tenant's segment unsealed at shutdown. That is not a data-loss gap — see
+    /// the recovery note above — but it does mean a multi-tenant deployment that wants
+    /// every chain sealed before exit must call `close_with_auth` once per tenant it has
+    /// actually served, not just once. Tracked as a follow-up to close alongside this
+    /// gap rather than solved here.
+    ///
     /// # Errors
     ///
     /// Returns [`HaciendaError::Audit`] if the seal write fails, or
@@ -597,11 +867,17 @@ impl HaciendaFacade {
 
     /// Close stores with authentication context.
     ///
-    /// Requires `audit:read` capability (for sealing audit chain).
+    /// Requires `audit:read` capability (for sealing audit chain). See [`Self::close`]'s
+    /// multi-tenant caveat — this seals only `caller`'s own tenant's audit chain.
     pub async fn close_with_auth(&self, caller: Caller<'_>) -> Result<(), HaciendaError> {
         caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
         let audit = match &self.audit_store {
-            Some(store) => store.close().await.map(|_| ()).map_err(HaciendaError::from),
+            Some(store) => store
+                .close(&tenant)
+                .await
+                .map(|_| ())
+                .map_err(HaciendaError::from),
             None => Ok(()),
         };
 
@@ -643,6 +919,57 @@ impl HaciendaFacade {
     ) -> Result<Option<ComplianceReport>, HaciendaError> {
         caller.require(Capability::AuditRead)?;
         Ok(self.compliance.as_ref().map(|c| c.report(None)))
+    }
+
+    /// Generate the AI Act Art. 11 model card alone, without the rest of the compliance
+    /// pack — for `GET /v1/compliance/model-card`.
+    ///
+    /// [`Self::compliance_report_with_auth`] already bundles this in when
+    /// `ReportType::ModelCard` is enabled; this exists for a caller who wants it
+    /// addressable on its own, per the parent P5 spec's route table.
+    ///
+    /// Requires `audit:read`, same as every other compliance route. Returns `None` when
+    /// compliance is not configured.
+    pub fn model_card_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<crate::compliance::ModelCard>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self
+            .compliance
+            .as_ref()
+            .map(ComplianceGenerator::model_card))
+    }
+
+    /// Generate the compliance checklist alone — for `GET /v1/compliance/checklist`.
+    ///
+    /// Same relationship to [`Self::compliance_report_with_auth`] as
+    /// [`Self::model_card_with_auth`] above.
+    pub fn compliance_checklist_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Option<crate::compliance::ComplianceChecklist>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self.compliance.as_ref().map(ComplianceGenerator::checklist))
+    }
+
+    /// Generate a DORA Art. 11 incident report — for `POST /v1/compliance/dora`.
+    ///
+    /// A `POST`, unlike the rest of this pack's `GET` routes: a DORA report describes one
+    /// specific incident (summary, timeline, root cause, timestamps, remediation), not a
+    /// static fact about the pipeline configuration, so it needs a caller-supplied body.
+    /// [`Self::compliance_report_with_auth`] can never produce one — it always calls
+    /// [`ComplianceGenerator::report`] with `None`, so a DORA report has had no way to
+    /// reach the API at all until this method.
+    ///
+    /// Returns `None` when compliance is not configured.
+    pub fn dora_report_with_auth(
+        &self,
+        caller: Caller<'_>,
+        incident: &crate::compliance::PiiIncident,
+    ) -> Result<Option<crate::compliance::DoraReport>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        Ok(self.compliance.as_ref().map(|c| c.dora_report(incident)))
     }
 
     /// Extract, detect, redact, audit, review, and generate compliance artefacts.
@@ -698,7 +1025,10 @@ impl HaciendaFacade {
         let mut audit_entries = Vec::new();
         let mut review_submitted = 0;
 
-        if let Some(pipeline) = &self.pii_pipeline {
+        let tenant = caller.tenant_ctx().tenant;
+        let pipeline = self.optional_pii_pipeline_for(&tenant)?;
+
+        if let Some(pipeline) = &pipeline {
             let detections = self
                 .detect_concurrently(pipeline, &extraction.results)
                 .await?;
@@ -708,10 +1038,23 @@ impl HaciendaFacade {
             // audited and reviewed on this task, one at a time, exactly as before.
             for (document, result) in extraction.results.iter_mut().zip(detections) {
                 self.observe_glossary(&document.content, &result);
-                audit_entries.extend(self.record_audit(&result, caller).await?);
-                review_submitted += self.submit_for_review(&result).await?;
+                review_submitted += self.submit_for_review(caller, &result).await?;
 
                 document.content = result.redacted_text.clone();
+
+                // Collect `.content`'s audit-log entries plus every structured field's
+                // into one batch, so this document produces exactly one `store.append`
+                // call (D3) — not one for `.content` and, before this fix, one more per
+                // redacted table cell/page/revision/etc. See
+                // `redact_structured_fields`'s doc comment.
+                let mut audit_log = result.audit_log.clone();
+                let child_audit_entries = self
+                    .redact_structured_fields(document, pipeline, caller, &mut audit_log, 0)
+                    .await?;
+                let mut appended = self.record_audit_entries(&audit_log, caller).await?;
+                appended.extend(child_audit_entries);
+                audit_entries.extend(appended);
+
                 pii.push(result);
             }
         }
@@ -725,7 +1068,7 @@ impl HaciendaFacade {
                 .unwrap_or_default(),
             metadata: HaciendaMetadata {
                 processing_time_ms: start.elapsed().as_millis() as u64,
-                pii_enabled: self.pii_pipeline.is_some(),
+                pii_enabled: self.pii_enabled(),
                 documents: extraction.results.len(),
             },
             extraction,
@@ -790,10 +1133,8 @@ impl HaciendaFacade {
             caller.require(Capability::PiiReveal)?;
         }
 
-        let pipeline = self
-            .pii_pipeline
-            .as_ref()
-            .ok_or(HaciendaError::PiiDisabled)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pipeline = self.pii_pipeline_for(&tenant)?;
 
         let result = pipeline.scan(text).await?;
 
@@ -858,10 +1199,8 @@ impl HaciendaFacade {
     ) -> Result<TextRedactResult, HaciendaError> {
         caller.require(Capability::DocumentsProcess)?;
 
-        let pipeline = self
-            .pii_pipeline
-            .as_ref()
-            .ok_or(HaciendaError::PiiDisabled)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pipeline = self.pii_pipeline_for(&tenant)?;
 
         let result = pipeline.process(text).await?;
         let audit_entries = self.record_audit(&result, caller).await?;
@@ -904,13 +1243,64 @@ impl HaciendaFacade {
         token: &str,
     ) -> Result<String, HaciendaError> {
         caller.require(Capability::PiiReveal)?;
-        let pseudonymiser = self
-            .pseudonymiser
-            .as_ref()
-            .ok_or(HaciendaError::PiiDisabled)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pseudonymiser = self.pseudonymiser_for(&tenant)?;
         let plaintext = pseudonymiser.reveal(token)?;
         self.record_token_reveal(&plaintext, caller).await?;
         Ok(plaintext)
+    }
+
+    /// Mint the pseudonym token for a caller-supplied `(category, value)` pair, without
+    /// revealing anything (P3b §2, D-P3-1 in the parent P3 spec).
+    ///
+    /// Requires only `documents:process` — not `pii:reveal` — because computing the token
+    /// for a value the caller already supplies discloses nothing new; only the reverse
+    /// direction ([`Self::reveal_token_with_auth`]) does. This is what makes a GDPR right
+    /// of access or erasure practicable against redacted storage: compute the token for
+    /// the value a data subject names, then search the corpus for *that token*, without
+    /// decrypting it. No audit entry is written here for the same reason: `reveal` records
+    /// a disclosure event, and minting isn't one.
+    ///
+    /// Resolves through [`Self::pseudonymiser_for`], the same reveal-only cache
+    /// `reveal_token_with_auth` uses — this works under a key-resolver-only configuration
+    /// with no `[pii]` detection section, exactly like reveal does (P3a §7).
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no key resolver is configured, or the caller's
+    /// tenant has no resolvable key. [`HaciendaError::Pseudonym`] wrapping
+    /// [`crate::redaction::PseudonymError::UnsupportedCategory`] for a
+    /// [`PiiCategory::Custom`] name containing a token delimiter.
+    pub async fn mint_pseudonym_token_with_auth(
+        &self,
+        caller: Caller<'_>,
+        category: &PiiCategory,
+        value: &str,
+    ) -> Result<String, HaciendaError> {
+        caller.require(Capability::DocumentsProcess)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pseudonymiser = self.pseudonymiser_for(&tenant)?;
+        Ok(pseudonymiser.token(category, value)?)
+    }
+
+    /// List the caller's tenant's pseudonym key ids and rotation status — identifiers
+    /// only, never key material (P3b §3, D-P3-3 in the parent P3 spec).
+    ///
+    /// Requires `audit:read`, per the parent P3 spec's route table. Resolves through
+    /// [`Self::pseudonymiser_for`], so this also works with no `[pii]` section configured.
+    ///
+    /// # Errors
+    ///
+    /// [`HaciendaError::PiiDisabled`] if no key resolver is configured, or the caller's
+    /// tenant has no resolvable key.
+    pub async fn list_keys_with_auth(
+        &self,
+        caller: Caller<'_>,
+    ) -> Result<Vec<KeyStatus>, HaciendaError> {
+        caller.require(Capability::AuditRead)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let pseudonymiser = self.pseudonymiser_for(&tenant)?;
+        Ok(pseudonymiser.key_statuses())
     }
 
     /// Record a token reveal audit entry for a single plaintext value.
@@ -932,11 +1322,16 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         };
 
+        let tenant = caller.tenant_ctx().tenant;
         let principal = caller.principal_id().map(str::to_owned);
         let span_hash = blake3::hash(plaintext.as_bytes()).to_hex().to_string();
+        // Best-effort: the caller that reached this point already built and cached this
+        // tenant's pipeline (`reveal_token_with_auth` calls `pii_pipeline_for` first), so
+        // this is a cache hit in practice. `.ok()` rather than `?` because a failure to
+        // resolve provenance metadata must not block recording that the reveal happened.
         let vertical = self
-            .pii_pipeline
-            .as_ref()
+            .pii_pipeline_for(&tenant)
+            .ok()
             .and_then(|p| p.vertical_provenance_id());
 
         let input = AuditEntryInput {
@@ -953,7 +1348,7 @@ impl HaciendaFacade {
             vertical,
         };
 
-        Ok(store.append(vec![input]).await?)
+        Ok(store.append(&tenant, vec![input]).await?)
     }
 
     /// Append one `Reveal` entry per span whose plaintext was handed to `caller`.
@@ -984,10 +1379,15 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         }
 
+        let tenant = caller.tenant_ctx().tenant;
         let principal = caller.principal_id().map(str::to_owned);
+        // Best-effort, same reasoning as `record_token_reveal`: this tenant's pipeline
+        // is already built and cached by the caller that detected `entities` in the
+        // first place, so this is a cache hit; a failure here must not block recording
+        // the reveal itself.
         let vertical = self
-            .pii_pipeline
-            .as_ref()
+            .pii_pipeline_for(&tenant)
+            .ok()
             .and_then(|p| p.vertical_provenance_id());
         let inputs: Vec<AuditEntryInput> = entities
             .iter()
@@ -1016,7 +1416,7 @@ impl HaciendaFacade {
             })
             .collect();
 
-        Ok(store.append(inputs).await?)
+        Ok(store.append(&tenant, inputs).await?)
     }
 
     /// Record the glossary against the *original* text, before redaction rewrites it.
@@ -1049,17 +1449,48 @@ impl HaciendaFacade {
         result: &PipelineResult,
         caller: Caller<'_>,
     ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        self.record_audit_entries(&result.audit_log, caller).await
+    }
+
+    /// The store-append core [`Self::record_audit`] delegates to, generalised to accept a
+    /// pre-collected batch of [`RedactionAuditEntry`] from more than one source.
+    ///
+    /// Structured-field redaction (`redact_structured_fields` and its helpers) needs this
+    /// directly: a document with tables, pages, revisions, form fields, and URIs redacts
+    /// many individual strings, and calling `record_audit` once per string would call
+    /// `store.append` once per string — one `store.append` per field, not per document,
+    /// silently violating the same D3 invariant this method's doc comment states. Every
+    /// structured-field helper therefore only *collects* `RedactionAuditEntry`s (via
+    /// `redact_string_field`'s `audit_log` accumulator); the caller that owns a whole
+    /// document's redaction (the `process_batch_with_auth` loop, or
+    /// `redact_document_recursively` for a nested archive member) calls this once, after
+    /// collecting `.content`'s entries and every structured field's entries into one
+    /// `Vec`, so one document — content and every structured field together — still
+    /// produces exactly one `store.append` call, and (under `SyncPolicy::EveryBatch`) one
+    /// fsync, not one per redacted cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Audit`] if the store rejects the batch.
+    async fn record_audit_entries(
+        &self,
+        audit_log: &[RedactionAuditEntry],
+        caller: Caller<'_>,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
         let Some(store) = &self.audit_store else {
             return Ok(Vec::new());
         };
 
+        let tenant = caller.tenant_ctx().tenant;
         let principal = caller.principal_id().map(str::to_owned);
+        // Best-effort, same reasoning as `record_token_reveal`/`record_reveal`: this
+        // tenant's pipeline is already built and cached by the caller that produced
+        // `audit_log` in the first place.
         let vertical = self
-            .pii_pipeline
-            .as_ref()
+            .pii_pipeline_for(&tenant)
+            .ok()
             .and_then(|p| p.vertical_provenance_id());
-        let inputs: Vec<AuditEntryInput> = result
-            .audit_log
+        let inputs: Vec<AuditEntryInput> = audit_log
             .iter()
             .map(|entry| AuditEntryInput {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -1083,7 +1514,464 @@ impl HaciendaFacade {
             return Ok(Vec::new());
         }
 
-        Ok(store.append(inputs).await?)
+        Ok(store.append(&tenant, inputs).await?)
+    }
+
+    /// Redact every text-bearing field on `document` beyond `.content`.
+    ///
+    /// P7 (`superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md`) found, by
+    /// reproduction against a live build, that `document.content = result.redacted_text`
+    /// was the *only* rewrite this pipeline performed. xberg's `ExtractedDocument`
+    /// populates several other fields unconditionally for the formats already enabled on
+    /// this workspace (`pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/`archives`),
+    /// not behind an opt-in flag, and every one of them passed through unredacted in every
+    /// transport that serialises an `ExtractedDocument` (REST, CLI, MCP):
+    ///
+    /// - `tables`, and `pages` (which nests a *second* copy of both `content` and
+    ///   `tables`, plus PPTX `speaker_notes`)
+    /// - `formatted_content`
+    /// - `metadata.authors` / `created_by` / `modified_by`
+    /// - `annotations` (PDF comments), `form_fields` (PDF form values), `uris` (extracted
+    ///   links — a `mailto:` URL *is* a plaintext email address)
+    /// - `revisions` (DOCX/PPTX tracked-change author names and content deltas)
+    /// - `children` (archive members — each a complete nested `ExtractedDocument`,
+    ///   redacted recursively via [`Self::redact_document_recursively`])
+    ///
+    /// This method closes that gap the same way `.content` is closed: walk every
+    /// text-bearing field, not just the one most callers think of as "the document text."
+    ///
+    /// X1 (`superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`) added
+    /// three more fields once this method already covered everything above: `images`
+    /// (`.caption`/`.description`, pre-existing fields this method never walked, plus the
+    /// new `qr_codes[].payload` — a QR code can just as easily encode a phone number or a
+    /// vCard as a URL — and `.ocr_result`, a full nested `ExtractedDocument` from
+    /// `candle-trocr`, redacted recursively the same way archive `children` are),
+    /// `extracted_keywords[].text` (a YAKE/RAKE keyword can itself be a person's name),
+    /// and `summary.text` (an extractive summary is built from sentences lifted straight
+    /// out of `.content`, so anything detectable there can resurface here verbatim).
+    ///
+    /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
+    /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
+    /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
+    /// silently included by half-measure. Also not covered: fields gated behind
+    /// extraction-config flags or Cargo features this workspace does not yet enable
+    /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
+    /// `chunks`, `translation`, `page_classifications`, `structured_output`,
+    /// `code_intelligence` — the `tree-sitter` Cargo feature is disabled pending an
+    /// upstream fix, see the workspace `Cargo.toml`'s `xberg` entry) — see the
+    /// `2026-08-13-hacienda-xberg-capability-parity-program.md` X2/X3 specs, each of
+    /// which is gated on this method already covering the field it would add.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if detection fails on any field, and
+    /// [`HaciendaError::Audit`] if the audit store rejects an entry — the same errors
+    /// `.content`'s own redaction can already produce, now also possible per structured
+    /// field.
+    /// Redact every text-bearing field on `document` beyond `.content`, collecting raw
+    /// audit entries into `audit_log` rather than appending them.
+    ///
+    /// Every helper this method calls (`redact_table`, `redact_revision`,
+    /// `redact_string_field`) only *collects* into `audit_log` — none of them touch the
+    /// audit store. That is deliberate: a document with tables, pages, revisions, form
+    /// fields, and URIs redacts many individual strings, and appending once per string
+    /// would call `store.append` once per string, silently breaking the "one `append` per
+    /// document" invariant `record_audit`'s doc comment states (and, under
+    /// `SyncPolicy::EveryBatch`, turning one request into hundreds of fsyncs). The caller
+    /// that owns this document's whole redaction lifecycle — the `process_batch_with_auth`
+    /// loop for a top-level document, or [`Self::redact_document_recursively`] for a
+    /// nested archive member — collects `.content`'s entries into the same `audit_log`
+    /// this method extends, then calls [`Self::record_audit_entries`] exactly once.
+    ///
+    /// Returns the already-appended [`AuditEntry`] batch from any recursively-redacted
+    /// archive `children` — each nested document gets its own single `append` (via
+    /// [`Self::redact_document_recursively`]), separate from this document's own, so those
+    /// entries are real (chain hash, id) by the time this method returns them, unlike
+    /// everything pushed into `audit_log`.
+    ///
+    /// P7 (`superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md`) found, by
+    /// reproduction against a live build, that `document.content = result.redacted_text`
+    /// was the *only* rewrite this pipeline performed. xberg's `ExtractedDocument`
+    /// populates several other fields unconditionally for the formats already enabled on
+    /// this workspace (`pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/`archives`),
+    /// not behind an opt-in flag, and every one of them passed through unredacted in every
+    /// transport that serialises an `ExtractedDocument` (REST, CLI, MCP):
+    ///
+    /// - `tables`, and `pages` (which nests a *second* copy of both `content` and
+    ///   `tables`, plus PPTX `speaker_notes`)
+    /// - `formatted_content`
+    /// - `metadata.authors` / `created_by` / `modified_by`
+    /// - `annotations` (PDF comments), `form_fields` (PDF form values), `uris` (extracted
+    ///   links — a `mailto:` URL *is* a plaintext email address)
+    /// - `revisions` (DOCX/PPTX tracked-change author names and content deltas)
+    /// - `children` (archive members — each a complete nested `ExtractedDocument`,
+    ///   redacted recursively via [`Self::redact_document_recursively`])
+    ///
+    /// This method closes that gap the same way `.content` is closed: walk every
+    /// text-bearing field, not just the one most callers think of as "the document text."
+    ///
+    /// X1 (`superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`) added
+    /// three more fields once this method already covered everything above: `images`
+    /// (`.caption`/`.description`, pre-existing fields this method never walked, plus the
+    /// new `qr_codes[].payload` — a QR code can just as easily encode a phone number or a
+    /// vCard as a URL — and `.ocr_result`, a full nested `ExtractedDocument` from
+    /// `candle-trocr`, redacted recursively the same way archive `children` are),
+    /// `extracted_keywords[].text` (a YAKE/RAKE keyword can itself be a person's name),
+    /// and `summary.text` (an extractive summary is built from sentences lifted straight
+    /// out of `.content`, so anything detectable there can resurface here verbatim).
+    ///
+    /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
+    /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
+    /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
+    /// silently included by half-measure. Also not covered: fields gated behind
+    /// extraction-config flags or Cargo features this workspace does not yet enable
+    /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
+    /// `chunks`, `translation`, `page_classifications`, `structured_output`,
+    /// `code_intelligence` — the `tree-sitter` Cargo feature is disabled pending an
+    /// upstream fix, see the workspace `Cargo.toml`'s `xberg` entry) — see the
+    /// `2026-08-13-hacienda-xberg-capability-parity-program.md` X2/X3 specs, each of
+    /// which is gated on this method already covering the field it would add.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Pii`] if detection fails on any field,
+    /// [`HaciendaError::Audit`] if a nested archive member's own append fails, and
+    /// [`HaciendaError::RedactionDepthExceeded`] if `depth` (this document's nesting level,
+    /// 0 for a top-level document) reaches [`MAX_REDACTION_DEPTH`] while walking into
+    /// `children` or into an image's `ocr_result`.
+    async fn redact_structured_fields(
+        &self,
+        document: &mut xberg::ExtractedDocument,
+        pipeline: &Arc<PiiPipeline>,
+        caller: Caller<'_>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
+        depth: usize,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        // Collects already-appended entries from any recursively-redacted `ExtractedDocument`
+        // nested inside this one — archive `children` below, and (X1) an image's OCR
+        // result. Declared up front so both loops can extend the same collection.
+        let mut child_audit_entries = Vec::new();
+
+        for table in &mut document.tables {
+            self.redact_table(table, pipeline, audit_log).await?;
+        }
+
+        if let Some(pages) = &mut document.pages {
+            for page in pages {
+                self.redact_string_field(&mut page.content, pipeline, audit_log)
+                    .await?;
+
+                // `PageContent::tables` is `Vec<Arc<Table>>` (shared with other pages'
+                // views for memory efficiency, per xberg's own doc comment) — redacting
+                // through the `Arc` in place would either fail (`Arc::get_mut` when a
+                // reference is shared) or silently redact a copy nobody else sees
+                // (`Arc::make_mut`, which clones on write). Replacing each entry with a
+                // freshly built `Arc` sidesteps both: correctness over preserving
+                // whatever sharing existed pre-redaction, which buys nothing once this is
+                // the last step before the result leaves the process.
+                let mut redacted_tables = Vec::with_capacity(page.tables.len());
+                for shared_table in &page.tables {
+                    let mut table = (**shared_table).clone();
+                    self.redact_table(&mut table, pipeline, audit_log).await?;
+                    redacted_tables.push(Arc::new(table));
+                }
+                page.tables = redacted_tables;
+
+                // PPTX presenter notes — as PII-bearing as any other document text (a
+                // presenter's notes routinely name people and give contact details), and
+                // easy to miss because it's a page-level field with no counterpart at the
+                // top level of `ExtractedDocument`.
+                if let Some(notes) = &mut page.speaker_notes {
+                    self.redact_string_field(notes, pipeline, audit_log).await?;
+                }
+            }
+        }
+
+        if let Some(formatted) = &mut document.formatted_content {
+            self.redact_string_field(formatted, pipeline, audit_log)
+                .await?;
+        }
+
+        if let Some(authors) = &mut document.metadata.authors {
+            for author in authors {
+                self.redact_string_field(author, pipeline, audit_log)
+                    .await?;
+            }
+        }
+        if let Some(created_by) = &mut document.metadata.created_by {
+            self.redact_string_field(created_by, pipeline, audit_log)
+                .await?;
+        }
+        if let Some(modified_by) = &mut document.metadata.modified_by {
+            self.redact_string_field(modified_by, pipeline, audit_log)
+                .await?;
+        }
+
+        // PDF comment/sticky-note text — routinely names people ("per John's request...").
+        if let Some(annotations) = &mut document.annotations {
+            for annotation in annotations {
+                if let Some(content) = &mut annotation.content {
+                    self.redact_string_field(content, pipeline, audit_log)
+                        .await?;
+                }
+            }
+        }
+
+        // PDF form field values — a filled-in "Name"/"SSN"/"Email" field is exactly the
+        // kind of value this whole pipeline exists to catch, and a form field is no less
+        // reachable than a table cell.
+        for field in &mut document.form_fields {
+            if let Some(value) = &mut field.value {
+                self.redact_string_field(value, pipeline, audit_log).await?;
+            }
+            if let Some(default_value) = &mut field.default_value {
+                self.redact_string_field(default_value, pipeline, audit_log)
+                    .await?;
+            }
+        }
+
+        // DOCX/PPTX tracked-change history — the author name and the inserted/deleted
+        // text are both exactly as sensitive as the same text appearing in `.content`;
+        // track-changes is often where an *earlier*, unredacted draft's wording survives
+        // even after the visible document was cleaned up.
+        if let Some(revisions) = &mut document.revisions {
+            for revision in revisions {
+                self.redact_revision(revision, pipeline, audit_log).await?;
+            }
+        }
+
+        // Extracted hyperlinks: a `mailto:` URL *is* a plaintext email address, and a
+        // link's display label routinely names a person ("Contact Jane Doe").
+        if let Some(uris) = &mut document.uris {
+            for uri in uris {
+                self.redact_string_field(&mut uri.url, pipeline, audit_log)
+                    .await?;
+                if let Some(label) = &mut uri.label {
+                    self.redact_string_field(label, pipeline, audit_log).await?;
+                }
+            }
+        }
+
+        // Keywords (`keywords` feature, X1): keyword/keyphrase extraction runs over
+        // already-extracted content, so a keyword can itself be a PII value — a person's
+        // name is a plausible YAKE/RAKE keyword (X1 spec §3).
+        if let Some(keywords) = &mut document.extracted_keywords {
+            for keyword in keywords {
+                self.redact_string_field(&mut keyword.text, pipeline, audit_log)
+                    .await?;
+            }
+        }
+
+        // Extractive summary (`summarization` feature, X1): built from sentences lifted
+        // straight out of `.content`, so anything PII detection would catch there can
+        // resurface here verbatim.
+        if let Some(summary) = &mut document.summary {
+            self.redact_string_field(&mut summary.text, pipeline, audit_log)
+                .await?;
+        }
+
+        // Images: `.caption`/`.description` are pre-existing fields this method never
+        // walked before X1; `qr_codes` (X1, `qr-codes` feature) decodes to a string
+        // payload, not prose, but a QR code can encode a phone number, an email, or a
+        // vCard just as easily as a URL — X1 spec §3 says to treat it as document content
+        // for PII-scanning purposes regardless. `ocr_result` (X1, `candle-trocr`) nests a
+        // complete `ExtractedDocument` produced by OCR, so it recurses the same way an
+        // archive member does, sharing this document's depth budget.
+        if let Some(images) = &mut document.images {
+            if !images.is_empty() && depth >= MAX_REDACTION_DEPTH {
+                return Err(HaciendaError::RedactionDepthExceeded {
+                    limit: MAX_REDACTION_DEPTH,
+                });
+            }
+            for image in images {
+                if let Some(caption) = &mut image.caption {
+                    self.redact_string_field(caption, pipeline, audit_log)
+                        .await?;
+                }
+                if let Some(description) = &mut image.description {
+                    self.redact_string_field(description, pipeline, audit_log)
+                        .await?;
+                }
+                if let Some(qr_codes) = &mut image.qr_codes {
+                    for qr_code in qr_codes {
+                        self.redact_string_field(&mut qr_code.payload, pipeline, audit_log)
+                            .await?;
+                    }
+                }
+                if let Some(ocr_result) = &mut image.ocr_result {
+                    child_audit_entries.extend(
+                        self.redact_document_recursively(ocr_result, pipeline, caller, depth + 1)
+                            .await?,
+                    );
+                }
+            }
+        }
+
+        // Archive members (`archives` feature): each is a *complete nested
+        // `ExtractedDocument`* (a zip containing a PDF containing PII is exactly as real a
+        // leak as the top-level PDF would be), and archives can nest arbitrarily deep
+        // (a zip inside a zip is legal), hence the recursive call rather than one more
+        // field loop. Each child gets its own single `append` — see
+        // `redact_document_recursively` — so its entries are already real `AuditEntry`s,
+        // unlike everything else collected into `audit_log` above.
+        if let Some(children) = &mut document.children {
+            if !children.is_empty() && depth >= MAX_REDACTION_DEPTH {
+                return Err(HaciendaError::RedactionDepthExceeded {
+                    limit: MAX_REDACTION_DEPTH,
+                });
+            }
+            for child in children {
+                child_audit_entries.extend(
+                    self.redact_document_recursively(
+                        &mut child.result,
+                        pipeline,
+                        caller,
+                        depth + 1,
+                    )
+                    .await?,
+                );
+            }
+        }
+
+        Ok(child_audit_entries)
+    }
+
+    /// Redact a nested archive entry's document: its own `.content` (nothing else in the
+    /// pipeline reaches an archive member's content — [`Self::detect_concurrently`] only
+    /// ever sees the top-level documents in `extraction.results`), then everything
+    /// [`Self::redact_structured_fields`] covers for a top-level document, recursively —
+    /// an archive member can itself contain archive members. Content and every structured
+    /// field are collected into one `audit_log` and appended in a single
+    /// [`Self::record_audit_entries`] call, so each archive member — like each top-level
+    /// document — produces exactly one `store.append`.
+    ///
+    /// Hand-written `Pin<Box<dyn Future>>` return, not a plain `async fn`, because this
+    /// function's own body calls [`Self::redact_structured_fields`], which calls this
+    /// function again for each nested child: an `async fn` that (indirectly) calls itself
+    /// produces an infinitely-sized state-machine type. Boxing breaks the cycle — the
+    /// caller only needs to store a pointer-sized `Pin<Box<dyn Future>>` at the await
+    /// point, not the unbounded concrete future type.
+    ///
+    /// `depth` is this document's nesting level (0 for a direct child of a top-level
+    /// document, incremented on every further recursion) — see [`MAX_REDACTION_DEPTH`].
+    fn redact_document_recursively<'a>(
+        &'a self,
+        document: &'a mut xberg::ExtractedDocument,
+        pipeline: &'a Arc<PiiPipeline>,
+        caller: Caller<'a>,
+        depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AuditEntry>, HaciendaError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut audit_log = Vec::new();
+            self.redact_string_field(&mut document.content, pipeline, &mut audit_log)
+                .await?;
+            let child_audit_entries = self
+                .redact_structured_fields(document, pipeline, caller, &mut audit_log, depth)
+                .await?;
+
+            let mut audit_entries = self.record_audit_entries(&audit_log, caller).await?;
+            audit_entries.extend(child_audit_entries);
+            Ok(audit_entries)
+        })
+    }
+
+    /// Redact a tracked change's author name and its content delta (inserted/deleted
+    /// lines, changed table cells, changed formatting properties), collecting into
+    /// `audit_log` rather than appending — see [`Self::redact_structured_fields`].
+    async fn redact_revision(
+        &self,
+        revision: &mut xberg::DocumentRevision,
+        pipeline: &Arc<PiiPipeline>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
+    ) -> Result<(), HaciendaError> {
+        if let Some(author) = &mut revision.author {
+            self.redact_string_field(author, pipeline, audit_log)
+                .await?;
+        }
+        for line in &mut revision.delta.content {
+            let text = match line {
+                xberg::DiffLine::Context(s)
+                | xberg::DiffLine::Added(s)
+                | xberg::DiffLine::Removed(s) => s,
+            };
+            self.redact_string_field(text, pipeline, audit_log).await?;
+        }
+        for change in &mut revision.delta.table_changes {
+            self.redact_string_field(&mut change.from, pipeline, audit_log)
+                .await?;
+            self.redact_string_field(&mut change.to, pipeline, audit_log)
+                .await?;
+        }
+        // Property changes are usually non-linguistic ("bold", "12pt") and unlikely to
+        // match any PII pattern — run through the same pipeline anyway rather than special
+        // -case them, since a redaction pass over text with nothing to redact is a no-op,
+        // and a special case here is one more place a future property type could be added
+        // without anyone remembering this method exists.
+        for prop in &mut revision.delta.property_changes {
+            if let Some(from) = &mut prop.from {
+                self.redact_string_field(from, pipeline, audit_log).await?;
+            }
+            if let Some(to) = &mut prop.to {
+                self.redact_string_field(to, pipeline, audit_log).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Redact a table's cells (and header, when present) in place, then regenerate
+    /// `markdown` from the redacted cells — unless `cells` is empty, in which case
+    /// `markdown` is redacted directly: `cells_to_markdown` renders an empty string for no
+    /// rows, and a table that carries a rendered `markdown` without parallel `cells` data
+    /// (an extractor that populates one but not the other) would otherwise lose it rather
+    /// than have it redacted.
+    ///
+    /// Regenerating from `cells` when they exist keeps the two representations consistent
+    /// by construction and avoids collecting two audit entries for what is the same
+    /// underlying value rendered twice.
+    async fn redact_table(
+        &self,
+        table: &mut xberg::Table,
+        pipeline: &Arc<PiiPipeline>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
+    ) -> Result<(), HaciendaError> {
+        for row in &mut table.cells {
+            for cell in row {
+                self.redact_string_field(cell, pipeline, audit_log).await?;
+            }
+        }
+        if let Some(columns) = &mut table.columns {
+            for column in columns {
+                self.redact_string_field(column, pipeline, audit_log)
+                    .await?;
+            }
+        }
+        if table.cells.is_empty() {
+            self.redact_string_field(&mut table.markdown, pipeline, audit_log)
+                .await?;
+        } else {
+            table.markdown = cells_to_markdown(&table.cells);
+        }
+        Ok(())
+    }
+
+    /// Run `text` through the PII pipeline and replace it with the redacted result,
+    /// collecting the raw audit-log entries into `audit_log` rather than appending them —
+    /// appending is the caller's job (see [`Self::redact_structured_fields`]'s doc
+    /// comment), so this function alone cannot honour the "one `append` per document"
+    /// invariant and does not try to.
+    async fn redact_string_field(
+        &self,
+        text: &mut String,
+        pipeline: &Arc<PiiPipeline>,
+        audit_log: &mut Vec<RedactionAuditEntry>,
+    ) -> Result<(), HaciendaError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let result = pipeline.process(text).await?;
+        audit_log.extend(result.audit_log);
+        *text = result.redacted_text;
+        Ok(())
     }
 
     /// Submit every low-confidence detection for human review, returning how many were
@@ -1096,24 +1984,32 @@ impl HaciendaFacade {
     /// than being counted: `review_submitted` is reported back to the caller, and a number
     /// that counts attempts rather than acceptances would tell an operator that items are
     /// queued for review when nothing is.
-    async fn submit_for_review(&self, result: &PipelineResult) -> Result<usize, HaciendaError> {
+    async fn submit_for_review(
+        &self,
+        caller: Caller<'_>,
+        result: &PipelineResult,
+    ) -> Result<usize, HaciendaError> {
         let Some(queue) = &self.review_queue else {
             return Ok(0);
         };
+        let tenant = caller.tenant_ctx().tenant;
         let mut count = 0;
         for entity in &result.entities {
             if queue.needs_review(entity.confidence) {
                 queue
-                    .submit(ReviewRequest {
-                        // The snippet is the model's own mention text, which is empty for
-                        // regex spans — those are deterministic and need no human context.
-                        text_snippet: entity.text.clone(),
-                        category: entity.category.to_string(),
-                        start: entity.start,
-                        end: entity.end,
-                        confidence: entity.confidence,
-                        source: entity.source.to_string(),
-                    })
+                    .submit(
+                        &tenant,
+                        ReviewRequest {
+                            // The snippet is the model's own mention text, which is empty for
+                            // regex spans — those are deterministic and need no human context.
+                            text_snippet: entity.text.clone(),
+                            category: entity.category.to_string(),
+                            start: entity.start,
+                            end: entity.end,
+                            confidence: entity.confidence,
+                            source: entity.source.to_string(),
+                        },
+                    )
                     .await?;
                 count += 1;
             }
@@ -1197,11 +2093,73 @@ async fn extract_all(
     inputs: Vec<ExtractInput>,
     config: &HaciendaConfig,
 ) -> Result<ExtractionResult, HaciendaError> {
+    let extraction = safe_extraction_config(&config.extraction);
     if inputs.len() == 1 {
         let input = inputs.into_iter().next().expect("length checked above");
-        return Ok(extract(input, &config.extraction).await?);
+        return Ok(extract(input, &extraction).await?);
     }
-    Ok(xberg::extract_batch(inputs, &config.extraction).await?)
+    Ok(xberg::extract_batch(inputs, &extraction).await?)
+}
+
+/// Guards against a caller-invisible behaviour change from enabling xberg's
+/// `candle-trocr` Cargo feature (see the workspace `Cargo.toml`'s `xberg` entry for the
+/// full explanation): once `ocr-pipeline` is compiled in, an [`xberg::ExtractionConfig`]
+/// with no `ocr` section no longer skips OCR the way it did before — it falls through to
+/// `OcrConfig::default()`, whose backend (`"tesseract"`) isn't registered in this build
+/// (the `ocr`/`ocr-wasm` Cargo features stay off), turning every image extraction into a
+/// hard `Plugin` error instead of the metadata-only result callers got before this
+/// feature was enabled.
+///
+/// Forcing `disable_ocr = true` when the caller never set `extraction.ocr` themselves
+/// preserves that pre-`candle-trocr` behaviour for everyone who hasn't explicitly opted
+/// in. A caller who wants OCR sets `[extraction.ocr] backend = "candle-trocr"` in their
+/// config (`extraction.ocr` is then `Some`, so this function leaves it untouched); an
+/// explicit `disable_ocr = true`/`false` from the caller is also left untouched either
+/// way, since the condition below only fires when both are at their unset defaults.
+fn safe_extraction_config(config: &xberg::ExtractionConfig) -> xberg::ExtractionConfig {
+    if config.ocr.is_none() && !config.disable_ocr {
+        xberg::ExtractionConfig {
+            disable_ocr: true,
+            ..config.clone()
+        }
+    } else {
+        config.clone()
+    }
+}
+
+/// Rebuild a table's markdown rendering from its (already redacted) cells.
+///
+/// Deliberately simpler than whatever formatting produced the original `markdown` — no
+/// column-width alignment, no per-format styling heuristics. The goal is a rendering that
+/// says what `cells` now says (post-redaction), not a byte-identical replacement for the
+/// pre-redaction original. The first row is treated as the header, matching every markdown
+/// table renderer's convention and `Table::columns`' own "first row of `cells`" doc comment.
+fn cells_to_markdown(cells: &[Vec<String>]) -> String {
+    let Some(header) = cells.first() else {
+        return String::new();
+    };
+
+    let render_row = |row: &[String]| -> String {
+        let mut line = String::from("|");
+        for cell in row {
+            line.push(' ');
+            line.push_str(&cell.replace('|', "\\|"));
+            line.push_str(" |");
+        }
+        line.push('\n');
+        line
+    };
+
+    let mut out = render_row(header);
+    out.push('|');
+    for _ in header {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+    for row in cells.iter().skip(1) {
+        out.push_str(&render_row(row));
+    }
+    out
 }
 
 /// Recover the guard when a panic poisoned the lock.
@@ -1240,6 +2198,7 @@ mod tests {
         FileReviewStore, InMemoryReviewStore, QueueStats, ReviewConfig, ReviewDecision,
         ReviewError, ReviewQueueItem, ReviewRequest, ReviewStatus,
     };
+    use crate::tenancy::TenantId;
     use async_trait::async_trait;
     use std::fs;
     use std::path::PathBuf;
@@ -1304,42 +2263,47 @@ mod tests {
     impl AuditStore for CountingAuditStore {
         async fn append(
             &self,
+            tenant: &TenantId,
             inputs: Vec<AuditEntryInput>,
         ) -> Result<Vec<AuditEntry>, AuditError> {
             self.append_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.append(inputs).await
+            self.inner.append(tenant, inputs).await
         }
 
-        async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
-            self.inner.entries().await
+        async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
+            self.inner.entries(tenant).await
         }
 
-        async fn tip(&self) -> Result<String, AuditError> {
-            self.inner.tip().await
+        async fn tip(&self, tenant: &TenantId) -> Result<String, AuditError> {
+            self.inner.tip(tenant).await
         }
 
-        async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
-            self.inner.seals().await
+        async fn seals(
+            &self,
+            tenant: &TenantId,
+        ) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+            self.inner.seals(tenant).await
         }
 
         async fn history(
             &self,
+            tenant: &TenantId,
             after: Option<&crate::audit::AuditCursor>,
             limit: usize,
         ) -> Result<crate::audit::AuditPage, AuditError> {
-            self.inner.history(after, limit).await
+            self.inner.history(tenant, after, limit).await
         }
 
-        async fn verify(&self) -> Result<(), AuditError> {
-            self.inner.verify().await
+        async fn verify(&self, tenant: &TenantId) -> Result<(), AuditError> {
+            self.inner.verify(tenant).await
         }
 
-        async fn rotate(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.rotate().await
+        async fn rotate(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.rotate(tenant).await
         }
 
-        async fn close(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.close().await
+        async fn close(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.close(tenant).await
         }
     }
 
@@ -1370,50 +2334,54 @@ mod tests {
 
     #[async_trait]
     impl ReviewStore for ClosingReviewStore {
-        async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.submit(item).await
+        async fn submit(
+            &self,
+            tenant: &TenantId,
+            item: ReviewQueueItem,
+        ) -> Result<ReviewQueueItem, ReviewError> {
+            self.inner.submit(tenant, item).await
         }
 
         async fn assign(
             &self,
-            ctx: &TenantCtx,
+            tenant: &TenantId,
             id: &str,
             reviewer: &str,
         ) -> Result<ReviewQueueItem, ReviewError> {
-            self.inner.assign(ctx, id, reviewer).await
+            self.inner.assign(tenant, id, reviewer).await
         }
 
         async fn decide(
             &self,
-            ctx: &TenantCtx,
+            tenant: &TenantId,
             id: &str,
             decision: ReviewDecision,
             reviewer: &str,
             comment: &str,
         ) -> Result<ReviewQueueItem, ReviewError> {
             self.inner
-                .decide(ctx, id, decision, reviewer, comment)
+                .decide(tenant, id, decision, reviewer, comment)
                 .await
         }
 
         async fn list(
             &self,
-            ctx: &TenantCtx,
+            tenant: &TenantId,
             filter: Option<ReviewStatus>,
         ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
-            self.inner.list(ctx, filter).await
+            self.inner.list(tenant, filter).await
         }
 
         async fn get(
             &self,
-            ctx: &TenantCtx,
+            tenant: &TenantId,
             id: &str,
         ) -> Result<Option<ReviewQueueItem>, ReviewError> {
-            self.inner.get(ctx, id).await
+            self.inner.get(tenant, id).await
         }
 
-        async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
-            self.inner.stats(ctx).await
+        async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
+            self.inner.stats(tenant).await
         }
 
         async fn close(&self) -> Result<(), ReviewError> {
@@ -1434,6 +2402,7 @@ mod tests {
     impl AuditStore for FailingAuditStore {
         async fn append(
             &self,
+            _tenant: &TenantId,
             _inputs: Vec<AuditEntryInput>,
         ) -> Result<Vec<AuditEntry>, AuditError> {
             Err(AuditError::Io {
@@ -1442,20 +2411,24 @@ mod tests {
             })
         }
 
-        async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
+        async fn entries(&self, _tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
             Ok(Vec::new())
         }
 
-        async fn tip(&self) -> Result<String, AuditError> {
+        async fn tip(&self, _tenant: &TenantId) -> Result<String, AuditError> {
             Ok(crate::audit::GENESIS_HASH.to_owned())
         }
 
-        async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+        async fn seals(
+            &self,
+            _tenant: &TenantId,
+        ) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
             Ok(Vec::new())
         }
 
         async fn history(
             &self,
+            _tenant: &TenantId,
             _after: Option<&crate::audit::AuditCursor>,
             _limit: usize,
         ) -> Result<crate::audit::AuditPage, AuditError> {
@@ -1465,18 +2438,21 @@ mod tests {
             })
         }
 
-        async fn verify(&self) -> Result<(), AuditError> {
+        async fn verify(&self, _tenant: &TenantId) -> Result<(), AuditError> {
             Ok(())
         }
 
-        async fn rotate(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
+        async fn rotate(
+            &self,
+            _tenant: &TenantId,
+        ) -> Result<crate::audit::SegmentSeal, AuditError> {
             Err(AuditError::Io {
                 path: "simulated".into(),
                 source: std::io::Error::other("injected failure"),
             })
         }
 
-        async fn close(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
+        async fn close(&self, _tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
             Err(AuditError::Io {
                 path: "simulated".into(),
                 source: std::io::Error::other("injected failure"),
@@ -1536,7 +2512,8 @@ mod tests {
     #[tokio::test]
     async fn should_redact_with_reversible_tokens_end_to_end() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
         let result = facade
             .process(text_input("mail bob@example.com"))
             .await
@@ -1547,8 +2524,8 @@ mod tests {
         assert!(content.contains("[EMAIL:k1:"), "{content}");
 
         // The whole point of the mode: the value is recoverable by a key holder.
-        let ctx = TenantCtx::default_tenant(ActorId::new("test"));
-        let pseudonymiser = Pseudonymiser::new(&ctx, &key_resolver(), &[]).unwrap();
+        let pseudonymiser =
+            Pseudonymiser::new(&key_resolver(), &TenantId::default_tenant(), &[]).unwrap();
         assert_eq!(
             pseudonymiser.reveal(token_in(content)).unwrap(),
             "bob@example.com"
@@ -1560,7 +2537,8 @@ mod tests {
         // Cross-document co-reference. If each document minted its own token, a reader
         // could not tell that the same person appears in both.
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
         let result = facade
             .process_batch(vec![
                 text_input("from bob@example.com"),
@@ -1585,7 +2563,8 @@ mod tests {
     async fn should_mint_under_the_key_named_by_configuration() {
         // Config pins the minting key rather than inheriting the resolver's active one.
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(Some("k2")));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
         let result = facade
             .process(text_input("mail bob@example.com"))
             .await
@@ -1602,7 +2581,291 @@ mod tests {
         // Better a startup failure than discovering the corpus is irreversible when a
         // data subject exercises a right of access.
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(Some("gone")));
-        assert!(HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).is_err());
+        assert!(HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).is_err());
+    }
+
+    // ── P3a: tenant-scoped pseudonym keys ─────────────────────────────────────
+
+    /// A resolver holding distinct `k1` material for the default tenant and for
+    /// `acme`, both under key id `k1` — mirrors
+    /// `pseudonym::pseudonymiser_tests::two_tenants_same_value_different_tokens`, one
+    /// level up at the facade's own public API.
+    fn two_tenant_key_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(EnvKeyResolver::with_lookup(|name| match name {
+            ACTIVE_KEY_VAR => Some("k1".to_string()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some("k1".to_string()),
+            "HACIENDA_TENANT_ACME_HACIENDA_PSEUDONYM_KEY_K1" => Some("a9".repeat(KEY_BYTES)),
+            _ => None,
+        }))
+    }
+
+    fn acme_caller_ctx() -> AuthContext {
+        AuthContext::with_tenant(
+            "alice",
+            TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([Capability::DocumentsProcess, Capability::PiiReveal]),
+        )
+    }
+
+    /// Spec §5: a `Caller::Principal` from tenant A cannot have a tenant-B token
+    /// revealed through their own facade call — ties into P3's own
+    /// `cross_tenant_token_is_unknown_key_not_forbidden` (D-P3-6): the reveal fails the
+    /// same way an unknown token would, not with a distinguishable "forbidden" error
+    /// that would confirm the token is valid for *some* tenant.
+    #[tokio::test]
+    async fn reveal_resolves_the_callers_own_tenants_key() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let acme_ctx = acme_caller_ctx();
+        let acme = Caller::Principal(&acme_ctx);
+
+        // The default tenant (Caller::Trusted) mints a token under its own key.
+        let default_result = facade
+            .redact_text_with_auth(Caller::Trusted, "mail bob@example.com")
+            .await
+            .unwrap();
+        let default_token = token_in(&default_result.redacted_text);
+
+        // Tenant acme cannot reveal it: same failure shape an unknown token would
+        // produce, per D-P3-6 — never a distinguishable "forbidden".
+        assert!(facade
+            .reveal_token_with_auth(acme, default_token)
+            .await
+            .is_err());
+
+        // Tenant acme mints and reveals its own token correctly, under its own,
+        // different key material.
+        let acme_result = facade
+            .redact_text_with_auth(acme, "mail bob@example.com")
+            .await
+            .unwrap();
+        let acme_token = token_in(&acme_result.redacted_text);
+        assert_ne!(
+            default_token, acme_token,
+            "two tenants redacting the same value must mint different tokens"
+        );
+        let revealed = facade
+            .reveal_token_with_auth(acme, acme_token)
+            .await
+            .unwrap();
+        assert_eq!(revealed, "bob@example.com");
+    }
+
+    // ── P3b: pseudonym key management API surface ─────────────────────────────
+
+    /// P3b §5: minting is pure — the same `(category, value)` pair mints the same
+    /// token across two independent calls (P3's founding determinism property,
+    /// narrowed to `mint_pseudonym_token_with_auth`).
+    #[tokio::test]
+    async fn mint_token_same_value_same_token_two_calls() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let first = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        let second = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+    }
+
+    /// P3b §5 / D-P3-1: a caller holding `documents:process` but *not* `pii:reveal`
+    /// can still mint — minting discloses nothing the caller doesn't already supply,
+    /// unlike reveal.
+    #[tokio::test]
+    async fn mint_token_requires_only_documents_process_not_pii_reveal() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let ctx = AuthContext::with_tenant(
+            "alice",
+            TenantId::default_tenant(),
+            crate::auth::CapabilitySet::new([Capability::DocumentsProcess]),
+        );
+        let caller = Caller::Principal(&ctx);
+
+        let token = facade
+            .mint_pseudonym_token_with_auth(caller, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        assert!(!token.is_empty());
+    }
+
+    /// P3b §5: `GET /v1/keys`' facade method reports the active key plus every
+    /// configured retired key, and nothing else.
+    #[tokio::test]
+    async fn list_keys_reports_active_and_one_retired_status() {
+        let resolver: Arc<dyn KeyResolver> =
+            Arc::new(EnvKeyResolver::with_lookup(|name| match name {
+                ACTIVE_KEY_VAR => Some("k2".to_string()),
+                "HACIENDA_PSEUDONYM_KEY_K2" => Some("07".repeat(KEY_BYTES)),
+                "HACIENDA_PSEUDONYM_KEY_K1" => Some("a9".repeat(KEY_BYTES)),
+                _ => None,
+            }));
+        let retired = vec![KeyId::new("k1").unwrap()];
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade = HaciendaFacade::with_key_resolver(config, resolver, &retired).unwrap();
+
+        let mut statuses = facade.list_keys_with_auth(Caller::Trusted).await.unwrap();
+        statuses.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].id.as_str(), "k1");
+        assert!(!statuses[0].active);
+        assert_eq!(statuses[1].id.as_str(), "k2");
+        assert!(statuses[1].active);
+    }
+
+    /// P3b §5 / D-P3-3: nothing in a [`KeyStatus`] can carry key material — there is no
+    /// field to leak one through in the first place, but this pins that shape so a
+    /// future field addition can't reintroduce it silently.
+    #[tokio::test]
+    async fn list_keys_response_contains_no_key_material() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        let statuses = facade.list_keys_with_auth(Caller::Trusted).await.unwrap();
+        for status in statuses {
+            // `KeyStatus` has exactly two fields, `id` and `active` — this loop and
+            // the assertions below are the exhaustiveness check: if a third field
+            // existed, nothing here would fail to compile to remind us to check it.
+            assert!(!status.id.as_str().is_empty());
+        }
+    }
+
+    /// P3b §5: two tenants resolve independent key listings and mint independent
+    /// tokens through the same facade — reusing P3a's `two_tenant_key_resolver`.
+    #[tokio::test]
+    async fn list_keys_and_token_resolve_the_callers_own_tenant() {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let facade =
+            HaciendaFacade::with_key_resolver(config, two_tenant_key_resolver(), &[]).unwrap();
+
+        // Unlike `acme_caller_ctx()` above (scoped to reveal), this test also needs
+        // `audit:read` for `list_keys_with_auth`.
+        let acme_ctx = AuthContext::with_tenant(
+            "alice",
+            TenantId::new("acme"),
+            crate::auth::CapabilitySet::new([
+                Capability::DocumentsProcess,
+                Capability::PiiReveal,
+                Capability::AuditRead,
+            ]),
+        );
+        let acme = Caller::Principal(&acme_ctx);
+
+        let default_keys = facade.list_keys_with_auth(Caller::Trusted).await.unwrap();
+        let acme_keys = facade.list_keys_with_auth(acme).await.unwrap();
+        assert_eq!(default_keys.len(), 1);
+        assert_eq!(acme_keys.len(), 1);
+        assert_eq!(default_keys[0].id.as_str(), "k1");
+        assert_eq!(acme_keys[0].id.as_str(), "k1");
+
+        let default_token = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        let acme_token = facade
+            .mint_pseudonym_token_with_auth(acme, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        assert_ne!(
+            default_token, acme_token,
+            "two tenants minting the same value must get different tokens"
+        );
+    }
+
+    /// Counts `detect` calls — used to prove `pii_pipeline_for` never reloads the NER
+    /// backend when building a second tenant's pipeline (P3a §3.2), mirroring how
+    /// `CountingAuditStore` (above) proves D3 elsewhere in this module.
+    struct CountingNerBackend {
+        detect_calls: AtomicUsize,
+    }
+
+    impl CountingNerBackend {
+        fn new() -> Self {
+            Self {
+                detect_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn detect_call_count(&self) -> usize {
+            self.detect_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl NerBackend for CountingNerBackend {
+        async fn detect(
+            &self,
+            _text: &str,
+            _categories: &[EntityCategory],
+        ) -> XbergResult<Vec<Entity>> {
+            self.detect_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    /// Two tenants' pipelines share the one loaded detector — proven two ways: the
+    /// backend's `Arc` strong count grows by exactly one per tenant pipeline built
+    /// (never resets, which a reload would look like — a fresh `Arc::new` per tenant
+    /// would leave this count flat relative to the baseline), and a `detect` call
+    /// against each tenant's pipeline reaches the *same* counter.
+    #[tokio::test]
+    async fn pii_pipeline_for_reuses_the_loaded_detector_across_tenants() {
+        let counting_backend = Arc::new(CountingNerBackend::new());
+        let backend: Arc<dyn NerBackend> = counting_backend.clone();
+        let detector = NerDetector::new(Arc::clone(&backend));
+
+        let config = HaciendaConfig::default().with_pii(pii_config());
+        let facade = HaciendaFacade {
+            config,
+            pii_pipelines: Some(Mutex::new(HashMap::new())),
+            shared_detector: Some(detector),
+            key_resolver: None,
+            pinned_active_key: None,
+            retired_keys: Vec::new(),
+            pseudonymisers: None,
+            compliance: None,
+            audit_store: None,
+            review_queue: None,
+            glossary: None,
+            api_key_store: None,
+        };
+
+        // Two references already exist: this test's own `backend`, and the clone
+        // `facade.shared_detector`'s `NerDetector` holds.
+        let baseline = Arc::strong_count(&backend);
+
+        let tenant_a = TenantId::new("acme");
+        let tenant_b = TenantId::new("umbrella");
+        let pipeline_a = facade.pii_pipeline_for(&tenant_a).unwrap();
+        let pipeline_b = facade.pii_pipeline_for(&tenant_b).unwrap();
+
+        assert_eq!(
+            Arc::strong_count(&backend),
+            baseline + 2,
+            "each tenant's pipeline must hold a clone of the same backend Arc, not a \
+             freshly constructed one"
+        );
+
+        pipeline_a.process("hello").await.unwrap();
+        pipeline_b.process("hello").await.unwrap();
+        assert_eq!(
+            counting_backend.detect_call_count(),
+            2,
+            "one detect call per pipeline, against the one shared backend"
+        );
     }
 
     #[tokio::test]
@@ -1683,7 +2946,7 @@ mod tests {
             facade
                 .review_queue()
                 .expect("review queue is configured")
-                .stats(&TenantCtx::default_tenant(ActorId::new("test")))
+                .stats(&TenantId::default_tenant())
                 .await
                 .expect("stats")
                 .pending,
@@ -1744,6 +3007,417 @@ mod tests {
         }
     }
 
+    // ── P7: structured-field redaction ────────────────────────────────────────
+    // superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md
+
+    /// A control-corpus value that must never survive unredacted anywhere in a
+    /// structured field — distinct from anything else in this test module, so a match is
+    /// a disclosure and never a coincidence.
+    const P7_CORPUS_EMAIL: &str = "zephyrine.quatrebarbes@corpus-temoin.example";
+
+    /// Assert `haystack` does not contain the corpus value, naming `field` on failure.
+    fn assert_field_redacted(field: &str, haystack: &str) {
+        assert!(
+            !haystack.contains(P7_CORPUS_EMAIL),
+            "{field} leaked the corpus value: {haystack}"
+        );
+    }
+
+    /// A minimal, real `ExtractedDocument` to build test fixtures from.
+    ///
+    /// `xberg::ExtractedDocument` carries private fields (`internal_document`,
+    /// `ocr_internal_document`), so it cannot be built via struct-literal syntax from
+    /// outside the crate — `..Default::default()` cannot see them either. The only way to
+    /// obtain one here is `xberg::extract`; every field this test then wants to populate
+    /// is assigned afterward, which is plain field mutation on public fields and needs no
+    /// literal.
+    async fn base_document() -> xberg::ExtractedDocument {
+        xberg::extract(
+            ExtractInput::from_bytes(
+                b"placeholder".to_vec(),
+                "text/plain",
+                Some("doc.txt".into()),
+            ),
+            &xberg::ExtractionConfig::default(),
+        )
+        .await
+        .expect("trivial plain-text extraction must succeed")
+        .results
+        .into_iter()
+        .next()
+        .expect("one result for one input")
+    }
+
+    /// Build an `ExtractedDocument` with the corpus value planted in every field
+    /// [`HaciendaFacade::redact_structured_fields`] covers, one nested archive child deep.
+    async fn document_with_corpus_everywhere() -> xberg::ExtractedDocument {
+        let table = xberg::Table {
+            cells: vec![
+                vec!["Name".to_string(), "Email".to_string()],
+                vec!["Zephyrine".to_string(), P7_CORPUS_EMAIL.to_string()],
+            ],
+            markdown: format!(
+                "| Name | Email |\n| --- | --- |\n| Zephyrine | {P7_CORPUS_EMAIL} |\n"
+            ),
+            page_number: 1,
+            ..Default::default()
+        };
+
+        let page = xberg::PageContent {
+            page_number: 1,
+            content: format!("page content: {P7_CORPUS_EMAIL}"),
+            tables: vec![Arc::new(table.clone())],
+            image_indices: Vec::new(),
+            hierarchy: None,
+            is_blank: None,
+            layout_regions: None,
+            speaker_notes: Some(format!("presenter note: {P7_CORPUS_EMAIL}")),
+            section_name: None,
+            sheet_name: None,
+        };
+
+        let annotation = xberg::PdfAnnotation {
+            annotation_type: xberg::PdfAnnotationType::Text,
+            content: Some(format!("comment: {P7_CORPUS_EMAIL}")),
+            page_number: 1,
+            bounding_box: None,
+        };
+
+        let form_field = xberg::PdfFormField {
+            name: "email".to_string(),
+            full_name: "form1.email".to_string(),
+            field_type: xberg::FormFieldType::Text,
+            value: Some(P7_CORPUS_EMAIL.to_string()),
+            default_value: Some(P7_CORPUS_EMAIL.to_string()),
+            flags: 0,
+            page: None,
+            bbox: None,
+            max_length: None,
+            tooltip: None,
+        };
+
+        let revision = xberg::DocumentRevision {
+            revision_id: "1".to_string(),
+            author: Some(P7_CORPUS_EMAIL.to_string()),
+            timestamp: None,
+            kind: xberg::RevisionKind::Insertion,
+            anchor: None,
+            delta: xberg::RevisionDelta {
+                content: vec![xberg::DiffLine::Added(format!(
+                    "inserted: {P7_CORPUS_EMAIL}"
+                ))],
+                table_changes: vec![xberg::CellChange {
+                    row: 0,
+                    col: 0,
+                    from: String::new(),
+                    to: P7_CORPUS_EMAIL.to_string(),
+                }],
+                ..Default::default()
+            },
+        };
+
+        let uri = xberg::ExtractedUri {
+            url: format!("mailto:{P7_CORPUS_EMAIL}"),
+            label: Some(format!("email {P7_CORPUS_EMAIL}")),
+            page: None,
+            kind: xberg::UriKind::Email,
+        };
+
+        let mut nested = base_document().await;
+        nested.content = format!("nested archive member: {P7_CORPUS_EMAIL}");
+        nested.tables = vec![table.clone()];
+
+        let child = xberg::ArchiveEntry {
+            path: "nested.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            result: Box::new(nested),
+        };
+
+        // X1: keyword extraction, extractive summary, an image carrying a caption, a
+        // description, a decoded QR payload, and (recursively) an OCR result.
+        let keyword = xberg::Keyword {
+            text: P7_CORPUS_EMAIL.to_string(),
+            score: 1.0,
+            algorithm: xberg::KeywordAlgorithm::Yake,
+            positions: None,
+        };
+
+        let summary = xberg::DocumentSummary {
+            text: format!("summary mentioning {P7_CORPUS_EMAIL}"),
+            strategy: xberg::SummaryStrategy::default(),
+            token_count: None,
+        };
+
+        let mut ocr_result = base_document().await;
+        ocr_result.content = format!("ocr transcript: {P7_CORPUS_EMAIL}");
+
+        let qr_code = xberg::QrCode {
+            payload: P7_CORPUS_EMAIL.to_string(),
+            confidence: None,
+            bbox: None,
+        };
+
+        let image = xberg::ExtractedImage {
+            caption: Some(format!("caption: {P7_CORPUS_EMAIL}")),
+            description: Some(format!("description: {P7_CORPUS_EMAIL}")),
+            qr_codes: Some(vec![qr_code]),
+            ocr_result: Some(Box::new(ocr_result)),
+            ..Default::default()
+        };
+
+        let mut document = base_document().await;
+        document.content = "top-level content, redacted separately by the outer loop".to_string();
+        document.metadata.authors = Some(vec![P7_CORPUS_EMAIL.to_string()]);
+        document.metadata.created_by = Some(P7_CORPUS_EMAIL.to_string());
+        document.metadata.modified_by = Some(P7_CORPUS_EMAIL.to_string());
+        document.tables = vec![table];
+        document.pages = Some(vec![page]);
+        document.formatted_content = Some(format!("**formatted**: {P7_CORPUS_EMAIL}"));
+        document.annotations = Some(vec![annotation]);
+        document.form_fields = vec![form_field];
+        document.revisions = Some(vec![revision]);
+        document.uris = Some(vec![uri]);
+        document.children = Some(vec![child]);
+        document.extracted_keywords = Some(vec![keyword]);
+        document.summary = Some(summary);
+        document.images = Some(vec![image]);
+        document
+    }
+
+    /// The reproduction P7 was filed against, as an automated test: every structured
+    /// field this method covers must come back redacted, at every depth (top level, page
+    /// level, and one level into a nested archive member).
+    #[tokio::test]
+    async fn redact_structured_fields_covers_every_known_field() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
+        let mut document = document_with_corpus_everywhere().await;
+
+        // `redact_structured_fields` no longer appends its own fields' entries — it
+        // collects them into `audit_log` for the caller to append in one batch (see its
+        // doc comment) — and returns only already-appended entries from recursively
+        // redacted archive children.
+        let mut audit_log = Vec::new();
+        let child_audit_entries = facade
+            .redact_structured_fields(&mut document, pipeline, Caller::Trusted, &mut audit_log, 0)
+            .await
+            .unwrap();
+
+        assert!(
+            !audit_log.is_empty(),
+            "the corpus value in this document's own fields must have produced at least \
+             one audit-log entry"
+        );
+        assert!(
+            !child_audit_entries.is_empty(),
+            "the corpus value in the nested archive child must have produced at least one \
+             already-appended audit entry"
+        );
+
+        for table in &document.tables {
+            for row in &table.cells {
+                for cell in row {
+                    assert_field_redacted("tables[].cells", cell);
+                }
+            }
+            assert_field_redacted("tables[].markdown", &table.markdown);
+        }
+
+        let pages = document.pages.as_ref().expect("pages present");
+        for page in pages {
+            assert_field_redacted("pages[].content", &page.content);
+            assert_field_redacted(
+                "pages[].speaker_notes",
+                page.speaker_notes.as_deref().unwrap_or(""),
+            );
+            for table in &page.tables {
+                for row in &table.cells {
+                    for cell in row {
+                        assert_field_redacted("pages[].tables[].cells", cell);
+                    }
+                }
+                assert_field_redacted("pages[].tables[].markdown", &table.markdown);
+            }
+        }
+
+        assert_field_redacted(
+            "formatted_content",
+            document.formatted_content.as_deref().unwrap_or(""),
+        );
+
+        let authors = document.metadata.authors.as_ref().expect("authors present");
+        for author in authors {
+            assert_field_redacted("metadata.authors", author);
+        }
+        assert_field_redacted(
+            "metadata.created_by",
+            document.metadata.created_by.as_deref().unwrap_or(""),
+        );
+        assert_field_redacted(
+            "metadata.modified_by",
+            document.metadata.modified_by.as_deref().unwrap_or(""),
+        );
+
+        for annotation in document.annotations.as_ref().expect("annotations present") {
+            assert_field_redacted(
+                "annotations[].content",
+                annotation.content.as_deref().unwrap_or(""),
+            );
+        }
+
+        for field in &document.form_fields {
+            assert_field_redacted("form_fields[].value", field.value.as_deref().unwrap_or(""));
+            assert_field_redacted(
+                "form_fields[].default_value",
+                field.default_value.as_deref().unwrap_or(""),
+            );
+        }
+
+        for revision in document.revisions.as_ref().expect("revisions present") {
+            assert_field_redacted(
+                "revisions[].author",
+                revision.author.as_deref().unwrap_or(""),
+            );
+            for line in &revision.delta.content {
+                let text = match line {
+                    xberg::DiffLine::Context(s)
+                    | xberg::DiffLine::Added(s)
+                    | xberg::DiffLine::Removed(s) => s,
+                };
+                assert_field_redacted("revisions[].delta.content", text);
+            }
+            for change in &revision.delta.table_changes {
+                assert_field_redacted("revisions[].delta.table_changes.to", &change.to);
+            }
+        }
+
+        for uri in document.uris.as_ref().expect("uris present") {
+            assert_field_redacted("uris[].url", &uri.url);
+            assert_field_redacted("uris[].label", uri.label.as_deref().unwrap_or(""));
+        }
+
+        let children = document.children.as_ref().expect("children present");
+        let nested = &children[0].result;
+        assert_field_redacted("children[].result.content", &nested.content);
+        for table in &nested.tables {
+            for row in &table.cells {
+                for cell in row {
+                    assert_field_redacted("children[].result.tables[].cells", cell);
+                }
+            }
+        }
+
+        // X1
+        for keyword in document
+            .extracted_keywords
+            .as_ref()
+            .expect("extracted_keywords present")
+        {
+            assert_field_redacted("extracted_keywords[].text", &keyword.text);
+        }
+        assert_field_redacted(
+            "summary.text",
+            &document.summary.as_ref().expect("summary present").text,
+        );
+        for image in document.images.as_ref().expect("images present") {
+            assert_field_redacted("images[].caption", image.caption.as_deref().unwrap_or(""));
+            assert_field_redacted(
+                "images[].description",
+                image.description.as_deref().unwrap_or(""),
+            );
+            for qr_code in image.qr_codes.as_ref().expect("qr_codes present") {
+                assert_field_redacted("images[].qr_codes[].payload", &qr_code.payload);
+            }
+            assert_field_redacted(
+                "images[].ocr_result.content",
+                &image
+                    .ocr_result
+                    .as_ref()
+                    .expect("ocr_result present")
+                    .content,
+            );
+        }
+    }
+
+    /// Defense-in-depth alongside xberg's own `ExtractionConfig::max_archive_depth`
+    /// (default 3): a document whose nesting has already reached
+    /// [`MAX_REDACTION_DEPTH`] must refuse to redact one level deeper rather than either
+    /// silently skip the child (leaking unredacted text past I1) or recurse without
+    /// bound.
+    #[tokio::test]
+    async fn redact_structured_fields_refuses_to_recurse_past_the_depth_limit() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
+        let mut document = document_with_corpus_everywhere().await;
+        assert!(
+            document.children.is_some(),
+            "this test needs an archive child to hit the depth check"
+        );
+
+        let mut audit_log = Vec::new();
+        let error = facade
+            .redact_structured_fields(
+                &mut document,
+                pipeline,
+                Caller::Trusted,
+                &mut audit_log,
+                MAX_REDACTION_DEPTH,
+            )
+            .await
+            .expect_err("depth already at the limit must refuse to recurse into children");
+
+        assert!(
+            matches!(
+                error,
+                HaciendaError::RedactionDepthExceeded { limit } if limit == MAX_REDACTION_DEPTH
+            ),
+            "expected RedactionDepthExceeded, got {error:?}"
+        );
+    }
+
+    /// A table that carries a rendered `markdown` without parallel `cells` data (an
+    /// extractor that populates one but not the other) must have `markdown` redacted
+    /// directly, not silently wiped: `cells_to_markdown` renders an empty string for zero
+    /// rows, and unconditionally assigning that result would lose the rendering entirely.
+    #[tokio::test]
+    async fn redact_table_redacts_markdown_directly_when_cells_are_empty() {
+        let facade = HaciendaFacade::new(HaciendaConfig::default().with_pii(pii_config())).unwrap();
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
+
+        let mut table = xberg::Table {
+            cells: Vec::new(),
+            markdown: format!("contact: {P7_CORPUS_EMAIL}"),
+            page_number: 1,
+            ..Default::default()
+        };
+
+        let mut audit_log = Vec::new();
+        facade
+            .redact_table(&mut table, pipeline, &mut audit_log)
+            .await
+            .unwrap();
+
+        assert!(
+            !table.markdown.is_empty(),
+            "markdown must survive redaction, not be wiped to an empty string"
+        );
+        assert_field_redacted("table.markdown", &table.markdown);
+        assert!(
+            table.markdown.contains("[EMAIL]"),
+            "expected a mask token in: {}",
+            table.markdown
+        );
+    }
+
     // ── New tests for Task 7 ──────────────────────────────────────────────────
 
     /// Exactly one `append` call per document, not one per entity.
@@ -1785,6 +3459,72 @@ mod tests {
             counting_store.append_call_count(),
             2,
             "two documents must produce exactly two append calls"
+        );
+    }
+
+    /// The structured-field counterpart of `should_append_exactly_once_per_document`: a
+    /// document whose PII is spread across tables, pages, metadata, annotations, form
+    /// fields, revisions, and URIs — not just `.content` — must still produce exactly one
+    /// `store.append` call, not one per redacted field.
+    ///
+    /// Before this fix, `redact_string_field` called `record_audit` (one `store.append`)
+    /// on every structured field it touched, so this same document produced many appends —
+    /// silently violating the "one append per document" invariant D3 requires and, under
+    /// `SyncPolicy::EveryBatch`, turning one request into many fsyncs.
+    #[tokio::test]
+    async fn should_append_exactly_once_per_document_with_structured_fields() {
+        let counting_store = Arc::new(CountingAuditStore::new());
+        let facade = HaciendaFacade::with_stores(
+            HaciendaConfig::default().with_pii(pii_config()),
+            Some(Arc::clone(&counting_store) as Arc<dyn AuditStore>),
+            None,
+            None,
+        )
+        .unwrap();
+        let pipeline = facade
+            .pii_pipeline_for(&TenantId::default_tenant())
+            .expect("pii configured");
+        let pipeline = &pipeline;
+
+        // No archive children, and no image OCR results: isolates the "one append per
+        // document" claim for a document's own structured fields from the separate "one
+        // append per nested document" behaviour `redact_document_recursively` provides
+        // for both archive children and (X1) `images[].ocr_result`. `images` itself stays
+        // populated — `.caption`/`.description`/`.qr_codes` are still this document's own
+        // fields, not nested documents, so they belong in this test's coverage.
+        let mut document = document_with_corpus_everywhere().await;
+        document.children = None;
+        if let Some(images) = &mut document.images {
+            for image in images {
+                image.ocr_result = None;
+            }
+        }
+
+        let mut audit_log = Vec::new();
+        let child_audit_entries = facade
+            .redact_structured_fields(&mut document, pipeline, Caller::Trusted, &mut audit_log, 0)
+            .await
+            .unwrap();
+        assert!(
+            child_audit_entries.is_empty(),
+            "no archive children were given, so there must be nothing already appended"
+        );
+        assert!(
+            !audit_log.is_empty(),
+            "the corpus value across tables/pages/metadata/etc. must have produced audit-log \
+             entries to append"
+        );
+
+        facade
+            .record_audit_entries(&audit_log, Caller::Trusted)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            counting_store.append_call_count(),
+            1,
+            "one document's worth of structured-field redactions must still produce exactly \
+             one append call, not one per field"
         );
     }
 
@@ -1864,7 +3604,10 @@ mod tests {
                 .expect("chain from first run must still verify after restart");
 
             // The sealed segment carries the entry count from before the restart.
-            let seals = store.seals().await.expect("seals");
+            let seals = store
+                .seals(&TenantId::default_tenant())
+                .await
+                .expect("seals");
             let total_sealed: u64 = seals.iter().map(|s| s.entry_count).sum();
             assert_eq!(
                 total_sealed, entry_count_before as u64,
@@ -1906,21 +3649,24 @@ mod tests {
                 .expect("an explicitly supplied review store must produce a queue");
 
             let item = queue
-                .submit(ReviewRequest {
-                    text_snippet: "bob@example.com".into(),
-                    category: "Email".into(),
-                    start: 0,
-                    end: 15,
-                    confidence: 0.4,
-                    source: "regex".into(),
-                })
+                .submit(
+                    &TenantId::default_tenant(),
+                    ReviewRequest {
+                        text_snippet: "bob@example.com".into(),
+                        category: "Email".into(),
+                        start: 0,
+                        end: 15,
+                        confidence: 0.4,
+                        source: "regex".into(),
+                    },
+                )
                 .await
                 .expect("submit first run");
             item_id = item.id.clone();
 
             queue
                 .decide(
-                    &TenantCtx::default_tenant(ActorId::new("test")),
+                    &TenantId::default_tenant(),
                     &item_id,
                     ReviewDecision::Approve,
                     "amy",
@@ -1949,7 +3695,7 @@ mod tests {
             let item = facade
                 .review_queue()
                 .expect("queue after restart")
-                .get(&TenantCtx::default_tenant(ActorId::new("test")), &item_id)
+                .get(&TenantId::default_tenant(), &item_id)
                 .await
                 .expect("get after restart")
                 .expect("the item written in the first run must still exist");
@@ -2002,20 +3748,23 @@ mod tests {
             "passing a review store must build a queue; dropping it silently loses every decision",
         );
         queue
-            .submit(ReviewRequest {
-                text_snippet: "bob@example.com".into(),
-                category: "Email".into(),
-                start: 0,
-                end: 15,
-                confidence: 0.4,
-                source: "regex".into(),
-            })
+            .submit(
+                &TenantId::default_tenant(),
+                ReviewRequest {
+                    text_snippet: "bob@example.com".into(),
+                    category: "Email".into(),
+                    start: 0,
+                    end: 15,
+                    confidence: 0.4,
+                    source: "regex".into(),
+                },
+            )
             .await
             .expect("submit must reach the supplied store");
 
         assert_eq!(
             queue
-                .stats(&TenantCtx::default_tenant(ActorId::new("test")))
+                .stats(&TenantId::default_tenant())
                 .await
                 .expect("stats")
                 .total,
@@ -2143,12 +3892,19 @@ mod tests {
         )));
         HaciendaFacade {
             config,
-            pii_pipeline: Some(Arc::new(pipeline)),
+            pii_pipelines: Some(Mutex::new(HashMap::from([(
+                TenantId::default_tenant(),
+                Arc::new(pipeline),
+            )]))),
+            shared_detector: None,
+            key_resolver: None,
+            pinned_active_key: None,
+            retired_keys: Vec::new(),
+            pseudonymisers: None,
             compliance: None,
             audit_store,
             review_queue: None,
             glossary: None,
-            pseudonymiser: None,
             api_key_store: None,
         }
     }
@@ -2412,7 +4168,8 @@ mod tests {
     #[tokio::test]
     async fn should_reveal_a_previously_minted_pseudonym_token() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let result = facade
             .process(text_input("mail bob@example.com"))
@@ -2433,7 +4190,8 @@ mod tests {
     #[tokio::test]
     async fn should_reject_reveal_without_pii_reveal_capability() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let result = facade
             .process(text_input("mail bob@example.com"))
@@ -2455,7 +4213,8 @@ mod tests {
     #[tokio::test]
     async fn should_reject_a_malformed_token() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let ctx = principal_with(&[Capability::DocumentsProcess, Capability::PiiReveal]);
         let caller = Caller::Principal(&ctx);
@@ -2469,7 +4228,8 @@ mod tests {
     #[tokio::test]
     async fn should_record_an_audit_entry_for_a_token_reveal() {
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let facade = HaciendaFacade::with_key_resolver(config, &key_resolver(), &[]).unwrap();
+        let facade =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
 
         let result = facade
             .process(text_input("mail bob@example.com"))
@@ -2617,6 +4377,74 @@ mod tests {
         let report = facade.compliance_report_with_auth(caller).await.unwrap();
 
         assert!(report.is_none());
+    }
+
+    // ── P4/P5: model-card, checklist, and DORA reachable standalone ────────────
+
+    /// `model_card`/`checklist` must be reachable without a full `report()` round trip
+    /// (`superpowers/specs/2026-08-14-P4-P5-missing-endpoints.md` §4).
+    #[tokio::test]
+    async fn model_card_and_checklist_are_reachable_standalone() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        assert!(facade.model_card_with_auth(caller).unwrap().is_some());
+        assert!(facade
+            .compliance_checklist_with_auth(caller)
+            .unwrap()
+            .is_some());
+    }
+
+    /// A DORA report has had no path to the API at all before this change —
+    /// `compliance_report_with_auth` always calls `report(None)`. Proves the new
+    /// standalone method actually produces one, given an incident.
+    #[tokio::test]
+    async fn dora_report_requires_an_incident_body() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::AuditRead]);
+        let caller = Caller::Principal(&ctx);
+
+        let incident = crate::compliance::PiiIncident {
+            summary: "test incident".to_string(),
+            timeline: "detected then contained".to_string(),
+            root_cause: "misconfiguration".to_string(),
+            detected_at: "2026-08-14T00:00:00Z".to_string(),
+            contained_at: None,
+            resolved_at: None,
+            actions_taken: vec![],
+            lessons_learned: vec![],
+        };
+
+        let report = facade
+            .dora_report_with_auth(caller, &incident)
+            .unwrap()
+            .expect("compliance is configured");
+        assert!(!report.reference.is_empty());
+
+        // And bundled `report()` still never includes one — this method is additive,
+        // not a replacement for that behaviour.
+        let bundled = facade.compliance_report_with_auth(caller).await.unwrap();
+        assert!(bundled.unwrap().dora.is_none());
+    }
+
+    #[tokio::test]
+    async fn compliance_standalone_methods_reject_without_audit_read() {
+        let mut config = HaciendaConfig::default().with_pii(pii_config());
+        config.compliance = Some(crate::compliance::ComplianceConfig::default());
+        let facade = HaciendaFacade::new(config).unwrap();
+
+        let ctx = principal_with(&[Capability::DocumentsProcess]);
+        let caller = Caller::Principal(&ctx);
+
+        assert!(facade.model_card_with_auth(caller).is_err());
+        assert!(facade.compliance_checklist_with_auth(caller).is_err());
     }
 
     // ── Phase 10 Task 2 Step 3: review_queue_read_with_auth vs review_queue_with_auth ──
@@ -2894,7 +4722,7 @@ mod tests {
                 let result = pipeline.process(&text).await?;
                 facade.observe_glossary(&text, &result);
                 let audit_entries = facade.record_audit(&result, Caller::Trusted).await?;
-                let submitted = facade.submit_for_review(&result).await?;
+                let submitted = facade.submit_for_review(Caller::Trusted, &result).await?;
                 Ok(audit_entries.len() + submitted)
             });
         }
@@ -2953,12 +4781,19 @@ mod tests {
         let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
         HaciendaFacade {
             config,
-            pii_pipeline: Some(Arc::new(pipeline)),
+            pii_pipelines: Some(Mutex::new(HashMap::from([(
+                TenantId::default_tenant(),
+                Arc::new(pipeline),
+            )]))),
+            shared_detector: None,
+            key_resolver: None,
+            pinned_active_key: None,
+            retired_keys: Vec::new(),
+            pseudonymisers: None,
             compliance: None,
             audit_store,
             review_queue: None,
             glossary: None,
-            pseudonymiser: None,
             api_key_store: None,
         }
     }
@@ -3126,45 +4961,50 @@ mod tests {
     impl AuditStore for TimingAuditStore {
         async fn append(
             &self,
+            tenant: &TenantId,
             inputs: Vec<AuditEntryInput>,
         ) -> Result<Vec<AuditEntry>, AuditError> {
             let start = std::time::Instant::now();
-            let result = self.inner.append(inputs).await;
+            let result = self.inner.append(tenant, inputs).await;
             self.append_nanos
                 .fetch_add(start.elapsed().as_nanos() as u64, Ordering::SeqCst);
             result
         }
 
-        async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
-            self.inner.entries().await
+        async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
+            self.inner.entries(tenant).await
         }
 
-        async fn tip(&self) -> Result<String, AuditError> {
-            self.inner.tip().await
+        async fn tip(&self, tenant: &TenantId) -> Result<String, AuditError> {
+            self.inner.tip(tenant).await
         }
 
-        async fn seals(&self) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
-            self.inner.seals().await
+        async fn seals(
+            &self,
+            tenant: &TenantId,
+        ) -> Result<Vec<crate::audit::SegmentSeal>, AuditError> {
+            self.inner.seals(tenant).await
         }
 
         async fn history(
             &self,
+            tenant: &TenantId,
             after: Option<&crate::audit::AuditCursor>,
             limit: usize,
         ) -> Result<crate::audit::AuditPage, AuditError> {
-            self.inner.history(after, limit).await
+            self.inner.history(tenant, after, limit).await
         }
 
-        async fn verify(&self) -> Result<(), AuditError> {
-            self.inner.verify().await
+        async fn verify(&self, tenant: &TenantId) -> Result<(), AuditError> {
+            self.inner.verify(tenant).await
         }
 
-        async fn rotate(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.rotate().await
+        async fn rotate(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.rotate(tenant).await
         }
 
-        async fn close(&self) -> Result<crate::audit::SegmentSeal, AuditError> {
-            self.inner.close().await
+        async fn close(&self, tenant: &TenantId) -> Result<crate::audit::SegmentSeal, AuditError> {
+            self.inner.close(tenant).await
         }
     }
 

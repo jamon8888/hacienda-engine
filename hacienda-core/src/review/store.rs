@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::review::error::ReviewError;
 use crate::review::types::{QueueStats, ReviewDecision, ReviewQueueItem, ReviewStatus};
-use crate::tenancy::TenantCtx;
+use crate::tenancy::TenantId;
 
 // ── ReviewStore trait ─────────────────────────────────────────────────────────
 
@@ -55,64 +55,73 @@ use crate::tenancy::TenantCtx;
 /// concurrent workload, not in sequential tests.
 #[async_trait]
 pub trait ReviewStore: Send + Sync {
-    /// Insert a pre-built item into the store.
+    /// Insert a pre-built item into the store, scoped to `tenant`.
     ///
     /// The item is constructed by [`ReviewQueue::submit`] which generates the id, priority,
-    /// deadline, and timestamps before calling here. The store records what it receives.
+    /// deadline, and timestamps before calling here. The store records what it receives,
+    /// after overwriting `item.tenant_id` with `tenant` — `tenant` is the parameter every
+    /// other method on this trait enforces isolation through, and `submit` matches that
+    /// discipline rather than trusting the caller to have already labelled `item`
+    /// correctly.
     ///
     /// [`ReviewQueue::submit`]: super::queue::ReviewQueue::submit
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError>;
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError>;
 
-    /// Atomic compare-and-swap: move `id` from `Pending` to `InReview`, scoped to `ctx`'s
-    /// tenant (S1).
+    /// Atomic compare-and-swap: move `id` from `Pending` to `InReview`, scoped to
+    /// `tenant` (S1).
     ///
-    /// Succeeds only if the item's current status is `Pending` *and* it belongs to
-    /// `ctx.tenant`. An id that exists but belongs to a different tenant is reported the
-    /// same way as an id that does not exist at all ([`ReviewError::NotFound`]) — never
-    /// distinguished, per D-S1-6 (cross-tenant absence looks like non-existence, not a
-    /// permission error). The check and the mutation must happen under one lock
-    /// acquisition — see the trait-level docs on atomicity. Splitting this into a `get`
-    /// followed by a `put` is a correctness bug, not an optimisation.
+    /// Succeeds only if the item's current status is `Pending` **and** its tenant is
+    /// `tenant`. An id that belongs to a different tenant is reported exactly like an
+    /// id that does not exist at all — [`ReviewError::NotFound`], never a distinguishable
+    /// error — per decision D-S1b-1 (a 403-shaped response on a well-formed but
+    /// cross-tenant id would itself disclose that the id is valid *somewhere*). The
+    /// check and the mutation must happen under one lock acquisition — see the
+    /// trait-level docs on atomicity. Splitting this into a `get` followed by a `put`
+    /// is a correctness bug, not an optimisation.
     async fn assign(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         reviewer: &str,
     ) -> Result<ReviewQueueItem, ReviewError>;
 
-    /// Atomic compare-and-swap: record a decision when none exists yet, scoped to `ctx`'s
-    /// tenant (S1).
+    /// Atomic compare-and-swap: record a decision when none exists yet, scoped to
+    /// `tenant` (S1).
     ///
-    /// Succeeds only if the item has no existing decision *and* belongs to `ctx.tenant`.
-    /// Returns [`ReviewError::AlreadyDecided`] if a decision is already present, and
-    /// [`ReviewError::NotFound`] both for an unknown id and for an id belonging to a
-    /// different tenant — see [`Self::assign`]'s doc for why those two cases must not be
-    /// distinguished. Like `assign`, this must be a single atomic check-and-mutate — see
-    /// the trait-level docs.
+    /// Succeeds only if the item has no existing decision **and** its tenant is
+    /// `tenant` — same not-found-not-forbidden discipline as [`Self::assign`]. Returns
+    /// [`ReviewError::AlreadyDecided`] if a decision is already present. Like `assign`,
+    /// this must be a single atomic check-and-mutate — see the trait-level docs.
     async fn decide(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
         comment: &str,
     ) -> Result<ReviewQueueItem, ReviewError>;
 
-    /// Return `ctx.tenant`'s items, optionally restricted to a single status (S1).
+    /// Return every item belonging to `tenant`, optionally restricted to a single status.
     async fn list(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         filter: Option<ReviewStatus>,
     ) -> Result<Vec<ReviewQueueItem>, ReviewError>;
 
-    /// Return a single item by id, scoped to `ctx`'s tenant (S1).
-    ///
-    /// `None` both when no item has this id and when one does but belongs to a different
-    /// tenant — see [`Self::assign`]'s doc for why the two are not distinguished.
-    async fn get(&self, ctx: &TenantCtx, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError>;
+    /// Return a single item by id, or `None` if it does not exist **or belongs to a
+    /// different tenant** — the two are indistinguishable to the caller (D-S1b-1).
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+    ) -> Result<Option<ReviewQueueItem>, ReviewError>;
 
-    /// Return counts of `ctx.tenant`'s items in each status (S1).
-    async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError>;
+    /// Return counts of `tenant`'s items in each status.
+    async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError>;
 
     /// Release any resources the store holds open. Idempotent.
     ///
@@ -187,7 +196,12 @@ impl InMemoryReviewStore {
 
 #[async_trait]
 impl ReviewStore for InMemoryReviewStore {
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        mut item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        item.tenant_id = tenant.to_string();
         // Guard acquired, item pushed, guard dropped before returning. No .await while held.
         self.lock().push(item.clone());
         Ok(item)
@@ -195,7 +209,7 @@ impl ReviewStore for InMemoryReviewStore {
 
     async fn assign(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         reviewer: &str,
     ) -> Result<ReviewQueueItem, ReviewError> {
@@ -204,10 +218,15 @@ impl ReviewStore for InMemoryReviewStore {
         // the guard between finding the item and updating it would open a window where two
         // concurrent callers both see `Pending` and both proceed — splitting this across two
         // operations is a correctness bug, not an optimisation.
+        //
+        // Matching on `id && tenant` together, rather than finding by id and checking
+        // tenant after, means a cross-tenant id falls straight into the same `NotFound`
+        // branch a nonexistent id does — the not-found-not-forbidden property (D-S1b-1)
+        // falls out of the lookup itself instead of needing a second branch to enforce it.
         let mut items = self.lock();
         let item = items
             .iter_mut()
-            .find(|i| i.id == id && i.tenant_id == ctx.tenant.as_str())
+            .find(|i| i.id == id && i.tenant_id == tenant.as_str())
             .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
         if item.status != ReviewStatus::Pending {
@@ -225,19 +244,21 @@ impl ReviewStore for InMemoryReviewStore {
 
     async fn decide(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
         comment: &str,
     ) -> Result<ReviewQueueItem, ReviewError> {
-        // Same single-acquisition discipline as `assign`. The check on `decision.is_none()`
-        // and the write of `decision` must happen inside one guard to prevent two callers
-        // both observing "no decision yet" and both recording one.
+        // Same single-acquisition discipline as `assign`, including matching on
+        // `id && tenant` together for the same not-found-not-forbidden reason. The check
+        // on `decision.is_none()` and the write of `decision` must happen inside one
+        // guard to prevent two callers both observing "no decision yet" and both
+        // recording one.
         let mut items = self.lock();
         let item = items
             .iter_mut()
-            .find(|i| i.id == id && i.tenant_id == ctx.tenant.as_str())
+            .find(|i| i.id == id && i.tenant_id == tenant.as_str())
             .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
         if item.decision.is_some() {
@@ -259,33 +280,42 @@ impl ReviewStore for InMemoryReviewStore {
 
     async fn list(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         filter: Option<ReviewStatus>,
     ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
         let items = self.lock();
         let result = items
             .iter()
-            .filter(|i| i.tenant_id == ctx.tenant.as_str())
-            .filter(|i| filter.is_none_or(|status| i.status == status))
+            .filter(|i| {
+                i.tenant_id == tenant.as_str()
+                    && filter.map(|status| i.status == status).unwrap_or(true)
+            })
             .cloned()
             .collect();
         Ok(result)
     }
 
-    async fn get(&self, ctx: &TenantCtx, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+    ) -> Result<Option<ReviewQueueItem>, ReviewError> {
         Ok(self
             .lock()
             .iter()
-            .find(|i| i.id == id && i.tenant_id == ctx.tenant.as_str())
+            .find(|i| i.id == id && i.tenant_id == tenant.as_str())
             .cloned())
     }
 
-    async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
+    async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
         let items = self.lock();
-        let tenant_items = || items.iter().filter(|i| i.tenant_id == ctx.tenant.as_str());
-        let count = |status: ReviewStatus| tenant_items().filter(|i| i.status == status).count();
+        let mine: Vec<&ReviewQueueItem> = items
+            .iter()
+            .filter(|i| i.tenant_id == tenant.as_str())
+            .collect();
+        let count = |status: ReviewStatus| mine.iter().filter(|i| i.status == status).count();
         Ok(QueueStats {
-            total: tenant_items().count(),
+            total: mine.len(),
             pending: count(ReviewStatus::Pending),
             in_review: count(ReviewStatus::InReview),
             approved: count(ReviewStatus::Approved),
@@ -301,6 +331,38 @@ impl ReviewStore for InMemoryReviewStore {
 mod tests {
     use super::*;
 
+    /// The tenant used by every test that doesn't itself care about tenant scoping.
+    fn t() -> TenantId {
+        TenantId::new("tenant-a")
+    }
+
+    /// A second, distinct tenant — used only by the cross-tenant isolation tests below.
+    fn t2() -> TenantId {
+        TenantId::new("tenant-b")
+    }
+
+    fn make_item(id: &str, tenant: TenantId) -> ReviewQueueItem {
+        ReviewQueueItem {
+            id: id.to_string(),
+            tenant_id: tenant.to_string(),
+            text_snippet: "John Smith".to_string(),
+            category: "PersonName".to_string(),
+            start: 0,
+            end: 10,
+            confidence: 0.75,
+            source: "regex".to_string(),
+            status: ReviewStatus::Pending,
+            priority: crate::review::types::Priority::Normal,
+            assigned_reviewer: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            deadline: None,
+            decision: None,
+            decided_by: None,
+            decided_at: None,
+            comment: None,
+        }
+    }
+
     /// Confirm that `Arc<dyn ReviewStore>` is constructible.
     ///
     /// If the trait is not object-safe — because a method is generic, returns `Self`, or
@@ -313,87 +375,80 @@ mod tests {
         // If this compiles, the trait is object-safe.
     }
 
-    fn ctx(tenant: &str) -> TenantCtx {
-        TenantCtx::new(
-            crate::tenancy::TenantId::new(tenant),
-            crate::tenancy::ActorId::new("test"),
-        )
-    }
-
-    fn item(id: &str, tenant: &str) -> ReviewQueueItem {
-        ReviewQueueItem {
-            id: id.to_owned(),
-            text_snippet: "jane@example.com".to_owned(),
-            category: "email".to_owned(),
-            start: 0,
-            end: 16,
-            confidence: 0.4,
-            source: "regex".to_owned(),
-            status: ReviewStatus::Pending,
-            priority: crate::review::types::Priority::High,
-            assigned_reviewer: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            deadline: None,
-            decision: None,
-            decided_by: None,
-            decided_at: None,
-            comment: None,
-            tenant_id: tenant.to_owned(),
-        }
-    }
-
-    /// S1 §9: `cross_tenant_read_is_404_not_403`, applied to `ReviewStore::{get,assign,decide}`.
+    /// D-S1b-1: an id that belongs to a different tenant must be reported exactly like an
+    /// id that does not exist at all — `Ok(None)`, never a distinguishable error. A caller
+    /// probing ids could otherwise learn that a well-formed id is valid *somewhere*, just
+    /// not in their own tenant.
     #[tokio::test]
-    async fn cross_tenant_get_assign_and_decide_are_not_found_not_forbidden() {
+    async fn review_get_for_another_tenants_item_id_is_not_found() {
         let store = InMemoryReviewStore::new();
-        store.submit(item("i1", "acme")).await.expect("submit");
+        store
+            .submit(&t(), make_item("item-a", t()))
+            .await
+            .expect("submit for tenant a");
 
-        let globex = ctx("globex");
-        assert!(
-            store.get(&globex, "i1").await.expect("get").is_none(),
-            "a different tenant must not see acme's item"
-        );
-        assert!(
-            matches!(
-                store.assign(&globex, "i1", "bob").await,
-                Err(ReviewError::NotFound(_))
-            ),
-            "assigning another tenant's item must look like it doesn't exist, not 403"
-        );
-        assert!(
-            matches!(
-                store
-                    .decide(&globex, "i1", ReviewDecision::Approve, "bob", "")
-                    .await,
-                Err(ReviewError::NotFound(_))
-            ),
-            "deciding on another tenant's item must look like it doesn't exist, not 403"
-        );
+        // Tenant a can see its own item.
+        assert!(store.get(&t(), "item-a").await.unwrap().is_some());
 
-        // Positive control: the owning tenant can still act on its own item.
-        let acme = ctx("acme");
-        assert!(store.get(&acme, "i1").await.expect("get").is_some());
-        assert!(store.assign(&acme, "i1", "alice").await.is_ok());
+        // Tenant b gets exactly the same `None` it would get for an id that never existed.
+        assert!(store.get(&t2(), "item-a").await.unwrap().is_none());
+        assert!(store.get(&t2(), "no-such-id").await.unwrap().is_none());
     }
 
-    /// `list`/`stats` must only ever report the caller's own tenant.
+    /// The same not-found-not-forbidden discipline applies to the compare-and-swap
+    /// operations: a cross-tenant `assign`/`decide` must fail with `NotFound`, not a
+    /// status- or permission-shaped error that would confirm the id exists elsewhere.
     #[tokio::test]
-    async fn list_and_stats_only_report_the_callers_tenant() {
+    async fn review_assign_and_decide_for_another_tenants_item_id_is_not_found() {
         let store = InMemoryReviewStore::new();
-        store.submit(item("a1", "acme")).await.expect("submit");
-        store.submit(item("a2", "acme")).await.expect("submit");
-        store.submit(item("g1", "globex")).await.expect("submit");
+        store
+            .submit(&t(), make_item("item-a", t()))
+            .await
+            .expect("submit for tenant a");
 
-        let acme = ctx("acme");
-        let acme_items = store.list(&acme, None).await.expect("list");
-        assert_eq!(acme_items.len(), 2);
-        assert!(acme_items.iter().all(|i| i.tenant_id == "acme"));
-        assert_eq!(store.stats(&acme).await.expect("stats").total, 2);
+        assert!(matches!(
+            store.assign(&t2(), "item-a", "mallory").await,
+            Err(ReviewError::NotFound(id)) if id == "item-a"
+        ));
+        assert!(matches!(
+            store
+                .decide(&t2(), "item-a", ReviewDecision::Approve, "mallory", "")
+                .await,
+            Err(ReviewError::NotFound(id)) if id == "item-a"
+        ));
 
-        let globex = ctx("globex");
-        let globex_items = store.list(&globex, None).await.expect("list");
-        assert_eq!(globex_items.len(), 1);
-        assert_eq!(globex_items[0].id, "g1");
-        assert_eq!(store.stats(&globex).await.expect("stats").total, 1);
+        // Tenant a's item is untouched by tenant b's rejected attempts.
+        let item = store.get(&t(), "item-a").await.unwrap().unwrap();
+        assert_eq!(item.status, ReviewStatus::Pending);
+    }
+
+    /// Two tenants' queues must never leak into each other's `list`/`stats` — the review
+    /// analogue of `two_tenants_audit_chains_are_independent`.
+    #[tokio::test]
+    async fn two_tenants_review_queues_are_independent() {
+        let store = InMemoryReviewStore::new();
+        store
+            .submit(&t(), make_item("a-1", t()))
+            .await
+            .expect("submit a-1");
+        store
+            .submit(&t(), make_item("a-2", t()))
+            .await
+            .expect("submit a-2");
+        store
+            .submit(&t2(), make_item("b-1", t2()))
+            .await
+            .expect("submit b-1");
+
+        let a_items = store.list(&t(), None).await.unwrap();
+        let b_items = store.list(&t2(), None).await.unwrap();
+        assert_eq!(a_items.len(), 2);
+        assert_eq!(b_items.len(), 1);
+        assert!(a_items.iter().all(|i| i.id != "b-1"));
+
+        let a_stats = store.stats(&t()).await.unwrap();
+        let b_stats = store.stats(&t2()).await.unwrap();
+        assert_eq!(a_stats.total, 2);
+        assert_eq!(b_stats.total, 1);
     }
 }

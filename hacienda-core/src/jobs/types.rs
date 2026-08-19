@@ -97,5 +97,15 @@ pub struct Job {
     /// tenant, optional for trusted callers), every job has exactly one tenant —
     /// `Caller::Trusted`'s `tenant_ctx()` resolves to the `default` tenant, the same
     /// one every pre-S1 job is attributed to.
+    ///
+    /// Defaulted on deserialize (mirroring `review::types::ReviewQueueItem::tenant_id`):
+    /// `Job` is not currently persisted via `serde_json` in any production backend, but
+    /// carrying the same default keeps the type safe to serialize/deserialize should a
+    /// future store do so.
+    #[serde(default = "default_tenant_id")]
     pub tenant_id: String,
+}
+
+fn default_tenant_id() -> String {
+    crate::tenancy::DEFAULT_TENANT.to_owned()
 }

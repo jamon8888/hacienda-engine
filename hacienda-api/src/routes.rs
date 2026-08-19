@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, documents, info, jobs, openapi, pii, presets, rag, rag_stream,
-        uploads, usage, versions,
+        audit, audit_review, auth, documents, info, jobs, keys, openapi, pii, presets, rag,
+        rag_stream, uploads, usage, versions,
     },
     quota::quota_middleware,
     state::ApiState,
@@ -118,6 +118,13 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::PiiReveal),
         make_router: || post(pii::reveal_token),
     },
+    // `token` needs only `documents:process` (D-P3-1, P3b §2) — minting a token for a
+    // caller-supplied value discloses nothing new, unlike `reveal` above.
+    RouteSpec {
+        path: "/v1/pii/token",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(pii::mint_token),
+    },
     RouteSpec {
         path: "/v1/pii/config",
         access: Access::Capability(Capability::DocumentsProcess),
@@ -175,6 +182,24 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::ReviewDecide),
         make_router: || post(audit_review::decide_review),
     },
+    // `stats` (a static path) and `{id}` (dynamic) below never collide: axum's router
+    // matches the more specific static segment first, so a request for
+    // `/v1/review/stats` never reaches `get_review_item` with `id == "stats"`.
+    RouteSpec {
+        path: "/v1/review/stats",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_review_stats),
+    },
+    RouteSpec {
+        path: "/v1/review/{id}",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_review_item),
+    },
+    RouteSpec {
+        path: "/v1/review/{id}/assign",
+        access: Access::Capability(Capability::ReviewDecide),
+        make_router: || post(audit_review::assign_review_item),
+    },
     RouteSpec {
         path: "/v1/compliance/dpia",
         access: Access::Capability(Capability::AuditRead),
@@ -184,6 +209,21 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/compliance/report",
         access: Access::Capability(Capability::AuditRead),
         make_router: || get(audit_review::get_compliance_report),
+    },
+    RouteSpec {
+        path: "/v1/compliance/model-card",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_compliance_model_card),
+    },
+    RouteSpec {
+        path: "/v1/compliance/checklist",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(audit_review::get_compliance_checklist),
+    },
+    RouteSpec {
+        path: "/v1/compliance/dora",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || post(audit_review::post_compliance_dora),
     },
     RouteSpec {
         path: "/v1/glossary",
@@ -336,6 +376,13 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::AuditRead),
         make_router: || get(usage::get_usage),
     },
+    // Pseudonym key ids and status only, never material (D-P3-3, P3b §3) — gated under
+    // the same `AuditRead` capability the parent P3 spec's route table assigns it.
+    RouteSpec {
+        path: "/v1/keys",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(keys::list_keys),
+    },
 ];
 
 /// Build the `AuthState` from the route table.
@@ -445,11 +492,54 @@ pub(crate) mod tests {
         };
 
         let config = HaciendaConfig::default().with_pii(pii_config);
-        let facade = Arc::new(HaciendaFacade::with_key_resolver(config, &resolver, &[]).unwrap());
+        let facade =
+            Arc::new(HaciendaFacade::with_key_resolver(config, Arc::new(resolver), &[]).unwrap());
 
         let auth = AuthState::new(Arc::new(DevTokenResolver));
         let jobs = InMemoryJobStore::new().into_arc();
         ApiState::new(facade, jobs, auth, ApiLimits::default())
+    }
+
+    /// A state with review and compliance both configured (in-memory review store,
+    /// `HaciendaFacade::new`'s default when `config.review` is `Some` — no Postgres
+    /// needed), and one pending review item pre-submitted so the new P4/P5 endpoints
+    /// (`get_review_item`, `assign_review_item`, `get_review_stats`) have something to
+    /// act on. Returns the state and that item's id.
+    async fn state_with_review_and_compliance() -> (ApiState, String) {
+        use hacienda_core::compliance::ComplianceConfig;
+        use hacienda_core::review::{ReviewConfig, ReviewRequest};
+
+        let config = HaciendaConfig {
+            pii: Some(PipelineConfig::default()),
+            compliance: Some(ComplianceConfig::default()),
+            review: Some(ReviewConfig::default()),
+            ..Default::default()
+        };
+        let facade = Arc::new(HaciendaFacade::new(config).unwrap());
+
+        let queue = facade
+            .review_queue_with_auth(hacienda_core::auth::Caller::Trusted)
+            .unwrap()
+            .expect("review configured above");
+        let item = queue
+            .submit(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                ReviewRequest {
+                    text_snippet: "jane@example.com".to_string(),
+                    category: "email".to_string(),
+                    start: 0,
+                    end: 16,
+                    confidence: 0.4,
+                    source: "regex".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let auth = AuthState::new(Arc::new(DevTokenResolver));
+        let jobs = InMemoryJobStore::new().into_arc();
+        let state = ApiState::new(facade, jobs, auth, ApiLimits::default());
+        (state, item.id)
     }
 
     /// A state with auth disabled and an in-memory RAG store attached.
@@ -996,6 +1086,345 @@ pub(crate) mod tests {
         assert_eq!(response.status().as_u16(), 400);
     }
 
+    /// P3b: `POST /v1/pii/token` requires only `documents:process`, not `pii:reveal`
+    /// — the opposite gating from `/v1/pii/reveal` (D-P3-1).
+    #[tokio::test]
+    async fn token_route_works_with_only_documents_process() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pii/token")
+                    .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"category":"email","value":"bob@example.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            200,
+            "token minting must work with documents:process alone"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["token"].as_str().unwrap().starts_with("[EMAIL:"));
+    }
+
+    /// P3b: minting the same value twice returns the same token.
+    #[tokio::test]
+    async fn token_route_same_value_same_token() {
+        let app = build_router(state_with_pii());
+
+        let mint = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/pii/token")
+                .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"category":"email","value":"bob@example.com"}"#,
+                ))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(mint()).await.unwrap();
+        let first_body = axum::body::to_bytes(first.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+
+        let second = app.oneshot(mint()).await.unwrap();
+        let second_body = axum::body::to_bytes(second.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+
+        assert_eq!(first_json["token"], second_json["token"]);
+    }
+
+    /// P3b: `GET /v1/keys` requires `audit:read`; `documents:process` alone is 403.
+    #[tokio::test]
+    async fn keys_route_requires_audit_read() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/keys")
+                    .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// P3b / D-P3-3: `GET /v1/keys`' response reports the configured key's id and
+    /// active status, and the raw JSON text contains no key material — `state_with_pii`
+    /// configures `HACIENDA_PSEUDONYM_KEY_K1` to 64 bytes of hex `07`s, so a leak would
+    /// show up as that literal substring.
+    #[tokio::test]
+    async fn keys_route_reports_status_with_no_key_material() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/keys")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+
+        assert!(
+            !text.contains(&"07".repeat(64)),
+            "key material leaked into the /v1/keys response: {text}"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(text).unwrap();
+        let keys = json["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0]["id"], "k1");
+        assert_eq!(keys[0]["active"], true);
+    }
+
+    // ── P4/P5: the missing review and compliance endpoints ─────────────────────
+
+    /// `GET /v1/review/{id}` returns the item by id, requiring only `audit:read`.
+    #[tokio::test]
+    async fn get_review_item_returns_the_item_by_id() {
+        let (state, item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/review/{item_id}"))
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["item"]["id"], item_id);
+        assert_eq!(json["item"]["text_snippet"], "jane@example.com");
+    }
+
+    /// An unknown id is a 400 with no distinguishable "forbidden" shape — not found is
+    /// not found, matching every other store's discipline in this codebase.
+    #[tokio::test]
+    async fn get_review_item_returns_400_for_an_unknown_id() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/review/does-not-exist")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    /// `POST /v1/review/{id}/assign` requires `review:decide`, not just `audit:read`.
+    #[tokio::test]
+    async fn assign_review_item_requires_review_decide() {
+        let (state, item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/review/{item_id}/assign"))
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reviewer":"alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 403);
+    }
+
+    /// `POST /v1/review/{id}/assign` sets the reviewer, given `review:decide`.
+    #[tokio::test]
+    async fn assign_review_item_sets_the_reviewer() {
+        let (state, item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/review/{item_id}/assign"))
+                    .header("authorization", "Bearer hcd_review:decide_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reviewer":"alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["item"]["assigned_reviewer"], "alice");
+    }
+
+    /// `GET /v1/review/stats` reports the one pending item `state_with_review_and_compliance`
+    /// seeds, and the static `stats` path never collides with the dynamic `/v1/review/{id}`
+    /// route registered alongside it.
+    #[tokio::test]
+    async fn review_stats_reports_pending_count() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/review/stats")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["pending"], 1);
+    }
+
+    /// `GET /v1/compliance/model-card` and `GET /v1/compliance/checklist` are reachable
+    /// standalone, not only bundled inside `GET /v1/compliance/report`.
+    #[tokio::test]
+    async fn model_card_and_checklist_routes_work() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        for path in ["/v1/compliance/model-card", "/v1/compliance/checklist"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200, "{path} did not return 200");
+        }
+    }
+
+    /// `POST /v1/compliance/dora` — the route that could not be reached at all before
+    /// this change (`compliance_report_with_auth` never supplies an incident).
+    #[tokio::test]
+    async fn dora_route_accepts_an_incident_and_returns_a_report() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "summary": "test incident",
+            "timeline": "detected then contained",
+            "root_cause": "misconfiguration",
+            "detected_at": "2026-08-14T00:00:00Z",
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/compliance/dora")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["report"]["reference"].is_string());
+    }
+
+    /// Pins the §2 deviation: `/v1/compliance/dora` must be a `POST`, not a `GET` — a
+    /// `GET` to that path must not silently 200 with an empty/default incident.
+    #[tokio::test]
+    async fn dora_route_is_post_not_get() {
+        let (state, _item_id) = state_with_review_and_compliance().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/compliance/dora")
+                    .header("authorization", "Bearer hcd_audit:read_testsuffix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            405,
+            "GET must not be routable to a POST-only endpoint"
+        );
+    }
+
     /// The route table's path set must be internally consistent (no duplicate paths).
     #[test]
     fn route_table_has_no_duplicate_paths() {
@@ -1425,6 +1854,43 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(response.status().as_u16(), 404);
+    }
+
+    /// `POST .../answer` against a facade with no `[pii]` section configured must fail
+    /// with `HaciendaError::PiiDisabled`'s own classification (400, `invalid_request`),
+    /// not the generic 500 `RagError::Backend` maps to. Before `map_guarded_llm_error`
+    /// (P6 review fix), `FacadeRedactor::redact` boxed every `HaciendaError` — including
+    /// this one — into an opaque `RagError::Backend`, and every redaction failure through
+    /// `GuardedLlm` collapsed to 500 regardless of its real cause. `state_with_rag()`'s own
+    /// doc comment names this exact failure mode (`redact_text_with_auth` "fails closed
+    /// with `PiiDisabled`") as the reason `state_with_rag_and_pii()` exists for the other
+    /// answer tests — this test is the assertion that doc comment was describing.
+    #[tokio::test]
+    async fn rag_answer_without_pii_configured_is_400_not_500() {
+        let app = build_router(state_with_rag());
+
+        assert_eq!(create_collection(&app.clone(), "c1", 3).await, 201);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rag/collections/c1/answer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"prompt":"hi","retrieve":{"mode":"vector","query_vector":[1.0,0.0,0.0],"top_k":5},"llm":{"model":"x/y"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            400,
+            "a PiiDisabled redaction failure must classify as 400, not the generic 500 \
+             RagError::Backend maps to"
+        );
     }
 
     /// Without a configured RAG store, every `/v1/rag/*` route must fail cleanly
@@ -2309,19 +2775,22 @@ pub(crate) mod tests {
         let audit_store = PostgresAuditStore::new(pool.clone());
         let principal = format!("avocat-{}", uuid::Uuid::new_v4());
         audit_store
-            .append(vec![AuditEntryInput {
-                id: uuid::Uuid::new_v4().to_string(),
-                category: "Email".to_string(),
-                action: RedactionAction::Mask,
-                span_hash: "hash".to_string(),
-                span_length: 42,
-                confidence: Some(1.0),
-                source: EntitySource::Regex,
-                pipeline_version: "1.0".to_string(),
-                config_hash: "cfg".to_string(),
-                principal: Some(principal.clone()),
-                vertical: None,
-            }])
+            .append(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                vec![AuditEntryInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    category: "Email".to_string(),
+                    action: RedactionAction::Mask,
+                    span_hash: "hash".to_string(),
+                    span_length: 42,
+                    confidence: Some(1.0),
+                    source: EntitySource::Regex,
+                    pipeline_version: "1.0".to_string(),
+                    config_hash: "cfg".to_string(),
+                    principal: Some(principal.clone()),
+                    vertical: None,
+                }],
+            )
             .await
             .expect("append failed");
 
@@ -2393,19 +2862,22 @@ pub(crate) mod tests {
         // entry can be found by identity rather than assuming an empty table.
         let principal = format!("avocat-postgres-route-test-{}", uuid::Uuid::new_v4());
         audit_store
-            .append(vec![AuditEntryInput {
-                id: uuid::Uuid::new_v4().to_string(),
-                category: "Email".to_string(),
-                action: RedactionAction::Mask,
-                span_hash: "hash".to_string(),
-                span_length: 42,
-                confidence: Some(1.0),
-                source: EntitySource::Regex,
-                pipeline_version: "1.0".to_string(),
-                config_hash: "cfg".to_string(),
-                principal: Some(principal.clone()),
-                vertical: None,
-            }])
+            .append(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                vec![AuditEntryInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    category: "Email".to_string(),
+                    action: RedactionAction::Mask,
+                    span_hash: "hash".to_string(),
+                    span_length: 42,
+                    confidence: Some(1.0),
+                    source: EntitySource::Regex,
+                    pipeline_version: "1.0".to_string(),
+                    config_hash: "cfg".to_string(),
+                    principal: Some(principal.clone()),
+                    vertical: None,
+                }],
+            )
             .await
             .expect("append failed");
 
@@ -2413,25 +2885,28 @@ pub(crate) mod tests {
         // have something to act on.
         let review_id = uuid::Uuid::new_v4().to_string();
         review_store
-            .submit(ReviewQueueItem {
-                id: review_id.clone(),
-                text_snippet: "jane@example.com".to_string(),
-                category: "email".to_string(),
-                start: 0,
-                end: 16,
-                confidence: 0.4,
-                source: "regex".to_string(),
-                status: ReviewStatus::Pending,
-                priority: Priority::High,
-                assigned_reviewer: None,
-                created_at: chrono::Utc::now().to_rfc3339(),
-                deadline: None,
-                decision: None,
-                decided_by: None,
-                decided_at: None,
-                comment: None,
-                tenant_id: "default".to_string(),
-            })
+            .submit(
+                &hacienda_core::tenancy::TenantId::default_tenant(),
+                ReviewQueueItem {
+                    id: review_id.clone(),
+                    text_snippet: "jane@example.com".to_string(),
+                    category: "email".to_string(),
+                    start: 0,
+                    end: 16,
+                    confidence: 0.4,
+                    source: "regex".to_string(),
+                    status: ReviewStatus::Pending,
+                    priority: Priority::High,
+                    assigned_reviewer: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    deadline: None,
+                    decision: None,
+                    decided_by: None,
+                    decided_at: None,
+                    comment: None,
+                    tenant_id: "default".to_string(),
+                },
+            )
             .await
             .expect("submit failed");
 

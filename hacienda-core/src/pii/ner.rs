@@ -49,6 +49,14 @@ pub(crate) fn categories_with_vertical(
 }
 
 /// Runs an xberg NER backend and maps its entities into pipeline spans.
+///
+/// `Clone` is cheap (P3a): `backend` is already behind an `Arc`, and `categories`/
+/// `threshold` are small owned data. This is what lets [`HaciendaFacade`]
+/// (`hacienda-core/src/facade.rs`) build one detector once and construct a second,
+/// per-tenant [`crate::pii::PiiPipeline`] from a clone of it without reloading the NER
+/// backend's model weights.
+///
+/// [`HaciendaFacade`]: crate::HaciendaFacade
 #[derive(Clone)]
 pub struct NerDetector {
     backend: Arc<dyn NerBackend>,

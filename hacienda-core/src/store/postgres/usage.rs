@@ -24,6 +24,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::tenancy::TenantId;
+
 /// Error type for usage read-model queries.
 #[derive(Debug, thiserror::Error)]
 pub enum UsageError {
@@ -46,10 +48,18 @@ pub struct UsageRecord {
 /// Read-model over the audit chain for billing/metering.
 #[async_trait]
 pub trait UsageStore: Send + Sync {
-    /// Aggregate usage per principal, optionally windowed to `created_at >= since` and
-    /// `created_at < until`. `None` on either bound leaves that side open.
+    /// Aggregate usage per principal for `tenant`, optionally windowed to
+    /// `created_at >= since` and `created_at < until`. `None` on either bound leaves
+    /// that side open.
+    ///
+    /// Scoped to `tenant` via `audit_entries.segment_id -> audit_segments.tenant_id`
+    /// (`audit_entries` itself carries no `tenant_id` column — segments are the unit of
+    /// tenant ownership, per S1b). The returned rows carry `principal` values, so an
+    /// unscoped aggregate would disclose which principals exist in *other* tenants, not
+    /// just leak their usage totals — this join is what closes that gap.
     async fn summary(
         &self,
+        tenant: &TenantId,
         since: Option<DateTime<Utc>>,
         until: Option<DateTime<Utc>>,
     ) -> Result<Vec<UsageRecord>, UsageError>;
@@ -85,25 +95,30 @@ struct UsageRow {
 impl UsageStore for PostgresUsageStore {
     async fn summary(
         &self,
+        tenant: &TenantId,
         since: Option<DateTime<Utc>>,
         until: Option<DateTime<Utc>>,
     ) -> Result<Vec<UsageRecord>, UsageError> {
+        let tenant_id = tenant.as_str();
         let rows: Vec<UsageRow> = sqlx::query_as(
             r#"
             SELECT
-                principal,
+                e.principal,
                 COUNT(*) AS entity_count,
                 -- `span_length` is BIGINT; `SUM(BIGINT)` in Postgres returns NUMERIC, not
                 -- BIGINT, so the runtime type check on `UsageRow::byte_count: i64` fails
                 -- without this cast (caught by the ignored integration test below).
-                COALESCE(SUM(span_length), 0)::BIGINT AS byte_count
-            FROM audit_entries
-            WHERE ($1::timestamptz IS NULL OR created_at >= $1)
-              AND ($2::timestamptz IS NULL OR created_at < $2)
-            GROUP BY principal
-            ORDER BY principal NULLS FIRST
+                COALESCE(SUM(e.span_length), 0)::BIGINT AS byte_count
+            FROM audit_entries e
+            JOIN audit_segments s ON s.segment_id = e.segment_id
+            WHERE s.tenant_id = $1
+              AND ($2::timestamptz IS NULL OR e.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR e.created_at < $3)
+            GROUP BY e.principal
+            ORDER BY e.principal NULLS FIRST
             "#,
         )
+        .bind(tenant_id)
         .bind(since)
         .bind(until)
         .fetch_all(&self.pool)
@@ -126,7 +141,16 @@ mod tests {
     use crate::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
     use crate::store::postgres::audit::PostgresAuditStore;
     use crate::store::postgres::test_support;
+    use crate::tenancy::TenantId;
     use uuid::Uuid;
+
+    /// The tenant every non-isolation test in this module uses. Mirrors
+    /// `postgres::audit::tests::t`: these tests already share one un-torn-down Postgres
+    /// database, so a fixed tenant id keeps that existing shared behaviour rather than
+    /// accidentally isolating them.
+    fn t() -> TenantId {
+        TenantId::new("pg-usage-test-tenant")
+    }
 
     // Ignored by default — shares one Postgres instance with the other postgres-feature
     // test modules (see `test_support::shared`), so needs `--test-threads=1`. Run with:
@@ -158,6 +182,10 @@ mod tests {
     fn should_aggregate_entity_and_byte_counts_per_principal() {
         test_support::block_on_shared(async {
             let pool = test_support::shared().await.pool();
+            // `fk_audit_segments_tenant` (migration 0005) requires the tenant to
+            // already exist — only `default` is seeded by migration, so this module's
+            // shared literal tenant must be admitted before any test's first append.
+            test_support::ensure_tenant(&pool, &t()).await;
 
             let audit_store = PostgresAuditStore::new(pool.clone());
             let usage_store = PostgresUsageStore::new(pool);
@@ -171,17 +199,20 @@ mod tests {
             let avocat_7 = format!("avocat-7-{suffix}");
             let avocat_9 = format!("avocat-9-{suffix}");
             audit_store
-                .append(vec![
-                    entry(&format!("{suffix}-a1"), Some(&avocat_7), 10),
-                    entry(&format!("{suffix}-a2"), Some(&avocat_7), 15),
-                    entry(&format!("{suffix}-b1"), Some(&avocat_9), 100),
-                    entry(&format!("{suffix}-c1"), None, 5),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        entry(&format!("{suffix}-a1"), Some(&avocat_7), 10),
+                        entry(&format!("{suffix}-a2"), Some(&avocat_7), 15),
+                        entry(&format!("{suffix}-b1"), Some(&avocat_9), 100),
+                        entry(&format!("{suffix}-c1"), None, 5),
+                    ],
+                )
                 .await
                 .expect("append failed");
 
             let summary = usage_store
-                .summary(None, None)
+                .summary(&t(), None, None)
                 .await
                 .expect("summary failed");
 
@@ -219,6 +250,7 @@ mod tests {
     fn since_in_the_future_excludes_everything() {
         test_support::block_on_shared(async {
             let pool = test_support::shared().await.pool();
+            test_support::ensure_tenant(&pool, &t()).await;
 
             let audit_store = PostgresAuditStore::new(pool.clone());
             let usage_store = PostgresUsageStore::new(pool);
@@ -226,13 +258,16 @@ mod tests {
             let suffix = Uuid::new_v4();
             let principal = format!("avocat-1-{suffix}");
             audit_store
-                .append(vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)])
+                .append(
+                    &t(),
+                    vec![entry(&format!("{suffix}-x1"), Some(&principal), 10)],
+                )
                 .await
                 .expect("append failed");
 
             let future = Utc::now() + chrono::Duration::days(1);
             let summary = usage_store
-                .summary(Some(future), None)
+                .summary(&t(), Some(future), None)
                 .await
                 .expect("summary failed");
 
@@ -241,6 +276,79 @@ mod tests {
                     .iter()
                     .all(|r| r.principal.as_deref() != Some(principal.as_str())),
                 "a since bound in the future must exclude the entry just inserted"
+            );
+        });
+    }
+
+    /// Two tenants, each with their own principal, must never see each other's usage —
+    /// the exact cross-tenant disclosure CodeRabbit flagged: an unscoped `summary` would
+    /// return both principals to either tenant. Each tenant gets a fresh, UUID-suffixed
+    /// id so this test cannot inherit contamination from, or contaminate, the rest of
+    /// the suite.
+    #[test]
+    #[ignore]
+    fn summary_is_scoped_to_the_requesting_tenant() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
+            let tenant_a = TenantId::new(format!("pg-usage-isolation-a-{}", Uuid::new_v4()));
+            let tenant_b = TenantId::new(format!("pg-usage-isolation-b-{}", Uuid::new_v4()));
+            test_support::ensure_tenant(&pool, &tenant_a).await;
+            test_support::ensure_tenant(&pool, &tenant_b).await;
+
+            let audit_store = PostgresAuditStore::new(pool.clone());
+            let usage_store = PostgresUsageStore::new(pool);
+
+            let suffix = Uuid::new_v4();
+            let principal_a = format!("avocat-a-{suffix}");
+            let principal_b = format!("avocat-b-{suffix}");
+
+            audit_store
+                .append(
+                    &tenant_a,
+                    vec![entry(&format!("{suffix}-a1"), Some(&principal_a), 10)],
+                )
+                .await
+                .expect("tenant a append failed");
+            audit_store
+                .append(
+                    &tenant_b,
+                    vec![entry(&format!("{suffix}-b1"), Some(&principal_b), 20)],
+                )
+                .await
+                .expect("tenant b append failed");
+
+            let summary_a = usage_store
+                .summary(&tenant_a, None, None)
+                .await
+                .expect("tenant a summary failed");
+            assert!(
+                summary_a
+                    .iter()
+                    .any(|r| r.principal.as_deref() == Some(principal_a.as_str())),
+                "tenant a's summary must include its own principal"
+            );
+            assert!(
+                summary_a
+                    .iter()
+                    .all(|r| r.principal.as_deref() != Some(principal_b.as_str())),
+                "tenant a's summary must not disclose tenant b's principal"
+            );
+
+            let summary_b = usage_store
+                .summary(&tenant_b, None, None)
+                .await
+                .expect("tenant b summary failed");
+            assert!(
+                summary_b
+                    .iter()
+                    .any(|r| r.principal.as_deref() == Some(principal_b.as_str())),
+                "tenant b's summary must include its own principal"
+            );
+            assert!(
+                summary_b
+                    .iter()
+                    .all(|r| r.principal.as_deref() != Some(principal_a.as_str())),
+                "tenant b's summary must not disclose tenant a's principal"
             );
         });
     }

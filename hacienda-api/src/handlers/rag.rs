@@ -608,9 +608,10 @@ pub async fn migrate_embeddings(
         )));
     }
 
+    let tenant = tenant_ctx.tenant.clone();
     let owner = caller.principal_id().map(str::to_owned);
 
-    let job = state.jobs.create(&tenant_ctx, owner).await.map_err(|e| {
+    let job = state.jobs.create(&tenant, owner).await.map_err(|e| {
         tracing::error!(error = %e, "failed to create migrate-embeddings job");
         ApiError::internal()
     })?;
@@ -619,6 +620,7 @@ pub async fn migrate_embeddings(
     let task_store = Arc::clone(store);
     let task_jobs = state.jobs.clone();
     let task_job_id = job_id.clone();
+    let task_tenant = tenant.clone();
     let task_collection = scoped_name.clone();
     let task_caller_facing_name = name.clone();
     let task_to_source = body.to_source.clone();
@@ -628,6 +630,7 @@ pub async fn migrate_embeddings(
         run_migrate_embeddings_job(
             task_store,
             task_jobs,
+            task_tenant,
             task_job_id,
             task_collection,
             task_caller_facing_name,
@@ -658,9 +661,17 @@ pub async fn migrate_embeddings(
 /// outcome. Split out of [`migrate_embeddings`] so the handler itself stays a
 /// thin validate-then-spawn shim, matching
 /// `documents::process_documents_async`'s shape.
+///
+/// Eight arguments, one per independently `.clone()`d value the caller `move`s into
+/// the spawned task (see the call site) — wrapping them in a struct would just push the
+/// same eight fields into a one-off type built solely to unpack them again here,
+/// matching this repo's existing `#[allow(clippy::too_many_arguments)]` precedent in
+/// `hacienda-core/src/audit/segment.rs`.
+#[allow(clippy::too_many_arguments)]
 async fn run_migrate_embeddings_job(
     store: Arc<dyn hacienda_rag::RagStore>,
     jobs: Arc<dyn hacienda_core::jobs::JobStore>,
+    tenant: hacienda_core::tenancy::TenantId,
     job_id: String,
     collection: String,
     caller_facing_name: String,
@@ -668,7 +679,7 @@ async fn run_migrate_embeddings_job(
     to_version: u32,
 ) {
     if let Err(e) = jobs
-        .transition(&job_id, JobStatus::Queued, JobStatus::Running)
+        .transition(&tenant, &job_id, JobStatus::Queued, JobStatus::Running)
         .await
     {
         tracing::error!(
@@ -678,7 +689,7 @@ async fn run_migrate_embeddings_job(
         return;
     }
 
-    match migrate_embeddings_work(&store, &jobs, &job_id, &collection, &to_source).await {
+    match migrate_embeddings_work(&store, &jobs, &tenant, &job_id, &collection, &to_source).await {
         Ok(()) => {
             if let Err(e) = store
                 .set_embedding_provenance(&collection, &to_source, to_version)
@@ -690,6 +701,7 @@ async fn run_migrate_embeddings_job(
                 );
                 let _ = jobs
                     .fail(
+                        &tenant,
                         &job_id,
                         "failed to persist embedding provenance".to_string(),
                     )
@@ -702,7 +714,7 @@ async fn run_migrate_embeddings_job(
                 "to_version": to_version,
             })
             .to_string();
-            if let Err(e) = jobs.finish(&job_id, result_json).await {
+            if let Err(e) = jobs.finish(&tenant, &job_id, result_json).await {
                 tracing::error!(
                     job_id = %job_id, error = %e,
                     "failed to mark migrate-embeddings job as succeeded"
@@ -714,7 +726,7 @@ async fn run_migrate_embeddings_job(
                 job_id = %job_id, collection = %collection, error = %message,
                 "migrate-embeddings job failed"
             );
-            let _ = jobs.fail(&job_id, message).await;
+            let _ = jobs.fail(&tenant, &job_id, message).await;
         }
     }
 }
@@ -730,6 +742,7 @@ async fn run_migrate_embeddings_job(
 async fn migrate_embeddings_work(
     store: &Arc<dyn hacienda_rag::RagStore>,
     jobs: &Arc<dyn hacienda_core::jobs::JobStore>,
+    tenant: &hacienda_core::tenancy::TenantId,
     job_id: &str,
     collection: &str,
     to_source: &str,
@@ -804,7 +817,7 @@ async fn migrate_embeddings_work(
             current_phase: "embedding".to_string(),
         };
         if let Ok(progress_json) = serde_json::to_string(&progress) {
-            if let Err(e) = jobs.update_progress(job_id, progress_json).await {
+            if let Err(e) = jobs.update_progress(tenant, job_id, progress_json).await {
                 tracing::warn!(
                     job_id = %job_id, error = %e,
                     "failed to record migrate-embeddings progress"
@@ -854,10 +867,11 @@ pub async fn get_migrate_status(
 ) -> Result<Json<MigrateStatusResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
 
     let job = state
         .jobs
-        .get(&job_id)
+        .get(&tenant, &job_id)
         .await
         .map_err(|e| {
             tracing::error!(

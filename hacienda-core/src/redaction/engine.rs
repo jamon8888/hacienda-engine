@@ -199,6 +199,7 @@ mod tests {
     use super::*;
     use crate::pii::types::{EntitySource, PiiCategory};
     use crate::redaction::pseudonym::{EnvKeyResolver, ACTIVE_KEY_VAR, KEY_BYTES};
+    use crate::tenancy::TenantId;
 
     fn entity(category: PiiCategory, start: u32, end: u32) -> MergedEntity {
         MergedEntity {
@@ -230,8 +231,9 @@ mod tests {
             "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
             _ => None,
         });
-        let ctx = crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
-        Some(Arc::new(Pseudonymiser::new(&ctx, &resolver, &[]).unwrap()))
+        Some(Arc::new(
+            Pseudonymiser::new(&resolver, &TenantId::default_tenant(), &[]).unwrap(),
+        ))
     }
 
     /// Shorthand for the common case: redaction that is expected to succeed.

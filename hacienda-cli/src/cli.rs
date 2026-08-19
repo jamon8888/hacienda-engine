@@ -65,6 +65,14 @@ pub enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Serve the Model Context Protocol (MCP) surface, for Claude Desktop and other
+    /// local MCP clients.
+    ///
+    /// Runs the same `HaciendaFacade` `hacienda serve` would build from this
+    /// configuration, over stdio instead of HTTP. Like `pii reveal`, this process is
+    /// `Caller::Trusted` — the process boundary is the trust boundary, appropriate for a
+    /// locally spawned MCP server, not for a network-reachable one.
+    Mcp(McpArgs),
     /// Operations on the human review queue (AI Act Art. 14 human oversight).
     Review {
         #[command(subcommand)]
@@ -77,6 +85,18 @@ pub enum Command {
     },
     /// Print a shell completion script to stdout.
     Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub command: McpCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Start the MCP server on the stdio transport.
+    Serve,
 }
 
 #[derive(Debug, Subcommand)]

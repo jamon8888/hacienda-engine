@@ -7,8 +7,9 @@ use std::time::Instant;
 
 use crate::{
     dto::{
-        EntityDto, PiiConfigResponse, RedactTextRequest, RedactTextResponse, RevealTokenRequest,
-        RevealTokenResponse, ScanTextRequest, ScanTextResponse,
+        EntityDto, MintTokenRequest, MintTokenResponse, PiiConfigResponse, RedactTextRequest,
+        RedactTextResponse, RevealTokenRequest, RevealTokenResponse, ScanTextRequest,
+        ScanTextResponse,
     },
     error::ApiError,
     extract::Json as SafeJson,
@@ -202,6 +203,45 @@ pub async fn reveal_token(
         plaintext: result,
         audit_chain_tip,
     }))
+}
+
+/// `POST /v1/pii/token`
+///
+/// Mints the pseudonym token for a caller-supplied `(category, value)` pair, without
+/// revealing anything. Requires `documents:process` only — not `pii:reveal` — because
+/// computing the token for a value the caller already supplies discloses nothing new
+/// (`facade.mint_pseudonym_token_with_auth`'s own doc comment, P3b §2). This is what
+/// makes a GDPR right of access or erasure practicable against redacted storage: compute
+/// the token for a named value, then search the corpus for *that token*.
+#[utoipa::path(
+    post,
+    path = "/v1/pii/token",
+    tag = "pii",
+    operation_id = "mintToken",
+    security(("bearerAuth" = [])),
+    request_body = MintTokenRequest,
+    responses(
+        (status = 200, description = "The pseudonym token for the requested value", body = MintTokenResponse),
+        (status = 400, description = "Unsupported category name, or no key resolvable for the caller's tenant"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
+pub async fn mint_token(
+    State(state): State<ApiState>,
+    parts: Parts,
+    SafeJson(body): SafeJson<MintTokenRequest>,
+) -> Result<Json<MintTokenResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let token = state
+        .facade
+        .mint_pseudonym_token_with_auth(caller, &body.category, &body.value)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(MintTokenResponse { token }))
 }
 
 #[cfg(test)]

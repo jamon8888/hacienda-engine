@@ -57,11 +57,7 @@ impl PiiPipeline {
     /// [`PiiError::ModelUnavailable`] if the configuration enables a model this
     /// build cannot load.
     pub fn new(config: PipelineConfig) -> Result<Self, PiiError> {
-        let detector = if config.model.enabled {
-            Some(load_detector(&config)?)
-        } else {
-            None
-        };
+        let detector = build_detector(&config)?;
         Self::assemble(config, detector, None)
     }
 
@@ -100,11 +96,7 @@ impl PiiPipeline {
         config: PipelineConfig,
         pseudonymiser: Option<Arc<Pseudonymiser>>,
     ) -> Result<Self, PiiError> {
-        let detector = if config.model.enabled {
-            Some(load_detector(&config)?)
-        } else {
-            None
-        };
+        let detector = build_detector(&config)?;
         Self::assemble(config, detector, pseudonymiser)
     }
 
@@ -272,6 +264,21 @@ fn load_detector(_config: &PipelineConfig) -> Result<NerDetector, PiiError> {
     ))
 }
 
+/// Build the detector `config` selects, or `None` if `config.model.enabled` is false.
+///
+/// `pub(crate)` so `HaciendaFacade` (P3a) can build the (expensive) detector once and
+/// reuse it — via [`NerDetector`]'s cheap `Clone` — across one [`PiiPipeline`] per
+/// tenant, instead of every pipeline independently reloading the model. `PiiPipeline::new`/
+/// `with_pseudonymiser` also call this, so the "load only when enabled" branch exists in
+/// exactly one place.
+pub(crate) fn build_detector(config: &PipelineConfig) -> Result<Option<NerDetector>, PiiError> {
+    if config.model.enabled {
+        Ok(Some(load_detector(config)?))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Validate that every entity category configured on `detector` can be encoded in a
 /// pseudonym token.
 ///
@@ -304,6 +311,7 @@ mod tests {
     use super::*;
     use crate::pii::types::PiiCategory;
     use crate::redaction::RedactionMode;
+    use crate::tenancy::TenantId;
     use std::sync::Arc;
     use xberg::text::ner::NerBackend;
     use xberg::types::entity::{Entity, EntityCategory};
@@ -466,10 +474,9 @@ mod tests {
                 "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
                 _ => None,
             });
-            let ctx =
-                crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
             Some(Arc::new(
-                crate::redaction::Pseudonymiser::new(&ctx, &resolver, &[]).unwrap(),
+                crate::redaction::Pseudonymiser::new(&resolver, &TenantId::default_tenant(), &[])
+                    .unwrap(),
             ))
         };
 
@@ -514,10 +521,9 @@ mod tests {
                 "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
                 _ => None,
             });
-            let ctx =
-                crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
             Some(Arc::new(
-                crate::redaction::Pseudonymiser::new(&ctx, &resolver, &[]).unwrap(),
+                crate::redaction::Pseudonymiser::new(&resolver, &TenantId::default_tenant(), &[])
+                    .unwrap(),
             ))
         };
 
@@ -570,8 +576,10 @@ mod tests {
             "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(KEY_BYTES)),
             _ => None,
         });
-        let ctx = crate::tenancy::TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"));
-        Arc::new(crate::redaction::Pseudonymiser::new(&ctx, &resolver, &[]).unwrap())
+        Arc::new(
+            crate::redaction::Pseudonymiser::new(&resolver, &TenantId::default_tenant(), &[])
+                .unwrap(),
+        )
     }
 
     #[test]
