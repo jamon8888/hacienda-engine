@@ -142,6 +142,7 @@ mod audit_handle {
     use super::to_js_err;
     use hacienda_core::audit::{AuditEntryInput, AuditStore, IndexedDbAuditStore, NodeId};
     use hacienda_core::pii::PipelineResult;
+    use hacienda_core::tenancy::TenantId;
     use wasm_bindgen::prelude::*;
 
     /// Recorded on every entry this handle mints, mirroring
@@ -215,23 +216,35 @@ mod audit_handle {
                     })
                     .collect();
 
-                self.store.append(inputs).await.map_err(to_js_err)?;
+                self.store
+                    .append(&TenantId::default_tenant(), inputs)
+                    .await
+                    .map_err(to_js_err)?;
             }
 
-            self.store.tip().await.map_err(to_js_err)
+            self.store
+                .tip(&TenantId::default_tenant())
+                .await
+                .map_err(to_js_err)
         }
 
         /// The chain's current head — a client that records this alongside a result can
         /// later prove which chain state produced it.
         pub async fn tip(&self) -> Result<String, JsValue> {
-            self.store.tip().await.map_err(to_js_err)
+            self.store
+                .tip(&TenantId::default_tenant())
+                .await
+                .map_err(to_js_err)
         }
 
         /// Recompute every chain hash from genesis. Throws (rejects) on the first
         /// mismatch rather than returning a boolean, so a caller can't accidentally
         /// ignore tampering by discarding a return value.
         pub async fn verify(&self) -> Result<(), JsValue> {
-            self.store.verify().await.map_err(to_js_err)
+            self.store
+                .verify(&TenantId::default_tenant())
+                .await
+                .map_err(to_js_err)
         }
     }
 }
