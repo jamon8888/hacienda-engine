@@ -354,11 +354,14 @@ export async function loadNerModel(
   // Only the model's own progress is reported — it dwarfs the tokenizer (~16MB) and config
   // (<1KB), so tracking all three separately would add complexity without changing what the
   // user sees in any meaningful way.
+  const downloadStart = performance.now();
   const [modelData, tokenizerData, configData] = await Promise.all([
     fetchAsset(MODEL_URL, { onProgress, parallel: true }),
     fetchAsset(TOKENIZER_URL),
     fetchAsset(ENCODER_CONFIG_URL),
   ]);
+  const downloadMs = performance.now() - downloadStart;
+  console.log(`[PERF] Download: ${downloadMs.toFixed(0)}ms (${(modelData.byteLength / 1024 / 1024).toFixed(1)} MB)`);
 
   // Cache in IndexedDB
   const tx = db.transaction(MODEL_STORE, "readwrite");
@@ -383,11 +386,14 @@ export async function createNerBackend(
 ): Promise<NerModel> {
   // Use the new NerModel from xberg-wasm (ner-candle-wasm feature)
   const { NerModel } = await import("@xberg-io/xberg-wasm");
+  const loadStart = performance.now();
   const runtime = await NerModel.load({
     weights: model,
     tokenizer,
     encoderConfig,
   });
+  const loadMs = performance.now() - loadStart;
+  console.log(`[PERF] Model load (WASM): ${loadMs.toFixed(0)}ms`);
   return runtime;
 }
 

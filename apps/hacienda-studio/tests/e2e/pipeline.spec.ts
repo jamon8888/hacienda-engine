@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect } from "@playwright/test";
 import JSZip from "jszip";
-import { skipOnboarding } from "./fixtures";
+import { skipOnboarding, waitForFileRowDone } from "./fixtures";
 
 const NOTE = [
   "Contact Jean Dupont at jean.dupont@cabinet-exemple.fr.",
@@ -36,13 +36,15 @@ test.describe("document pipeline", () => {
     // WASM module, and the input is disabled until the handshake lands.
     await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
+    await waitForFileRowDone(page, "note.txt");
 
+    const download = page.waitForEvent("download");
+    await page.click("button.download-zip");
     const zip = await JSZip.loadAsync(await readFile(await (await download).path()));
     expect(Object.keys(zip.files).sort()).toEqual(
       expect.arrayContaining([

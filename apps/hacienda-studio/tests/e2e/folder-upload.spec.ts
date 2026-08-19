@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { test, expect } from "@playwright/test";
 import JSZip from "jszip";
-import { skipOnboarding } from "./fixtures";
+import { skipOnboarding, waitForFileRowDone } from "./fixtures";
 
 const NOTE =
   "Contact Jean Dupont at jean.dupont@cabinet-exemple.fr regarding the deal.";
@@ -46,7 +46,6 @@ test.describe("folder upload (Track I1)", () => {
         "",
       );
 
-      const download = page.waitForEvent("download");
       await page.setInputFiles('input[type="file"]', dir);
 
       const skipNotice = page.locator(".skip-notice");
@@ -54,12 +53,16 @@ test.describe("folder upload (Track I1)", () => {
       await expect(skipNotice).toContainText("1 unsupported");
       await expect(skipNotice).toContainText("1 system");
 
+      const root = basename(dir);
+      await waitForFileRowDone(page, `${root}/sub/note.txt`);
+
+      const download = page.waitForEvent("download");
+      await page.click("button.download-zip");
       const zip = await JSZip.loadAsync(
         await readFile(await (await download).path()),
       );
       const entryNames = Object.keys(zip.files);
 
-      const root = basename(dir);
       const notePath = entryNames.find((name) =>
         name.endsWith(`documents/${root}/sub/note.md`),
       );

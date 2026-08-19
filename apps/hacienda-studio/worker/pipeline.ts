@@ -23,7 +23,11 @@ import initWasm from "@xberg-io/xberg-wasm";
 // index.html, and WebAssembly rejects it as "expected magic word 00 61 73 6d,
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
-import { extractEntities, type BridgeEntity } from "../lib/ner-bridge";
+import {
+  extractEntities,
+  isBridgeEntityArray,
+  type BridgeEntity,
+} from "../lib/ner-bridge";
 import { createNerBackend, loadNerModel } from "../lib/asset-loader";
 import {
   initPiiEngine,
@@ -43,19 +47,34 @@ import { KGExporter } from "../lib/kg-export";
 import { TranscriptionRequestBridge } from "./transcribe-bridge";
 import type { TranscriptionResult } from "../lib/transcription/types";
 import {
-  entityFileName,
   relativeEntityLink,
-  relativeDocLink,
   renderAnnotatedMarkdown,
 } from "../lib/annotate";
+import {
+  assembleZip,
+  buildEntityFile,
+  buildGlossaryIndex,
+  type ZipBatch,
+} from "../lib/zip-export";
 
 // Track I4: re-exported unchanged so nothing importing these from "./pipeline" (the
 // vitest suite included) needs to know they now live in lib/annotate.ts — see that
 // file's header for why the split exists (App.tsx needs them without this module's
 // top-level `self.onmessage =`).
 export { relativeEntityLink, renderAnnotatedMarkdown };
+// Track K/Phase 2: same re-export pattern, now for lib/zip-export.ts — see that
+// file's header for why the split exists (the worker needs a "build-zip" round trip
+// that runs independently of processFiles(), not just once at the end of it).
+export { buildEntityFile, buildGlossaryIndex };
 
 let wasmReady: Promise<void> | null = null;
+
+// Track K/Phase 2: the most recently completed batch's state, retained so the
+// on-demand "build-zip" message (self.onmessage below) can call assembleZip()
+// without processFiles() needing to build the zip eagerly. Concurrent batches
+// aren't supported (see the plan's risk notes) — a second "process" message
+// mid-batch would overwrite this before the first batch's zip request lands.
+let lastBatch: ZipBatch | null = null;
 
 // Worker-side half of the whisper transcription bridge — see `worker/transcribe-bridge.ts`'s
 // header for why transcription has to be requested from the main thread rather than run
@@ -125,8 +144,32 @@ export function selectNerBridge(
   runtime: NerRuntime | null,
 ): (text: string, categories: string[]) => Promise<BridgeEntity[]> {
   if (!runtime) return extractEntities;
-  return async (text, categories) =>
-    (await runtime.detect(text, { categories })) as BridgeEntity[];
+  return async (text, categories) => {
+    try {
+      const raw: unknown = await runtime.detect(text, { categories });
+      // `runtime.detect()` crosses a WASM boundary — its result isn't something this
+      // code controls the shape of. Validate rather than `as BridgeEntity[]`-assert it.
+      if (!isBridgeEntityArray(raw)) {
+        throw new Error(
+          "Neural NER backend returned a malformed result (not a BridgeEntity[])",
+        );
+      }
+      return raw;
+    } catch (err: unknown) {
+      // Candle F16/F32 dtype mismatch — GLiNER2 weights are F16 but candle creates
+      // F32 activations with no auto-cast. Falls back to regex/compromise for this
+      // document rather than crashing the batch.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("dtype mismatch")) {
+        console.warn(
+          "[Worker] Neural NER dtype mismatch (F16/F32), falling back to regex:",
+          msg,
+        );
+        return extractEntities(text, categories);
+      }
+      throw err;
+    }
+  };
 }
 
 function postProgress(update: ProgressUpdate): void {
@@ -139,6 +182,33 @@ function slugify(text: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .substring(0, 64);
+}
+
+/** The one shape the NER-result loop below actually reads from an entity. */
+interface RawNerEntity {
+  category: string;
+  text: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * `nerEngine.ner()` is an external WASM bridge call — its result isn't
+ * something this code controls the shape of. Without this guard, a malformed
+ * or incompatible result would throw a raw, uncaught `TypeError` reading
+ * `.category`/`.text`/`.start`/`.end` off an unexpected value, failing the
+ * whole file's processing instead of the "continue without NER" degradation
+ * the surrounding try/catch already intends for a NER failure.
+ */
+function isRawNerEntity(value: unknown): value is RawNerEntity {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.category === "string" &&
+    typeof v.text === "string" &&
+    typeof v.start === "number" &&
+    typeof v.end === "number"
+  );
 }
 
 const MA_TERMS =
@@ -169,7 +239,22 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
       map.set(key, e);
     }
   }
-  return Array.from(map.values()).sort((a, b) => b.count - a.count);
+
+  // Filter overlapping spans within each entity to prevent nested links. Compares each
+  // candidate against the last *retained* span, not the previous span in sorted order —
+  // for [0,3], [2,10], [4,5], comparing against arr[i-1] would drop [4,5] against the
+  // already-dropped [2,10] even though [4,5] doesn't overlap the retained [0,3].
+  return Array.from(map.values())
+    .map((e) => {
+      const sorted = [...e.spans].sort((a, b) => a.start - b.start);
+      const retained: typeof sorted = [];
+      for (const span of sorted) {
+        const previous = retained[retained.length - 1];
+        if (!previous || span.start >= previous.end) retained.push(span);
+      }
+      return { ...e, spans: retained };
+    })
+    .sort((a, b) => b.count - a.count);
 }
 
 /**
@@ -217,60 +302,6 @@ entities: ${JSON.stringify(entityMeta)}
 ---`;
 }
 
-/**
- * Track G3: without this, a Claude Desktop session that opens the zip sees a
- * pile of markdown files, a JSON registry and a `kg-export/` folder with no
- * explanation — nothing tells it the registry and KG files exist to answer
- * cross-document questions the prose alone can't (which entities appear in
- * multiple files, how they relate), so a session would only ever read the
- * prose. `fileCount`/`entityCount` are computed by the caller, which already
- * has `results`/`registry` in scope; this function only formats.
- */
-function buildBundleReadme(fileCount: number, entityCount: number): string {
-  const documents = fileCount === 1 ? "document" : "documents";
-  const entities = entityCount === 1 ? "entity" : "entities";
-  return `# Hacienda Studio export
-
-This bundle was produced entirely in-browser (Hacienda Studio) — no document
-left the device it was processed on. It contains ${fileCount} processed
-${documents} and ${entityCount} distinct ${entities} across them.
-
-## What's in here
-
-- **\`documents/\`** — one markdown file per source document, at the same
-  relative path it was uploaded from. Each has YAML frontmatter (source name,
-  type, processing time, PII count) followed by the extracted content, with
-  named entities linked to their file under \`entities/\`, and a local
-  \`## Entities\` summary at the bottom.
-- **\`entities/\`** — one file per distinct entity across the whole batch:
-  type, vertical, roles, aliases, and a backlink to every document that
-  mentions it. This is what makes the bundle RAG-ready rather than merely
-  readable — open \`entities/organization-acme-sas.md\` and find every
-  document naming Acme SAS, without reading every file in \`documents/\`.
-- **\`GLOSSARY.md\`** — the index into \`entities/\`, grouped by type. Start
-  here for "what entities does this bundle know about".
-- **\`_manifest.json\`** — the file list for this batch, with per-file entity
-  counts.
-- **\`entities-registry.json\`** — every entity across the whole batch, with
-  which document(s) it appears in and inferred relationships between
-  entities. Use this, not just the prose, to answer questions that span more
-  than one document — an entity mentioned in three files only has one row
-  here, not three.
-- **\`kg-export/\`** — the same registry as a knowledge graph, in three
-  formats: \`neo4j.cypher\` (importable into Neo4j), \`networkx.json\`
-  (Python's NetworkX), and \`rdf.ttl\` (RDF/Turtle). Prefer these over
-  re-deriving relationships from the prose.
-
-## Reading this bundle
-
-For cross-document questions (shared entities, relationships between
-documents), start from \`GLOSSARY.md\`, \`entities/\`, \`entities-registry.json\`
-or \`kg-export/\`, not by reading every file in \`documents/\`. For a single
-document's content, its own \`.md\` file is self-contained — frontmatter,
-prose, and local entity summary together.
-`;
-}
-
 function buildGlossary(entities: Entity[], docPath: string): string {
   if (entities.length === 0) return "";
   let md = "\n## Entities\n\n";
@@ -278,65 +309,6 @@ function buildGlossary(entities: Entity[], docPath: string): string {
     const verticalInfo =
       e.vertical && e.vertical !== "shared" ? ` [${e.vertical}]` : "";
     md += `- [${e.name}](${relativeEntityLink(docPath, e)}) \`${e.type.charAt(0).toUpperCase() + e.type.slice(1)}${verticalInfo}\` — mentioned ${e.count} time${e.count > 1 ? "s" : ""}\n`;
-  }
-  return md;
-}
-
-/**
- * Track I2: "one file per entity, with backlinks." `docLinks` are already
- * `documents/...` paths (see `processFiles`'s `docPaths` map) — sorted by
- * the caller so file output is deterministic across runs.
- */
-export function buildEntityFile(
-  entity: RegistryEntity,
-  docLinks: string[],
-): string {
-  const typeLabel = entity.type.charAt(0).toUpperCase() + entity.type.slice(1);
-  const lines = [`# ${entity.display_name}`, "", `- **Type:** ${typeLabel}`];
-  if (entity.vertical) lines.push(`- **Vertical:** ${entity.vertical}`);
-  if (entity.sector) lines.push(`- **Sector:** ${entity.sector}`);
-  if (entity.roles.length) lines.push(`- **Roles:** ${entity.roles.join(", ")}`);
-  if (entity.aliases.length)
-    lines.push(`- **Aliases:** ${entity.aliases.join(", ")}`);
-  lines.push(
-    `- **Mentions:** ${entity.mention_count} across ${docLinks.length} document${docLinks.length === 1 ? "" : "s"}`,
-  );
-  lines.push("", "## Appears in", "");
-  for (const docPath of docLinks) {
-    lines.push(`- [${docPath.replace(/^documents\//, "")}](${relativeDocLink(docPath)})`);
-  }
-  return lines.join("\n") + "\n";
-}
-
-/**
- * Track I2: "GLOSSARY.md is the entry point" — the global index into
- * `entities/`, grouped by type and sorted for deterministic output.
- */
-export function buildGlossaryIndex(entities: RegistryEntity[]): string {
-  if (entities.length === 0) {
-    return "# Glossary\n\nNo entities were detected in this batch.\n";
-  }
-  const byType = new Map<string, RegistryEntity[]>();
-  for (const e of entities) {
-    const list = byType.get(e.type) ?? [];
-    list.push(e);
-    byType.set(e.type, list);
-  }
-  let md =
-    "# Glossary\n\nEvery entity detected across this batch. Open an entry " +
-    "for its full detail and backlinks into the documents that mention it.\n";
-  for (const type of Array.from(byType.keys()).sort()) {
-    const typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
-    md += `\n## ${typeLabel}\n\n`;
-    const sorted = byType
-      .get(type)!
-      .sort((a, b) => a.display_name.localeCompare(b.display_name));
-    for (const e of sorted) {
-      const verticalInfo =
-        e.vertical && e.vertical !== "shared" ? ` — ${e.vertical}` : "";
-      const docCount = e.source_documents.length;
-      md += `- [${e.display_name}](entities/${entityFileName(e)})${verticalInfo}, mentioned ${e.mention_count} time${e.mention_count > 1 ? "s" : ""} across ${docCount} document${docCount === 1 ? "" : "s"}\n`;
-    }
   }
   return md;
 }
@@ -368,6 +340,7 @@ async function processFile(
    * `"pseudonymize"` and a passphrase was given. */
   pseudonymKeyHex: string | null,
 ): Promise<ProcessedFile> {
+  console.log(`[Worker] processFile START: ${input.name} (${input.type}, ${input.bytes.byteLength} bytes)`);
   postProgress({ file: input.name, stage: "extract", percent: 10 });
 
   // Track I2: every document lives under `documents/` in the exported vault,
@@ -402,55 +375,94 @@ async function processFile(
       `[Worker] Transcription complete: ${markdown.substring(0, 100)}...`,
     );
   } else {
-    const extractInput = WasmExtractInput.fromBytes(
-      new Uint8Array(input.bytes),
-      input.type,
-      input.name,
-    );
+    console.log(`[Worker] Extracting content from ${input.name}...`);
+    try {
+      const extractInput = WasmExtractInput.fromBytes(
+        new Uint8Array(input.bytes),
+        input.type,
+        input.name,
+      );
 
-    const extractConfig = WasmExtractionConfig.default();
-    extractConfig.outputFormat = WasmOutputFormat.Markdown;
-    extractConfig.chunking = WasmChunkingConfig.default();
-    extractConfig.chunking.maxCharacters = config.chunkSize;
-    extractConfig.ocr = WasmOcrConfig.default();
-    extractConfig.ocr.backend = "tesseract-wasm";
-    extractConfig.ocr.language = ["eng"];
+      const extractConfig = WasmExtractionConfig.default();
+      extractConfig.outputFormat = WasmOutputFormat.Markdown;
+      extractConfig.chunking = WasmChunkingConfig.default();
+      extractConfig.chunking.maxCharacters = config.chunkSize;
+      extractConfig.ocr = WasmOcrConfig.default();
+      extractConfig.ocr.backend = "tesseract-wasm";
+      extractConfig.ocr.language = ["eng"];
 
-    const nerConfig = WasmNerConfig.default();
-    nerConfig.backend = WasmNerBackendKind.Onnx;
-    nerConfig.categories = config.nerCategories;
-    extractConfig.ner = nerConfig;
+      const nerConfig = WasmNerConfig.default();
+      nerConfig.backend = WasmNerBackendKind.Onnx;
+      nerConfig.categories = config.nerCategories;
+      extractConfig.ner = nerConfig;
 
-    const engine = new XbergEngine(
-      { bridgeTimeoutMs: 30000 },
-      { ner: { ner: selectNerBridge(nerRuntime) } },
-    );
+      const engine = new XbergEngine(
+        { bridgeTimeoutMs: 30000 },
+        { ner: { ner: selectNerBridge(nerRuntime) } },
+      );
 
-    const result = await engine.extract(extractInput, extractConfig);
-    postProgress({ file: input.name, stage: "extract", percent: 50 });
+      console.log(`[Worker] Calling engine.extract for ${input.name}...`);
+      const extractStart = performance.now();
+      const result = await engine.extract(extractInput, extractConfig);
+      const extractMs = performance.now() - extractStart;
+      console.log(`[Worker] engine.extract completed in ${extractMs.toFixed(0)}ms for ${input.name}`);
+      postProgress({ file: input.name, stage: "extract", percent: 50 });
 
-    if (!result.results[0]?.content) {
-      throw new Error("No content extracted");
+      if (!result.results[0]?.content) {
+        console.error(`[Worker] No content extracted from ${input.name}. Result:`, result);
+        throw new Error("No content extracted");
+      }
+
+      markdown = result.results[0].content;
+      console.log(`[Worker] Extracted ${markdown.length} chars from ${input.name}`);
+    } catch (extractError) {
+      console.error(`[Worker] EXTRACTION FAILED for ${input.name}:`, extractError);
+      console.error("[Worker] Extraction error type:", typeof extractError);
+      console.error("[Worker] Extraction error constructor:", extractError?.constructor?.name);
+      if (extractError instanceof Error) {
+        console.error("[Worker] Extraction error name:", extractError.name);
+        console.error("[Worker] Extraction error message:", extractError.message);
+        console.error("[Worker] Extraction error stack:", extractError.stack);
+      } else {
+        console.error("[Worker] Raw extraction error:", JSON.stringify(extractError));
+      }
+      throw extractError;
     }
-
-    markdown = result.results[0].content;
   }
 
   postProgress({ file: input.name, stage: "ner", percent: 60 });
 
   // Run NER on the markdown (works for both transcription and extraction)
-  const nerEngine = new XbergEngine(
-    { bridgeTimeoutMs: 30000 },
-    { ner: { ner: selectNerBridge(nerRuntime) } },
-  );
+  console.log(`[Worker] Running NER on ${input.name}...`);
+  let nerResults: unknown[] = [];
+  try {
+    const nerEngine = new XbergEngine(
+      { bridgeTimeoutMs: 30000 },
+      { ner: { ner: selectNerBridge(nerRuntime) } },
+    );
 
-  const nerResults = await nerEngine.ner(markdown, {
-    categories: config.nerCategories,
-  });
-  console.log(
-    "[Worker] Engine NER results:",
-    JSON.stringify(nerResults, null, 2),
-  );
+    nerResults = await nerEngine.ner(markdown, {
+      categories: config.nerCategories,
+    });
+    console.log(
+      "[Worker] Engine NER results:",
+      JSON.stringify(nerResults, null, 2),
+    );
+  } catch (nerError) {
+    console.error(`[Worker] NER FAILED for ${input.name}, continuing without NER:`, nerError);
+    if (nerError instanceof Error) {
+      console.error("[Worker] NER error:", nerError.name, nerError.message);
+    }
+    // Don't throw — continue processing with empty NER results so the file
+    // still gets PII detection, redaction, and zip export. But say so: without this,
+    // a document with zero entities because NER failed is indistinguishable from one
+    // that genuinely has none.
+    self.postMessage({
+      type: "warning",
+      file: input.name,
+      message: "Entity extraction (NER) failed for this file — it will export with no entity glossary.",
+    });
+  }
 
   const xbergEntities = nerResults || [];
   console.log(
@@ -460,7 +472,14 @@ async function processFile(
 
   const entities: Entity[] = [];
   for (const e of xbergEntities) {
-    if (!config.nerCategories.includes(e.category.toLowerCase())) continue;
+    if (!isRawNerEntity(e)) {
+      console.warn(`[Worker] Skipping malformed NER entity for ${input.name}:`, e);
+      continue;
+    }
+    // `e.category` is a runtime string from an external WASM bridge, not
+    // necessarily a valid `NerCategory` — compare as plain strings rather than
+    // asserting it into that narrower type.
+    if (!(config.nerCategories as string[]).includes(e.category.toLowerCase())) continue;
     entities.push({
       name: e.text,
       type: e.category.toLowerCase(),
@@ -484,12 +503,31 @@ async function processFile(
   let piiEntitiesFound = 0;
   let piiFindings: PiiEntity[] = [];
   if (config.enablePiiDetection) {
+    console.log(`[Worker] Running PII detection on ${input.name}...`);
     postProgress({ file: input.name, stage: "pii", percent: 82 });
-    const piiResult = config.redactPiiInOutput
-      ? await redactPii(markdown)
-      : await scanForPii(markdown);
-    piiFindings = piiResult.entities;
-    piiEntitiesFound = piiFindings.length;
+    try {
+      const piiStart = performance.now();
+      const piiResult = config.redactPiiInOutput
+        ? await redactPii(markdown)
+        : await scanForPii(markdown);
+      const piiMs = performance.now() - piiStart;
+      console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
+      piiFindings = piiResult.entities;
+      piiEntitiesFound = piiFindings.length;
+      console.log(`[Worker] Found ${piiEntitiesFound} PII entities in ${input.name}`);
+    } catch (piiError) {
+      console.error(`[Worker] PII DETECTION FAILED for ${input.name}:`, piiError);
+      console.error("[Worker] PII error type:", typeof piiError);
+      console.error("[Worker] PII error constructor:", piiError?.constructor?.name);
+      if (piiError instanceof Error) {
+        console.error("[Worker] PII error name:", piiError.name);
+        console.error("[Worker] PII error message:", piiError.message);
+        console.error("[Worker] PII error stack:", piiError.stack);
+      } else {
+        console.error("[Worker] Raw PII error:", JSON.stringify(piiError));
+      }
+      throw piiError;
+    }
 
     // Track F1/F2: `redactionMode: "pseudonymize"` replaces each finding's
     // `redact_template` — the string `renderAnnotatedMarkdown` splices into the body — with
@@ -583,6 +621,8 @@ async function processFile(
 
   postProgress({ file: input.name, stage: "complete", percent: 100 });
 
+  console.log(`[Worker] processFile DONE: ${input.name} → ${input.name.replace(/\.[^.]+$/, ".md")}, ${deduped.length} entities, ${piiEntitiesFound} PII`);
+
   return {
     name: input.name.replace(/\.[^.]+$/, ".md"),
     markdown: finalMarkdown,
@@ -612,6 +652,13 @@ async function processFiles(
 ): Promise<void> {
   console.log("[Worker] processFiles STARTED for", files.length, "files");
 
+  // Drop the previous batch before this one starts. `lastBatch` is only reassigned
+  // once this whole run completes (see the bottom of this function) — if it were left
+  // set here and this run then failed or threw partway through, a later "build-zip"
+  // request would still export the *previous* run's documents/manifest/registry as if
+  // they belonged to the batch the user just saw fail.
+  lastBatch = null;
+
   // Initialize vertical dictionary and registry
   //
   // Track D1 found `config.enabledVerticals` was never read here — every
@@ -620,10 +667,23 @@ async function processFiles(
   // fixed. An empty selection is not an error case: it means no taxonomy
   // vocabulary is consulted, so every entity falls through to
   // classifyDocumentVertical's document-level fallback below.
-  const taxonomies = await Promise.all(
-    config.enabledVerticals.map((v) => loadVerticalTaxonomy(v)),
-  );
-  const verticalDict = new VerticalDictionary(taxonomies);
+  let verticalDict: VerticalDictionary;
+  try {
+    const taxonomies = await Promise.all(
+      config.enabledVerticals.map((v) => loadVerticalTaxonomy(v)),
+    );
+    verticalDict = new VerticalDictionary(taxonomies);
+  } catch (taxonomyErr) {
+    console.error("[Worker] Taxonomy loading failed, continuing without verticals:", taxonomyErr);
+    verticalDict = new VerticalDictionary([]);
+    // Every entity in this batch will fall through to classifyDocumentVertical's
+    // document-level fallback instead of the taxonomy's actual vertical metadata — say
+    // so, rather than exporting a knowledge graph that's silently missing that metadata.
+    self.postMessage({
+      type: "warning",
+      message: "Vertical taxonomy failed to load — exported entities will use a coarser, document-level vertical instead of taxonomy matches.",
+    });
+  }
   const registry = new BatchEntityRegistry();
 
   // Transcription (Track D3, superseded by the main-thread migration `transcribe-bridge.ts`'s
@@ -651,7 +711,20 @@ async function processFiles(
     config.redactionMode === "pseudonymize" &&
     config.pseudonymPassphrase
   ) {
-    pseudonymKeyHex = await deriveKeyHex(config.pseudonymPassphrase, config.pseudonymKeyId);
+    try {
+      pseudonymKeyHex = await deriveKeyHex(config.pseudonymPassphrase, config.pseudonymKeyId);
+    } catch (keyErr) {
+      console.error("[Worker] Key derivation failed, falling back to mask mode:", keyErr);
+      // `pseudonymKeyHex` stays null, so every `processFile` call below silently uses
+      // the mask-mode branch even though the user asked for reversible pseudonymize
+      // tokens — tell them, rather than letting the export look like it honored their
+      // choice. (`_manifest.json`/zip-export.ts's manifest does not record
+      // `redactionMode` at all, so there is no stale "pseudonymize" label to correct.)
+      self.postMessage({
+        type: "warning",
+        message: "Pseudonymization key derivation failed — this batch will use mask mode instead of reversible tokens.",
+      });
+    }
   }
 
   let docCounter = 0;
@@ -662,15 +735,18 @@ async function processFiles(
   // entries themselves use, so the two can never disagree.
   const docPaths = new Map<string, string>();
 
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     try {
       console.log(
-        "[Worker] processing:",
+        `[Worker] === FILE ${i + 1}/${files.length} ===`,
         file.name,
         file.type,
         file.bytes.byteLength,
+        "bytes",
       );
       const docId = `doc-${String(++docCounter).padStart(3, "0")}`;
+      const startTime = performance.now();
       const processed = await processFile(
         file,
         config,
@@ -679,82 +755,53 @@ async function processFiles(
         docId,
         pseudonymKeyHex,
       );
+      const elapsed = performance.now() - startTime;
+      console.log(
+        `[Worker] ✓ FILE ${i + 1}/${files.length} COMPLETE:`,
+        file.name,
+        `(${elapsed.toFixed(0)}ms)`,
+        `entities:${processed.entities.length}`,
+        `pii:${processed.piiFindings.length}`,
+      );
       // Infer relationships for this document
       registry.inferRelationships(docId);
       docPaths.set(docId, "documents/" + processed.name);
       results.push(processed);
       self.postMessage({ type: "file-complete", ...processed });
     } catch (error) {
-      console.error("[Worker] error processing", file.name, error);
+      console.error(`[Worker] ✗ FILE ${i + 1}/${files.length} FAILED:`, file.name, error);
+      console.error("[Worker] Error type:", typeof error);
+      console.error("[Worker] Error constructor:", error?.constructor?.name);
+      if (error instanceof Error) {
+        console.error("[Worker] Error name:", error.name);
+        console.error("[Worker] Error message:", error.message);
+        console.error("[Worker] Error stack:", error.stack);
+      } else {
+        console.error("[Worker] Raw error value:", JSON.stringify(error));
+      }
+      // Try to extract a meaningful message from any error type
+      let errorMessage = "Unknown error";
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === "string") {
+        errorMessage = error;
+      } else if (error && typeof error === "object") {
+        errorMessage = JSON.stringify(error);
+      }
       self.postMessage({
         type: "error",
         file: file.name,
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: errorMessage,
       });
     }
   }
-  console.log("[Worker] All files processed, creating zip...");
-  const JSZip = (await import("jszip")).default;
-  const zip = new JSZip();
-  for (const r of results) {
-    zip.file("documents/" + r.name, r.markdown);
-  }
-  const manifest = {
-    files: results.map((r) => ({
-      name: r.name,
-      entityCount: r.entities.length,
-    })),
-    generated: new Date().toISOString(),
-  };
-  zip.file("_manifest.json", JSON.stringify(manifest, null, 2));
-
-  // Add entities registry to zip
-  const registryJson = {
-    ...registry.toJSON(),
-    ...(config.enableTranscription && {
-      transcription: {
-        model: config.transcriptionModel,
-        language: config.transcriptionLanguage,
-        enabled: true,
-      },
-    }),
-  };
-  zip.file("entities-registry.json", JSON.stringify(registryJson, null, 2));
-  zip.file(
-    "README.md",
-    buildBundleReadme(
-      results.length,
-      registryJson.entity_registry.entities.length,
-    ),
-  );
-
-  // Track I2: one file per entity with backlinks, plus the global index.
-  const entitiesFolder = zip.folder("entities");
-  for (const entity of registry.getEntities()) {
-    const docLinks = entity.source_documents
-      .map((docId) => docPaths.get(docId))
-      .filter((p): p is string => !!p)
-      .sort();
-    entitiesFolder?.file(
-      entityFileName(entity),
-      buildEntityFile(entity, docLinks),
-    );
-  }
-  zip.file("GLOSSARY.md", buildGlossaryIndex(registry.getEntities()));
-
-  // Add KG exports
-  const kgExporter = new KGExporter(registry);
-  const kgFolder = zip.folder("kg-export");
-  kgFolder?.file("neo4j.cypher", kgExporter.toCypher());
-  kgFolder?.file(
-    "networkx.json",
-    JSON.stringify(kgExporter.toNetworkX(), null, 2),
-  );
-  kgFolder?.file("rdf.ttl", kgExporter.toRDF());
-
-  const blob = await zip.generateAsync({ type: "blob" });
-  console.log("[Worker] Zip created, sending batch-complete");
-  self.postMessage({ type: "batch-complete", zip: blob });
+  console.log("[Worker] All files processed");
+  // Track K/Phase 2: the zip is no longer built here — retained so a later on-demand
+  // "build-zip" message (see self.onmessage below) can call assembleZip() without
+  // re-deriving the registry/docPaths/config that only this function's scope has.
+  // batch-complete is now a pure queue->browser signal, no zip field.
+  lastBatch = { results, registry, docPaths, config };
+  self.postMessage({ type: "batch-complete" });
 }
 
 self.onmessage = async (event: MessageEvent) => {
@@ -777,17 +824,59 @@ self.onmessage = async (event: MessageEvent) => {
   }
 
   if (type === "init") {
-    wasmReady = initEngine();
-    await wasmReady;
+    try {
+      wasmReady = initEngine();
+      await wasmReady;
+    } catch (err) {
+      console.error("[Worker] initEngine failed:", err);
+      wasmReady = Promise.resolve();
+    }
     self.postMessage({ type: "ready" });
     return;
   }
 
   if (type === "process") {
     console.log("[Worker] Processing files...");
-    if (wasmReady) await wasmReady;
-    console.log("[Worker] About to call processFiles");
-    await processFiles(files, config);
-    console.log("[Worker] processFiles returned");
+    try {
+      if (wasmReady) await wasmReady;
+      console.log("[Worker] About to call processFiles");
+      await processFiles(files, config);
+      console.log("[Worker] processFiles returned");
+    } catch (err) {
+      console.error("[Worker] processFiles crashed:", err);
+      // Without this, the UI's only signal was an empty file browser with no
+      // explanation — batch-complete alone tells the main thread the queue is over,
+      // not that it ended in failure. Post an error first so the existing error
+      // banner (App.tsx's "error" case) can say why.
+      self.postMessage({
+        type: "error",
+        file: "batch",
+        message: err instanceof Error ? err.message : "Batch processing failed.",
+      });
+      // Always fire batch-complete so the UI transitions to the browser
+      // screen rather than staying stuck on the queue forever.
+      self.postMessage({ type: "batch-complete" });
+    }
+    return;
+  }
+
+  if (type === "build-zip") {
+    if (!lastBatch) {
+      console.error("[Worker] build-zip requested with no completed batch");
+      return;
+    }
+    console.log("[Worker] Building zip on demand...");
+    try {
+      const zip = await assembleZip(lastBatch, event.data.overrides);
+      console.log("[Worker] Zip built, sending zip-ready");
+      self.postMessage({ type: "zip-ready", zip });
+    } catch (zipError) {
+      console.error("[Worker] Zip build failed:", zipError);
+      self.postMessage({
+        type: "error",
+        file: "zip",
+        message: zipError instanceof Error ? zipError.message : String(zipError),
+      });
+    }
   }
 };

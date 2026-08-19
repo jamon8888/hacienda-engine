@@ -22,6 +22,16 @@ extend-exclude = [
   # id substrings read as typos to an English dictionary but are not text anyone here
   # authored or should "fix".
   "apps/hacienda-studio/components/extend/layout-blocks.tsx",
+  # apps/hacienda-studio/public/models/ is vendored model assets (GLiNER2 tokenizer
+  # vocabulary, etc.) — subword tokens like "fonction"/"schoo"/"opion" are training-data
+  # fragments, not English prose, and aren't meant to satisfy a spell-checker any more than
+  # a binary would.
+  "apps/hacienda-studio/public/models/",
+  # crates/hacienda-wasm/pkg/ is wasm-bindgen's own generated JS/TS glue
+  # (ci-wasm-freshness.yaml rebuilds and diffs it, so it's trusted as machine output, not
+  # hand-authored) — its `__wbg_*_<hash>` export names embed random hex suffixes that
+  # occasionally spell real words ("ba", "ede") by coincidence, not typos to fix.
+  "crates/hacienda-wasm/pkg/",
 ]
 
 [default.extend-words]

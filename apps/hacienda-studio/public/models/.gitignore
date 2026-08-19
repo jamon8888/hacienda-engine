@@ -1,0 +1,5 @@
+# Model weights — too large for git, download once via curl or browser
+*.safetensors
+*.bin
+*.pt
+*.onnx

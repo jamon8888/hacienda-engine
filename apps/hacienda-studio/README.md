@@ -14,6 +14,41 @@ npm run test:e2e
 npm run build
 ```
 
+## Deploying to Vercel
+
+Studio deploys via Vercel's native Git integration (no GitHub Actions workflow, no
+`VERCEL_TOKEN`). Vercel builds directly from the committed `crates/hacienda-wasm/pkg/`
+output — it never runs `wasm-pack` (no Rust toolchain in Vercel's build image). See
+`.github/workflows/ci-wasm-freshness.yaml` for the staleness guard on that assumption.
+
+### One-time project setup (Vercel dashboard — cannot be committed as code)
+
+1. Vercel dashboard → **Add New Project** → import this GitHub repo.
+2. **Root Directory**: set to `apps/hacienda-studio`.
+3. Under Root Directory settings, enable **"Include source files outside of the Root
+   Directory in the Build Step."** Required because:
+   - `package.json`'s `"hacienda-wasm": "file:../../crates/hacienda-wasm/pkg"` dependency
+     resolves outside `apps/hacienda-studio/`.
+   - npm workspace install needs the repo-root `package.json` (`workspaces` field) and
+     `package-lock.json`.
+4. **Framework Preset**: Vite (auto-detected via `apps/hacienda-studio/vercel.json`'s
+   `"framework": "vite"`).
+5. Leave Build Command / Output Directory / Install Command as detected — `vercel.json`
+   supplies `buildCommand`/`outputDirectory` explicitly; don't override in the dashboard
+   UI (dashboard overrides win over `vercel.json` and would silently diverge from what's
+   committed).
+6. No environment variables required for the initial deploy (see below). Do not set
+   `VERCEL_TOKEN` or any deploy secret — the Git integration doesn't need one.
+7. Deploy. First deploy targets whatever branch is configured as Production (typically
+   `main`).
+
+### Environment variables (optional overrides)
+
+`VITE_MODEL_BASE_URL` / `VITE_TESSDATA_BASE_URL` (see `lib/asset-loader.ts`) default to
+the `huggingface.co` / `raw.githubusercontent.com` origins baked into the CSP. Leave unset
+unless self-hosting these assets — if overridden, the new origin must also be added to
+`connect-src` in `vercel.json`'s CSP header (it does not follow the env var automatically).
+
 ## Relationship to the CLI/API — target = one engine, not two
 
 Studio and `hacienda-cli`/`hacienda-api` are two different trust models — Studio runs in the

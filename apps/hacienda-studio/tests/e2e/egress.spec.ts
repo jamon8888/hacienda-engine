@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
-import { mockNerModelAssets, skipOnboarding } from "./fixtures";
+import { mockNerModelAssets, skipOnboarding, waitForFileRowDone } from "./fixtures";
+
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
 /**
  * Hosts the app is permitted to contact. Everything else is a compliance
@@ -45,13 +49,61 @@ test.describe("network egress", () => {
     // WASM module, and the input is disabled until the handshake lands.
     await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(CONTRACT),
     });
-    await download;
+    await waitForFileRowDone(page, "protocole.txt");
+
+    expect(external).toEqual([]);
+  });
+
+  // Track K regression guard: `DocxViewerPreview`/`PDFViewer` pull in large,
+  // previously-unaudited third-party packages (`@extend-ai/react-docx`,
+  // `@embedpdf/*`) — this proves their rendering path (including the pdfium
+  // WASM fetch) stays on `'self'`/blob: and never reaches a CDN like
+  // jsdelivr, closing the Gate 1 egress loop end-to-end.
+  test("contacts no host outside the allowlist while previewing docx/pdf documents", async ({
+    page,
+  }) => {
+    // Two full uploads (worker extraction + viewer bundle load) back to back, on a dev
+    // server that cold-optimizes each viewer's worker dependency on first use —
+    // comfortably exceeds the suite's default 120s per-test timeout on a slow/first run.
+    test.setTimeout(240000);
+    const external = recordExternalRequests(page);
+
+    await skipOnboarding(page);
+    await page.goto("/");
+    await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
+
+    const docxBuffer = await readFile(path.join(FIXTURES_DIR, "note.docx"));
+    await page.setInputFiles('input[type="file"]', {
+      name: "note.docx",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: docxBuffer,
+    });
+    await waitForFileRowDone(page, "note.docx");
+    // The viewer now renders inside the click-to-open detail screen (Track K1/Phase 1),
+    // not inline on upload.
+    await page.locator('[data-file-row="note.docx"]').click();
+    await expect(page.locator('[aria-label="Open DOCX actions"]')).toBeVisible({
+      timeout: 15000,
+    });
+    await page.locator(".close-split-view").click();
+    // Back on the file-browser screen; the upload dropzone lives on its own screen now
+    // (Track K1/Phase 1), reached via "Add more files".
+    await page.locator(".add-more-files").click();
+
+    const pdfBuffer = await readFile(path.join(FIXTURES_DIR, "note.pdf"));
+    await page.setInputFiles('input[type="file"]', {
+      name: "note.pdf",
+      mimeType: "application/pdf",
+      buffer: pdfBuffer,
+    });
+    await waitForFileRowDone(page, "note.pdf");
+    await page.locator('[data-file-row="note.pdf"]').click();
+    await expect(page.locator('[data-slot="pdf-viewer"]')).toBeVisible({ timeout: 15000 });
 
     expect(external).toEqual([]);
   });
@@ -97,13 +149,15 @@ test.describe("PII redaction export contract", () => {
     );
     await page.keyboard.press("Escape");
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "protocole.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(CONTRACT),
     });
+    await waitForFileRowDone(page, "protocole.txt");
 
+    const download = page.waitForEvent("download");
+    await page.click("button.download-zip");
     const zip = await JSZip.loadAsync(
       await readFile(await (await download).path()),
     );

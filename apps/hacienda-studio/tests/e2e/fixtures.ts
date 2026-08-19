@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 /**
  * The default e2e suite must never fetch the real GLiNER2 model over the network: it is a
@@ -71,4 +71,32 @@ export async function visitFresh(page: Page): Promise<void> {
   await skipOnboarding(page);
   await page.goto("/");
   await page.waitForSelector('input[type="file"]:not([disabled])', { state: "attached" });
+}
+
+/**
+ * Waits for a file's `FileBrowser` row to reach completion — the processing-complete signal
+ * most specs actually want. The progress bar is cleared 1s after batch-complete (see
+ * App.tsx's batch-complete handler), so we wait for the PII badge to appear (which is
+ * always rendered as "N PII" or "0 PII") and the row to be visible.
+ * `fileName` must match `data-file-row`, i.e. `effectiveFileName(file)`.
+ *
+ * 60s timeout: the full extract→ner→pii pipeline measurably exceeds a naive 15s on this
+ * CPU-constrained host under parallel worker contention — 60s matches the existing
+ * PBKDF2-derivation wait in pseudonymize.spec.ts for the same reason.
+ */
+export async function waitForFileRowDone(page: Page, fileName: string): Promise<void> {
+  const row = page.locator(`[data-file-row="${fileName}"]`);
+  await expect(row).toBeVisible({ timeout: 60000 });
+  // PII badge is always present as "N PII" or "0 PII"
+  await expect(row).toContainText("PII", { timeout: 60000 });
+}
+
+/** Waits for the file browser screen to appear (after batch-complete fires). */
+export async function waitForBrowserScreen(page: Page): Promise<void> {
+  await expect(page.locator('[aria-label="File browser"]')).toBeVisible({ timeout: 15000 });
+}
+
+/** Waits for the detail screen to appear after clicking a file row. */
+export async function waitForDetailScreen(page: Page): Promise<void> {
+  await expect(page.locator('section[aria-label="File detail"]')).toBeVisible({ timeout: 15000 });
 }

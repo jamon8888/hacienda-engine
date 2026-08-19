@@ -33,9 +33,12 @@ jobs:
       # `.agents/skills` holds Claude Code agent skill definitions, not prose
       # documentation — same category as the already-excluded `superpowers`
       # and `.ai-rulez` directories, and not meant to satisfy a human-prose
-      # markdown linter any more than those are.
+      # markdown linter any more than those are. Same reasoning for
+      # `apps/hacienda-studio/tests/e2e/fixtures`: PII-detection test fixture
+      # content, not documentation — MD041 (first line must be a heading)
+      # doesn't apply to it.
       - name: Lint markdown
-        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents" -d MD013
+        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,apps/hacienda-studio/tests/e2e/fixtures" -d MD013
 
       - name: Check spelling
         run: typos . --config _typos.toml

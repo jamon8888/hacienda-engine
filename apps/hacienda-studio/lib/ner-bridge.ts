@@ -8,6 +8,43 @@ export interface BridgeEntity {
   confidence: number;
 }
 
+const NER_CATEGORIES: readonly NerCategory[] = [
+  "person",
+  "organization",
+  "location",
+  "date",
+  "time",
+  "money",
+  "percent",
+  "email",
+  "phone",
+  "url",
+];
+
+function isBridgeEntity(value: unknown): value is BridgeEntity {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.category === "string" &&
+    (NER_CATEGORIES as readonly string[]).includes(v.category) &&
+    typeof v.text === "string" &&
+    typeof v.start === "number" &&
+    typeof v.end === "number" &&
+    typeof v.confidence === "number"
+  );
+}
+
+/**
+ * `runtime.detect()` (the neural NER backend, `pipeline.ts`'s `selectNerBridge`) crosses a
+ * WASM boundary — its result isn't something this code controls the shape of. Used instead
+ * of an `as BridgeEntity[]` assertion, which would let a malformed result read
+ * `.category`/`.text`/`.start`/`.end`/`.confidence` off values TypeScript has no actual
+ * evidence for.
+ */
+export function isBridgeEntityArray(value: unknown): value is BridgeEntity[] {
+  return Array.isArray(value) && value.every(isBridgeEntity);
+}
+
 const FRENCH_MONTHS =
   "janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre";
 const ENGLISH_MONTHS =
@@ -19,9 +56,15 @@ const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
  * numbers, which group in pairs from a leading 0 (`01 23 45 67 89`) rather
  * than 3-3-4 — the first alternative alone never matched a French fixture's
  * phone number at all (Track D2).
+ *
+ * The leading `(?<![A-Za-z0-9])` guards both alternatives against starting a
+ * match mid-token: `\b` only exists at a token's true start/end, so without
+ * this a long digit run embedded in a larger alphanumeric token (e.g. an
+ * IBAN's BBAN digits) could still yield a spurious trailing "phone" match
+ * ending at the token's real end-of-run `\b` (issue #67).
  */
 const PHONE_PATTERN =
-  /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|\b0\d(?:[-.\s]?\d{2}){4}\b/g;
+  /(?<![A-Za-z0-9])(?:(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|0\d(?:[-.\s]?\d{2}){4}\b)/g;
 const URL_PATTERN = /https?:\/\/[^\s]+/g;
 /**
  * compromise's date extraction lives in the separate compromise-dates plugin,
@@ -39,21 +82,58 @@ const DATE_PATTERN = new RegExp(
   "gi",
 );
 
+/**
+ * ISO 13616 IBAN shape: 2-letter country code, 2 check digits, up to 30
+ * alphanumeric BBAN characters — commonly displayed in space-separated groups
+ * of 4 (`DE89 3704 0044 0532 0130 00`). Used only to exclude phone matches
+ * that land on a formatted IBAN's digit groups; not exposed as its own
+ * detected category.
+ *
+ * `PHONE_PATTERN`'s single-character negative lookbehind only blocks a match
+ * from starting immediately after an alphanumeric character with no gap — a
+ * space-separated IBAN group has a space before it, so the lookbehind alone
+ * does not stop a phone-shaped run of digits inside one (issue #67's spaced
+ * case, distinct from the compact-IBAN case the lookbehind already covers).
+ */
+const IBAN_PATTERN = /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b/g;
+
+interface Span {
+  start: number;
+  end: number;
+}
+
+function matchSpans(pattern: RegExp, text: string): Span[] {
+  pattern.lastIndex = 0;
+  const spans: Span[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    spans.push({ start: match.index, end: match.index + match[0].length });
+  }
+  return spans;
+}
+
+function overlapsAny(span: Span, exclusions: Span[]): boolean {
+  return exclusions.some((ex) => span.start < ex.end && ex.start < span.end);
+}
+
 function collectPattern(
   entities: BridgeEntity[],
   category: NerCategory,
   text: string,
   pattern: RegExp,
   confidence: number,
+  exclusions: Span[] = [],
 ): void {
   pattern.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
+    const span = { start: match.index, end: match.index + match[0].length };
+    if (overlapsAny(span, exclusions)) continue;
     entities.push({
       category,
       text: match[0],
-      start: match.index,
-      end: match.index + match[0].length,
+      start: span.start,
+      end: span.end,
       confidence,
     });
   }
@@ -106,7 +186,8 @@ export async function extractEntities(
     collectPattern(entities, "email", text, EMAIL_PATTERN, 0.9);
   }
   if (wanted.has("phone")) {
-    collectPattern(entities, "phone", text, PHONE_PATTERN, 0.8);
+    const ibanSpans = matchSpans(IBAN_PATTERN, text);
+    collectPattern(entities, "phone", text, PHONE_PATTERN, 0.8, ibanSpans);
   }
   if (wanted.has("url")) {
     collectPattern(entities, "url", text, URL_PATTERN, 0.9);

@@ -89,6 +89,34 @@ describe("NER bridge", () => {
   });
 
   /**
+   * Issue #67: `PHONE_PATTERN` had no boundary check *before* the match
+   * start, so it could begin matching in the middle of a longer digit run —
+   * e.g. inside an IBAN's BBAN digits — as long as it could reach a trailing
+   * `\b` at the end of that run. That produced a bogus "phone" entity
+   * overlapping the IBAN and, via the entity-linking pipeline, a leaky
+   * partial redaction (only the matched suffix got wikilinked).
+   */
+  it("does not match digits embedded inside a larger token like an IBAN", async () => {
+    const text = "IBAN FR7630006000011234567890189.";
+    const phones = await extractEntities(text, ["phone"]);
+    expect(phones).toEqual([]);
+  });
+
+  /**
+   * The compact-IBAN case above is guarded by `PHONE_PATTERN`'s lookbehind
+   * alone. A *formatted* IBAN with spaces between groups is a distinct case:
+   * the space right before a digit group defeats the single-character
+   * lookbehind (it sees a space, not an alphanumeric character), so a
+   * phone-shaped run of digits starting after one of those spaces could still
+   * match without the dedicated IBAN-span exclusion this test guards.
+   */
+  it("does not match a space-formatted IBAN's digit groups", async () => {
+    const text = "IBAN DE89 3704 0044 0532 0130 00";
+    const phones = await extractEntities(text, ["phone"]);
+    expect(phones).toEqual([]);
+  });
+
+  /**
    * Track B1/B2 baseline: this is the failure the neural backend (xberg-wasm's
    * `NerModel`) exists to fix. compromise.js is English-only — it does not
    * recognise "Maître" as a French honorific, so it never resolves "Jean Dupont"

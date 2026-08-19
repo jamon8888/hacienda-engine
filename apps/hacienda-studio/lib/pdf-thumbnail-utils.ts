@@ -1,7 +1,15 @@
 import type { PdfDocumentObject, PdfEngine } from "@embedpdf/models"
 
-const PDFIUM_VERSION = "2.14.4"
-const PDFIUM_WASM_URL = `https://cdn.jsdelivr.net/npm/@embedpdf/pdfium@${PDFIUM_VERSION}/dist/pdfium.wasm`
+// Must resolve to a same-origin, Vite-bundled asset — never a CDN URL. This
+// app's core product claim is zero document-content egress; @embedpdf/pdfium
+// defaults to fetching this wasm from jsdelivr, which would be a real
+// violation the moment a PDF viewer is live. See egress audit in
+// superpowers/specs/2026-07-28-hacienda-studio-client-app-design.md §11
+// gate 1. ~keep
+export const PDFIUM_WASM_URL = new URL(
+  "@embedpdf/pdfium/pdfium.wasm",
+  import.meta.url,
+).href
 
 let sharedEnginePromise: Promise<PdfEngine> | null = null
 const pdfDocumentCache = new Map<string, Promise<PdfDocumentObject>>()
@@ -9,7 +17,7 @@ const thumbnailUrlCache = new Map<string, Promise<string | null>>()
 
 export function loadSharedPdfEngine() {
   sharedEnginePromise ??= import("@embedpdf/engines/pdfium-worker-engine").then(
-    ({ createPdfiumEngine }) => createPdfiumEngine(PDFIUM_WASM_URL, {})
+    ({ createPdfiumEngine }) => createPdfiumEngine(PDFIUM_WASM_URL, { fontFallback: null })
   )
 
   return sharedEnginePromise

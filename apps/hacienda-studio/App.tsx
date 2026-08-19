@@ -1,15 +1,26 @@
 import { useEffect, useRef, useState } from "react";
-import { Onboarding } from "./components/Onboarding";
 import { ConfigPanel } from "./components/ConfigPanel";
-import { ProgressBar } from "./components/ProgressBar";
-import { PiiPanel } from "./components/PiiPanel";
-import { MarkdownEditor } from "./components/MarkdownEditor";
-import { FileBrowser, buildFileRows } from "./components/FileBrowser";
-import { FileUpload } from "./components/extend/file-upload";
-import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
+import { buildFileRows } from "./components/FileBrowser";
+import { AssetLoadingScreen } from "./components/screens/AssetLoadingScreen";
+import { UploadScreen } from "./components/screens/UploadScreen";
+import { QueueScreen } from "./components/screens/QueueScreen";
+import { FileBrowserScreen } from "./components/screens/FileBrowserScreen";
+import { DetailScreen } from "./components/screens/DetailScreen";
+import {
+  loadNerModel,
+  isModelCached,
+  preloadXbergWasm,
+  validateFile,
+  type DownloadProgress,
+} from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import { renderAnnotatedMarkdown } from "./lib/annotate";
+import { reExportMarkdown, resolveExportContent } from "./lib/export-resolve";
+import { getViewerKind } from "./lib/viewer-kind";
+import { computeContentHash } from "./lib/content-hash";
+import { loadDraft, saveDraft, pruneDrafts } from "./lib/redaction-store";
 import { DEFAULT_CONFIG } from "./lib/types";
+import type { Screen } from "./lib/screens";
 import type { AppConfig, OnboardingState, ProcessedFile, ProgressUpdate } from "./lib/types";
 import type { PiiEntity } from "./lib/pii-engine";
 // Type-only: erased at compile time, so this does not pull `@remotion/whisper-web` into the
@@ -18,9 +29,6 @@ import type { PiiEntity } from "./lib/pii-engine";
 // sessions never enable transcription, and whisper-web's wasm/JS should not load for them.
 import type { WhisperBridge } from "./lib/transcription/whisper-bridge";
 import type { TranscriptionConfig, TranscriptionResult } from "./lib/transcription/types";
-
-const UPLOAD_ACCEPT =
-  ".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html,.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv";
 
 function downloadZip(blob: Blob): void {
   const url = URL.createObjectURL(blob);
@@ -41,31 +49,11 @@ function downloadText(fileName: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
-/**
- * Track I4: re-splices `result.rawMarkdown` against the (possibly edited) `findings`,
- * reusing the exact function `worker/pipeline.ts` used to build the original export —
- * `lib/annotate.ts` exists specifically so this can happen on the main thread without
- * importing the worker module itself (see that file's header). Frontmatter and the local
- * "## Entities" glossary are carried over unchanged from the original export rather than
- * regenerated: `pii_entities_found` and the entity list can go stale relative to add/remove
- * edits (an added finding won't retroactively drop an entity mention from the glossary, a
- * removed one won't add a mention back), which is an explicit, documented scope cut — full
- * frontmatter/registry/KG-export consistency with post-export edits is out of scope for
- * this increment, the same kind of bounded call already made for I3 below and for Track
- * J2's "thinner CLI vault" decision.
- */
-function reExportMarkdown(result: ProcessedFile, findings: PiiEntity[]): string {
-  const docPath = "documents/" + result.name;
-  const linked = renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findings, docPath);
-  const frontmatterMatch = result.markdown.match(/^---\n[\s\S]*?\n---/);
-  const glossaryMatch = result.markdown.match(/\n## Entities\n\n[\s\S]*$/);
-  const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
-  const glossary = glossaryMatch ? glossaryMatch[0] : "";
-  return frontmatter + "\n" + linked + glossary;
-}
-
 export function App() {
-  const [onboardingComplete, setOnboardingComplete] = useState(false);
+  // Replaces the prior `onboardingComplete: boolean` + `openResultName: string | null`
+  // pair — see `lib/screens.ts`'s header for why folding both into one discriminated
+  // union removes a whole class of "which of two names is authoritative" bug.
+  const [screen, setScreen] = useState<Screen>({ kind: "asset-loading" });
   const [assets, setAssets] = useState<OnboardingState["assets"]>({
     xbergWasm: false,
     nerModel: false,
@@ -84,10 +72,19 @@ export function App() {
   // Folder drops routinely carry OS noise and unsupported files; report the count once
   // instead of a per-file error banner that just overwrites itself.
   const [skipNotice, setSkipNotice] = useState<string | null>(null);
+  // Non-fatal config degradations the worker reports mid-batch (taxonomy load failure,
+  // pseudonymize key derivation failure, per-file NER failure) — the batch still
+  // completes, but the output doesn't fully match what the user configured, so this is
+  // surfaced rather than left to only the worker console.
+  const [warnings, setWarnings] = useState<string[]>([]);
   // `assets.nerModel` stays true even when the neural backend failed to load, because the
   // app has a legitimate regex-only fallback and onboarding must not get stuck on a
   // blocked model download. This flag is what actually records the failure.
   const [nerModelDegraded, setNerModelDegraded] = useState(false);
+  // Byte-level NER model download progress, threaded into `AssetLoadingScreen` for the
+  // "clear loading progress" requirement — null whenever no download is in flight
+  // (cached model, not-yet-started, or finished/failed).
+  const [nerDownloadProgress, setNerDownloadProgress] = useState<DownloadProgress | null>(null);
   // The drop zone renders before the worker finishes its handshake, and the handshake is
   // slow — it compiles a 48 MB WASM module. Dropping a file into that window used to throw
   // on a null worker and silently do nothing.
@@ -104,10 +101,61 @@ export function App() {
   // the Finder list's "edited" badge keys off, via `handleAddFinding`/`handleRemoveFinding`
   // always writing an entry, never mutating `result.piiFindings` itself.
   const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
+  // Keyed by `ProcessedFile.name` (the `.md` output name), object URLs backing the
+  // docx/xlsx/pptx/pdf preview viewers below. `results` is never cleared mid-session
+  // (see the batch-complete handler above), so these are revoked only on unmount.
+  const [previewUrls, setPreviewUrls] = useState<Map<string, string>>(new Map());
+  // A single viewer-scoped dark toggle — this app has no app-wide dark mode.
+  const [viewerDark, setViewerDark] = useState(false);
+  // Track K2: the redacted pane's free-text buffer per result, keyed by `ProcessedFile.name`.
+  // Seeded lazily from `renderAnnotatedMarkdown` the first time a result's split view opens
+  // (see `redactedDraftFor` below); once present, edits here are independent of
+  // `piiFindings`/`entities` offsets, same scope cut as `MarkdownEditor`'s own edit model.
+  const [redactedDrafts, setRedactedDrafts] = useState<Map<string, string>>(new Map());
+  // Track K/Phase 4: SHA-256 hex of each input file's bytes, keyed by `effectiveFileName`
+  // (the same key `progress`/`fileErrors` use) — computed once in `handleFiles` from bytes
+  // already being read for the worker upload, and used as the IndexedDB autosave key so a
+  // draft survives a reload without being tied to a filename.
+  const [contentHashes, setContentHashes] = useState<Map<string, string>>(new Map());
+  // Autosave status for whichever result the detail screen currently has open — null
+  // outside the detail screen or before any edit has triggered a save.
+  const [saveStatus, setSaveStatus] = useState<"saving" | "saved" | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
+  const previewUrlsRef = useRef(previewUrls);
+  previewUrlsRef.current = previewUrls;
+
+  useEffect(() => {
+    setPreviewUrls((prev) => {
+      const next = new Map(prev);
+      let changed = false;
+      for (const result of results) {
+        if (next.has(result.name)) continue;
+        const file = files.find(
+          (f) => effectiveFileName(f) === result.frontmatter.source,
+        );
+        if (!file) {
+          console.warn(`[App] No matching file for result ${result.name} (source: ${result.frontmatter.source}). files:`, files.map(f => effectiveFileName(f)));
+          continue;
+        }
+        console.log(`[App] Creating preview URL for ${result.name} from file ${file.name}`);
+        next.set(result.name, URL.createObjectURL(file));
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [results, files]);
+
+  useEffect(() => {
+    // Reads the ref (not `previewUrls`) so the map at the moment of unmount is
+    // revoked, not the empty map this effect's own closure was created with.
+    return () => {
+      for (const url of previewUrlsRef.current.values()) URL.revokeObjectURL(url);
+    };
+  }, []);
+
   // Track D3's follow-up (see `worker/transcribe-bridge.ts`'s header): the one `WhisperBridge`
   // instance for this tab, created lazily on the first "transcribe-request" the worker sends
   // and reused for every request after that — instance reuse is what makes `load()`'s
@@ -130,13 +178,15 @@ export function App() {
           setAssets((a) => ({ ...a, nerModel: true }));
         } else {
           try {
-            await loadNerModel();
+            await loadNerModel((p) => setNerDownloadProgress(p));
             setAssets((a) => ({ ...a, nerModel: true }));
           } catch (e) {
             console.warn("[App] NER model download failed, using fallback:", e);
             setNerModelDegraded(true);
             setError("Neural PII backend unavailable — falling back to regex-only detection.");
             setAssets((a) => ({ ...a, nerModel: true }));
+          } finally {
+            setNerDownloadProgress(null);
           }
         }
 
@@ -156,7 +206,7 @@ export function App() {
     async function init() {
       const visited = localStorage.getItem("xberg-studio-visited");
       if (visited) {
-        setOnboardingComplete(true);
+        setScreen({ kind: "upload" });
         setAssets({ xbergWasm: true, nerModel: true, tessdata: true });
       } else {
         await preloadAssets();
@@ -271,7 +321,11 @@ export function App() {
           );
           break;
         case "batch-complete":
-          downloadZip(data.zip);
+          // queue → browser: the worker has settled every file in this batch. Zip
+          // building is now a deliberate, on-demand action (the file-browser screen's
+          // "Download redacted zip" button, via handleDownloadZip's "build-zip" message)
+          // rather than something that runs unconditionally here.
+          setScreen({ kind: "browser" });
           // Clears the per-file progress bars (`progress` empty ⇒ `update` is undefined ⇒
           // each renders null) once the batch settles. Deliberately does NOT clear `files`
           // too: `files` also drives `FileBrowser`'s per-file row list (Track I3), which is
@@ -285,8 +339,21 @@ export function App() {
           }, 1000);
           break;
         case "error":
+          console.error("[App] Worker error received:", data);
+          console.error("[App] Error file:", data.file);
+          console.error("[App] Error message:", data.message);
           setError(`${data.file}: ${data.message}`);
           setFileErrors((prev) => new Map(prev).set(data.file, data.message));
+          break;
+        case "warning":
+          console.warn("[App] Worker warning received:", data);
+          setWarnings((prev) => [
+            ...prev,
+            data.file ? `${data.file}: ${data.message}` : data.message,
+          ]);
+          break;
+        case "zip-ready":
+          downloadZip(data.zip);
           break;
       }
     }
@@ -343,25 +410,34 @@ export function App() {
 
     setFiles((prev) => [...prev, ...validFiles]);
     setError(null);
+    setWarnings([]);
 
     // Send to worker — `name` carries the folder-relative path when the file came from a
     // directory picker, so it survives into the worker's output filename (and, via
     // JSZip's own path handling, the exported zip's folder structure) rather than being
-    // flattened to a basename.
+    // flattened to a basename. `hash` rides along on the same `arrayBuffer()` read (Track
+    // K/Phase 4's autosave key) rather than re-reading each file a second time, and is
+    // stripped back out before posting — `FileInput` (`lib/types.ts`) has no `hash` field.
     const fileInputs = await Promise.all(
-      validFiles.map(async (f) => ({
-        name: effectiveFileName(f),
-        bytes: await f.arrayBuffer(),
-        type: f.type || "application/octet-stream",
-      })),
+      validFiles.map(async (f) => {
+        const bytes = await f.arrayBuffer();
+        const hash = await computeContentHash(bytes);
+        return { name: effectiveFileName(f), bytes, type: f.type || "application/octet-stream", hash };
+      }),
     );
+    setContentHashes((prev) => {
+      const next = new Map(prev);
+      for (const fi of fileInputs) next.set(fi.name, fi.hash);
+      return next;
+    });
 
     console.log("[App] posting to worker:", fileInputs.length, "files");
     workerRef.current!.postMessage({
       type: "process",
-      files: fileInputs,
+      files: fileInputs.map(({ name, bytes, type }) => ({ name, bytes, type })),
       config: JSON.parse(JSON.stringify(configRef.current)),
     });
+    setScreen({ kind: "queue" });
   }
 
 
@@ -424,6 +500,121 @@ export function App() {
     downloadText(result.name, reExportMarkdown(result, findingsFor(result)));
   }
 
+  // Track K/Phase 2: "Download redacted zip" — a worker round-trip rather than a
+  // main-thread zip rebuild, since only the worker retains the live `BatchEntityRegistry`
+  // instance (`lastBatch` in `worker/pipeline.ts`) that `assembleZip` needs. `overrides`
+  // only carries entries that actually diverge from `result.markdown`, so files nobody
+  // touched still export exactly what the pipeline produced.
+  function handleDownloadZip(): void {
+    const overrides: Record<string, string> = {};
+    for (const result of results) {
+      const content = resolveExportContent(result, redactedDrafts, editedFindings);
+      if (content !== result.markdown) overrides[result.name] = content;
+    }
+    workerRef.current!.postMessage({ type: "build-zip", overrides });
+  }
+
+  function handleDownloadFile(result: ProcessedFile): void {
+    const content = resolveExportContent(result, redactedDrafts, editedFindings);
+    const blob = new Blob([content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = result.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // Track K2: the split view's right pane starts as the same redacted rendering the export
+  // path produces, then diverges once the user edits it (see `redactedDrafts`' own comment).
+  function redactedDraftFor(result: ProcessedFile): string {
+    const existing = redactedDrafts.get(result.name);
+    if (existing !== undefined) return existing;
+    const docPath = "documents/" + result.name;
+    return renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findingsFor(result), docPath);
+  }
+
+  function handleRedactedChange(result: ProcessedFile, next: string): void {
+    setRedactedDrafts((prev) => new Map(prev).set(result.name, next));
+  }
+
+  const openDetailResult =
+    screen.kind === "detail" ? results.find((r) => r.frontmatter.source === screen.inputName) : undefined;
+
+  // Redacted drafts are user-editable free text that can end up holding PII (a user can
+  // leave identifiers in it, or paste unredacted content into it) — bound their local
+  // retention by default rather than only via an explicit "clear" action, same reasoning
+  // as `pruneDrafts`'s own doc comment. Runs once per app load, not once per draft, so a
+  // draft never outlives 30 days of the app simply never being reopened either.
+  useEffect(() => {
+    void pruneDrafts(30 * 24 * 60 * 60 * 1000);
+  }, []);
+
+  // Track K/Phase 4: restore-on-open. Fires once per detail-screen open, looks up a saved
+  // draft by content hash, and adopts it only if `redactedDrafts` still has no entry for
+  // this result by the time the lookup resolves — `redactedDraftFor`'s synchronous
+  // `renderAnnotatedMarkdown` fallback already renders immediately (no blank flash), and an
+  // in-session edit (including a first keystroke that lands before this resolves) always
+  // wins over a stale on-disk draft rather than being silently clobbered by it.
+  useEffect(() => {
+    if (!openDetailResult) return;
+    const result = openDetailResult;
+    const hash = contentHashes.get(result.frontmatter.source);
+    if (!hash) return;
+    let cancelled = false;
+    loadDraft(hash).then((saved) => {
+      if (cancelled || saved === undefined) return;
+      setRedactedDrafts((prev) => (prev.has(result.name) ? prev : new Map(prev).set(result.name, saved)));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on which file is open, not on redactedDrafts/results identity
+  }, [openDetailResult?.name]);
+
+  // Track K/Phase 4: debounced (~1s) autosave of the open detail screen's own draft. Only
+  // ever watches `openDetailResult`'s entry in `redactedDrafts` — while the detail screen
+  // is open, that is the only entry `handleRedactedChange` can touch.
+  //
+  // Split into two effects on purpose. `redactedDrafts` replaces its `Map` reference on
+  // every keystroke (see `handleRedactedChange`), so a single effect keyed on it would
+  // re-run its cleanup on every keystroke too — and an unconditional flush-on-cleanup
+  // (needed so Back/switch-file within the debounce window doesn't drop the last edit)
+  // would then write on every keystroke, defeating the debounce entirely. Keeping the
+  // latest pending write in a ref lets the flush-on-cleanup effect depend on
+  // `openDetailResult` alone, so it only fires on navigation/unmount, not on typing.
+  const pendingSaveRef = useRef<{ hash: string; draft: string } | null>(null);
+
+  useEffect(() => {
+    if (!openDetailResult) {
+      setSaveStatus(null);
+      return;
+    }
+    const result = openDetailResult;
+    const hash = contentHashes.get(result.frontmatter.source);
+    const draft = redactedDrafts.get(result.name);
+    if (!hash || draft === undefined) return;
+    pendingSaveRef.current = { hash, draft };
+    setSaveStatus("saving");
+    const timer = setTimeout(() => {
+      pendingSaveRef.current = null;
+      saveDraft(hash, draft).then(() => setSaveStatus("saved"));
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [openDetailResult, contentHashes, redactedDrafts]);
+
+  useEffect(() => {
+    return () => {
+      const pending = pendingSaveRef.current;
+      if (pending) {
+        pendingSaveRef.current = null;
+        void saveDraft(pending.hash, pending.draft);
+      }
+    };
+  }, [openDetailResult]);
+
   // `progress` is keyed by whatever name the worker was sent — the folder-relative path
   // for a directory upload, the basename otherwise — so lookups have to use the same key,
   // not `file.name`, or every folder-uploaded file's progress card silently never appears.
@@ -431,13 +622,14 @@ export function App() {
     (f) => progress.get(effectiveFileName(f))?.stage === "complete",
   ).length;
 
-  if (!onboardingComplete) {
+  if (screen.kind === "asset-loading") {
     return (
-      <Onboarding
+      <AssetLoadingScreen
         assets={assets}
         nerModelDegraded={nerModelDegraded}
+        nerDownloadProgress={nerDownloadProgress}
         onComplete={() => {
-          setOnboardingComplete(true);
+          setScreen({ kind: "upload" });
           localStorage.setItem("xberg-studio-visited", "true");
         }}
       />
@@ -485,59 +677,42 @@ export function App() {
         </div>
       )}
 
-      <main className="mx-auto w-full max-w-[800px] flex-1 px-6 py-12">
-        <section aria-label="Upload documents">
-          <FileUpload
-            className="drop-zone"
-            id="file-input"
-            disabled={!workerReady}
-            multiple
-            filterAccept={false}
-            showFileList={false}
-            showBorderBeam={workerReady}
-            webkitdirectory={folderMode}
-            accept={folderMode ? undefined : UPLOAD_ACCEPT}
-            inputAriaLabel={folderMode ? "Choose a folder" : "Choose files"}
-            title={
-              workerReady
-                ? folderMode
-                  ? "Drop a folder here or click to browse"
-                  : "Drop files here or click to browse"
-                : "Starting the local engine…"
-            }
-            description="PDF, Office, Email, Images, Audio/Video, Subtitles, Code — up to 50MB each"
+      {warnings.length > 0 && (
+        <div
+          className="config-warning-banner flex items-start justify-between gap-3 border-b border-border bg-amber-500/15 px-6 py-3 text-sm text-amber-900 dark:text-amber-200"
+          role="status"
+        >
+          <ul className="flex flex-col gap-1">
+            {warnings.map((w, i) => (
+              <li key={i}>⚠️ {w}</li>
+            ))}
+          </ul>
+          <button
+            aria-label="Dismiss warnings"
+            className="text-lg leading-none"
+            onClick={() => setWarnings([])}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <main className="flex flex-1 flex-col">
+        {screen.kind === "upload" && (
+          <UploadScreen
+            workerReady={workerReady}
+            folderMode={folderMode}
+            onToggleFolderMode={toggleFolderMode}
             onFilesAccepted={(accepted) => handleFiles(accepted)}
           />
-          <button
-            type="button"
-            className="mode-toggle mx-auto mt-4 block bg-transparent text-xs text-muted-foreground underline hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={!workerReady}
-            onClick={toggleFolderMode}
-          >
-            {folderMode ? "or choose individual files" : "or choose a folder"}
-          </button>
-        </section>
-
-        {files.length > 0 && (
-          <>
-            {files.length > 1 && (
-              <p className="batch-summary -mb-2 mt-6 text-center text-sm text-muted-foreground" aria-live="polite">
-                {completedCount} / {files.length} processed
-              </p>
-            )}
-            <section className="mt-6 flex flex-col gap-3" aria-live="polite">
-              {files.map((file) => {
-                const key = effectiveFileName(file);
-                const update = progress.get(key);
-                if (!update) return null;
-                return <ProgressBar key={key} file={{ name: key }} update={update} />;
-              })}
-            </section>
-          </>
         )}
 
-        {files.length > 0 && (
-          <FileBrowser
+        {screen.kind === "queue" && (
+          <QueueScreen files={files} progress={progress} completedCount={completedCount} />
+        )}
+
+        {screen.kind === "browser" && (
+          <FileBrowserScreen
             rows={buildFileRows(
               files,
               progress,
@@ -546,55 +721,46 @@ export function App() {
               new Set(editedFindings.keys()),
               new Map(results.map((r) => [r.name, findingsFor(r)] as const)),
             )}
+            onOpen={(name) => setScreen({ kind: "detail", inputName: name })}
+            onAddMore={() => setScreen({ kind: "upload" })}
+            onDownloadZip={handleDownloadZip}
+            onDownloadFile={handleDownloadFile}
+            previewUrls={previewUrls}
           />
         )}
 
-        {results.length > 0 && (
-          <section className="mt-8 flex flex-col gap-4 border-t border-border pt-6">
-            <h2 className="text-sm font-semibold text-muted-foreground">
-              Processed this batch ({results.length})
-            </h2>
-            {results.map((result) => {
-              const findings = findingsFor(result);
-              const edited = editedFindings.has(result.name);
-              return (
-                <div key={result.name} className="flex flex-col gap-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="font-medium">{result.name}</span>
-                    <div className="flex items-center gap-3 text-muted-foreground">
-                      <span>
-                        {result.entities.length}{" "}
-                        {result.entities.length === 1 ? "entity" : "entities"}
-                      </span>
-                      {edited && (
-                        <button
-                          type="button"
-                          className="export-edited rounded-md bg-muted px-2 py-1 text-xs text-foreground hover:bg-primary hover:text-primary-foreground"
-                          onClick={() => handleExportEdited(result)}
-                        >
-                          Export edited file
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  <MarkdownEditor
-                    value={result.rawMarkdown}
-                    findings={findings}
-                    onAddFinding={(start, end, category) =>
-                      handleAddFinding(result, start, end, category)
-                    }
-                  />
-                  {(findings.length > 0 || edited) && (
-                    <PiiPanel
-                      findings={findings}
-                      onRemove={(i) => handleRemoveFinding(result, i)}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </section>
-        )}
+        {screen.kind === "detail" &&
+          (() => {
+            // `openDetailResult` already resolves `screen.inputName` (the original input
+            // file name, e.g. "note.docx") against `result.frontmatter.source` — not
+            // `result.name`, the output markdown's own name (e.g. "note.md"), which would
+            // never match.
+            const result = openDetailResult;
+            if (!result) return null;
+            const findings = findingsFor(result);
+            const edited = editedFindings.has(result.name);
+            return (
+              <DetailScreen
+                result={result}
+                viewerKind={getViewerKind(result.frontmatter.source)}
+                previewUrl={previewUrls.get(result.name)}
+                viewerDark={viewerDark}
+                onViewerDarkChange={setViewerDark}
+                redactedValue={redactedDraftFor(result)}
+                onRedactedChange={(next) => handleRedactedChange(result, next)}
+                saveStatus={saveStatus}
+                findings={findings}
+                edited={edited}
+                onAddFinding={(start, end, category) =>
+                  handleAddFinding(result, start, end, category)
+                }
+                onRemoveFinding={(i) => handleRemoveFinding(result, i)}
+                onExportEdited={() => handleExportEdited(result)}
+                onDownloadZip={handleDownloadZip}
+                onBack={() => setScreen({ kind: "browser" })}
+              />
+            );
+          })()}
       </main>
 
       {showConfig && (

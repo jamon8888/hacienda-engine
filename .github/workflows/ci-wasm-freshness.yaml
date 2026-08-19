@@ -1,0 +1,104 @@
+name: CI - WASM Freshness
+
+# Guards against deploying stale hacienda-wasm/pkg/ output: Vercel's build never
+# runs wasm-pack (no Rust toolchain in its build image — see
+# apps/hacienda-studio/vercel.json and its README's Vercel deployment section), so
+# the committed pkg/ output is trusted as-is at deploy time. For a PII
+# detection/redaction engine, silently shipping stale WASM logic is a
+# correctness/compliance risk — this job rebuilds from source and fails if the
+# committed output has drifted.
+#
+# Toolchain and wasm-pack are both pinned below (nightly-2026-08-06, matching every
+# other dtolnay/rust-toolchain@nightly step in this repo's CI per ci-rust.yaml's own
+# comment; wasm-pack 0.15.0) — a floating nightly or wasm-pack version can regenerate
+# different pkg/ output on its own and fail this job for a reason unrelated to any
+# source change.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/hacienda-wasm/**"
+      - "hacienda-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci-wasm-freshness.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/hacienda-wasm/**"
+      - "hacienda-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci-wasm-freshness.yaml"
+
+concurrency:
+  group: ci-wasm-freshness-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-06
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Rebuild hacienda-wasm/pkg from source
+        # `wasm-pack build`'s trailing PATH argument only works immediately after
+        # `build`, before flags — with flags first (as apps/hacienda-studio's own
+        # `build:wasm` script avoids entirely, see its `cd ... && wasm-pack build`
+        # form), wasm-pack 0.15.0 silently falls back to the cwd and tries to treat
+        # the workspace root's own Cargo.toml as a package manifest, erroring with
+        # "missing field `package`". `cd` into the crate directory first instead, to
+        # match the one invocation already proven to work.
+        #
+        # `--features ner-candle-wasm` must match apps/hacienda-studio/package.json's
+        # own `build:wasm` script exactly — this job's whole point is verifying the
+        # committed pkg/ matches what that script produces, so a feature-flag mismatch
+        # here would make it "detect drift" against its own wrong baseline.
+        #
+        # RUSTFLAGS: `file!()`/panic-location strings embed the absolute source path of
+        # every crate compiled, dependencies included — so without remapping, the
+        # `hacienda_wasm_bg.wasm` this step produces differs from one built anywhere
+        # else (a contributor's machine, a different runner) purely by build directory,
+        # with zero actual source drift. `--remap-path-prefix` normalizes both halves
+        # of that: the checkout root (`github.workspace`, unique per run but always
+        # under `/home/runner/work/...`) and Cargo's registry/dependency-source cache
+        # (`CARGO_HOME`, GitHub-hosted runners' well-established default of
+        # `/home/runner/.cargo` — not available as a workflow expression since nothing
+        # here sets it via `env:`, so it's spelled out literally rather than templated).
+        # Anyone rebuilding and committing pkg/ output outside CI must pass the same
+        # `--remap-path-prefix=<their local paths>=/repo,/cargo-home` targets for the
+        # committed output to match what this job independently rebuilds.
+        env:
+          RUSTFLAGS: >-
+            --remap-path-prefix=${{ github.workspace }}=/repo
+            --remap-path-prefix=/home/runner/.cargo=/cargo-home
+        run: cd crates/hacienda-wasm && wasm-pack build --target web --no-default-features --features ner-candle-wasm
+
+      - name: Fail if committed pkg/ output is stale
+        run: |
+          # `git diff --exit-code` alone only catches changes to files git already
+          # tracks — a rebuild that adds a brand-new file under pkg/ (e.g. a renamed
+          # chunk) wouldn't show up there at all and this job would pass on stale
+          # output. `git status --porcelain` catches both modified *and* untracked
+          # files in one check.
+          if [ -n "$(git status --porcelain -- crates/hacienda-wasm/pkg/)" ]; then
+            echo "::error::crates/hacienda-wasm/pkg/ is stale. Run 'task build:wasm' locally, commit the result, and push again. Vercel trusts this committed output as-is and never rebuilds it."
+            git status --porcelain -- crates/hacienda-wasm/pkg/
+            git diff -- crates/hacienda-wasm/pkg/
+            exit 1
+          fi

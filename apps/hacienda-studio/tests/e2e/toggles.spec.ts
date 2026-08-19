@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
-import { visitFresh } from "./fixtures";
+import { visitFresh, waitForFileRowDone } from "./fixtures";
 
 /**
  * Track D1: "one test where the output differs with the flag on and off" for
@@ -26,13 +26,15 @@ async function uploadAndDownload(
   page: Page,
   fileName: string,
 ): Promise<{ markdown: string; frontmatter: string }> {
-  const download = page.waitForEvent("download");
   await page.setInputFiles('input[type="file"]', {
     name: fileName,
     mimeType: "text/plain",
     buffer: Buffer.from(NOTE),
   });
+  await waitForFileRowDone(page, fileName);
 
+  const download = page.waitForEvent("download");
+  await page.click("button.download-zip");
   const zip = await JSZip.loadAsync(
     await readFile(await (await download).path()),
   );

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
 import JSZip from "jszip";
-import { visitFresh } from "./fixtures";
+import { visitFresh, waitForFileRowDone } from "./fixtures";
 
 /**
  * Track I3/I4: the Finder-like per-file list (`components/FileBrowser.tsx`) and
@@ -25,13 +25,12 @@ test.describe("FileBrowser (Track I3)", () => {
   test("shows the processed file with its entity and PII counts", async ({ page }) => {
     await visitFresh(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
-    await download;
+    await waitForFileRowDone(page, "note.txt");
 
     const row = page.locator('[data-file-row="note.txt"]');
     await expect(row).toBeVisible();
@@ -45,20 +44,28 @@ test.describe("Per-document PII editing (Track I4)", () => {
   test("removing a finding un-redacts it in the re-exported file", async ({ page }) => {
     await visitFresh(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
-    await download;
+    await waitForFileRowDone(page, "note.txt");
+
+    // Findings editing now lives behind the click-to-open detail screen (Track K1/Phase 1)
+    // rather than being inline on the file-browser row.
+    await page.locator('[data-file-row="note.txt"]').click();
 
     const findingCountBefore = await page.locator(".pii-finding-trigger").count();
     expect(findingCountBefore).toBeGreaterThan(0);
 
     await page.locator('[aria-label="Remove finding 1"]').click();
 
+    // The "edited" badge only renders on the file-browser row, so step back to it —
+    // "← Back" is `.close-split-view`, reused unchanged as the detail screen's back
+    // affordance (see `DetailScreen.tsx`).
+    await page.locator(".close-split-view").click();
     await expect(page.locator('[data-file-row="note.txt"] .file-edited-badge')).toBeVisible();
+    await page.locator('[data-file-row="note.txt"]').click();
 
     const exportDownload = page.waitForEvent("download");
     await page.locator(".export-edited").click();
@@ -71,13 +78,16 @@ test.describe("Per-document PII editing (Track I4)", () => {
   test("marking a selection as PII redacts it in the re-exported file", async ({ page }) => {
     await visitFresh(page);
 
-    const download = page.waitForEvent("download");
     await page.setInputFiles('input[type="file"]', {
       name: "note.txt",
       mimeType: "text/plain",
       buffer: Buffer.from(NOTE),
     });
-    await download;
+    await waitForFileRowDone(page, "note.txt");
+
+    // Findings editing now lives behind the click-to-open detail screen (Track K1/Phase 1)
+    // rather than being inline on the file-browser row.
+    await page.locator('[data-file-row="note.txt"]').click();
 
     const from = NOTE.indexOf(EMPLOYEE_ID);
     const to = from + EMPLOYEE_ID.length;
@@ -90,12 +100,15 @@ test.describe("Per-document PII editing (Track I4)", () => {
     await expect(pill).toBeVisible();
     await expect(pill).toHaveText(EMPLOYEE_ID);
 
-    // Longer than the default 5s: selectRange above drives ~60 sequential keyboard.press
-    // calls, and this host is CPU-constrained enough (see pseudonymize.spec.ts) that the
+    // The "edited" badge only renders on the file-browser row, so step back to it. Longer
+    // than the default 5s: selectRange above drives ~60 sequential keyboard.press calls,
+    // and this host is CPU-constrained enough (see pseudonymize.spec.ts) that the
     // resulting re-render can lag past the default budget.
+    await page.locator(".close-split-view").click();
     await expect(page.locator('[data-file-row="note.txt"] .file-edited-badge')).toBeVisible({
       timeout: 20000,
     });
+    await page.locator('[data-file-row="note.txt"]').click();
 
     const exportDownload = page.waitForEvent("download");
     await page.locator(".export-edited").click();

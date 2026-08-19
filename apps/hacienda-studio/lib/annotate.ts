@@ -100,3 +100,19 @@ export function renderAnnotatedMarkdown(
   }
   return result;
 }
+
+/**
+ * Track K2: the side-by-side redacted-markdown pane's "Redact selection" button. Unlike
+ * `renderAnnotatedMarkdown` above, this operates on the pane's own free-text buffer, not
+ * `rawMarkdown` offsets — once a user has typed into that buffer it has no correspondence
+ * to `piiFindings`/`entities` positions any more, so redaction there is a plain text splice,
+ * not a span re-render keyed to detector output.
+ */
+export function spliceRedaction(
+  text: string,
+  from: number,
+  to: number,
+  category: string,
+): string {
+  return text.slice(0, from) + `[${category.toUpperCase()}]` + text.slice(to);
+}
