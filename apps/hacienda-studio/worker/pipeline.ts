@@ -23,7 +23,11 @@ import initWasm from "@xberg-io/xberg-wasm";
 // index.html, and WebAssembly rejects it as "expected magic word 00 61 73 6d,
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
-import { extractEntities, type BridgeEntity } from "../lib/ner-bridge";
+import {
+  extractEntities,
+  isBridgeEntityArray,
+  type BridgeEntity,
+} from "../lib/ner-bridge";
 import { createNerBackend, loadNerModel } from "../lib/asset-loader";
 import {
   initPiiEngine,
@@ -142,12 +146,20 @@ export function selectNerBridge(
   if (!runtime) return extractEntities;
   return async (text, categories) => {
     try {
-      return (await runtime.detect(text, { categories })) as BridgeEntity[];
-    } catch (err: any) {
+      const raw: unknown = await runtime.detect(text, { categories });
+      // `runtime.detect()` crosses a WASM boundary — its result isn't something this
+      // code controls the shape of. Validate rather than `as BridgeEntity[]`-assert it.
+      if (!isBridgeEntityArray(raw)) {
+        throw new Error(
+          "Neural NER backend returned a malformed result (not a BridgeEntity[])",
+        );
+      }
+      return raw;
+    } catch (err: unknown) {
       // Candle F16/F32 dtype mismatch — GLiNER2 weights are F16 but candle creates
       // F32 activations with no auto-cast. Falls back to regex/compromise for this
       // document rather than crashing the batch.
-      const msg = String(err?.message ?? err);
+      const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("dtype mismatch")) {
         console.warn(
           "[Worker] Neural NER dtype mismatch (F16/F32), falling back to regex:",
@@ -228,18 +240,20 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
     }
   }
 
-  // Filter overlapping spans within each entity to prevent nested links
+  // Filter overlapping spans within each entity to prevent nested links. Compares each
+  // candidate against the last *retained* span, not the previous span in sorted order —
+  // for [0,3], [2,10], [4,5], comparing against arr[i-1] would drop [4,5] against the
+  // already-dropped [2,10] even though [4,5] doesn't overlap the retained [0,3].
   return Array.from(map.values())
-    .map((e) => ({
-      ...e,
-      spans: e.spans
-        .sort((a, b) => a.start - b.start)
-        .filter((span, i, arr) => {
-          // Keep only non-overlapping spans
-          if (i === 0) return true;
-          return span.start >= arr[i - 1].end;
-        }),
-    }))
+    .map((e) => {
+      const sorted = [...e.spans].sort((a, b) => a.start - b.start);
+      const retained: typeof sorted = [];
+      for (const span of sorted) {
+        const previous = retained[retained.length - 1];
+        if (!previous || span.start >= previous.end) retained.push(span);
+      }
+      return { ...e, spans: retained };
+    })
     .sort((a, b) => b.count - a.count);
 }
 
@@ -440,7 +454,14 @@ async function processFile(
       console.error("[Worker] NER error:", nerError.name, nerError.message);
     }
     // Don't throw — continue processing with empty NER results so the file
-    // still gets PII detection, redaction, and zip export.
+    // still gets PII detection, redaction, and zip export. But say so: without this,
+    // a document with zero entities because NER failed is indistinguishable from one
+    // that genuinely has none.
+    self.postMessage({
+      type: "warning",
+      file: input.name,
+      message: "Entity extraction (NER) failed for this file — it will export with no entity glossary.",
+    });
   }
 
   const xbergEntities = nerResults || [];
@@ -655,6 +676,13 @@ async function processFiles(
   } catch (taxonomyErr) {
     console.error("[Worker] Taxonomy loading failed, continuing without verticals:", taxonomyErr);
     verticalDict = new VerticalDictionary([]);
+    // Every entity in this batch will fall through to classifyDocumentVertical's
+    // document-level fallback instead of the taxonomy's actual vertical metadata — say
+    // so, rather than exporting a knowledge graph that's silently missing that metadata.
+    self.postMessage({
+      type: "warning",
+      message: "Vertical taxonomy failed to load — exported entities will use a coarser, document-level vertical instead of taxonomy matches.",
+    });
   }
   const registry = new BatchEntityRegistry();
 
@@ -687,6 +715,15 @@ async function processFiles(
       pseudonymKeyHex = await deriveKeyHex(config.pseudonymPassphrase, config.pseudonymKeyId);
     } catch (keyErr) {
       console.error("[Worker] Key derivation failed, falling back to mask mode:", keyErr);
+      // `pseudonymKeyHex` stays null, so every `processFile` call below silently uses
+      // the mask-mode branch even though the user asked for reversible pseudonymize
+      // tokens — tell them, rather than letting the export look like it honored their
+      // choice. (`_manifest.json`/zip-export.ts's manifest does not record
+      // `redactionMode` at all, so there is no stale "pseudonymize" label to correct.)
+      self.postMessage({
+        type: "warning",
+        message: "Pseudonymization key derivation failed — this batch will use mask mode instead of reversible tokens.",
+      });
     }
   }
 
@@ -807,6 +844,15 @@ self.onmessage = async (event: MessageEvent) => {
       console.log("[Worker] processFiles returned");
     } catch (err) {
       console.error("[Worker] processFiles crashed:", err);
+      // Without this, the UI's only signal was an empty file browser with no
+      // explanation — batch-complete alone tells the main thread the queue is over,
+      // not that it ended in failure. Post an error first so the existing error
+      // banner (App.tsx's "error" case) can say why.
+      self.postMessage({
+        type: "error",
+        file: "batch",
+        message: err instanceof Error ? err.message : "Batch processing failed.",
+      });
       // Always fire batch-complete so the UI transitions to the browser
       // screen rather than staying stuck on the queue forever.
       self.postMessage({ type: "batch-complete" });

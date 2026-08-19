@@ -114,13 +114,14 @@ function webkitDirectoryFallback(): Promise<FolderPickResult | null> {
       document.body.removeChild(input);
 
       const fileList = Array.from(input.files ?? []);
-      if (fileList.length === 0) {
+      const first = fileList[0];
+      if (!first) {
         resolve(null);
         return;
       }
 
       // Extract directory name from the first file's webkitRelativePath
-      const firstPath = fileList[0].webkitRelativePath || fileList[0].name;
+      const firstPath = first.webkitRelativePath || first.name;
       const directoryName = firstPath.split("/")[0] || "folder";
 
       resolve({ files: fileList, directoryName });

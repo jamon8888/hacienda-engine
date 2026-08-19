@@ -72,6 +72,11 @@ export function App() {
   // Folder drops routinely carry OS noise and unsupported files; report the count once
   // instead of a per-file error banner that just overwrites itself.
   const [skipNotice, setSkipNotice] = useState<string | null>(null);
+  // Non-fatal config degradations the worker reports mid-batch (taxonomy load failure,
+  // pseudonymize key derivation failure, per-file NER failure) — the batch still
+  // completes, but the output doesn't fully match what the user configured, so this is
+  // surfaced rather than left to only the worker console.
+  const [warnings, setWarnings] = useState<string[]>([]);
   // `assets.nerModel` stays true even when the neural backend failed to load, because the
   // app has a legitimate regex-only fallback and onboarding must not get stuck on a
   // blocked model download. This flag is what actually records the failure.
@@ -340,6 +345,13 @@ export function App() {
           setError(`${data.file}: ${data.message}`);
           setFileErrors((prev) => new Map(prev).set(data.file, data.message));
           break;
+        case "warning":
+          console.warn("[App] Worker warning received:", data);
+          setWarnings((prev) => [
+            ...prev,
+            data.file ? `${data.file}: ${data.message}` : data.message,
+          ]);
+          break;
         case "zip-ready":
           downloadZip(data.zip);
           break;
@@ -398,6 +410,7 @@ export function App() {
 
     setFiles((prev) => [...prev, ...validFiles]);
     setError(null);
+    setWarnings([]);
 
     // Send to worker — `name` carries the folder-relative path when the file came from a
     // directory picker, so it survives into the worker's output filename (and, via
@@ -574,10 +587,18 @@ export function App() {
     const draft = redactedDrafts.get(result.name);
     if (!hash || draft === undefined) return;
     setSaveStatus("saving");
+    // A plain `clearTimeout` on teardown drops a pending save outright: navigating away
+    // (Back, or opening another file) inside the debounce window left the last edit
+    // unpersisted. Flush it instead of just cancelling the timer.
+    let flushed = false;
     const timer = setTimeout(() => {
+      flushed = true;
       saveDraft(hash, draft).then(() => setSaveStatus("saved"));
     }, 1000);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      if (!flushed) void saveDraft(hash, draft);
+    };
   }, [openDetailResult, contentHashes, redactedDrafts]);
 
   // `progress` is keyed by whatever name the worker was sent — the folder-relative path
@@ -636,6 +657,26 @@ export function App() {
             aria-label="Dismiss"
             className="text-lg leading-none"
             onClick={() => setSkipNotice(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div
+          className="config-warning-banner flex items-start justify-between gap-3 border-b border-border bg-amber-500/15 px-6 py-3 text-sm text-amber-900 dark:text-amber-200"
+          role="status"
+        >
+          <ul className="flex flex-col gap-1">
+            {warnings.map((w, i) => (
+              <li key={i}>⚠️ {w}</li>
+            ))}
+          </ul>
+          <button
+            aria-label="Dismiss warnings"
+            className="text-lg leading-none"
+            onClick={() => setWarnings([])}
           >
             ✕
           </button>

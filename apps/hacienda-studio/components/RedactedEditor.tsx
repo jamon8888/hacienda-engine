@@ -10,7 +10,11 @@ import { useCallback, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import type { ViewUpdate } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
-import { ADDABLE_CATEGORIES } from "../lib/pii-categories";
+import {
+  ADDABLE_CATEGORIES,
+  DEFAULT_ADDABLE_CATEGORY,
+  isAddableCategory,
+} from "../lib/pii-categories";
 import { spliceRedaction } from "../lib/annotate";
 
 // See MarkdownEditor.tsx's identical constant for why this is module-level, not inline.
@@ -25,7 +29,7 @@ export function RedactedEditor({
   onChange: (next: string) => void;
 }) {
   const [selection, setSelection] = useState({ from: 0, to: 0 });
-  const [category, setCategory] = useState(ADDABLE_CATEGORIES[0]);
+  const [category, setCategory] = useState(DEFAULT_ADDABLE_CATEGORY);
 
   const handleUpdate = useCallback((update: ViewUpdate) => {
     const range = update.state.selection.main;
@@ -40,7 +44,9 @@ export function RedactedEditor({
         <select
           className="redact-category rounded-md border border-border bg-background px-2 py-1 text-xs"
           value={category}
-          onChange={(e) => setCategory(e.target.value)}
+          onChange={(e) => {
+            if (isAddableCategory(e.target.value)) setCategory(e.target.value);
+          }}
         >
           {ADDABLE_CATEGORIES.map((c) => (
             <option key={c} value={c}>

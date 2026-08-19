@@ -8,6 +8,43 @@ export interface BridgeEntity {
   confidence: number;
 }
 
+const NER_CATEGORIES: readonly NerCategory[] = [
+  "person",
+  "organization",
+  "location",
+  "date",
+  "time",
+  "money",
+  "percent",
+  "email",
+  "phone",
+  "url",
+];
+
+function isBridgeEntity(value: unknown): value is BridgeEntity {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.category === "string" &&
+    (NER_CATEGORIES as readonly string[]).includes(v.category) &&
+    typeof v.text === "string" &&
+    typeof v.start === "number" &&
+    typeof v.end === "number" &&
+    typeof v.confidence === "number"
+  );
+}
+
+/**
+ * `runtime.detect()` (the neural NER backend, `pipeline.ts`'s `selectNerBridge`) crosses a
+ * WASM boundary — its result isn't something this code controls the shape of. Used instead
+ * of an `as BridgeEntity[]` assertion, which would let a malformed result read
+ * `.category`/`.text`/`.start`/`.end`/`.confidence` off values TypeScript has no actual
+ * evidence for.
+ */
+export function isBridgeEntityArray(value: unknown): value is BridgeEntity[] {
+  return Array.isArray(value) && value.every(isBridgeEntity);
+}
+
 const FRENCH_MONTHS =
   "janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre";
 const ENGLISH_MONTHS =

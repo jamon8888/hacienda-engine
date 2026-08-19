@@ -38,7 +38,11 @@ import type { ReactCodeMirrorRef, ViewUpdate } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import type { PiiEntity } from "../lib/pii-engine";
 import { piiHighlightExtension } from "../lib/pii-decorations";
-import { ADDABLE_CATEGORIES } from "../lib/pii-categories";
+import {
+  ADDABLE_CATEGORIES,
+  DEFAULT_ADDABLE_CATEGORY,
+  isAddableCategory,
+} from "../lib/pii-categories";
 
 // Module-level, not inline in the JSX below: `@uiw/react-codemirror`'s internal
 // reconfigure effect depends on this prop's *identity* (like `extensions` per the
@@ -65,7 +69,7 @@ export function MarkdownEditor({
   // exists to keep correctly anchored.
   const [content] = useState(value);
   const [selection, setSelection] = useState({ from: 0, to: 0 });
-  const [category, setCategory] = useState(ADDABLE_CATEGORIES[0]);
+  const [category, setCategory] = useState(DEFAULT_ADDABLE_CATEGORY);
   const editorRef = useRef<ReactCodeMirrorRef>(null);
 
   const extensions = useMemo(
@@ -84,7 +88,9 @@ export function MarkdownEditor({
           <select
             className="pii-add-category rounded-md border border-border bg-background px-2 py-1 text-xs"
             value={category}
-            onChange={(e) => setCategory(e.target.value)}
+            onChange={(e) => {
+              if (isAddableCategory(e.target.value)) setCategory(e.target.value);
+            }}
           >
             {ADDABLE_CATEGORIES.map((c) => (
               <option key={c} value={c}>
