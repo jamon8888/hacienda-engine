@@ -69,11 +69,36 @@ jobs:
         # own `build:wasm` script exactly — this job's whole point is verifying the
         # committed pkg/ matches what that script produces, so a feature-flag mismatch
         # here would make it "detect drift" against its own wrong baseline.
+        #
+        # RUSTFLAGS: `file!()`/panic-location strings embed the absolute source path of
+        # every crate compiled, dependencies included — so without remapping, the
+        # `hacienda_wasm_bg.wasm` this step produces differs from one built anywhere
+        # else (a contributor's machine, a different runner) purely by build directory,
+        # with zero actual source drift. `--remap-path-prefix` normalizes both halves
+        # of that: the checkout root (`github.workspace`, unique per run but always
+        # under `/home/runner/work/...`) and Cargo's registry/dependency-source cache
+        # (`CARGO_HOME`, GitHub-hosted runners' well-established default of
+        # `/home/runner/.cargo` — not available as a workflow expression since nothing
+        # here sets it via `env:`, so it's spelled out literally rather than templated).
+        # Anyone rebuilding and committing pkg/ output outside CI must pass the same
+        # `--remap-path-prefix=<their local paths>=/repo,/cargo-home` targets for the
+        # committed output to match what this job independently rebuilds.
+        env:
+          RUSTFLAGS: >-
+            --remap-path-prefix=${{ github.workspace }}=/repo
+            --remap-path-prefix=/home/runner/.cargo=/cargo-home
         run: cd crates/hacienda-wasm && wasm-pack build --target web --no-default-features --features ner-candle-wasm
 
       - name: Fail if committed pkg/ output is stale
         run: |
-          if ! git diff --exit-code -- crates/hacienda-wasm/pkg/; then
+          # `git diff --exit-code` alone only catches changes to files git already
+          # tracks — a rebuild that adds a brand-new file under pkg/ (e.g. a renamed
+          # chunk) wouldn't show up there at all and this job would pass on stale
+          # output. `git status --porcelain` catches both modified *and* untracked
+          # files in one check.
+          if [ -n "$(git status --porcelain -- crates/hacienda-wasm/pkg/)" ]; then
             echo "::error::crates/hacienda-wasm/pkg/ is stale. Run 'task build:wasm' locally, commit the result, and push again. Vercel trusts this committed output as-is and never rebuilds it."
+            git status --porcelain -- crates/hacienda-wasm/pkg/
+            git diff -- crates/hacienda-wasm/pkg/
             exit 1
           fi
