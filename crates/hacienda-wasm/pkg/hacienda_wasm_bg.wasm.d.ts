@@ -11,11 +11,11 @@ export const loadNerModel: (a: number, b: number, c: number, d: number, e: numbe
 export const process: (a: number, b: number) => any;
 export const redact_empty: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const scan: (a: number, b: number) => any;
-export const wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___wasm_bindgen_cbc57a76bbbebc35___JsValue__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_cbc57a76bbbebc35___JsError___true_: (a: number, b: number, c: any) => [number, number];
-export const wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___web_sys_3d3beebc3740e975___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_cbc57a76bbbebc35___JsValue___true_: (a: number, b: number, c: any) => [number, number];
-export const wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___js_sys_7f8c806926947354___Function_fn_wasm_bindgen_cbc57a76bbbebc35___JsValue_____wasm_bindgen_cbc57a76bbbebc35___sys__Undefined___js_sys_7f8c806926947354___Function_fn_wasm_bindgen_cbc57a76bbbebc35___JsValue_____wasm_bindgen_cbc57a76bbbebc35___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
-export const wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke___web_sys_3d3beebc3740e975___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
-export const wasm_bindgen_cbc57a76bbbebc35___convert__closures_____invoke_______true_: (a: number, b: number) => void;
+export const wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___wasm_bindgen_bf7b0d491ce864c2___JsValue__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsError___true_: (a: number, b: number, c: any) => [number, number];
+export const wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___web_sys_c2086d39a3c4ab29___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsValue___true_: (a: number, b: number, c: any) => [number, number];
+export const wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___js_sys_f311ed201db48e3e___Function_fn_wasm_bindgen_bf7b0d491ce864c2___JsValue_____wasm_bindgen_bf7b0d491ce864c2___sys__Undefined___js_sys_f311ed201db48e3e___Function_fn_wasm_bindgen_bf7b0d491ce864c2___JsValue_____wasm_bindgen_bf7b0d491ce864c2___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
+export const wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___web_sys_c2086d39a3c4ab29___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
+export const wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke_______true_: (a: number, b: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_exn_store: (a: number) => void;
