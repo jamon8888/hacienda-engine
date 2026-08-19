@@ -6,7 +6,7 @@ pub mod types;
 
 pub use engine::RedactionEngine;
 pub use pseudonym::{
-    EnvKeyResolver, KeyId, KeyResolver, PseudonymError, PseudonymKey, Pseudonymiser,
+    EnvKeyResolver, KeyId, KeyResolver, KeyStatus, PseudonymError, PseudonymKey, Pseudonymiser,
     ACTIVE_KEY_VAR, KEY_BYTES, KEY_VAR_PREFIX,
 };
 pub use types::{

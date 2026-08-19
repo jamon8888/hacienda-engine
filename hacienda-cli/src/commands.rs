@@ -54,7 +54,7 @@ fn build_facade(config: HaciendaConfig) -> Result<HaciendaFacade, hacienda::Haci
         .as_ref()
         .is_some_and(|p| p.redaction.mode == RedactionMode::Pseudonymize);
     if needs_pseudonymiser {
-        HaciendaFacade::with_key_resolver(config, &EnvKeyResolver::new(), &[])
+        HaciendaFacade::with_key_resolver(config, Arc::new(EnvKeyResolver::new()), &[])
     } else {
         HaciendaFacade::new(config)
     }
@@ -93,7 +93,7 @@ pub async fn run_pii_reveal(
 ) -> Result<()> {
     let config = load_config(config_path, config_json, None, None)?;
     let facade = Arc::new(
-        HaciendaFacade::with_key_resolver(config, &EnvKeyResolver::new(), &[])
+        HaciendaFacade::with_key_resolver(config, Arc::new(EnvKeyResolver::new()), &[])
             .context("no pseudonym key is configured for this process")?,
     );
 
@@ -971,8 +971,9 @@ async fn write_review_queue(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
          happen, since --review-out materialises [review] automatically (see \
          apply_cli_overrides in hacienda-cli/src/config.rs)",
     )?;
+    let tenant = Caller::Trusted.tenant_ctx().tenant;
     let items = queue
-        .list(&Caller::Trusted.tenant_ctx(), None)
+        .list(&tenant, None)
         .await
         .context("reading this run's review queue")?;
 
@@ -983,7 +984,7 @@ async fn write_review_queue(facade: &HaciendaFacade, dir: &Path) -> Result<()> {
         .with_context(|| format!("opening the review store at {}", log_path.display()))?;
     for item in items {
         store
-            .submit(item)
+            .submit(&tenant, item)
             .await
             .context("writing a review item to the durable store")?;
     }
@@ -1077,7 +1078,7 @@ pub async fn run_review_list(args: ReviewListArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let items = queue
         .list(
-            &Caller::Trusted.tenant_ctx(),
+            &Caller::Trusted.tenant_ctx().tenant,
             args.status.map(review_status_from_arg),
         )
         .await
@@ -1109,7 +1110,7 @@ pub async fn run_review_list(args: ReviewListArgs) -> Result<()> {
 pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .get(&Caller::Trusted.tenant_ctx(), &args.id)
+        .get(&Caller::Trusted.tenant_ctx().tenant, &args.id)
         .await
         .context("reading the review item")?
         .ok_or_else(|| anyhow::anyhow!("no review item with id '{}'", args.id))?;
@@ -1120,7 +1121,7 @@ pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
 pub async fn run_review_assign(args: ReviewAssignArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .assign(&Caller::Trusted.tenant_ctx(), &args.id, &args.reviewer)
+        .assign(&Caller::Trusted.tenant_ctx().tenant, &args.id, &args.reviewer)
         .await
         .with_context(|| format!("assigning review item '{}'", args.id))?;
     print_review_item(&item, args.format)
@@ -1131,7 +1132,7 @@ pub async fn run_review_decide(args: ReviewDecideArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
         .decide(
-            &Caller::Trusted.tenant_ctx(),
+            &Caller::Trusted.tenant_ctx().tenant,
             &args.id,
             review_decision_from_arg(args.decision),
             &args.reviewer,
@@ -1146,7 +1147,7 @@ pub async fn run_review_decide(args: ReviewDecideArgs) -> Result<()> {
 pub async fn run_review_stats(args: ReviewStatsArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let stats = queue
-        .stats(&Caller::Trusted.tenant_ctx())
+        .stats(&Caller::Trusted.tenant_ctx().tenant)
         .await
         .context("reading review queue stats")?;
 
@@ -1476,6 +1477,40 @@ fn check_bind_policy(bind: SocketAddr, auth: &AuthConfig) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Run `hacienda mcp serve` — the MCP surface (M1a), stdio transport only.
+///
+/// Builds the facade the same way `run_extract`/`run_scan` do: a key resolver is wired
+/// in only when the configured default redaction mode is `pseudonymize` (see
+/// `build_facade`'s own doc comment for why this is conditional). A deployment that
+/// never configures pseudonymisation still gets every other tool; `pii_reveal` alone
+/// returns the facade's `PiiDisabled` error, mapped the same way `hacienda pii reveal`
+/// maps it.
+///
+/// Unlike `run_extract`/`run_scan`, this facade is long-lived — one MCP session can make
+/// many tool calls — so there is no `close_after` here; `hacienda-mcp::HaciendaMcp`
+/// serves until the client disconnects, and there is currently no signal to close the
+/// facade's stores afterwards (the same gap `run_serve` has today: neither shuts down
+/// cleanly on process exit, both rely on OS process teardown).
+pub async fn run_mcp_serve(
+    config_path: Option<PathBuf>,
+    config_json: Option<String>,
+) -> Result<()> {
+    let config = load_config(config_path, config_json, None, None)?;
+    let facade = Arc::new(build_facade(config).context("building the facade")?);
+
+    // `serve_stdio` returns `Box<dyn std::error::Error + Send + Sync>`, which does not
+    // itself implement `std::error::Error` (the boxed trait object is unsized, and std's
+    // `impl<T: Error> Error for Box<T>` requires `T: Sized`) — so `anyhow::Error::from`
+    // cannot take it directly. `anyhow!(error)` falls back to its adhoc (`Display`/`Debug`)
+    // constructor instead, which still carries the error's own message, unlike the
+    // hand-written `anyhow!("MCP server error: {e}")` this replaces.
+    hacienda_mcp::HaciendaMcp::new(facade)
+        .serve_stdio()
+        .await
+        .map_err(|error| anyhow::anyhow!(error))
+        .context("serving the MCP surface over stdio")
 }
 
 /// Run `hacienda serve` — the HTTP API of the integration design §5.

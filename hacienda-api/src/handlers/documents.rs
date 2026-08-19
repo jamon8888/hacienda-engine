@@ -77,6 +77,7 @@ pub async fn process_documents(
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
 
     let inputs: Vec<ExtractInput> = body
         .documents
@@ -133,7 +134,13 @@ pub async fn process_documents(
                 ApiError::internal()
             })?;
             let version_sequence = store
-                .create_version(document_id, &content_hash, &doc.content, entities_json)
+                .create_version(
+                    &tenant,
+                    document_id,
+                    &content_hash,
+                    &doc.content,
+                    entities_json,
+                )
                 .await
                 .map_err(ApiError::from)?;
             (Some(document_id), Some(version_sequence))
@@ -183,19 +190,16 @@ pub async fn process_documents_async(
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
 
     // The job's owner is the principal id for per-tenant isolation.
     // `Caller::Trusted` maps to `None` (in-process caller).
     let owner = caller.principal_id().map(str::to_owned);
 
-    let job = state
-        .jobs
-        .create(&caller.tenant_ctx(), owner)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to create async job");
-            ApiError::internal()
-        })?;
+    let job = state.jobs.create(&tenant, owner).await.map_err(|e| {
+        tracing::error!(error = %e, "failed to create async job");
+        ApiError::internal()
+    })?;
 
     let job_id = job.id.clone();
 
@@ -211,12 +215,18 @@ pub async fn process_documents_async(
     let task_jobs = state.jobs.clone();
     let task_facade = state.facade.clone();
     let task_job_id = job_id.clone();
+    let task_tenant = tenant.clone();
 
     tokio::spawn(async move {
         use hacienda_core::jobs::JobStatus;
 
         if let Err(e) = task_jobs
-            .transition(&task_job_id, JobStatus::Queued, JobStatus::Running)
+            .transition(
+                &task_tenant,
+                &task_job_id,
+                JobStatus::Queued,
+                JobStatus::Running,
+            )
             .await
         {
             tracing::error!(job_id = %task_job_id, error = %e, "failed to transition job to Running");
@@ -233,7 +243,7 @@ pub async fn process_documents_async(
         match result {
             Ok(res) => match serde_json::to_string(&res) {
                 Ok(json) => {
-                    if let Err(e) = task_jobs.finish(&task_job_id, json).await {
+                    if let Err(e) = task_jobs.finish(&task_tenant, &task_job_id, json).await {
                         tracing::error!(
                             job_id = %task_job_id, error = %e,
                             "failed to mark job as succeeded"
@@ -247,14 +257,22 @@ pub async fn process_documents_async(
                     );
                     // Do not write the result content to the store.
                     let _ = task_jobs
-                        .fail(&task_job_id, "result serialisation failed".to_string())
+                        .fail(
+                            &task_tenant,
+                            &task_job_id,
+                            "result serialisation failed".to_string(),
+                        )
                         .await;
                 }
             },
             Err(e) => {
                 tracing::error!(job_id = %task_job_id, error = %e, "async job failed");
                 let _ = task_jobs
-                    .fail(&task_job_id, "document processing failed".to_string())
+                    .fail(
+                        &task_tenant,
+                        &task_job_id,
+                        "document processing failed".to_string(),
+                    )
                     .await;
             }
         }

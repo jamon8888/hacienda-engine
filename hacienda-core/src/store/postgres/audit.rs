@@ -12,6 +12,7 @@ use crate::audit::{
     segment::{compute_seal_hash, verify_seal_chain, SegmentSeal},
     AuditStore, GENESIS_HASH,
 };
+use crate::tenancy::TenantId;
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use sqlx::PgPool;
@@ -32,7 +33,11 @@ impl PostgresAuditStore {
 
 #[async_trait]
 impl AuditStore for PostgresAuditStore {
-    async fn append(&self, inputs: Vec<AuditEntryInput>) -> Result<Vec<AuditEntry>, AuditError> {
+    async fn append(
+        &self,
+        tenant: &TenantId,
+        inputs: Vec<AuditEntryInput>,
+    ) -> Result<Vec<AuditEntry>, AuditError> {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
@@ -41,9 +46,9 @@ impl AuditStore for PostgresAuditStore {
         // This is done in a single transaction to maintain atomicity.
         let mut tx = self.pool.begin().await?;
 
-        // Get or create the open segment.
+        // Get or create the open segment — this tenant's, specifically.
         let (segment_id, segment_config_hash) =
-            get_or_create_open_segment(&mut tx, &inputs[0].config_hash).await?;
+            get_or_create_open_segment(&mut tx, tenant, &inputs[0].config_hash).await?;
 
         // Insert all entries in this batch.
         let mut entries = Vec::with_capacity(inputs.len());
@@ -79,7 +84,8 @@ impl AuditStore for PostgresAuditStore {
         Ok(entries)
     }
 
-    async fn entries(&self) -> Result<Vec<AuditEntry>, AuditError> {
+    async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
+        let tenant_id = tenant.as_str();
         let rows = sqlx::query_as!(
             AuditEntryRow,
             r#"
@@ -89,12 +95,13 @@ impl AuditStore for PostgresAuditStore {
             FROM audit_entries
             WHERE segment_id = (
                 SELECT segment_id FROM audit_segments
-                WHERE sealed_at IS NULL
+                WHERE sealed_at IS NULL AND tenant_id = $1
                 ORDER BY created_at DESC
                 LIMIT 1
             )
             ORDER BY sequence_num
-            "#
+            "#,
+            tenant_id
         )
         .fetch_all(&self.pool)
         .await?;
@@ -104,9 +111,12 @@ impl AuditStore for PostgresAuditStore {
 
     async fn history(
         &self,
+        tenant: &TenantId,
         after: Option<&AuditCursor>,
         limit: usize,
     ) -> Result<AuditPage, AuditError> {
+        let tenant_id = tenant.as_str();
+
         // Build extents: sealed segments (oldest first), then the open segment
         #[derive(sqlx::FromRow)]
         struct ExtentRow {
@@ -129,9 +139,10 @@ impl AuditStore for PostgresAuditStore {
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
-            WHERE sealed_at IS NOT NULL
+            WHERE sealed_at IS NOT NULL AND tenant_id = $1
             ORDER BY created_at
-            "#
+            "#,
+            tenant_id
         )
         .fetch_all(&mut *tx)
         .await?;
@@ -151,10 +162,11 @@ impl AuditStore for PostgresAuditStore {
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
-            WHERE sealed_at IS NULL
+            WHERE sealed_at IS NULL AND tenant_id = $1
             ORDER BY created_at DESC
             LIMIT 1
-            "#
+            "#,
+            tenant_id
         )
         .fetch_optional(&mut *tx)
         .await?;
@@ -217,25 +229,27 @@ impl AuditStore for PostgresAuditStore {
         })
     }
 
-    async fn tip(&self) -> Result<String, AuditError> {
+    async fn tip(&self, tenant: &TenantId) -> Result<String, AuditError> {
         // Mirrors the in-memory reference's `tip()` (`audit/store.rs`): the open
         // segment's own last entry is the head whenever it has one. Each segment's
         // entry chain restarts at genesis, so continuity across a rotation lives in
         // the *seal* chain — only fall through to the newest seal (or genesis) when
         // the open segment is empty or absent.
-        let open_entries = self.entries().await?;
+        let open_entries = self.entries(tenant).await?;
         if let Some(last) = open_entries.last() {
             return Ok(last.chain_hash.clone());
         }
 
         // Get the latest seal's sealed_tip, or genesis if no seals exist.
+        let tenant_id = tenant.as_str();
         let row = sqlx::query!(
             r#"
             SELECT sealed_tip FROM audit_segments
-            WHERE sealed_at IS NOT NULL
+            WHERE sealed_at IS NOT NULL AND tenant_id = $1
             ORDER BY sealed_at DESC
             LIMIT 1
-            "#
+            "#,
+            tenant_id
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -245,16 +259,18 @@ impl AuditStore for PostgresAuditStore {
             .unwrap_or_else(|| GENESIS_HASH.to_owned()))
     }
 
-    async fn seals(&self) -> Result<Vec<SegmentSeal>, AuditError> {
+    async fn seals(&self, tenant: &TenantId) -> Result<Vec<SegmentSeal>, AuditError> {
+        let tenant_id = tenant.as_str();
         let rows = sqlx::query_as!(
             SealRow,
             r#"
             SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                    entry_count, created_at, sealed_at
             FROM audit_segments
-            WHERE sealed_at IS NOT NULL
+            WHERE sealed_at IS NOT NULL AND tenant_id = $1
             ORDER BY created_at
-            "#
+            "#,
+            tenant_id
         )
         .fetch_all(&self.pool)
         .await?;
@@ -262,9 +278,9 @@ impl AuditStore for PostgresAuditStore {
         rows.into_iter().map(row_to_seal).collect()
     }
 
-    async fn verify(&self) -> Result<(), AuditError> {
+    async fn verify(&self, tenant: &TenantId) -> Result<(), AuditError> {
         // Verify seal chain
-        let seals = self.seals().await?;
+        let seals = self.seals(tenant).await?;
         verify_seal_chain(&seals)?;
 
         // Verify each sealed segment's entries
@@ -274,26 +290,41 @@ impl AuditStore for PostgresAuditStore {
         }
 
         // Verify open segment
-        let open_entries = self.entries().await?;
-        let config_hash = self.get_config_hash().await?;
-        crate::audit::store::verify_open_entries(&open_entries, &self.tip().await?, &config_hash)?;
+        let open_entries = self.entries(tenant).await?;
+        let config_hash = self.get_config_hash(tenant).await?;
+        crate::audit::store::verify_open_entries(
+            &open_entries,
+            &self.tip(tenant).await?,
+            &config_hash,
+        )?;
 
         Ok(())
     }
 
-    async fn rotate(&self) -> Result<SegmentSeal, AuditError> {
+    async fn rotate(&self, tenant: &TenantId) -> Result<SegmentSeal, AuditError> {
         let mut tx = self.pool.begin().await?;
+        let tenant_id = tenant.as_str();
 
-        // Get current open segment
+        // Get current open segment — this tenant's. Without the `tenant_id` filter,
+        // `fetch_one` would error as soon as a second tenant's open segment exists:
+        // "one open segment" only holds per tenant now, not store-wide. `fetch_optional`,
+        // not `fetch_one`: a tenant that has never appended (or was already closed) has
+        // no open segment, which is `StoreClosed`, not a generic backend error — matching
+        // `InMemoryAuditStore::rotate`'s own `StoreClosed { operation: "rotate" }`.
         let segment_row = sqlx::query!(
-            "SELECT segment_id, tenant_id, node_id, config_hash, entry_count, created_at FROM audit_segments WHERE sealed_at IS NULL"
+            "SELECT segment_id, node_id, config_hash, entry_count, created_at \
+             FROM audit_segments WHERE sealed_at IS NULL AND tenant_id = $1",
+            tenant_id
         )
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AuditError::StoreClosed {
+            operation: "rotate",
+        })?;
 
         let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
         let tip = compute_tip(&entries);
-        let prev_seal_hash = get_latest_seal_hash(&mut tx).await?;
+        let prev_seal_hash = get_latest_seal_hash(&mut tx, tenant).await?;
         // ~keep: truncated to microseconds because Postgres TIMESTAMPTZ has microsecond
         // resolution — `Utc::now()` carries nanoseconds, so hashing the untruncated value
         // here and then reading it back post-truncation for `verify()` would compute two
@@ -304,7 +335,7 @@ impl AuditStore for PostgresAuditStore {
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
             &segment_row.segment_id.to_string(),
-            &segment_row.tenant_id,
+            tenant_id,
             &segment_row.node_id,
             &segment_row.config_hash,
             &tip,
@@ -315,7 +346,7 @@ impl AuditStore for PostgresAuditStore {
 
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
-            tenant_id: segment_row.tenant_id.clone(),
+            tenant_id: tenant_id.to_string(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
             prev_seal_hash,
@@ -336,16 +367,16 @@ impl AuditStore for PostgresAuditStore {
         .execute(&mut *tx)
         .await?;
 
-        // Create new open segment, inheriting the tenant the rotated segment belonged to.
+        // Create new open segment, for the same tenant.
         sqlx::query!(
             r#"
-            INSERT INTO audit_segments (tenant_id, node_id, config_hash, prev_seal_hash)
+            INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash, tenant_id)
             VALUES ($1, $2, $3, $4)
             "#,
-            segment_row.tenant_id,
             segment_row.node_id,
             segment_row.config_hash,
-            seal_hash
+            seal_hash,
+            tenant_id
         )
         .execute(&mut *tx)
         .await?;
@@ -355,23 +386,26 @@ impl AuditStore for PostgresAuditStore {
         Ok(seal)
     }
 
-    async fn close(&self) -> Result<SegmentSeal, AuditError> {
+    async fn close(&self, tenant: &TenantId) -> Result<SegmentSeal, AuditError> {
         // Similar to rotate but without creating a new segment. `FOR UPDATE` matches
         // `get_or_create_open_segment`'s rationale: it serialises concurrent closers on
         // the same row instead of letting two of them race to seal it.
         let mut tx = self.pool.begin().await?;
+        let tenant_id = tenant.as_str();
 
         let segment_row = sqlx::query!(
-            "SELECT segment_id, tenant_id, node_id, config_hash, entry_count, created_at \
-             FROM audit_segments WHERE sealed_at IS NULL FOR UPDATE"
+            "SELECT segment_id, node_id, config_hash, entry_count, created_at \
+             FROM audit_segments WHERE sealed_at IS NULL AND tenant_id = $1 FOR UPDATE",
+            tenant_id
         )
         .fetch_optional(&mut *tx)
         .await?;
 
-        // No open segment: either this store was never opened, or `close` already ran.
-        // The trait documents `close` as idempotent (mirroring `InMemoryAuditStore`'s
-        // `closed_seal` cache), so a second call must return the same seal rather than
-        // erroring — only surface `StoreClosed` when there is truly nothing sealed yet.
+        // No open segment: either this tenant's chain was never opened, or `close` for
+        // this tenant already ran. The trait documents `close` as idempotent (mirroring
+        // `InMemoryAuditStore`'s `closed_seal` cache), so a second call must return the
+        // same seal rather than erroring — only surface `StoreClosed` when there is truly
+        // nothing sealed yet for this tenant.
         let Some(segment_row) = segment_row else {
             let sealed = sqlx::query_as!(
                 SealRow,
@@ -379,10 +413,11 @@ impl AuditStore for PostgresAuditStore {
                 SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                        entry_count, created_at, sealed_at
                 FROM audit_segments
-                WHERE sealed_at IS NOT NULL
+                WHERE sealed_at IS NOT NULL AND tenant_id = $1
                 ORDER BY sealed_at DESC
                 LIMIT 1
-                "#
+                "#,
+                tenant_id
             )
             .fetch_optional(&mut *tx)
             .await?;
@@ -395,7 +430,7 @@ impl AuditStore for PostgresAuditStore {
 
         let entries = get_segment_entries_tx(&mut tx, segment_row.segment_id).await?;
         let tip = compute_tip(&entries);
-        let prev_seal_hash = get_latest_seal_hash(&mut tx).await?;
+        let prev_seal_hash = get_latest_seal_hash(&mut tx, tenant).await?;
         // ~keep: see the matching truncation in `rotate()` — Postgres TIMESTAMPTZ has
         // microsecond resolution, so hashing the untruncated `Utc::now()` here would
         // mismatch the value `verify()` recomputes from after it round-trips the DB.
@@ -404,7 +439,7 @@ impl AuditStore for PostgresAuditStore {
         let seal_hash = compute_seal_hash(
             prev_seal_hash.as_deref(),
             &segment_row.segment_id.to_string(),
-            &segment_row.tenant_id,
+            tenant_id,
             &segment_row.node_id,
             &segment_row.config_hash,
             &tip,
@@ -415,7 +450,7 @@ impl AuditStore for PostgresAuditStore {
 
         let seal = SegmentSeal {
             segment_id: segment_row.segment_id.to_string(),
-            tenant_id: segment_row.tenant_id.clone(),
+            tenant_id: tenant_id.to_string(),
             node_id: segment_row.node_id.clone(),
             config_hash: segment_row.config_hash.clone(),
             prev_seal_hash,
@@ -582,15 +617,23 @@ struct SealRow {
 /// transaction (`_xact_lock`), released automatically on commit/rollback.
 async fn get_or_create_open_segment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &TenantId,
     config_hash: &str,
 ) -> Result<(Uuid, String), AuditError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('hacienda_audit_open_segment')::bigint)")
+    // The lock key includes the tenant so two tenants' first-appends never serialise
+    // behind each other — only concurrent first-appends for the *same* tenant do, which
+    // is the actual race being closed below.
+    let lock_key = format!("hacienda_audit_open_segment:{}", tenant.as_str());
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+        .bind(&lock_key)
         .execute(&mut **tx)
         .await?;
 
+    let tenant_id = tenant.as_str();
     let row = sqlx::query!(
         "SELECT segment_id, config_hash FROM audit_segments \
-         WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE"
+         WHERE sealed_at IS NULL AND tenant_id = $1 ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+        tenant_id
     )
     .fetch_optional(&mut **tx)
     .await?;
@@ -599,25 +642,27 @@ async fn get_or_create_open_segment(
         return Ok((row.segment_id, row.config_hash));
     }
 
-    // No open segment, create one. `prev_seal_hash` must link to whatever segment is
-    // currently the latest sealed one — the *only* other place a segment gets created,
-    // `rotate()`'s inline "create new open segment" insert, already does this (it has
-    // `prev_seal_hash` on hand from computing the segment it just sealed). This path is
-    // reached whenever `append` finds no open segment at all — notably right after a
-    // bare `close()` (which seals without opening a successor) — and used to leave
-    // `prev_seal_hash` unset. That produced a segment whose *own* seal, once this one is
-    // itself later sealed, is computed against the true latest seal hash (`rotate`/
+    // No open segment for this tenant, create one. `prev_seal_hash` must link to
+    // whatever segment is currently this tenant's latest sealed one — the *only*
+    // other place a segment gets created, `rotate()`'s inline "create new open
+    // segment" insert, already does this (it has `prev_seal_hash` on hand from
+    // computing the segment it just sealed). This path is reached whenever `append`
+    // finds no open segment at all — notably right after a bare `close()` (which
+    // seals without opening a successor) — and used to leave `prev_seal_hash`
+    // unset. That produced a segment whose *own* seal, once this one is itself
+    // later sealed, is computed against the true latest seal hash (`rotate`/
     // `close` both derive it fresh via `get_latest_seal_hash`) but whose stored
     // `prev_seal_hash` column — the value `verify()` reads back — stayed `NULL`,
-    // permanently failing `check_seal_integrity` for that segment regardless of any
-    // tampering.
-    let prev_seal_hash = get_latest_seal_hash(tx).await?;
+    // permanently failing `check_seal_integrity` for that segment regardless of
+    // any tampering.
+    let prev_seal_hash = get_latest_seal_hash(tx, tenant).await?;
 
     let row = sqlx::query!(
-        "INSERT INTO audit_segments (node_id, config_hash, prev_seal_hash) VALUES ($1, $2, $3) \
-         RETURNING segment_id",
+        "INSERT INTO audit_segments (node_id, config_hash, tenant_id, prev_seal_hash) \
+         VALUES ($1, $2, $3, $4) RETURNING segment_id",
         format!("hacienda-{}", std::process::id()),
         config_hash,
+        tenant_id,
         prev_seal_hash
     )
     .fetch_one(&mut **tx)
@@ -736,9 +781,12 @@ impl PostgresAuditStore {
         rows.into_iter().map(row_to_entry).collect()
     }
 
-    async fn get_config_hash(&self) -> Result<String, AuditError> {
+    async fn get_config_hash(&self, tenant: &TenantId) -> Result<String, AuditError> {
+        let tenant_id = tenant.as_str();
         let row = sqlx::query!(
-            "SELECT config_hash FROM audit_segments WHERE sealed_at IS NULL ORDER BY created_at DESC LIMIT 1"
+            "SELECT config_hash FROM audit_segments \
+             WHERE sealed_at IS NULL AND tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
+            tenant_id
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -772,11 +820,19 @@ async fn get_segment_entries_tx(
     rows.into_iter().map(row_to_entry).collect()
 }
 
+/// `tenant`'s own most recent seal — never another tenant's. Without the `tenant_id`
+/// filter, a rotation on one tenant's chain would link its new seal's `prev_seal_hash`
+/// to whichever tenant sealed most recently, producing a seal chain that spans tenants
+/// and fails `verify_seal_chain` for both of them.
 async fn get_latest_seal_hash(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &TenantId,
 ) -> Result<Option<String>, AuditError> {
+    let tenant_id = tenant.as_str();
     let row = sqlx::query!(
-        "SELECT seal_hash FROM audit_segments WHERE sealed_at IS NOT NULL ORDER BY sealed_at DESC LIMIT 1"
+        "SELECT seal_hash FROM audit_segments \
+         WHERE sealed_at IS NOT NULL AND tenant_id = $1 ORDER BY sealed_at DESC LIMIT 1",
+        tenant_id
     )
     .fetch_optional(&mut **tx)
     .await?;
@@ -824,24 +880,35 @@ mod tests {
     //    that needs exclusive ownership of what it appends next.
 
     async fn test_store() -> PostgresAuditStore {
-        PostgresAuditStore::new(test_support::shared().await.pool())
+        let pool = test_support::shared().await.pool();
+        // `fk_audit_segments_tenant` (migration 0005) requires the tenant to already
+        // exist — only `default` is seeded by migration, so this module's shared
+        // literal tenant must be admitted before any test's first `append`.
+        test_support::ensure_tenant(&pool, &t()).await;
+        PostgresAuditStore::new(pool)
     }
 
-    /// Seal away any entries an earlier test in this shared suite left in the open
-    /// segment, so whatever this test appends next lands in a brand-new, empty segment
-    /// of its own — required by any test that asserts on entry position/count within
-    /// "its" segment rather than just on `verify()` succeeding. A no-op if the open
-    /// segment is already empty (including if none is open at all, e.g. right after a
-    /// bare `close()` — `entries()` reports that as empty, not an error).
+    /// The tenant every test in this module uses. All tests already share one Postgres
+    /// database and one un-torn-down "the open segment" across the whole suite (see the
+    /// module doc above) — giving them all the same tenant id preserves that existing
+    /// shared-chain behavior unchanged rather than accidentally isolating them from each
+    /// other for the first time.
+    fn t() -> TenantId {
+        TenantId::new("pg-audit-test-tenant")
+    }
+
+    /// Seals away any leftover open-segment entries from an earlier test in this
+    /// shared-database suite (see the module doc above) so a test that asserts on an
+    /// entry's *position* within its segment can rely on starting from an empty one.
     async fn start_fresh_segment(store: &PostgresAuditStore) {
         if !store
-            .entries()
+            .entries(&t())
             .await
             .expect("reading the open segment")
             .is_empty()
         {
             store
-                .rotate()
+                .rotate(&t())
                 .await
                 .expect("sealing away a leftover open segment");
         }
@@ -872,6 +939,57 @@ mod tests {
         }
     }
 
+    /// Two tenants, neither of which is the shared `t()` this whole module's other
+    /// tests race on (see the module doc's "one shared open segment" caveat) — each
+    /// gets its own fresh, UUID-suffixed id so this test cannot inherit contamination
+    /// from, or contaminate, the rest of the suite. Proves the central S1b guarantee
+    /// `get_latest_seal_hash`'s own doc names: without the `tenant_id` filter, a second
+    /// tenant's seal chain would link into the first's `prev_seal_hash` and break
+    /// `verify_seal_chain` for both.
+    #[test]
+    #[ignore]
+    fn two_tenants_maintain_independent_seal_chains() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
+            let pool = test_support::shared().await.pool();
+            let tenant_a = TenantId::new(format!("pg-audit-isolation-a-{}", Uuid::new_v4()));
+            let tenant_b = TenantId::new(format!("pg-audit-isolation-b-{}", Uuid::new_v4()));
+            test_support::ensure_tenant(&pool, &tenant_a).await;
+            test_support::ensure_tenant(&pool, &tenant_b).await;
+            let config_hash = format!("cfg-{}", Uuid::new_v4());
+
+            store
+                .append(&tenant_a, vec![test_input(&unique_id("a1"), &config_hash)])
+                .await
+                .expect("append a1");
+            let seal_a = store.rotate(&tenant_a).await.expect("rotate a");
+
+            store
+                .append(&tenant_b, vec![test_input(&unique_id("b1"), &config_hash)])
+                .await
+                .expect("append b1");
+            let seal_b = store.rotate(&tenant_b).await.expect("rotate b");
+
+            let seals_a = store.seals(&tenant_a).await.expect("seals a");
+            let seals_b = store.seals(&tenant_b).await.expect("seals b");
+
+            assert_eq!(seals_a.len(), 1);
+            assert_eq!(seals_a[0].segment_id, seal_a.segment_id);
+            assert_eq!(seals_b.len(), 1);
+            assert_eq!(seals_b[0].segment_id, seal_b.segment_id);
+
+            // Neither tenant's chain contains the other's segment — the isolation
+            // property this test exists to prove.
+            assert!(!seals_a.iter().any(|s| s.segment_id == seal_b.segment_id));
+            assert!(!seals_b.iter().any(|s| s.segment_id == seal_a.segment_id));
+
+            // Each tenant's own chain — its sealed segment plus the fresh, empty open
+            // segment `rotate` left behind — verifies independently.
+            store.verify(&tenant_a).await.expect("verify a");
+            store.verify(&tenant_b).await.expect("verify b");
+        });
+    }
+
     #[test]
     #[ignore]
     fn should_return_one_entry_per_input_in_order() {
@@ -884,7 +1002,10 @@ mod tests {
                 test_input(&e2, &config_hash),
                 test_input(&e3, &config_hash),
             ];
-            let entries = store.append(inputs).await.expect("append must succeed");
+            let entries = store
+                .append(&t(), inputs)
+                .await
+                .expect("append must succeed");
             assert_eq!(entries.len(), 3);
             assert_eq!(entries[0].id, e1);
             assert_eq!(entries[1].id, e2);
@@ -904,7 +1025,7 @@ mod tests {
                 .map(|id| test_input(id, &config_hash))
                 .collect::<Vec<_>>();
 
-            let appended = store.append(inputs).await.expect("append failed");
+            let appended = store.append(&t(), inputs).await.expect("append failed");
             assert_eq!(appended.len(), 3);
 
             // Simulate a fresh reader by opening a brand-new pool/store rather than reusing
@@ -914,7 +1035,7 @@ mod tests {
                 .expect("connect failed");
             let fresh_store = PostgresAuditStore::new(fresh_pool);
 
-            let entries = fresh_store.entries().await.expect("entries failed");
+            let entries = fresh_store.entries(&t()).await.expect("entries failed");
             for id in &ids {
                 assert!(
                     entries.iter().any(|e| &e.id == id),
@@ -922,7 +1043,7 @@ mod tests {
                 );
             }
 
-            fresh_store.verify().await.expect("chain must verify");
+            fresh_store.verify(&t()).await.expect("chain must verify");
         });
     }
 
@@ -947,7 +1068,10 @@ mod tests {
             // Bootstrap an open segment up front so every racing append targets the same
             // segment rather than each trying to create one.
             store
-                .append(vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
+                .append(
+                    &t(),
+                    vec![test_input(&Uuid::new_v4().to_string(), &config_hash)],
+                )
                 .await
                 .expect("bootstrap append failed");
 
@@ -962,7 +1086,7 @@ mod tests {
                     for entry in 0..ENTRIES_PER_TASK {
                         let id = format!("task-{task}-entry-{entry}-{}", Uuid::new_v4());
                         store
-                            .append(vec![test_input(&id, &config_hash)])
+                            .append(&t(), vec![test_input(&id, &config_hash)])
                             .await
                             .expect("concurrent append must succeed");
                     }
@@ -975,11 +1099,11 @@ mod tests {
 
             // Every append serialised behind the row lock, so the full chain must be valid.
             store
-                .verify()
+                .verify(&t())
                 .await
                 .expect("chain must verify after concurrent appends");
 
-            let all_entries = store.entries().await.expect("entries");
+            let all_entries = store.entries(&t()).await.expect("entries");
             // +1 for the bootstrap entry.
             assert_eq!(all_entries.len(), TASKS * ENTRIES_PER_TASK + 1);
         });
@@ -1005,11 +1129,14 @@ mod tests {
                     .iter()
                     .map(|id| test_input(id, &config_hash))
                     .collect::<Vec<_>>();
-                store.append(inputs).await.expect("append failed");
-                let seal = store.rotate().await.expect("rotate failed");
+                store.append(&t(), inputs).await.expect("append failed");
+                let seal = store.rotate(&t()).await.expect("rotate failed");
                 rotated_segment_id = seal.segment_id;
                 store
-                    .append(vec![test_input(&Uuid::new_v4().to_string(), &config_hash)])
+                    .append(
+                        &t(),
+                        vec![test_input(&Uuid::new_v4().to_string(), &config_hash)],
+                    )
                     .await
                     .expect("post-rotate append failed");
                 // `store` (and its pool) is dropped here — simulates the process exiting.
@@ -1022,7 +1149,7 @@ mod tests {
             // every test in the module (see the module doc comment), so other tests'
             // sealed segments legitimately coexist here. What must be true is that
             // *this* test's own rotated segment is among them.
-            let seals = restarted.seals().await.expect("seals failed");
+            let seals = restarted.seals(&t()).await.expect("seals failed");
             let seal = seals
                 .iter()
                 .find(|s| s.segment_id == rotated_segment_id)
@@ -1040,7 +1167,7 @@ mod tests {
             }
 
             restarted
-                .verify()
+                .verify(&t())
                 .await
                 .expect("chain must verify after restart");
         });
@@ -1053,23 +1180,29 @@ mod tests {
             let store = test_store().await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
-                .append(vec![
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                    ],
+                )
                 .await
                 .expect("first append");
             store
-                .append(vec![
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                    test_input(&Uuid::new_v4().to_string(), &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                        test_input(&Uuid::new_v4().to_string(), &config_hash),
+                    ],
+                )
                 .await
                 .expect("second append");
-            let entries = store.entries().await.expect("entries");
+            let entries = store.entries(&t()).await.expect("entries");
             assert_eq!(entries.len(), 4);
             store
-                .verify()
+                .verify(&t())
                 .await
                 .expect("chain must verify after two appends");
         });
@@ -1083,15 +1216,21 @@ mod tests {
             start_fresh_segment(&store).await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
-                .append(vec![test_input(&unique_id("pre-rotate"), &config_hash)])
+                .append(
+                    &t(),
+                    vec![test_input(&unique_id("pre-rotate"), &config_hash)],
+                )
                 .await
                 .expect("append before rotate");
-            store.rotate().await.expect("rotate");
+            store.rotate(&t()).await.expect("rotate");
             store
-                .append(vec![test_input(&unique_id("post-rotate"), &config_hash)])
+                .append(
+                    &t(),
+                    vec![test_input(&unique_id("post-rotate"), &config_hash)],
+                )
                 .await
                 .expect("append after rotate");
-            store.verify().await.expect("verify after rotation");
+            store.verify(&t()).await.expect("verify after rotation");
         });
     }
 
@@ -1102,18 +1241,18 @@ mod tests {
             let store = test_store().await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
-                .append(vec![test_input(&unique_id("first"), &config_hash)])
+                .append(&t(), vec![test_input(&unique_id("first"), &config_hash)])
                 .await
                 .expect("append");
-            let seal = store.rotate().await.expect("rotate");
-            let open_entries = store.entries().await.expect("entries");
+            let seal = store.rotate(&t()).await.expect("rotate");
+            let open_entries = store.entries(&t()).await.expect("entries");
             assert_eq!(open_entries.len(), 0, "new segment should start empty");
 
             store
-                .append(vec![test_input(&unique_id("second"), &config_hash)])
+                .append(&t(), vec![test_input(&unique_id("second"), &config_hash)])
                 .await
                 .expect("append after rotate");
-            let seal2 = store.rotate().await.expect("second rotate");
+            let seal2 = store.rotate(&t()).await.expect("second rotate");
             assert_eq!(
                 seal2.prev_seal_hash.as_deref(),
                 Some(seal.seal_hash.as_str()),
@@ -1129,19 +1268,22 @@ mod tests {
             let store = test_store().await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
-                .append(vec![test_input(&unique_id("sealed-1"), &config_hash)])
+                .append(&t(), vec![test_input(&unique_id("sealed-1"), &config_hash)])
                 .await
                 .expect("append");
-            store.rotate().await.expect("rotate");
+            store.rotate(&t()).await.expect("rotate");
             let (open1, open2) = (unique_id("open-1"), unique_id("open-2"));
             store
-                .append(vec![
-                    test_input(&open1, &config_hash),
-                    test_input(&open2, &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![
+                        test_input(&open1, &config_hash),
+                        test_input(&open2, &config_hash),
+                    ],
+                )
                 .await
                 .expect("append to new segment");
-            let entries = store.entries().await.expect("entries");
+            let entries = store.entries(&t()).await.expect("entries");
             assert_eq!(entries.len(), 2);
             assert_eq!(entries[0].id, open1);
             assert_eq!(entries[1].id, open2);
@@ -1155,11 +1297,11 @@ mod tests {
             let store = test_store().await;
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             store
-                .append(vec![test_input(&unique_id("x"), &config_hash)])
+                .append(&t(), vec![test_input(&unique_id("x"), &config_hash)])
                 .await
                 .expect("append");
-            let seal1 = store.close().await.expect("first close");
-            let seal2 = store.close().await.expect("second close");
+            let seal1 = store.close(&t()).await.expect("first close");
+            let seal2 = store.close(&t()).await.expect("second close");
             assert_eq!(
                 seal1.seal_hash, seal2.seal_hash,
                 "both close calls must return the same seal"
@@ -1192,14 +1334,14 @@ mod tests {
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (t1, t2) = (unique_id("t1"), unique_id("t2"));
             store
-                .append(vec![
-                    test_input(&t1, &config_hash),
-                    test_input(&t2, &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![test_input(&t1, &config_hash), test_input(&t2, &config_hash)],
+                )
                 .await
                 .expect("append");
-            store.rotate().await.expect("rotate seals the segment");
-            store.verify().await.expect("clean chain verifies");
+            store.rotate(&t()).await.expect("rotate seals the segment");
+            store.verify(&t()).await.expect("clean chain verifies");
 
             // Plain (non-macro) query: no `.sqlx` offline-cache entry needed for a
             // query this narrowly test-only, unlike the tamper/restore pair below it.
@@ -1210,7 +1352,7 @@ mod tests {
                 .expect("tamper update failed");
 
             let err = store
-                .verify()
+                .verify(&t())
                 .await
                 .expect_err("a tampered sealed entry must fail verification");
             assert!(
@@ -1229,7 +1371,7 @@ mod tests {
                 .await
                 .expect("restore after tamper failed");
             store
-                .verify()
+                .verify(&t())
                 .await
                 .expect("chain must verify again once the tamper is undone");
         });
@@ -1254,13 +1396,13 @@ mod tests {
             let config_hash = format!("cfg-{}", Uuid::new_v4());
             let (c1, c2) = (unique_id("c1"), unique_id("c2"));
             store
-                .append(vec![
-                    test_input(&c1, &config_hash),
-                    test_input(&c2, &config_hash),
-                ])
+                .append(
+                    &t(),
+                    vec![test_input(&c1, &config_hash), test_input(&c2, &config_hash)],
+                )
                 .await
                 .expect("append");
-            store.rotate().await.expect("rotate");
+            store.rotate(&t()).await.expect("rotate");
 
             let captured = sqlx::query(
                 "SELECT id, segment_id, sequence_num, category, action, span_hash, \
@@ -1280,7 +1422,7 @@ mod tests {
                 .expect("tamper delete failed");
 
             let err = store
-                .verify()
+                .verify(&t())
                 .await
                 .expect_err("a truncated sealed segment must fail verification");
             match err {
@@ -1319,7 +1461,7 @@ mod tests {
             .await
             .expect("restoring the deleted row failed");
             store
-                .verify()
+                .verify(&t())
                 .await
                 .expect("chain must verify again once the row is restored");
         });

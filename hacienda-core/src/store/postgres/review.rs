@@ -5,7 +5,7 @@ use crate::review::{
     types::{Priority, QueueStats, ReviewDecision, ReviewQueueItem, ReviewStatus},
     ReviewStore,
 };
-use crate::tenancy::TenantCtx;
+use crate::tenancy::TenantId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -24,15 +24,21 @@ impl PostgresReviewStore {
 
 #[async_trait]
 impl ReviewStore for PostgresReviewStore {
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        mut item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        item.tenant_id = tenant.to_string();
         let deadline = parse_optional_rfc3339(item.deadline.as_deref())?;
 
         sqlx::query!(
             r#"
-            INSERT INTO review_items (id, text_snippet, category, start_pos, end_pos, confidence, source, status, priority, deadline, tenant_id)
+            INSERT INTO review_items (id, tenant_id, text_snippet, category, start_pos, end_pos, confidence, source, status, priority, deadline)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
             item.id,
+            item.tenant_id,
             item.text_snippet,
             item.category,
             item.start as i64,
@@ -41,8 +47,7 @@ impl ReviewStore for PostgresReviewStore {
             item.source,
             item.status.to_string(),
             item.priority.to_string(),
-            deadline,
-            item.tenant_id
+            deadline
         )
         .execute(&self.pool)
         .await?;
@@ -52,11 +57,11 @@ impl ReviewStore for PostgresReviewStore {
 
     async fn assign(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         reviewer: &str,
     ) -> Result<ReviewQueueItem, ReviewError> {
-        let tenant_id = ctx.tenant.to_string();
+        let tenant_id = tenant.as_str();
         let row = sqlx::query_as!(
             ReviewItemRow,
             r#"
@@ -77,10 +82,12 @@ impl ReviewStore for PostgresReviewStore {
         match row {
             Some(row) => row_to_item(row),
             None => {
-                // The item exists (in this tenant) but was not `pending`, or it does not
-                // exist at all in this tenant — including one that exists in a different
-                // tenant, which must not be distinguished from non-existence (D-S1-6).
-                match self.get(ctx, id).await? {
+                // The item exists (for this tenant) but was not `pending`, or no such
+                // item exists for this tenant at all. Distinguish the two so the caller
+                // gets an accurate error — `get` already applies the same tenant filter,
+                // so a cross-tenant id falls into `NotFound` here exactly like a
+                // nonexistent one (D-S1b-1).
+                match self.get(tenant, id).await? {
                     Some(existing) => Err(ReviewError::InvalidTransition {
                         from: existing.status.to_string(),
                         to: ReviewStatus::InReview.to_string(),
@@ -93,7 +100,7 @@ impl ReviewStore for PostgresReviewStore {
 
     async fn decide(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
@@ -105,7 +112,7 @@ impl ReviewStore for PostgresReviewStore {
             ReviewDecision::Reject => ReviewStatus::Rejected,
             ReviewDecision::Modify => ReviewStatus::Modified,
         };
-        let tenant_id = ctx.tenant.to_string();
+        let tenant_id = tenant.as_str();
 
         let row = sqlx::query_as!(
             ReviewItemRow,
@@ -131,9 +138,8 @@ impl ReviewStore for PostgresReviewStore {
         match row {
             Some(row) => row_to_item(row),
             None => {
-                // Either already decided, or the id does not exist in this tenant —
-                // including one belonging to a different tenant (D-S1-6).
-                match self.get(ctx, id).await? {
+                // Either already decided, or no such item exists for this tenant.
+                match self.get(tenant, id).await? {
                     Some(_) => Err(ReviewError::AlreadyDecided(id.to_string())),
                     None => Err(ReviewError::NotFound(id.to_string())),
                 }
@@ -143,10 +149,10 @@ impl ReviewStore for PostgresReviewStore {
 
     async fn list(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         filter: Option<ReviewStatus>,
     ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
-        let tenant_id = ctx.tenant.to_string();
+        let tenant_id = tenant.as_str();
         let items = if let Some(status) = filter {
             let rows = sqlx::query_as!(
                 ReviewItemRow,
@@ -189,8 +195,12 @@ impl ReviewStore for PostgresReviewStore {
         Ok(items)
     }
 
-    async fn get(&self, ctx: &TenantCtx, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
-        let tenant_id = ctx.tenant.to_string();
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+    ) -> Result<Option<ReviewQueueItem>, ReviewError> {
+        let tenant_id = tenant.as_str();
         let row = sqlx::query_as!(
             ReviewItemRow,
             r#"
@@ -209,8 +219,8 @@ impl ReviewStore for PostgresReviewStore {
         row.map(row_to_item).transpose()
     }
 
-    async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
-        let tenant_id = ctx.tenant.to_string();
+    async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
+        let tenant_id = tenant.as_str();
         let row = sqlx::query!(
             r#"
             SELECT
@@ -319,11 +329,19 @@ mod tests {
     //     --lib store::postgres::review -- --ignored --test-threads=1
 
     async fn test_store() -> PostgresReviewStore {
-        PostgresReviewStore::new(test_support::shared().await.pool())
+        let pool = test_support::shared().await.pool();
+        // `fk_review_items_tenant` (migration 0007) requires the tenant to already
+        // exist — only `default` is seeded by migration, so this module's shared
+        // literal tenant must be admitted before any test's first insert.
+        test_support::ensure_tenant(&pool, &t()).await;
+        PostgresReviewStore::new(pool)
     }
 
-    fn ctx() -> TenantCtx {
-        TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"))
+    /// The tenant every test in this module uses. Mirrors `postgres::audit::tests::t`:
+    /// these tests already share one un-torn-down Postgres database, so a fixed tenant
+    /// id keeps that existing shared behaviour rather than accidentally isolating them.
+    fn t() -> TenantId {
+        TenantId::new("pg-review-test-tenant")
     }
 
     fn test_item(id: &str) -> ReviewQueueItem {
@@ -356,10 +374,13 @@ mod tests {
             let id = uuid::Uuid::new_v4().to_string();
             let item = test_item(&id);
 
-            store.submit(item.clone()).await.expect("submit failed");
+            store
+                .submit(&t(), item.clone())
+                .await
+                .expect("submit failed");
 
             let fetched = store
-                .get(&ctx(), &id)
+                .get(&t(), &id)
                 .await
                 .expect("get failed")
                 .expect("item must exist");
@@ -376,14 +397,17 @@ mod tests {
         test_support::block_on_shared(async {
             let store = Arc::new(test_store().await);
             let id = uuid::Uuid::new_v4().to_string();
-            store.submit(test_item(&id)).await.expect("submit failed");
+            store
+                .submit(&t(), test_item(&id))
+                .await
+                .expect("submit failed");
 
             let mut handles = Vec::new();
             for i in 0..8 {
                 let store = Arc::clone(&store);
                 let id = id.clone();
                 handles.push(tokio::spawn(async move {
-                    store.assign(&ctx(), &id, &format!("reviewer-{i}")).await
+                    store.assign(&t(), &id, &format!("reviewer-{i}")).await
                 }));
             }
 
@@ -401,7 +425,7 @@ mod tests {
             assert_eq!(losses, 7);
 
             let final_item = store
-                .get(&ctx(), &id)
+                .get(&t(), &id)
                 .await
                 .expect("get failed")
                 .expect("item must exist");
@@ -415,9 +439,12 @@ mod tests {
         test_support::block_on_shared(async {
             let store = Arc::new(test_store().await);
             let id = uuid::Uuid::new_v4().to_string();
-            store.submit(test_item(&id)).await.expect("submit failed");
             store
-                .assign(&ctx(), &id, "reviewer-0")
+                .submit(&t(), test_item(&id))
+                .await
+                .expect("submit failed");
+            store
+                .assign(&t(), &id, "reviewer-0")
                 .await
                 .expect("assign failed");
 
@@ -428,7 +455,7 @@ mod tests {
                 handles.push(tokio::spawn(async move {
                     store
                         .decide(
-                            &ctx(),
+                            &t(),
                             &id,
                             ReviewDecision::Approve,
                             &format!("reviewer-{i}"),
@@ -452,7 +479,7 @@ mod tests {
             assert_eq!(losses, 7);
 
             let final_item = store
-                .get(&ctx(), &id)
+                .get(&t(), &id)
                 .await
                 .expect("get failed")
                 .expect("item must exist");

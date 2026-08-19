@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tenant-name sanitisation for pseudonym keys was still not injective after the
+  previous fix — `acme` and `Acme` could resolve the same key.** `scoped_var_name`
+  accepted `[A-Za-z0-9_]` and uppercased the result unconditionally, so two tenant ids
+  differing only in case (e.g. `acme`/`Acme`) both produced `HACIENDA_TENANT_ACME_...`
+  — the same cross-tenant key-sharing leak the punctuation-folding fix above closed,
+  reopened through case-folding instead. Fixed by accepting only `[a-z0-9_]` (lowercase
+  only) before uppercasing, so the transform is injective end to end. Found by
+  CodeRabbit review on this branch; caught before merge.
+- **`static-embeddings` was enabled on the `xberg` dependency with no call site
+  anywhere in the workspace, violating this repo's own contributing convention that a
+  Cargo feature addition needs a matching call site.** Removed from X1's feature list
+  (`Cargo.toml`) until both a real call site and the ingestion-time redaction guard it
+  needs (see the X1 spec's §6) exist. Found by CodeRabbit review on this branch.
+- **`PostgresJobStore::finish`/`fail` and the tenant-map `AuditError::Internal` sites
+  (`store_file.rs`/`store_idb.rs`) reported a bare error string with no operation,
+  job/tenant id, or root cause.** Both now include the operation name and tenant id in
+  the message, matching this repo's error-message convention. Found by CodeRabbit
+  review on this branch.
+- **Tenant-name sanitisation for pseudonym keys was not injective — `acme-corp` and
+  `acme_corp` could resolve the same key.** `scoped_var_name` (P3a) folded every
+  character outside `[A-Za-z0-9_]` in a tenant id to `_` before uppercasing, so
+  `acme-corp`, `acme_corp`, and `acme.corp` all produced the same
+  `HACIENDA_TENANT_ACME_CORP_...` variable name — three tenants sharing one key,
+  silently, with no error. This is the exact cross-tenant correlation leak P3a exists
+  to close. Fixed by rejecting a non-default tenant id outside `[A-Za-z0-9_]` outright
+  (`PseudonymError::UnsupportedTenantId`) instead of folding it — the same discipline
+  `KeyId::new` already applies to `-` in a key id, extended to tenant ids. Found by
+  CodeRabbit review on this branch; caught before merge.
+- **`PostgresJobStore::finish`/`fail` returned a generic 500-shaped `Internal` error,
+  not `NotFound`, for another tenant's job id.** Both used `fetch_one`, which errors
+  with `RowNotFound` once the `tenant_id` predicate excludes every row for a
+  cross-tenant id — `.map_err` then collapsed that into `JobError::Internal`,
+  contradicting the store's own documented contract and the in-memory backend's
+  behavior. Fixed by switching to `fetch_optional` + `ok_or_else(NotFound)`, matching
+  `update_progress`'s existing shape.
+- **`PostgresAuditStore::rotate` returned a generic backend error, not `StoreClosed`,
+  for a tenant with no open segment.** Same `fetch_one`-vs-`fetch_optional` shape as
+  the job-store fix above; a tenant that never appended (or was already closed) now
+  gets `AuditError::StoreClosed { operation: "rotate" }`, matching
+  `InMemoryAuditStore::rotate`.
+- **A tenant map lookup that "can never fail" used `expect`, panicking a library on a
+  broken invariant instead of returning an error.** Both `FileAuditStore` and
+  `IndexedDbAuditStore` re-look-up a tenant's state after `ensure_tenant_loaded`
+  populates it, and every mutating method asserted the entry was still there with
+  `.expect(...)`. Replaced with a new `AuditError::Internal` variant, propagated with
+  `?`, across `append`/`entries`/`history`/`tip`/`seals`/`verify`/`rotate`/`close` in
+  both files — an audit write is exactly the operation that must not be able to take
+  the whole process down with it.
+- **A JSONL review-queue record written before S1b shipped tenant scoping has no
+  `tenant` key — `FileReviewStore::open`'s replay would fail outright on any log
+  written before this change.** `ReviewQueueItem::tenant` had no `#[serde(default)]`.
+  Fixed by defaulting to `TenantId::default_tenant()` on deserialization when the key
+  is absent, matching what every such record was, in effect, written for.
+- **`GET /v1/review` converted every review-queue read failure into a silently empty
+  list.** `unwrap_or_default()` on `q.list(...)` meant a real store failure was
+  indistinguishable from "nothing awaits review." Now propagated as an `ApiError`;
+  `None` (no queue configured) remains the only legitimate empty-list case.
+- **`ReviewStore::submit` was the one method on the trait with no `&TenantId`
+  parameter**, relying on the caller to have already labelled the item with the
+  correct tenant rather than enforcing it the way `assign`/`decide`/`list`/`get`/
+  `stats` all do. Added the parameter across all three backends; each now overwrites
+  `item.tenant` with it.
+- **`IndexedDbAuditStore` never migrated the pre-S1b `current` snapshot record** —
+  `ensure_tenant_loaded` only ever read the new per-tenant `current:{tenant_id}` key,
+  so the default tenant's first load against an existing browser database would find
+  nothing and silently start a fresh genesis chain, leaving the real history
+  unreachable (not deleted) in the database. Fixed with a read-side fallback: only for
+  the default tenant, and only when the new key has nothing, fall back to the legacy
+  bare `current` key. The next mutation persists under the new key as normal.
 - **`hacienda serve` no longer accepts a network-reachable bind with an unreplaced
   placeholder auth token.** `check_bind_policy` refused non-loopback binds when auth was
   disabled entirely, but didn't check *what* the configured static token actually was —
@@ -221,6 +290,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Five pure-Rust xberg enrichment capabilities were sitting in the dependency graph,
+  unreachable, the same class of gap as the earlier extraction-format win (X1).** Enabled
+  `keywords` (YAKE/RAKE), `summarization` (extractive TextRank), `qr-codes` (`rqrr`
+  decoding), `static-embeddings` (model2vec, no ONNX Runtime), and `candle-trocr` (candle
+  transformer OCR — hacienda already vendors candle for GLiNER2 NER, so this is new model
+  weights, not a new inference runtime) on the workspace `xberg` dependency. Extended
+  `HaciendaFacade::redact_structured_fields` (P7) to cover the four new fields these
+  populate: `extracted_keywords[].text`, `summary.text`, and (previously silently
+  unwalked entirely, not just X1-new) `images[].caption`/`.description`/`.qr_codes[].
+  payload`/`.ocr_result` (a full nested `ExtractedDocument`, redacted recursively like an
+  archive member, sharing the same depth budget). `static-embeddings` is compile-only for
+  now — nothing in `hacienda-rag`/`hacienda-api` yet constructs the config needed to reach
+  it, and reaching it safely needs a `GuardedLlm`-shaped ingestion-time guard that turned
+  out not to exist yet for the vector-store embedding path (a pre-existing E4 gap, not
+  something this pass introduced — see the spec's §6 for the full writeup and the
+  `upsert_document`/`migrate_embeddings_work` call sites that need it, tracked as a
+  separate follow-up). `tree-sitter` — the spec's sixth capability — was found to hit a
+  genuine upstream compile break on this xberg pin (a `ProcessConfig` field mismatch
+  against the `tree-sitter-language-pack` version Cargo resolves) and stayed off pending
+  an upstream fix. Also fixed, found while wiring this in: enabling `candle-trocr` compiles
+  in xberg's OCR pipeline, which would have silently turned every image extraction into a
+  hard error for every caller who never configured OCR (falls through to a `"tesseract"`
+  backend that isn't registered) — `HaciendaFacade`'s new `safe_extraction_config` forces
+  `disable_ocr = true` unless the caller's own config already set `extraction.ocr`,
+  preserving the pre-existing metadata-only image behaviour by default. See
+  `superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`.
+- **Six review and compliance routes named in the specifications were never wired to
+  HTTP.** Verified directly against `hacienda-api/src/routes.rs`: in both
+  cases the underlying business logic already existed and was already tested —
+  `ReviewQueue::get`/`assign`/`stats` (`hacienda-core/src/review/queue.rs`) and
+  `ComplianceGenerator::model_card`/`checklist`/`dora_report`
+  (`hacienda-core/src/compliance/mod.rs`) — only the handler was missing, exactly the
+  "quelques centaines de lignes de handlers" shape wave 0 of
+  `2026-08-01-hacienda-platform-parity-program.md` §8 predicts. Added `GET /v1/review/{id}`
+  (single item, `audit:read` — same tier as the existing `GET /v1/review` list, not the
+  `review:decide` the spec's table proposes uniformly), `POST /v1/review/{id}/assign`
+  (`review:decide`, a write), `GET /v1/review/stats` (`audit:read`), `GET
+  /v1/compliance/model-card` and `GET /v1/compliance/checklist` (`audit:read`, both already
+  reachable bundled inside `GET /v1/compliance/report` when enabled in config — now also
+  addressable standalone), and `POST /v1/compliance/dora` (`audit:read`). The last one is a
+  `POST`, not the bare `GET` the spec's route table suggests: a DORA report describes one
+  specific incident (summary, timeline, root cause, timestamps, `Vec<String>`
+  actions-taken/lessons-learned), which doesn't fit query parameters, and — more
+  importantly — `compliance_report_with_auth` always calls `ComplianceGenerator::report`
+  with `incident: None`, so a DORA report had **no path to the API at all** before this
+  change, unlike the two `GET` additions above. No new facade method was needed for the two
+  `review:decide`/`audit:read` review reads or the assign write — `HaciendaFacade::
+  review_queue_with_auth`/`review_queue_read_with_auth` already return `Option<&ReviewQueue>`,
+  so the handlers call `.get`/`.assign`/`.stats` on it directly, the same way the existing
+  `decide_review` handler already calls `.decide`. See
+  `superpowers/specs/2026-08-14-P4-P5-missing-endpoints.md`.
+- **`POST /v1/pii/token` and `GET /v1/keys`: two of the four routes the pseudonymisation
+  spec always called for, never built until now.** `Pseudonymiser` had an API surface for
+  reveal (`POST /v1/pii/reveal`) but not for minting a token without revealing, or for
+  listing what keys exist — verified directly against `hacienda-api/src/routes.rs`. Added
+  `POST /v1/pii/token` (mint the token for a caller-supplied `(category, value)` pair;
+  requires `documents:process` only, not `pii:reveal`, since computing a token for a value
+  the caller already knows discloses nothing new — D-P3-1) and `GET /v1/keys` (the caller's
+  tenant's key ids and `active`/`retired` status, `audit:read`; never key material, D-P3-3).
+  Together these make a GDPR right of access or erasure practicable against redacted
+  storage without decrypting the corpus: compute the token for a named value, then search
+  for *that token*. Both resolve through the same per-tenant, reveal-only `Pseudonymiser`
+  cache the P3a tenant-scoping entry above added (`HaciendaFacade::pseudonymiser_for`), so
+  both work under a key-resolver-only configuration with no `[pii]` detection section
+  configured, exactly like `reveal` does. `POST /v1/keys/rotate` — the fourth route the
+  spec names — is explicitly not built: it needs a `KeyResolver` whose active key can
+  change at runtime, which `EnvKeyResolver`'s environment-variable model has no sound way
+  to do per-tenant; tracked against the future KMS-backed resolver (S2) instead of built
+  twice. See `superpowers/specs/2026-08-14-P3b-pseudonym-key-management-api.md`.
+- **`hacienda-mcp` (new crate): an MCP (Model Context Protocol) server for the guarded
+  facade, wired up as `hacienda mcp serve` (stdio transport).** Closes the gap the parity
+  program's own `2026-08-01-hacienda-platform-parity-program.md` §9 flagged as
+  unspecified ("Serveur MCP — chantier distinct… à spécifier à part"). Deliberately **not**
+  xberg's own MCP server (behind its `mcp` cargo feature, never enabled here): that server
+  returns unredacted extraction output with no audit trail, and re-exposing it would let an
+  MCP client read document content through a path the P1 redaction guard was never wired
+  into. Every one of this crate's eight tools (`documents_process`, `pii_scan`,
+  `pii_redact`, `pii_reveal`, `audit_verify`, `audit_entries`, `compliance_report`,
+  `get_version`) instead calls the same `HaciendaFacade` methods `hacienda-api`'s HTTP
+  handlers and `hacienda-cli`'s subcommands already call, as `Caller::Trusted` — the same
+  in-process-trust precedent `hacienda serve`/`hacienda pii reveal` already document. Built
+  on `rmcp = "2.2.0"`, the same MCP SDK xberg itself depends on. See
+  `superpowers/specs/2026-08-13-M1-mcp-server-and-cli-sdk-parity-design.md` for the design
+  and for a real gap this work surfaced: `hacienda serve` builds its audit/review stores
+  as in-memory (`HaciendaFacade::new`, not `with_stores`) in every production code path —
+  `FileAuditStore`/`PostgresAuditStore` exist in `hacienda-core` but nothing wires them into
+  `run_serve` today, so a restart loses the whole chain. Tracked, not fixed, in this change.
+- **xberg extraction-format coverage.** The root `Cargo.toml`'s `xberg` dependency now
+  enables `pdf`, `office`, `excel`, `email`, `hwp`, `hwpx`, `iwork`, `archives` — every
+  format xberg ships as a pure-Rust feature (no native toolchain, no ONNX Runtime, no model
+  download). Before this change hacienda's only enabled xberg features were `redaction`,
+  `ner`, `tokio-runtime` (plus xberg's own defaults `tokio-runtime`/`simd-utf8`), so
+  `xberg::extract_batch` — `HaciendaFacade`'s single extraction call site — could not
+  actually extract a PDF, a Word/Excel/PowerPoint file, an email, or an archive; only
+  whatever format needs none of those feature-gated extractors. A Cargo-feature-only
+  change, confirmed against `crates/xberg/Cargo.toml`'s own feature graph: `pdf_oxide`,
+  `lopdf`, `calamine`, `mail-parser`, `outlook-pst`, `biblatex`, `biblib`, `org`, `dbase`,
+  `roxmltree`, `quick-xml`, `unhwp` are all crates.io Rust libraries. `ocr` (Tesseract
+  binary), `heic`/`wordperfect` (native C/C++ libraries), and
+  `embeddings`/`reranking`/`layout-detection`/`ner-onnx`/`candle-ocr` (ONNX Runtime plus a
+  HuggingFace model fetch) are deliberately still not enabled — those need infrastructure
+  provisioning beyond a feature flag, not a decision to skip them.
 - **SDK parity pass against `xberg-sdks`.** Both `sdks/python` and `sdks/typescript` had
   fallen behind hacienda-api's own route table: the audit API was restored to 5 endpoints
   (this changelog's "full 5-endpoint audit API is live again" entry, below) but only
@@ -790,6 +961,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`AuditStore` is now tenant-scoped — two tenants sharing one process could previously
+  read, verify, and even seal each other's audit history.** `TenantCtx`/`Caller::tenant_ctx()`
+  (S1) resolved a tenant for every caller, but no store actually enforced it: `entries()`,
+  `history()`, `tip()`, `seals()`, and `verify()` all read *the* open segment/seal chain,
+  singular, store-wide — a second tenant's redaction/reveal audit trail (who saw what
+  plaintext, when) was fully readable by the first. Worse on the Postgres backend:
+  `rotate()`/`close()` assumed exactly one open segment existed globally and would panic
+  ("query returned more than one row") the moment a second tenant had its own; `verify()`'s
+  seal-chain check would fail for *both* tenants once each had sealed at least once, because
+  seals from different tenants got threaded into what looked like one broken chain. Fixed by
+  adding `&TenantId` to every `AuditStore` method (`append`/`entries`/`history`/`tip`/
+  `seals`/`verify`/`rotate`/`close`) across all three backends — `InMemoryAuditStore` (one
+  chain state per tenant), `FileAuditStore` (one directory per tenant under the node's, with
+  recovery now lazy per tenant instead of eager at open), and `PostgresAuditStore` (a
+  `tenant_id` column and predicate on every query, including a tenant-scoped advisory lock
+  for the open-segment race). `HaciendaFacade`'s audit call sites thread
+  `caller.tenant_ctx().tenant` through automatically — no API/CLI/MCP request shape changed.
+  `ReviewStore`/`JobStore`/`DocumentVersionStore`/`PresetStore` have the same gap and are
+  not yet fixed — tracked in
+  `superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`.
+  While auditing every `audit_entries` reader for the same class of leak,
+  `PostgresUsageStore::summary` (billing/usage aggregation, `GET /v1/usage`) was found to
+  have the identical gap, flagged in that spec's §7 — since fixed, see below.
+- **`PostgresUsageStore::summary` and `GET /v1/usage` are now tenant-scoped — closing the
+  cross-tenant principal-disclosure gap flagged above.** `summary` joins `audit_entries` to
+  `audit_segments` and filters on `audit_segments.tenant_id = $1` instead of aggregating
+  every tenant's entries unconditionally; `get_usage` resolves the caller's own tenant from
+  `TenantCtx` and passes it through, the same pattern every other S1b-scoped store handler
+  already uses. A new two-tenant isolation test (`summary_is_scoped_to_the_requesting_tenant`)
+  pins the behaviour the same way `AuditStore`'s and `ReviewStore`'s isolation tests do.
+- **`ReviewStore` is now tenant-scoped — two tenants sharing one process could previously
+  see, claim, and decide each other's pending review items, including unredacted
+  `text_snippet` content by design.** Same root cause as the `AuditStore` gap above:
+  `assign`/`decide`/`list`/`get`/`stats` all read or mutated the queue with no tenant
+  predicate at all. Fixed by giving `ReviewQueueItem` its own `tenant` field (so
+  `submit` cannot omit one — the struct has no `Default`) and adding `&TenantId` to every
+  other `ReviewStore` method, across all three backends — `InMemoryReviewStore` and
+  `FileReviewStore` (filter by the item's own tenant field at query time) and
+  `PostgresReviewStore` (a `tenant_id` column and predicate on every query, including the
+  `assign`/`decide` compare-and-swap `UPDATE`s). A cross-tenant id resolves as `None`/
+  `NotFound`, identically to an id that does not exist, never a distinguishable
+  forbidden-shaped error — the same discipline `AuditStore`'s fix established.
+  `HaciendaFacade::submit_for_review` gained a `Caller` parameter to resolve the tenant;
+  `hacienda-api`'s `GET /v1/review` and `POST /v1/review/{id}/decide` handlers now thread
+  `caller.tenant_ctx().tenant` through directly (the facade exposes `ReviewQueue`
+  references to callers rather than wrapping every operation itself, unlike audit).
+  `JobStore`/`DocumentVersionStore`/`PresetStore` have the same gap and are not yet fixed —
+  tracked in the same S1b spec.
+- **`JobStore` is now tenant-scoped, and `GET /v1/documents/{id}/diff/{diff_job_id}` had
+  no tenant or ownership check at all — any authenticated caller who obtained or guessed a
+  diff job id could read its line-diff content, potentially PII, regardless of tenant.**
+  Same root cause as the `AuditStore`/`ReviewStore` gaps above, plus one handler that was
+  missing auth extraction entirely. Fixed by giving `Job` its own `tenant` field (`create`
+  sets it once; `get`/`transition`/`finish`/`fail`/`update_progress` match on `id &&
+  tenant` together so a cross-tenant id resolves as `None`/`NotFound`, identically to a
+  nonexistent one) across both backends — `InMemoryJobStore` (filter by the job's own
+  tenant field) and `PostgresJobStore` (a `tenant_id` column and predicate on every
+  query). `owner: Option<String>` is unchanged and still enforced separately at the
+  transport layer (`hacienda-api/src/handlers/jobs.rs`'s existing 404-not-403 checks) —
+  `tenant` and `owner` are independent dimensions, neither supersedes the other.
+  `hacienda-api`'s `documents.rs`/`rag.rs`/`versions.rs` handlers thread
+  `caller.tenant_ctx().tenant` through every job-store call, including into the
+  `tokio::spawn`ed background tasks that finish or fail a job after the handler returns.
+  `versions::get_diff_job` and `diff_document` previously extracted no `Caller` at all;
+  both gained the extraction as part of this fix rather than as separate follow-up, since
+  `JobStore::get`/`create` needed a tenant argument regardless.
+  `DocumentVersionStore`/`PresetStore` have the same gap and are not yet fixed — tracked
+  in the same S1b spec.
+- **`DocumentVersionStore` is now tenant-scoped, and two more endpoints —
+  `GET /v1/documents/{id}/versions` and `GET /v1/documents/{id}` — had no auth extraction
+  at all, letting any authenticated caller read any tenant's document versions and
+  content.** Same root cause and same missing-auth-extraction pattern as the
+  `GET /v1/documents/{id}/diff/{diff_job_id}` fix above. Fixed by adding `&TenantId` to
+  `create_version`/`list_versions`/`get_version` (Postgres-only backend); a cross-tenant
+  `document_id` resolves as an empty list / `None`, identically to one that was never
+  used, never a distinguishable error. **Also fixed a real cross-tenant write bug, not
+  just a read-side leak**: `document_id` is caller-supplied (the client picks the UUID),
+  so two tenants choosing the same id is plausible — the old bare
+  `UNIQUE(document_id, version_sequence)` meant a second tenant's own first version could
+  collide with a first tenant's version 1 for the "same" `document_id`, failing an INSERT
+  that had nothing to do with the first tenant. Fixed by swapping the constraint to
+  `UNIQUE(tenant_id, document_id, version_sequence)` in the same migration revision;
+  verified against live Postgres that two tenants can now each version the same
+  `document_id` independently, both starting at sequence 1. `PresetStore` has the same
+  gap and is not yet fixed — tracked in the same S1b spec.
+- **`PresetStore` is now tenant-scoped, and all four `/v1/presets/*` endpoints had no auth
+  extraction at all — the same missing-auth-extraction bug found and fixed in the diff-job
+  and document-version routes above, this time in `create_preset`/`list_presets`/
+  `get_preset`/`delete_preset`.** Fixed by adding `&TenantId` to all five `PresetStore`
+  methods; `get`/`get_by_name` on an id/name belonging to a different tenant resolve as
+  `None`, never a distinguishable error. **Also fixes the functional bug this store was
+  named for**: `presets_name_key` (bare `UNIQUE(name)`) is replaced with
+  `presets_tenant_name_key` (`UNIQUE(tenant_id, name)`) in the same migration revision —
+  the identical caller-supplied-identifier fix already applied to `document_versions`
+  above. Two tenants can now each create a preset named `"default"` (or any other name)
+  without colliding, which the old constraint made impossible regardless of any security
+  concern. Verified against live Postgres. This closes out every store this S1b spec set
+  out to cover (`AuditStore`/`ReviewStore`/`JobStore`/`DocumentVersionStore`/
+  `PresetStore`) — see the spec for the one deliberately out-of-scope exception
+  (`ApiKeyStore`).
+- **Pseudonym tokens are now tenant-scoped — two tenants sharing one process previously got
+  the byte-identical token for the same plaintext value, a cross-tenant correlation leak.**
+  `Pseudonymiser::token` derives a deterministic AES-256-SIV token from `category`, `text`,
+  and the pseudonymiser's own key material only; `HaciendaFacade` held exactly one
+  `Pseudonymiser`, built once at construction from one `KeyResolver` call, for the lifetime
+  of the process — S1's `TenantCtx`/`Caller::tenant_ctx()` never reached the
+  pseudonymisation layer at all, unlike every store `AuditStore` through `PresetStore`
+  above. Fixed by adding `&TenantId` to `KeyResolver::active`/`resolve` and to
+  `Pseudonymiser::new`/`with_active`/`from_keys`, and by replacing `HaciendaFacade`'s single
+  `Option<Arc<PiiPipeline>>`/`Option<Arc<Pseudonymiser>>` with a per-tenant cache
+  (`pii_pipeline_for`/`pseudonymiser_for`) that builds and resolves each tenant's key
+  material lazily on first use, sharing one loaded NER detector across every tenant
+  (`NerDetector` now derives `Clone`, cheap because its backend is already `Arc`-wrapped) —
+  the expensive part is never reloaded per tenant. `EnvKeyResolver` resolves
+  `TenantId::default_tenant()` to exactly the same environment variable it always has
+  (`HACIENDA_PSEUDONYM_ACTIVE_KEY`/`HACIENDA_PSEUDONYM_KEY_<ID>`), so no already-minted
+  token or existing single-tenant deployment is affected; any other tenant resolves under a
+  `HACIENDA_TENANT_<TENANT>_`-prefixed variable name, provisioned explicitly — a tenant with
+  no provisioned key fails closed, never falling back to another tenant's material. A
+  cross-tenant reveal fails the same way an unknown or forged token does
+  (`HaciendaError::Pii`/`UnreadableToken`), never a distinguishable forbidden-shaped error —
+  the same discipline `ReviewStore`'s fix established for stores, applied here to the
+  pseudonym layer specifically (`reveal_token_with_auth` resolves strictly the caller's own
+  tenant's key). No call site outside `hacienda-core` changed signature; the one
+  constructor-time exception is `HaciendaFacade::with_key_resolver`, which now takes
+  `Arc<dyn KeyResolver>` instead of `&dyn KeyResolver` so the facade can retain the resolver
+  to build later tenants' pipelines lazily. This closes the other half of the S1
+  tenant-isolation gap the `AuditStore` entry above opens with — see
+  `superpowers/specs/2026-08-14-P3a-tenant-scoped-pseudonym-keys.md` for the full design and
+  §7 for one further correction found by a `hacienda-cli` integration-test regression
+  (`hacienda pii reveal` run with a key resolver but no `[pii]` section configured needs its
+  own reveal-only pseudonymiser cache, independent of the detection-pipeline cache).
+- **The one call site that sends document content to an LLM now redacts structurally, not
+  by discipline.** `hacienda-api`'s `POST /v1/rag/collections/{name}/answer` handler used to
+  call `redact_text_with_auth` by hand on the prompt and every retrieved chunk before
+  calling `hacienda_rag::answer_stream` directly — correct, but nothing stopped a future
+  caller from skipping the redaction step, unlike storage writes, which have had this
+  guarantee since P1. Fixed by a new `hacienda_rag::GuardedLlm`: it takes an injected
+  `Redactor` and redacts the prompt and every chunk before `answer_stream` is ever reached,
+  so a caller cannot construct the call without the redaction step. A workspace-wide test
+  (`crates/hacienda-rag/tests/llm_call_enforcement.rs`) fails the build if any crate outside
+  `GuardedLlm`'s owning module constructs a `liter_llm::LlmClient` or calls
+  `xberg::llm`'s text-completion functions directly. See
+  `superpowers/specs/2026-08-13-P6-llm-call-enforcement-point.md` §7 for what shipped and
+  where it diverges from the original placement recommendation (`hacienda-core` cannot
+  depend on `hacienda-rag`, where `liter-llm` actually lives).
+- **PII in structured extraction fields (tables, pages, PDF annotations/form fields, DOCX/PPTX
+  tracked changes, extracted links, and nested archive members) is now redacted.** Previously,
+  `HaciendaFacade::process_batch_with_auth` rewrote only `ExtractedDocument.content` —
+  `tables`, `pages` (which nests a *second* copy of both `content` and `tables`, plus PPTX
+  speaker notes), `formatted_content`, `metadata.authors`/`created_by`/`modified_by`, PDF
+  `annotations`, `form_fields`, DOCX/PPTX `revisions` (tracked-change author and inserted/
+  deleted text), extracted `uris` (a `mailto:` URL is a plaintext email address), and archive
+  `children` (each a complete nested `ExtractedDocument`) all passed through **unredacted**, in
+  every transport that shares the type (`POST /v1/documents`, `hacienda extract`,
+  `hacienda-mcp`'s `documents_process`). Found by reproduction with a control-corpus
+  spreadsheet: `content` redacted correctly while the same response's `tables` field carried
+  the same email and IBAN in plaintext. Live in the extraction-format features
+  (`pdf`/`office`/`excel`/`email`/`hwp`/`hwpx`/`iwork`/`archives`) added earlier in this
+  changelog's "Added" section. Fixed by a new `HaciendaFacade::redact_structured_fields`,
+  called from the same site `.content`'s own redaction already ran from, covering all ten
+  fields recursively (archive members can nest archive members). Table markdown is
+  regenerated from redacted cells rather than redacted independently, so the two
+  representations can't disagree. See
+  `superpowers/specs/2026-08-13-P7-structured-field-redaction-gap.md` for the full
+  reproduction and field-by-field rationale.
 - **`Pseudonymize` output from any earlier version is not pseudonymised data.** It was the
   per-category constant `[EMAIL:****]` — masked data with a misleading label, and it was
   the *default* mode. It carries no key, distinguishes no subjects, and cannot be

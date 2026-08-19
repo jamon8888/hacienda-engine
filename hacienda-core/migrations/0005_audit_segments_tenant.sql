@@ -3,9 +3,15 @@
 --
 -- DEFAULT 'default' backfills every pre-S1 row onto the tenant the migration path
 -- (spec §8) is built around, and lets existing INSERT statements that don't yet name a
--- tenant keep working unchanged until the store layer threads a real TenantCtx through
--- (tracked separately — see the Vague 2 plan's S1 task notes).
+-- tenant keep working unchanged until the store layer threads a real TenantCtx through.
+--
+-- S1b (superpowers/specs/2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md)
+-- lands `AuditStore`'s tenant threading in this same change, so the default is dropped
+-- immediately rather than left for a follow-up migration: every `AuditStore` insert (all
+-- three backends) supplies `tenant_id` explicitly as of this commit, so no
+-- rolling-upgrade window needs the default to stay.
 ALTER TABLE audit_segments ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE audit_segments ALTER COLUMN tenant_id DROP DEFAULT;
 
 -- Every tenant_id must name a real, admitted tenant (0004_tenants.sql, which seeds
 -- 'default' so this backfilled value satisfies it immediately) — without this, the

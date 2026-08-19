@@ -11,6 +11,7 @@
 //! dev-dependencies it needs — only exist for `cargo test`, never for a published build.
 
 use super::connection;
+use crate::tenancy::TenantId;
 use sqlx::PgPool;
 use std::sync::OnceLock;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
@@ -101,6 +102,23 @@ static SHARED: OnceCell<PostgresFixture> = OnceCell::const_new();
 /// requirement, it does not change that constraint.
 pub async fn shared() -> &'static PostgresFixture {
     SHARED.get_or_init(PostgresFixture::start).await
+}
+
+/// Admits `tenant` into the `tenants` table if it isn't already there.
+///
+/// Migration `0004_tenants.sql` seeds only the `default` tenant; every other
+/// tenant-scoped table gained a `fk_*_tenant` constraint in migrations 0005-0010
+/// referencing `tenants(id)`, so any store test that fabricates a non-`default`
+/// `TenantId` must admit it first or its very first insert against a scoped table fails
+/// with a foreign-key violation. `ON CONFLICT DO NOTHING` makes this safe to call
+/// repeatedly for the same fixed tenant literal a module's tests share across many
+/// invocations against the same long-lived [`shared`] instance.
+pub async fn ensure_tenant(pool: &PgPool, tenant: &TenantId) {
+    sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, NULL) ON CONFLICT (id) DO NOTHING")
+        .bind(tenant.as_str())
+        .execute(pool)
+        .await
+        .expect("failed to admit test tenant");
 }
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();

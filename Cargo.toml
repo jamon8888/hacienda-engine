@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hacienda-rag", "crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core"]
+members = ["crates/hacienda-rag", "crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core", "hacienda-mcp"]
 exclude = ["packages/*"]
 
 [workspace.package]
@@ -94,13 +94,97 @@ uuid = { version = "1", features = ["v4", "serde"] }
 web-time = "1"
 # xberg
 #
-# Feature set is deliberately minimal: hacienda only consumes `xberg::extract_batch`,
-# `xberg::text::ner`, and `xberg::types::entity`. The config types for embeddings,
-# reranking, captioning, and chunking (`EmbeddingConfig`, `RerankerConfig`,
-# `CaptioningConfig`, `ChunkingConfig`) are exported by xberg unconditionally, so those
-# features only gate implementation code we never call. Enabling them pulled ONNX
-# Runtime (`ort`), `ndarray`, `liter-llm`, and the ICU segmenter family into the graph
-# for no benefit. Do not re-add a feature here without a call site to justify it.
+# Format coverage: every document-format extractor xberg ships as a pure-Rust feature
+# (no native toolchain, no model download, no ONNX Runtime) is enabled here, so
+# `facade.rs`'s `extract_all` — which calls `xberg::extract` for a single input and
+# `xberg::extract_batch` for more than one — actually handles what a caller sends it
+# instead of erroring on anything but plain text. `pdf` (`pdf_oxide`/`lopdf`), `office`
+# (docx/xlsx/pptx via `zip`/`roxmltree`,
+# pulls in `html`/`notebook`), `excel` (`calamine`), `email` (`mail-parser`/
+# `outlook-pst`), `hwp`/`hwpx` (`unhwp`), `iwork` (`zip`/`snap`), `archives`
+# (`zip`/`tar`/`sevenz-rust2`) are all crates.io Rust libraries — confirmed against
+# xberg's own `Cargo.toml` — so this is a feature-flag change only, zero xberg source
+# touched. `xml` comes along transitively via `office`.
+#
+# Deliberately still NOT enabled: anything needing a native system library or a
+# model download at runtime — `ocr`/`ocr-wasm` (Tesseract binary), `heic`/
+# `wordperfect` (native C/C++ libs), `embeddings`/`reranking`/`layout-detection`/
+# `auto-rotate`/`ner-onnx`/`paddle-ocr` (ONNX Runtime + HuggingFace model fetch).
+# Those need infrastructure provisioning (`ORT_LIB_LOCATION`, a Tesseract install, a
+# model cache) beyond a Cargo feature, same class of gap the `.ai-rulez` OCR/ONNX
+# skills already document for xberg itself — track separately rather than silently
+# skip. `xberg::extract_batch`'s config types for embeddings, reranking, and
+# captioning stay exported unconditionally regardless (unaffected by this feature
+# set), so hacienda's `ExtractionConfig` passthrough already round-trips them even
+# before those backends are wired in.
+#
+# X1 (`superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md`): four of
+# the spec's six capabilities need no ONNX Runtime, no native system library, and
+# (for one of them) no model download.
+# `keywords`/`summarization` are pure-Rust text transforms (YAKE/RAKE, extractive
+# TextRank); `qr-codes` decodes via `rqrr` (already pulled in transitively by
+# `pdf`'s `image` dep). All three are off by default at the *config* level too
+# (`ExtractionConfig.keywords` / `.summarization` / `.qr_codes` default to `None`)
+# — enabling the Cargo feature only makes the capability reachable via
+# `[extraction]` config, it does not turn it on for every document.
+# `candle-trocr` is one backend of xberg's candle-based VLM OCR
+# (`candle-ocr` umbrella) — hacienda already vendors candle for its GLiNER2 NER
+# backend, so this is new model weights, not a new inference runtime; TrOCR is the
+# smallest/best-understood backend, picked over the full `candle-vlm-ocr` umbrella
+# for the first pass per the spec's §3.
+#
+# `static-embeddings` (the spec's fifth capability) is deliberately NOT enabled here,
+# unlike the four above: this repo's own contributing guidelines require a Cargo
+# feature addition to the `xberg` dependency to have a matching call site, and none
+# exists — nothing in `hacienda-rag`/`hacienda-api` constructs the
+# `EmbeddingModelType::Preset { name: "lightweight" }` config needed to reach it
+# through `xberg::embed_texts`/`embed_texts_async`. Enabling it would only grow the
+# native build surface for a capability nothing can call. See the X1 spec's §6 for
+# the fuller reasoning — it also documents a separate finding, that reaching this
+# safely needs an ingestion-time redaction guard (`GuardedLlm`-shaped) that doesn't
+# exist yet for the vector-store embedding path, a pre-existing E4 gap. Re-enable once
+# both a call site and that guard exist. Found by CodeRabbit review on this branch;
+# caught before merge.
+#
+# `candle-trocr` gotcha: enabling it compiles in xberg's `ocr-pipeline`, which
+# changes `extractors::image`'s behaviour even for callers who never touch OCR —
+# without it, an image input always fell back to metadata-only extraction; with
+# it, `ExtractionConfig::effective_disable_ocr()` (default `false`) no longer skips
+# the OCR branch, and a caller with no `[extraction.ocr]` section falls through to
+# `OcrConfig::default()`, whose backend is `"tesseract"` — not registered here,
+# since `ocr`/`ocr-wasm` stay off. That would turn every image extraction into a
+# hard error for every existing caller. `HaciendaFacade::extract_all` guards
+# against this directly (see its own comment) by forcing `disable_ocr = true`
+# unless the caller's config already set `extraction.ocr` explicitly — so OCR
+# stays a no-op by default, exactly as before this feature was enabled, and only
+# runs for a caller who opts in with `[extraction.ocr] backend = "candle-trocr"`.
+#
+# `tree-sitter` — the spec's sixth capability — is deliberately NOT enabled: this
+# xberg commit's `impl From<&TreeSitterProcessConfig> for
+# tree_sitter_language_pack::ProcessConfig` (`src/core/config/tree_sitter.rs`)
+# builds that struct with a field literal that omits `max_source_bytes` and
+# `parse_timeout_ms` — fields the crates.io `tree-sitter-language-pack` releases
+# Cargo currently resolves to (1.15.0, under this xberg commit's own unpinned
+# `^`-range requirement) require. That is a genuine compile error on this xberg
+# pin, reproduced locally (`cargo check -p hacienda-core --features tree-sitter`
+# fails inside the `xberg` crate itself, not in hacienda's code), not an artifact
+# of any sandboxing here — confirmed by isolating the tree-sitter-language-pack
+# crate's own build (a separate, pre-existing issue: its build script fetches a
+# parser-sources tarball from a GitHub release at build time, which needs
+# `TSLP_OFFLINE=1` or real network access to a non-intercepted github.com to
+# succeed at all). Re-enable once the xberg pin either updates that `From` impl
+# for the newer `ProcessConfig` shape or pins `tree-sitter-language-pack` itself
+# to a version predating the two added fields — see
+# `superpowers/specs/2026-08-13-X1-pure-rust-enrichment-features.md` §6 for the
+# full writeup. `hacienda-core/src/facade.rs`'s `redact_structured_fields` already
+# covers `code_intelligence` (the field this feature would populate) so no further
+# hacienda-side work blocks re-enabling it once the upstream issue clears.
+#
+# `mcp` and `api` are deliberately never enabled here: hacienda's MCP server and REST
+# API are built against `HaciendaFacade` directly (the redaction guard), not against
+# xberg's own unredacted server — see `hacienda-mcp` and `hacienda-api`. Enabling
+# xberg's `mcp`/`api` features would pull `rmcp`/`axum` server code hacienda never
+# calls, for a surface this repo intentionally does not re-expose.
 #
 # Pinned to a commit rather than `path = "../xberg/crates/xberg"`. The sibling
 # checkout is a working tree: it sits on rc.37 and carries uncommitted edits, one of
@@ -145,6 +229,18 @@ xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c16
     "redaction",
     "ner",
     "tokio-runtime",
+    "pdf",
+    "office",
+    "excel",
+    "email",
+    "hwp",
+    "hwpx",
+    "iwork",
+    "archives",
+    "keywords",
+    "summarization",
+    "qr-codes",
+    "candle-trocr",
 ] }
 # Key material must not survive a drop. `PseudonymKey` holds the secret that
 # de-pseudonymises an entire corpus.

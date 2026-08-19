@@ -5,8 +5,11 @@ use std::time::Instant;
 
 use crate::{
     dto::{
-        AuditResponse, AuditVerifyResponse, ComplianceDpiaResponse, ComplianceReportResponse,
-        GlossaryResponse, ReviewDecideRequest, ReviewDecideResponse, ReviewResponse,
+        AssignReviewItemRequest, AssignReviewItemResponse, AuditResponse, AuditVerifyResponse,
+        ComplianceChecklistResponse, ComplianceDpiaResponse, ComplianceModelCardResponse,
+        ComplianceReportResponse, DoraIncidentRequest, DoraReportResponse, GlossaryResponse,
+        ReviewDecideRequest, ReviewDecideResponse, ReviewItemResponse, ReviewResponse,
+        ReviewStatsResponse,
     },
     error::ApiError,
     extract::Json as SafeJson,
@@ -91,15 +94,15 @@ pub async fn get_review(
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
-    let tenant_ctx = caller.tenant_ctx();
 
     let queue = state
         .facade
         .review_queue_read_with_auth(caller)
         .map_err(ApiError::from)?;
 
+    let tenant = caller.tenant_ctx().tenant;
     let items = match queue {
-        Some(q) => q.list(&tenant_ctx, None).await.unwrap_or_default(),
+        Some(q) => q.list(&tenant, None).await.map_err(ApiError::from)?,
         None => Vec::new(),
     };
 
@@ -137,7 +140,6 @@ pub async fn decide_review(
 
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
-    let tenant_ctx = caller.tenant_ctx();
 
     let queue = state
         .facade
@@ -145,9 +147,10 @@ pub async fn decide_review(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::invalid_request("review queue not configured"))?;
 
+    let tenant = caller.tenant_ctx().tenant;
     let item = queue
         .decide(
-            &tenant_ctx,
+            &tenant,
             &id,
             body.decision.into(),
             &body.reviewer,
@@ -160,6 +163,148 @@ pub async fn decide_review(
 
     Ok(Json(ReviewDecideResponse {
         item: item.into(),
+        audit_chain_tip,
+    }))
+}
+
+/// `GET /v1/review/{id}`
+///
+/// Requires `audit:read` — same tier as `GET /v1/review` (`review_queue_read_with_auth`),
+/// not `review:decide`. Reading one item is not more sensitive than reading the list it
+/// comes from.
+#[utoipa::path(
+    get,
+    path = "/v1/review/{id}",
+    tag = "review",
+    operation_id = "getReviewItem",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Review item id")),
+    responses(
+        (status = 200, description = "The review item", body = ReviewItemResponse),
+        (status = 400, description = "Review queue not configured, or no item with this id"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks audit:read")
+    )
+)]
+pub async fn get_review_item(
+    State(state): State<ApiState>,
+    parts: Parts,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<ReviewItemResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let queue = state
+        .facade
+        .review_queue_read_with_auth(caller)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::invalid_request("review queue not configured"))?;
+
+    let tenant = caller.tenant_ctx().tenant;
+    let item = queue
+        .get(&tenant, &id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::invalid_request("no review item with this id"))?;
+
+    let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
+
+    Ok(Json(ReviewItemResponse {
+        item: item.into(),
+        audit_chain_tip,
+    }))
+}
+
+/// `POST /v1/review/{id}/assign`
+///
+/// Requires `review:decide` — a write, same tier as `decide` above, not the `audit:read`
+/// tier `GET /v1/review/{id}` uses.
+#[utoipa::path(
+    post,
+    path = "/v1/review/{id}/assign",
+    tag = "review",
+    operation_id = "assignReviewItem",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Review item id")),
+    request_body = AssignReviewItemRequest,
+    responses(
+        (status = 200, description = "The assigned review item", body = AssignReviewItemResponse),
+        (status = 400, description = "Review queue not configured, or no item with this id"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks review:decide")
+    )
+)]
+pub async fn assign_review_item(
+    State(state): State<ApiState>,
+    parts: Parts,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    SafeJson(body): SafeJson<AssignReviewItemRequest>,
+) -> Result<Json<AssignReviewItemResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let queue = state
+        .facade
+        .review_queue_with_auth(caller)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::invalid_request("review queue not configured"))?;
+
+    let tenant = caller.tenant_ctx().tenant;
+    let item = queue
+        .assign(&tenant, &id, &body.reviewer)
+        .await
+        .map_err(ApiError::from)?;
+
+    let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
+
+    Ok(Json(AssignReviewItemResponse {
+        item: item.into(),
+        audit_chain_tip,
+    }))
+}
+
+/// `GET /v1/review/stats`
+///
+/// Requires `audit:read`, same tier as `GET /v1/review` and `GET /v1/review/{id}` — an
+/// aggregate read, no snippet text.
+#[utoipa::path(
+    get,
+    path = "/v1/review/stats",
+    tag = "review",
+    operation_id = "getReviewStats",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Counts per review status", body = ReviewStatsResponse),
+        (status = 400, description = "Review queue not configured"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks audit:read")
+    )
+)]
+pub async fn get_review_stats(
+    State(state): State<ApiState>,
+    parts: Parts,
+) -> Result<Json<ReviewStatsResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let queue = state
+        .facade
+        .review_queue_read_with_auth(caller)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::invalid_request("review queue not configured"))?;
+
+    let tenant = caller.tenant_ctx().tenant;
+    let stats = queue.stats(&tenant).await.map_err(ApiError::from)?;
+
+    let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
+
+    Ok(Json(ReviewStatsResponse {
+        total: stats.total,
+        pending: stats.pending,
+        in_review: stats.in_review,
+        approved: stats.approved,
+        rejected: stats.rejected,
+        modified: stats.modified,
         audit_chain_tip,
     }))
 }
@@ -241,6 +386,129 @@ pub async fn get_compliance_report(
     })?;
 
     Ok(Json(ComplianceReportResponse {
+        report,
+        audit_chain_tip,
+    }))
+}
+
+/// `GET /v1/compliance/model-card`
+#[utoipa::path(
+    get,
+    path = "/v1/compliance/model-card",
+    tag = "compliance",
+    operation_id = "getComplianceModelCard",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "AI Act Art. 11 model card", body = ComplianceModelCardResponse),
+        (status = 400, description = "Compliance reporting not configured")
+    )
+)]
+pub async fn get_compliance_model_card(
+    State(state): State<ApiState>,
+    parts: Parts,
+) -> Result<Json<ComplianceModelCardResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let card = state
+        .facade
+        .model_card_with_auth(caller)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::invalid_request("compliance not configured"))?;
+
+    let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
+
+    let report = serde_json::to_value(card).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise model card");
+        ApiError::internal()
+    })?;
+
+    Ok(Json(ComplianceModelCardResponse {
+        report,
+        audit_chain_tip,
+    }))
+}
+
+/// `GET /v1/compliance/checklist`
+#[utoipa::path(
+    get,
+    path = "/v1/compliance/checklist",
+    tag = "compliance",
+    operation_id = "getComplianceChecklist",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Compliance control checklist", body = ComplianceChecklistResponse),
+        (status = 400, description = "Compliance reporting not configured")
+    )
+)]
+pub async fn get_compliance_checklist(
+    State(state): State<ApiState>,
+    parts: Parts,
+) -> Result<Json<ComplianceChecklistResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let checklist = state
+        .facade
+        .compliance_checklist_with_auth(caller)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::invalid_request("compliance not configured"))?;
+
+    let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
+
+    let report = serde_json::to_value(checklist).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise compliance checklist");
+        ApiError::internal()
+    })?;
+
+    Ok(Json(ComplianceChecklistResponse {
+        report,
+        audit_chain_tip,
+    }))
+}
+
+/// `POST /v1/compliance/dora`
+///
+/// A `POST`, not `GET` — see `DoraIncidentRequest`'s own doc comment and
+/// `superpowers/specs/2026-08-14-P4-P5-missing-endpoints.md` §2. Unlike `model-card` and
+/// `checklist` above, a DORA report was previously unreachable through this API at all:
+/// `compliance_report_with_auth` never supplies an incident, so `GET /v1/compliance/report`
+/// can never include one.
+#[utoipa::path(
+    post,
+    path = "/v1/compliance/dora",
+    tag = "compliance",
+    operation_id = "postComplianceDora",
+    security(("bearerAuth" = [])),
+    request_body = DoraIncidentRequest,
+    responses(
+        (status = 200, description = "DORA Art. 11 incident report", body = DoraReportResponse),
+        (status = 400, description = "Compliance reporting not configured")
+    )
+)]
+pub async fn post_compliance_dora(
+    State(state): State<ApiState>,
+    parts: Parts,
+    SafeJson(body): SafeJson<DoraIncidentRequest>,
+) -> Result<Json<DoraReportResponse>, ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+
+    let incident = body.into();
+    let report = state
+        .facade
+        .dora_report_with_auth(caller, &incident)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::invalid_request("compliance not configured"))?;
+
+    let audit_chain_tip = state.facade.audit_tip().await.map_err(ApiError::from)?;
+
+    let report = serde_json::to_value(report).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialise DORA report");
+        ApiError::internal()
+    })?;
+
+    Ok(Json(DoraReportResponse {
         report,
         audit_chain_tip,
     }))

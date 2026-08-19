@@ -12,6 +12,17 @@ de sortie.
 
 ---
 
+> **⚠ Alerte (2026-08-13), amendant P1 directement — corrigée.** `2026-08-13-P7-structured-field-redaction-gap.md`
+> a trouvé, par reproduction, un écart vivant dans du code déjà livré : `POST /v1/documents`,
+> `hacienda extract` et `hacienda-mcp` redigeaient correctement `ExtractedDocument.content` mais
+> laissaient `tables`, `pages[].content` et sept autres champs structurés **en clair** dans la
+> même réponse. P1 ne le couvrait pas — son garde porte sur le stockage, pas sur le corps d'une
+> réponse HTTP synchrone. **Statut : corrigé** — `HaciendaFacade::redact_structured_fields`
+> couvre désormais les dix champs identifiés, récursivement dans les membres d'archives ;
+> reproduction et test automatisé confirment zéro occurrence résiduelle. Voir P7 §8. Voir aussi
+> `2026-08-13-hacienda-xberg-capability-parity-program.md` §0, le programme frère qui a
+> découvert ce point en investiguant la parité de capacités xberg.
+
 ## 1. Objectif et réserve
 
 **Objectif demandé :** que hacienda propose tout ce que fait Xberg Enterprise, **plus** la
@@ -128,6 +139,46 @@ segments d'audit sont nommés `(tenant, node)` ; quotas et limites par tenant.
 produisent des tokens **différents** ; une clé retirée d'un tenant ne déchiffre rien d'un
 autre.
 
+> **⚠ Alerte (2026-08-14), résolue le même jour.** `TenantCtx`/`Caller::tenant_ctx()` sont
+> livrés, mais "tous les traits de store le prennent en paramètre de scope" ci-dessus ne
+> l'était **pas** à l'ouverture de cette alerte : vérifié directement contre `AuditStore`,
+> `ReviewStore`, `JobStore`, `DocumentVersionStore`, `PresetStore` — aucun ne prenait de
+> paramètre de tenant, et le schéma Postgres (`0001_init.sql`) n'avait de colonne
+> `tenant_id` nulle part. Deux tenants partageant un déploiement voyaient l'historique
+> d'audit, la file de revue (texte en clair inclus, par conception) et les versions de
+> documents l'un de l'autre.
+> Le volet pseudonymisation de cette alerte a été spécifié séparément
+> (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`, référencé plus haut à P3) et est
+> maintenant lui aussi implémenté (voir plus bas dans ce paragraphe). Le reste — audit,
+> revue, jobs, versions, presets — est spécifié dans
+> `2026-08-14-S1b-tenant-scoped-audit-review-job-document-stores.md`, avec son plan
+> d'implémentation en huit tâches, `superpowers/plans/2026-08-14-S1b-tenant-isolation-implementation.md`.
+> **Mise à jour (2026-08-14) :** les cinq stores couverts par la spec S1b sont livrés et
+> testés — `AuditStore` (Tâche 2), `ReviewStore` (Tâche 3), `JobStore` (Tâche 4),
+> `DocumentVersionStore` (Tâche 5) et `PresetStore` (Tâche 6), chacun avec ses trois
+> backends applicables (mémoire/fichier/Postgres selon le store) et son fil
+> `HaciendaFacade`/`hacienda-api` propre. Voir le §7 de la spec S1b pour le détail exact de
+> ce qui a été livré par store, y compris deux bugs réels découverts en cours de route et
+> corrigés dans la même migration : une collision de séquence de version entre tenants sur
+> `document_versions` (identifiant fourni par l'appelant, pas assigné par le store) et le
+> bug fonctionnel historique de `presets` (deux tenants ne pouvaient pas nommer un preset
+> `"default"`). Trois endpoints HTTP (`GET /v1/documents/{id}/versions`,
+> `GET /v1/documents/{id}`, et les quatre routes `/v1/presets/*`) n'extrayaient aucun
+> `Caller` du tout avant ce travail — corrigé au passage, pas seulement le scope tenant.
+> `ApiKeyStore` reste hors périmètre de S1b, volontairement (voir §3.2 de la spec S1b).
+> **Mise à jour (2026-08-14) :** le volet pseudonymisation de cette alerte
+> (`2026-08-14-P3a-tenant-scoped-pseudonym-keys.md`) est également livré et testé —
+> `KeyResolver::active`/`resolve` prennent désormais un `&TenantId`, `EnvKeyResolver`
+> résout chaque tenant sous une variable préfixée `HACIENDA_TENANT_<TENANT>_` (le tenant
+> par défaut reste sur la variable non préfixée, donc aucun token déjà émis n'est affecté),
+> et `HaciendaFacade` construit et met en cache un `Pseudonymiser`/`PiiPipeline` par tenant
+> à la demande, en partageant un seul détecteur NER chargé une fois. Voir le §7 de la spec
+> P3a pour le détail, y compris une correction trouvée par une régression de test
+> d'intégration `hacienda-cli` (`hacienda pii reveal` sans section `[pii]` configurée a
+> besoin de son propre cache de pseudonymiseur, indépendant du cache de pipeline de
+> détection). Cette alerte est maintenant entièrement résolue : les cinq stores (S1b) et la
+> couche de pseudonymisation (P3a) sont tous tenant-scoped.
+
 **Note.** Ne pas retarder : rétro-ajouter un tenant après mise en production impose de migrer
 les chaînes d'audit et de re-dériver les tokens. C'est le seul chantier réellement bloquant.
 
@@ -240,6 +291,21 @@ RGPD adossée au déterminisme des tokens.
 **Critères de sortie.** Une valeur donne le même token à travers un corpus et deux processus ;
 une clé retirée reste révélable ; deux tenants ne partagent aucun token ; aucune réponse ne
 contient de matériel de clé.
+
+> **⚠ Alerte (2026-08-14), résolue le même jour.** Le « deux tenants ne partagent aucun
+> token » ci-dessus n'était **pas** vérifié à l'ouverture de cette alerte : `KeyResolver::
+> active()`/`resolve()` et `Pseudonymiser::token()` ne prenaient aucun paramètre de tenant,
+> et `HaciendaFacade` ne construisait qu'un seul `Pseudonymiser` pour toute la durée du
+> process — vérifié directement contre `hacienda-core/src/redaction/pseudonym.rs` et
+> `facade.rs`, pas seulement contre ce document. S1 avait livré
+> `TenantCtx`/`TenantId`/`Caller::tenant_ctx()`, atteignables partout, mais jamais branchés
+> dans la couche de pseudonymisation spécifiquement. Corrigé par
+> `2026-08-14-P3a-tenant-scoped-pseudonym-keys.md` (implémentée et testée le 2026-08-14, §7
+> de la spec) : `KeyResolver`/`Pseudonymiser` prennent désormais un `&TenantId`,
+> `HaciendaFacade` met en cache un `Pseudonymiser`/`PiiPipeline` par tenant à la demande en
+> partageant un seul détecteur NER chargé une fois (`NerDetector` dérive maintenant
+> `Clone`), et le tenant par défaut reste sur la même variable d'environnement non
+> préfixée qu'avant ce changement — aucun token déjà émis n'est affecté.
 
 ### P4 — File de revue humaine
 
@@ -446,8 +512,9 @@ Enterprise des vagues 4 est à rediscuter avant d'engager quinze semaines.
 
 | Exclusion | Raison |
 | --- | --- |
-| Serveur MCP | Chantier distinct : la moitié extraction est une feature `xberg/mcp` à activer (analyse §9.11.1), les outils PII/conformité se greffent dessus. À spécifier à part. |
+| ~~Serveur MCP~~ | **Spécifié à part** par `2026-08-13-M1-mcp-server-and-cli-sdk-parity-design.md`, comme prévu — et à l'inverse de la piste envisagée ici : pas une activation de la feature `xberg/mcp`, qui contournerait le garde P1, mais un serveur propre à hacienda contre `HaciendaFacade`. Cette même spec ferme aussi l'écart CLI/API (`audit`, `review`, `compliance` sans front-end CLI) et documente pourquoi la parité SDK (§4 S4) n'a rien de plus à construire. |
 | ~~Intégrations de frameworks RAG~~ | **Rapatriées dans le programme** par la décision D1, comme spec **E0** en vague 1. |
+| Capacités internes du crate `xberg` (OCR, embeddings, reranking, transcription, résumé, traduction, légendage, mots-clés, détection de mise en page) au-delà de l'extraction de formats | **Programme frère** : `2026-08-13-hacienda-xberg-capability-parity-program.md`. Distinct de la piste E ci-dessus, qui vise la parité de *surface REST* avec Xberg Enterprise — celui-ci vise la parité de *capacité pipeline* avec le crate `xberg` lui-même, une couche en-dessous. Contient l'alerte P7 ci-dessus. |
 | Entraînement d'adaptateurs | PR #35 le couvre, en Python, hors de ce workspace. |
 | Studio | Consomme V1 et P3 ; son évolution propre est hors programme. |
 | SSO/SAML, console d'administration, facturation | Nécessaires à une offre SaaS, hors du périmètre demandé. |

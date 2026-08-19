@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO audit_segments (node_id, config_hash, tenant_id, prev_seal_hash) VALUES ($1, $2, $3, $4) RETURNING segment_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "segment_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7117939f2aa1f918a28479ec1eb00829c77f6035ed705d7bcfbf582449248495"
+}

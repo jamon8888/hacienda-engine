@@ -59,7 +59,7 @@ use std::sync::Mutex;
 use crate::review::error::ReviewError;
 use crate::review::store::ReviewStore;
 use crate::review::types::{QueueStats, ReviewDecision, ReviewQueueItem, ReviewStatus};
-use crate::tenancy::TenantCtx;
+use crate::tenancy::TenantId;
 
 // ── Event types ───────────────────────────────────────────────────────────────
 
@@ -109,6 +109,14 @@ struct FileState {
 impl FileState {
     fn get_mut(&mut self, id: &str) -> Option<&mut ReviewQueueItem> {
         self.by_id.get_mut(id)
+    }
+
+    /// Same as [`Self::get_mut`], but an id belonging to a different tenant is treated
+    /// exactly like an id that does not exist — `None` either way. This is what makes
+    /// the not-found-not-forbidden property (D-S1b-1) fall out of the lookup itself
+    /// rather than needing a second branch at every call site to enforce it.
+    fn get_mut_for_tenant(&mut self, tenant: &TenantId, id: &str) -> Option<&mut ReviewQueueItem> {
+        self.by_id.get_mut(id).filter(|item| item.tenant_id == tenant.as_str())
     }
 
     fn insert(&mut self, item: ReviewQueueItem) {
@@ -303,7 +311,12 @@ impl FileReviewStore {
 
 #[async_trait]
 impl ReviewStore for FileReviewStore {
-    async fn submit(&self, item: ReviewQueueItem) -> Result<ReviewQueueItem, ReviewError> {
+    async fn submit(
+        &self,
+        tenant: &TenantId,
+        mut item: ReviewQueueItem,
+    ) -> Result<ReviewQueueItem, ReviewError> {
+        item.tenant_id = tenant.to_string();
         self.check_not_poisoned()?;
 
         // Acquire io_order first, then the state lock — always this order.
@@ -340,7 +353,7 @@ impl ReviewStore for FileReviewStore {
 
     async fn assign(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         reviewer: &str,
     ) -> Result<ReviewQueueItem, ReviewError> {
@@ -359,8 +372,7 @@ impl ReviewStore for FileReviewStore {
         let (updated_item, bytes) = {
             let mut state = self.state();
             let item = state
-                .get_mut(id)
-                .filter(|i| i.tenant_id == ctx.tenant.as_str())
+                .get_mut_for_tenant(tenant, id)
                 .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
             if item.status != ReviewStatus::Pending {
@@ -401,7 +413,7 @@ impl ReviewStore for FileReviewStore {
 
     async fn decide(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         id: &str,
         decision: ReviewDecision,
         reviewer: &str,
@@ -418,8 +430,7 @@ impl ReviewStore for FileReviewStore {
         let (updated_item, bytes) = {
             let mut state = self.state();
             let item = state
-                .get_mut(id)
-                .filter(|i| i.tenant_id == ctx.tenant.as_str())
+                .get_mut_for_tenant(tenant, id)
                 .ok_or_else(|| ReviewError::NotFound(id.to_string()))?;
 
             if item.decision.is_some() {
@@ -466,37 +477,43 @@ impl ReviewStore for FileReviewStore {
 
     async fn list(
         &self,
-        ctx: &TenantCtx,
+        tenant: &TenantId,
         filter: Option<ReviewStatus>,
     ) -> Result<Vec<ReviewQueueItem>, ReviewError> {
         self.check_not_poisoned()?;
         let state = self.state();
-        let result = state
+        let mine = state
             .items_in_order()
             .into_iter()
-            .filter(|i| i.tenant_id == ctx.tenant.as_str())
-            .filter(|i| filter.is_none_or(|status| i.status == status))
-            .collect();
+            .filter(|i| i.tenant_id == tenant.as_str());
+        let result = match filter {
+            Some(status) => mine.filter(|i| i.status == status).collect(),
+            None => mine.collect(),
+        };
         Ok(result)
     }
 
-    async fn get(&self, ctx: &TenantCtx, id: &str) -> Result<Option<ReviewQueueItem>, ReviewError> {
+    async fn get(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+    ) -> Result<Option<ReviewQueueItem>, ReviewError> {
         self.check_not_poisoned()?;
         Ok(self
             .state()
             .by_id
             .get(id)
-            .filter(|i| i.tenant_id == ctx.tenant.as_str())
+            .filter(|item| item.tenant_id == tenant.as_str())
             .cloned())
     }
 
-    async fn stats(&self, ctx: &TenantCtx) -> Result<QueueStats, ReviewError> {
+    async fn stats(&self, tenant: &TenantId) -> Result<QueueStats, ReviewError> {
         self.check_not_poisoned()?;
         let state = self.state();
-        let all: Vec<_> = state
+        let all: Vec<ReviewQueueItem> = state
             .items_in_order()
             .into_iter()
-            .filter(|i| i.tenant_id == ctx.tenant.as_str())
+            .filter(|i| i.tenant_id == tenant.as_str())
             .collect();
         let count = |status: ReviewStatus| all.iter().filter(|i| i.status == status).count();
         Ok(QueueStats {
@@ -699,8 +716,9 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    fn ctx() -> TenantCtx {
-        TenantCtx::default_tenant(crate::tenancy::ActorId::new("test"))
+    /// The tenant used by every test that doesn't itself care about tenant scoping.
+    fn t() -> TenantId {
+        TenantId::new("tenant-a")
     }
 
     fn make_item(id: &str) -> ReviewQueueItem {
@@ -721,7 +739,7 @@ mod tests {
             decided_by: None,
             decided_at: None,
             comment: None,
-            tenant_id: "default".to_string(),
+            tenant_id: t().to_string(),
         }
     }
 
@@ -744,16 +762,16 @@ mod tests {
         let item_id = {
             let store = open_store(&dir);
             let item = store
-                .submit(make_item("item-1"))
+                .submit(&t(), make_item("item-1"))
                 .await
                 .expect("submit must succeed");
             store
-                .assign(&ctx(), &item.id, "alice")
+                .assign(&t(), &item.id, "alice")
                 .await
                 .expect("assign must succeed");
             store
                 .decide(
-                    &ctx(),
+                    &t(),
                     &item.id,
                     ReviewDecision::Approve,
                     "alice",
@@ -767,7 +785,7 @@ mod tests {
 
         let store2 = open_store(&dir);
         let replayed = store2
-            .get(&ctx(), &item_id)
+            .get(&t(), &item_id)
             .await
             .expect("get must not error")
             .expect("item must be present after restart");
@@ -787,26 +805,29 @@ mod tests {
         // Step 1: submit.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-2")).await.expect("submit");
+            store
+                .submit(&t(), make_item("item-2"))
+                .await
+                .expect("submit");
         }
 
         // Step 2: assign — opens fresh store from disk.
         {
             let store = open_store(&dir);
             let item = store
-                .get(&ctx(), "item-2")
+                .get(&t(), "item-2")
                 .await
                 .expect("get")
                 .expect("must be present");
             assert_eq!(item.status, ReviewStatus::Pending, "must replay as Pending");
-            store.assign(&ctx(), "item-2", "bob").await.expect("assign");
+            store.assign(&t(), "item-2", "bob").await.expect("assign");
         }
 
         // Step 3: decide — opens fresh store again.
         {
             let store = open_store(&dir);
             let item = store
-                .get(&ctx(), "item-2")
+                .get(&t(), "item-2")
                 .await
                 .expect("get")
                 .expect("must be present");
@@ -816,7 +837,7 @@ mod tests {
                 "must replay as InReview"
             );
             store
-                .decide(&ctx(), "item-2", ReviewDecision::Reject, "bob", "not PII")
+                .decide(&t(), "item-2", ReviewDecision::Reject, "bob", "not PII")
                 .await
                 .expect("decide");
         }
@@ -825,7 +846,7 @@ mod tests {
         {
             let store = open_store(&dir);
             let item = store
-                .get(&ctx(), "item-2")
+                .get(&t(), "item-2")
                 .await
                 .expect("get")
                 .expect("must be present");
@@ -843,8 +864,14 @@ mod tests {
         // Write two complete items.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-3")).await.expect("submit 3");
-            store.submit(make_item("item-4")).await.expect("submit 4");
+            store
+                .submit(&t(), make_item("item-3"))
+                .await
+                .expect("submit 3");
+            store
+                .submit(&t(), make_item("item-4"))
+                .await
+                .expect("submit 4");
         }
 
         // Append a partial (truncated) JSON line to the log file.
@@ -863,7 +890,7 @@ mod tests {
         // The store must open successfully and replay both complete items.
         let store = open_store(&dir);
         let items = store
-            .list(&ctx(), None)
+            .list(&t(), None)
             .await
             .expect("list must not error despite truncated line");
 
@@ -895,7 +922,10 @@ mod tests {
 
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-a")).await.expect("submit a");
+            store
+                .submit(&t(), make_item("item-a"))
+                .await
+                .expect("submit a");
         }
 
         // Simulate a crash part-way through appending a second event.
@@ -913,13 +943,16 @@ mod tests {
         // Recover and write a new item.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-b")).await.expect("submit b");
+            store
+                .submit(&t(), make_item("item-b"))
+                .await
+                .expect("submit b");
         }
 
         // The new item must survive one more restart.
         let store = open_store(&dir);
         let items = store
-            .list(&ctx(), None)
+            .list(&t(), None)
             .await
             .expect("list after second restart");
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
@@ -939,16 +972,16 @@ mod tests {
         // Submit and assign before the crash.
         {
             let store = open_store(&dir);
-            store.submit(make_item("item-5")).await.expect("submit");
             store
-                .assign(&ctx(), "item-5", "alice")
+                .submit(&t(), make_item("item-5"))
                 .await
-                .expect("assign");
+                .expect("submit");
+            store.assign(&t(), "item-5", "alice").await.expect("assign");
         }
 
         // After restart, a second assign must fail — the item is InReview, not Pending.
         let store2 = open_store(&dir);
-        let result = store2.assign(&ctx(), "item-5", "bob").await;
+        let result = store2.assign(&t(), "item-5", "bob").await;
         assert!(
             result.is_err(),
             "second assign must fail after restart — item is no longer Pending"
@@ -979,11 +1012,11 @@ mod tests {
         let store = open_store(&dir);
 
         let item = store
-            .submit(make_item("item-x"))
+            .submit(&t(), make_item("item-x"))
             .await
             .expect("submit must succeed");
         store
-            .assign(&ctx(), &item.id, "alice")
+            .assign(&t(), &item.id, "alice")
             .await
             .expect("assign must succeed");
 
@@ -994,7 +1027,7 @@ mod tests {
 
         // `decide` must fail — the disk write is rejected.
         let err = store
-            .decide(&ctx(), &item.id, ReviewDecision::Approve, "alice", "ok")
+            .decide(&t(), &item.id, ReviewDecision::Approve, "alice", "ok")
             .await
             .expect_err("decide must fail when the log file is read-only");
         assert!(
@@ -1010,7 +1043,7 @@ mod tests {
         // `AlreadyDecided`. `AlreadyDecided` would indicate that the phantom in-memory
         // mutation is still visible and the caller's retry is being misdirected.
         let retry = store
-            .decide(&ctx(), &item.id, ReviewDecision::Approve, "alice", "ok")
+            .decide(&t(), &item.id, ReviewDecision::Approve, "alice", "ok")
             .await;
         assert!(
             retry.is_err(),
@@ -1031,11 +1064,11 @@ mod tests {
         let store = open_store(&dir);
 
         let item = store
-            .submit(make_item("item-y"))
+            .submit(&t(), make_item("item-y"))
             .await
             .expect("submit must succeed");
         store
-            .assign(&ctx(), &item.id, "alice")
+            .assign(&t(), &item.id, "alice")
             .await
             .expect("assign must succeed");
 
@@ -1046,7 +1079,7 @@ mod tests {
 
         // `decide` must fail.
         store
-            .decide(&ctx(), &item.id, ReviewDecision::Approve, "alice", "ok")
+            .decide(&t(), &item.id, ReviewDecision::Approve, "alice", "ok")
             .await
             .expect_err("decide must fail when the log file is read-only");
 
@@ -1057,7 +1090,7 @@ mod tests {
         drop(store);
         let store2 = open_store(&dir);
         let replayed = store2
-            .get(&ctx(), &item.id)
+            .get(&t(), &item.id)
             .await
             .expect("get must not error")
             .expect("item must still be present");
@@ -1106,7 +1139,7 @@ mod tests {
 
             for i in 0..ITEMS {
                 store
-                    .submit(make_item(&format!("item-{i}")))
+                    .submit(&t(), make_item(&format!("item-{i}")))
                     .await
                     .expect("submit");
             }
@@ -1122,13 +1155,13 @@ mod tests {
                 let assigner = Arc::clone(&store);
                 let assign_id = id.clone();
                 handles.push(tokio::spawn(async move {
-                    let _ = assigner.assign(&ctx(), &assign_id, "alice").await;
+                    let _ = assigner.assign(&t(), &assign_id, "alice").await;
                 }));
 
                 let decider = Arc::clone(&store);
                 handles.push(tokio::spawn(async move {
                     let _ = decider
-                        .decide(&ctx(), &id, ReviewDecision::Approve, "bob", "ok")
+                        .decide(&t(), &id, ReviewDecision::Approve, "bob", "ok")
                         .await;
                 }));
             }
@@ -1136,12 +1169,12 @@ mod tests {
                 handle.await.expect("task must not panic");
             }
 
-            let live = store.list(&ctx(), None).await.expect("live list");
+            let live = store.list(&t(), None).await.expect("live list");
 
             drop(store);
             let replayed = FileReviewStore::open(log)
                 .expect("reopen after concurrent writes")
-                .list(&ctx(), None)
+                .list(&t(), None)
                 .await
                 .expect("replayed list");
 

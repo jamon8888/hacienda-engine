@@ -8,6 +8,17 @@ priority: critical
 
 **Axum server design for document extraction endpoints, middleware, async processing, and Model Context Protocol integration for AI agents**
 
+> **Copied from upstream `xberg` and now known-stale in one place** (same class of gap
+> the Unreleased changelog already flagged for `crate-structure`/`alef-generated-bindings`):
+> the "MCP Tools" section below lists three tools (`extract`, `extract_batch`,
+> `get_capabilities`). Reading the pinned xberg commit's actual source
+> (`crates/xberg/src/mcp/server.rs`) shows eight: `extract`, `extract_batch`,
+> `detect_mime_type`, `cache_stats`, `cache_clear`, `cache_manifest`, `cache_warm`,
+> `get_version`. This also does not describe hacienda's own MCP server —
+> `hacienda-mcp` (`hacienda mcp serve`), which wraps `HaciendaFacade`, not xberg's API —
+> see that crate's module doc and
+> `superpowers/specs/2026-08-13-M1-mcp-server-and-cli-sdk-parity-design.md`.
+
 ## Xberg API Architecture
 
 **Location**: `crates/xberg/src/api/`, `crates/xberg-cli/`
