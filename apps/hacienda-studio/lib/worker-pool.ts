@@ -1,7 +1,9 @@
 // Worker pool manager for cross-document parallelism (Tier 2.1)
 // Distributes files across multiple workers to maximize CPU utilization
+// Includes Tier 2.2: Cold-start caching for Wasm modules
 
 import type { FileInput, ProcessedFile, ProgressUpdate, AppConfig } from "./types";
+import { initializeWasmWithCache } from "./wasm-cache";
 
 export interface WorkerPoolConfig {
   /** Number of workers in the pool (default: conservative 3) */
@@ -38,6 +40,10 @@ const DEFAULT_CONFIG: WorkerPoolConfig = {
  * Each worker holds a full GLiNER2 model instance (~600MB), so pool size
  * is limited by available RAM rather than CPU cores.
  * 
+ * Features:
+ * - Tier 2.1: Cross-document parallelism via worker pool
+ * - Tier 2.2: Cold-start caching of Wasm modules
+ * 
  * Usage:
  *   const pool = new WorkerPool({ poolSize: 3 });
  *   await pool.initialize(transcribeHandler);
@@ -73,6 +79,8 @@ export class WorkerPool {
   /**
    * Initialize the worker pool - creates and initializes all workers.
    * Must be called before processFiles().
+   * 
+   * Includes Tier 2.2: Wasm module cold-start caching via Cache API / IndexedDB
    */
   async initialize(transcribeHandler?: (data: {
     requestId: string;
@@ -89,10 +97,19 @@ export class WorkerPool {
       console.log(`[WorkerPool] Initializing ${this.config.poolSize} workers...`);
       
       const initPromises = Array.from({ length: this.config.poolSize }, async (_, i) => {
-        const worker = new Worker(
-          new URL("./worker/pipeline.ts", import.meta.url),
-          { type: "module", name: `hacienda-worker-${i}` }
-        );
+        // Tier 2.2: Fetch Wasm module with caching
+        const wasmUrl = new URL("./pipeline.ts", import.meta.url).href;
+        const cachedResponse = await initializeWasmWithCache(wasmUrl, (update) => {
+          this.onProgress?.({ file: `worker-${i}`, stage: update.stage, percent: update.percent });
+        });
+        
+        // Create worker from cached response if available, otherwise use standard URL
+        const workerUrl = cachedResponse.url === wasmUrl ? cachedResponse : new URL("./worker/pipeline.ts", import.meta.url);
+        
+        const worker = new Worker(workerUrl, {
+          type: "module",
+          name: `hacienda-worker-${i}`
+        });
 
         const instance: WorkerInstance = {
           worker,
@@ -270,9 +287,6 @@ export class WorkerPool {
         }
         instance.busy = false;
         instance.pendingFiles = 0;
-        
-        // Process next queued task
-        // (Queue not implemented yet - could be added for future work)
         break;
         
       case "zip-ready":
@@ -387,3 +401,5 @@ export async function createWorkerPool(
   await pool.initialize(transcribeHandler);
   return pool;
 }
+
+export type { WorkerPoolConfig };
