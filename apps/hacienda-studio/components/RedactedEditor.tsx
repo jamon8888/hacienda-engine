@@ -10,6 +10,7 @@ import { useCallback, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import type { ViewUpdate } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
+import { oneDark } from "@codemirror/theme-one-dark";
 import {
   ADDABLE_CATEGORIES,
   DEFAULT_ADDABLE_CATEGORY,
@@ -19,7 +20,10 @@ import { spliceRedaction } from "../lib/annotate";
 
 // See MarkdownEditor.tsx's identical constant for why this is module-level, not inline.
 const BASIC_SETUP = { lineNumbers: false, foldGutter: false };
-const EXTENSIONS = [markdown()];
+// Redesign: the app is dark-only (see app.css's `.dark` block) — CM6 defaults to a light
+// theme regardless of the page around it, so without this the editor was the one visibly
+// light panel in an otherwise dark UI.
+const EXTENSIONS = [markdown(), oneDark];
 
 export function RedactedEditor({
   value,

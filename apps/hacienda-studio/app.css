@@ -140,115 +140,141 @@
   }
 }
 
+/*
+ * Pre-shadcn baseline styling (body/link/form-field/selection defaults), predating the
+ * Track E1/E2 shadcn token migration above. Kept for the plain-CSS rules below that still
+ * use it, but every custom property here is `--legacy-*`-prefixed — none of these names
+ * may reuse Tailwind's own `--color-*`/`--radius-*`/`--font-*` theme namespace. An
+ * unlayered `:root` block (this one) beats a layered `@theme`/`@layer` declaration of the
+ * same name regardless of source order (see the `@layer base` comment above), so a
+ * same-named property here would silently win over the shadcn tokens app-wide — which is
+ * exactly what happened before this rename: `--color-primary: #007ec6` here was
+ * overriding `@theme`'s `--color-primary: hsl(var(--primary))`, rendering every
+ * `text-primary`/`bg-primary` Tailwind utility (buttons, icons, links) in this legacy
+ * block's blue instead of the redesign's orange, and `--radius-sm/md/lg` /
+ * `--font-sans` were doing the same to `rounded-*` and `font-sans` utilities.
+ */
 :root {
-  --color-bg: #0d1117;
-  --color-bg-elevated: #161b22;
-  --color-border: #30363d;
-  --color-border-muted: #21262d;
-  --color-text: #e6edf3;
-  --color-text-muted: #8b949e;
-  --color-primary: #007ec6;
-  --color-primary-hover: #0096e0;
-  --color-primary-light: #1f6feb;
-  --color-accent: #a371f7;
-  --color-success: #3fb950;
-  --color-warning: #d29922;
-  --color-danger: #f85149;
-  --color-code-bg: #161b22;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-  --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
-  --transition-fast: 120ms ease;
-  --transition-normal: 200ms ease;
+  --legacy-bg: #0d1117;
+  --legacy-bg-elevated: #161b22;
+  --legacy-border: #30363d;
+  --legacy-border-muted: #21262d;
+  --legacy-text: #e6edf3;
+  --legacy-text-muted: #8b949e;
+  --legacy-primary: #007ec6;
+  --legacy-primary-hover: #0096e0;
+  --legacy-primary-light: #1f6feb;
+  --legacy-accent: #a371f7;
+  --legacy-success: #3fb950;
+  --legacy-warning: #d29922;
+  --legacy-danger: #f85149;
+  --legacy-code-bg: #161b22;
+  --legacy-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --legacy-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --legacy-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --legacy-radius-sm: 4px;
+  --legacy-radius-md: 8px;
+  --legacy-radius-lg: 12px;
+  --legacy-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --legacy-font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+  --legacy-transition-fast: 120ms ease;
+  --legacy-transition-normal: 200ms ease;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --color-bg: #ffffff;
-    --color-bg-elevated: #f6f8fa;
-    --color-border: #d0d7de;
-    --color-border-muted: #e1e4e8;
-    --color-text: #1f2328;
-    --color-text-muted: #656d76;
-    --color-primary: #0969da;
-    --color-primary-hover: #0969da;
-    --color-primary-light: #0969da;
-    --color-code-bg: #f6f8fa;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
-    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+    --legacy-bg: #ffffff;
+    --legacy-bg-elevated: #f6f8fa;
+    --legacy-border: #d0d7de;
+    --legacy-border-muted: #e1e4e8;
+    --legacy-text: #1f2328;
+    --legacy-text-muted: #656d76;
+    --legacy-primary: #0969da;
+    --legacy-primary-hover: #0969da;
+    --legacy-primary-light: #0969da;
+    --legacy-code-bg: #f6f8fa;
+    --legacy-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+    --legacy-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+    --legacy-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
   }
 }
 
-html {
-  font-size: 14px;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
+/*
+ * Layered (unlike the plain element-selector rules further down used to be): these are
+ * bare `button`/`a`/`input` selectors, and Tailwind's own component classes (shadcn's
+ * `Button`, `Input`, etc.) target the exact same elements. Left unlayered, a rule as
+ * generic as `button { background: none; }` would win over a component's layered
+ * `.bg-primary` utility class regardless of specificity — same mechanism, same fix
+ * pattern as the custom-property rename above (see that comment), just for element
+ * selectors instead of custom properties. This is what made every shadcn `<Button>`
+ * render with no visible background before this was layered.
+ */
+@layer base {
+  html {
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
 
-body {
-  font-family: var(--font-sans);
-  font-size: 1rem;
-  line-height: 1.5;
-  color: var(--color-text);
-  background-color: var(--color-bg);
-  min-height: 100vh;
-}
+  body {
+    font-family: var(--legacy-font-sans);
+    font-size: 1rem;
+    line-height: 1.5;
+    color: var(--legacy-text);
+    background-color: var(--legacy-bg);
+    min-height: 100vh;
+  }
 
-#app {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
+  #app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
 
-a {
-  color: var(--color-primary);
-  text-decoration: none;
-  transition: color var(--transition-fast);
-}
+  a {
+    color: var(--legacy-primary);
+    text-decoration: none;
+    transition: color var(--legacy-transition-fast);
+  }
 
-a:hover {
-  color: var(--color-primary-hover);
-  text-decoration: underline;
-}
+  a:hover {
+    color: var(--legacy-primary-hover);
+    text-decoration: underline;
+  }
 
-button {
-  font-family: inherit;
-  font-size: inherit;
-  cursor: pointer;
-  border: none;
-  background: none;
-}
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+    border: none;
+    background: none;
+  }
 
-input,
-select,
-textarea {
-  font-family: inherit;
-  font-size: inherit;
-  color: inherit;
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 0.5rem 0.75rem;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
-}
+  input,
+  select,
+  textarea {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background: var(--legacy-bg-elevated);
+    border: 1px solid var(--legacy-border);
+    border-radius: var(--legacy-radius-sm);
+    padding: 0.5rem 0.75rem;
+    transition: border-color var(--legacy-transition-fast), box-shadow var(--legacy-transition-fast);
+  }
 
-input:focus,
-select:focus,
-textarea:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(0, 126, 198, 0.2);
-}
+  input:focus,
+  select:focus,
+  textarea:focus {
+    outline: none;
+    border-color: var(--legacy-primary);
+    box-shadow: 0 0 0 3px rgba(0, 126, 198, 0.2);
+  }
 
-::selection {
-  background: var(--color-primary-light);
-  color: white;
+  ::selection {
+    background: var(--legacy-primary-light);
+    color: white;
+  }
 }
 
 ::-webkit-scrollbar {
@@ -257,16 +283,16 @@ textarea:focus {
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--color-bg);
+  background: var(--legacy-bg);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
+  background: var(--legacy-border);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
+  background: var(--legacy-text-muted);
 }
 
 .sr-only {
@@ -296,5 +322,5 @@ textarea:focus {
 }
 
 .cm-pii-editor .cm-scroller {
-  font-family: var(--font-mono);
+  font-family: var(--legacy-font-mono);
 }
