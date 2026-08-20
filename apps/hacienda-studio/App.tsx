@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { ChatPage } from "./components/chat/ChatPage";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Landing } from "./pages/Landing";
 import { Assets } from "./pages/Assets";
@@ -8,7 +7,6 @@ import { Documents } from "./pages/Documents";
 import { DocumentDetail } from "./pages/DocumentDetail";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
-import { renderAnnotatedMarkdown } from "./lib/annotate";
 import {
   saveDocument,
   saveEditedFindings,
@@ -16,6 +14,7 @@ import {
   listDocuments,
   listEditedFindings,
 } from "./lib/persistence";
+import { pruneDrafts } from "./lib/redaction-store";
 import { folderOf } from "./lib/library";
 import type { LibraryDocument } from "./lib/library";
 import { DEFAULT_CONFIG } from "./lib/types";
@@ -48,29 +47,23 @@ function downloadText(fileName: string, content: string): void {
 }
 
 /**
- * Track I4: re-splices `result.rawMarkdown` against the (possibly edited) `findings`,
- * reusing the exact function `worker/pipeline.ts` used to build the original export —
- * `lib/annotate.ts` exists specifically so this can happen on the main thread without
- * importing the worker module itself (see that file's header). Frontmatter and the local
- * "## Entities" glossary are carried over unchanged from the original export rather than
- * regenerated: `pii_entities_found` and the entity list can go stale relative to add/remove
- * edits (an added finding won't retroactively drop an entity mention from the glossary, a
- * removed one won't add a mention back), which is an explicit, documented scope cut — full
- * frontmatter/registry/KG-export consistency with post-export edits is out of scope for
- * this increment, the same kind of bounded call already made for I3 below and for Track
- * J2's "thinner CLI vault" decision.
+ * Wraps an already-spliced redacted body (`DocumentDetail`'s free-text draft, or a
+ * mode-recomputed rendering) with `result.markdown`'s original frontmatter and entity
+ * glossary. Uses the same `lastIndexOf`-based glossary extraction `lib/export-resolve.ts`'s
+ * `reExportMarkdown` documents: a first-match regex would misfire if the source document's
+ * own body happens to contain a literal "## Entities" heading before the pipeline's
+ * appended one.
  */
-function reExportMarkdown(result: ProcessedFile, findings: PiiEntity[]): string {
-  const docPath = "documents/" + result.name;
-  const linked = renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findings, docPath);
+function wrapRedactedBody(result: ProcessedFile, body: string): string {
   const frontmatterMatch = result.markdown.match(/^---\n[\s\S]*?\n---/);
-  const glossaryMatch = result.markdown.match(/\n## Entities\n\n[\s\S]*$/);
   const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
-  const glossary = glossaryMatch ? glossaryMatch[0] : "";
-  return frontmatter + "\n" + linked + glossary;
+  const glossaryMarker = "\n## Entities\n\n";
+  const glossaryStart = result.markdown.lastIndexOf(glossaryMarker);
+  const glossary = glossaryStart === -1 ? "" : result.markdown.slice(glossaryStart);
+  return frontmatter + "\n" + body + glossary;
 }
 
-type Route = "landing" | "assets" | "studio" | "chat";
+type Route = "landing" | "assets" | "studio";
 type StudioView = "upload" | "documents" | "document";
 
 export function App() {
@@ -343,6 +336,14 @@ export function App() {
     };
   }, []);
 
+  // Redacted-markdown drafts (`DocumentDetail`'s free-text autosave) can end up holding
+  // PII a user left in place or pasted unredacted — bound their local retention by
+  // default rather than only via an explicit "clear" action. Runs once per app load, not
+  // once per draft, so a draft never outlives 30 days of the app simply never reopening.
+  useEffect(() => {
+    void pruneDrafts(30 * 24 * 60 * 60 * 1000);
+  }, []);
+
   async function handleFiles(fileList: FileList | File[]): Promise<void> {
     console.log("[App] handleFiles called with", fileList.length, "files");
     const fileArray = Array.from(fileList);
@@ -502,9 +503,14 @@ export function App() {
   const selectedResult = selectedDocumentName
     ? results.find((r) => r.name === selectedDocumentName)
     : undefined;
-  const selectedOriginalAvailable = selectedResult
-    ? files.some((f) => effectiveFileName(f) === selectedResult.frontmatter.source)
-    : false;
+  // The in-memory `File` this result came from, when this session's the one that
+  // processed it — undefined once hydrated from a prior session's persisted library,
+  // where only the processed output survives. `DocumentDetail` uses its presence/absence
+  // to gate the native-viewer split view and the redacted-draft autosave, both of which
+  // need real file bytes.
+  const selectedOriginalFile = selectedResult
+    ? files.find((f) => effectiveFileName(f) === selectedResult.frontmatter.source)
+    : undefined;
 
   const navItem = (label: string, active: boolean, onClick: () => void) => (
     <button
@@ -529,7 +535,6 @@ export function App() {
           <nav aria-label="App sections" className="flex items-center gap-1">
             {navItem("Studio", route === "studio", goToStudio)}
             {navItem("Assets", route === "assets", () => setRoute("assets"))}
-            {navItem("Chat", route === "chat", () => setRoute("chat"))}
           </nav>
         </div>
         <button
@@ -577,8 +582,6 @@ export function App() {
         <Assets assets={assets} nerModelDegraded={nerModelDegraded} onContinue={goToStudio} />
       )}
 
-      {route === "chat" && <ChatPage />}
-
       {route === "studio" && studioView === "upload" && (
         <Studio
           workerReady={workerReady}
@@ -606,14 +609,14 @@ export function App() {
         <DocumentDetail
           result={selectedResult}
           findings={findingsFor(selectedResult)}
-          originalAvailable={selectedOriginalAvailable}
+          originalFile={selectedOriginalFile}
           onBack={() => setStudioView("documents")}
           onAddFinding={(start, end, category) =>
             handleAddFinding(selectedResult, start, end, category)
           }
           onRemoveFinding={(i) => handleRemoveFinding(selectedResult, i)}
-          onExport={(findings) =>
-            downloadText(selectedResult.name, reExportMarkdown(selectedResult, findings))
+          onExportBody={(body) =>
+            downloadText(selectedResult.name, wrapRedactedBody(selectedResult, body))
           }
         />
       )}
