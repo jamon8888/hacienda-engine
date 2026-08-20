@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { ChatPage } from "./components/chat/ChatPage";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Landing } from "./pages/Landing";
 import { Assets } from "./pages/Assets";
@@ -7,8 +6,8 @@ import { Studio } from "./pages/Studio";
 import { Documents } from "./pages/Documents";
 import { DocumentDetail } from "./pages/DocumentDetail";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
+import { WorkerPool, createWorkerPool } from "./lib/worker-pool";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
-import { renderAnnotatedMarkdown } from "./lib/annotate";
 import {
   saveDocument,
   saveEditedFindings,
@@ -16,6 +15,7 @@ import {
   listDocuments,
   listEditedFindings,
 } from "./lib/persistence";
+import { pruneDrafts } from "./lib/redaction-store";
 import { folderOf } from "./lib/library";
 import type { LibraryDocument } from "./lib/library";
 import { DEFAULT_CONFIG } from "./lib/types";
@@ -48,29 +48,23 @@ function downloadText(fileName: string, content: string): void {
 }
 
 /**
- * Track I4: re-splices `result.rawMarkdown` against the (possibly edited) `findings`,
- * reusing the exact function `worker/pipeline.ts` used to build the original export —
- * `lib/annotate.ts` exists specifically so this can happen on the main thread without
- * importing the worker module itself (see that file's header). Frontmatter and the local
- * "## Entities" glossary are carried over unchanged from the original export rather than
- * regenerated: `pii_entities_found` and the entity list can go stale relative to add/remove
- * edits (an added finding won't retroactively drop an entity mention from the glossary, a
- * removed one won't add a mention back), which is an explicit, documented scope cut — full
- * frontmatter/registry/KG-export consistency with post-export edits is out of scope for
- * this increment, the same kind of bounded call already made for I3 below and for Track
- * J2's "thinner CLI vault" decision.
+ * Wraps an already-spliced redacted body (`DocumentDetail`'s free-text draft, or a
+ * mode-recomputed rendering) with `result.markdown`'s original frontmatter and entity
+ * glossary. Uses the same `lastIndexOf`-based glossary extraction `lib/export-resolve.ts`'s
+ * `reExportMarkdown` documents: a first-match regex would misfire if the source document's
+ * own body happens to contain a literal "## Entities" heading before the pipeline's
+ * appended one.
  */
-function reExportMarkdown(result: ProcessedFile, findings: PiiEntity[]): string {
-  const docPath = "documents/" + result.name;
-  const linked = renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findings, docPath);
+function wrapRedactedBody(result: ProcessedFile, body: string): string {
   const frontmatterMatch = result.markdown.match(/^---\n[\s\S]*?\n---/);
-  const glossaryMatch = result.markdown.match(/\n## Entities\n\n[\s\S]*$/);
   const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
-  const glossary = glossaryMatch ? glossaryMatch[0] : "";
-  return frontmatter + "\n" + linked + glossary;
+  const glossaryMarker = "\n## Entities\n\n";
+  const glossaryStart = result.markdown.lastIndexOf(glossaryMarker);
+  const glossary = glossaryStart === -1 ? "" : result.markdown.slice(glossaryStart);
+  return frontmatter + "\n" + body + glossary;
 }
 
-type Route = "landing" | "assets" | "studio" | "chat";
+type Route = "landing" | "assets" | "studio";
 type StudioView = "upload" | "documents" | "document";
 
 export function App() {
@@ -117,6 +111,7 @@ export function App() {
   const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
 
   const workerRef = useRef<Worker | null>(null);
+  const workerPoolRef = useRef<WorkerPool | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
   // Track D3's follow-up (see `worker/transcribe-bridge.ts`'s header): the one `WhisperBridge`
@@ -173,6 +168,51 @@ export function App() {
       }
       if (cancelled) return;
 
+      // Initialize worker pool with transcription handler
+      const pool = await createWorkerPool(
+        { poolSize: 3 },
+        async (data) => {
+          // Transcription handler - runs on main thread
+          await handleTranscribeRequest(data as {
+            requestId: string;
+            file: string;
+            audioBytes: Uint8Array<ArrayBuffer>;
+            mimeType: string;
+            config: TranscriptionConfig;
+          });
+        }
+      );
+      workerPoolRef.current = pool;
+
+      // Set up pool callbacks
+      pool.setProgressHandler((update) => {
+        setProgress((prev) => new Map(prev).set(update.file, update));
+      });
+      pool.setFileCompleteHandler((result) => {
+        setResults((prev) => [...prev, result]);
+        setProgress((prev) =>
+          new Map(prev).set(result.name, { ...result, stage: "complete", percent: 100 })
+        );
+        void saveDocument(result);
+      });
+      pool.setErrorHandler((file, error) => {
+        setError(`${file}: ${error}`);
+        setFileErrors((prev) => new Map(prev).set(file, error));
+      });
+      pool.setWarningHandler((message) => {
+        console.warn("[WorkerPool] Warning:", message);
+        // Could show a toast notification here
+      });
+      pool.setBatchCompleteHandler(() => {
+        // Batch complete - transition to documents view after a delay
+        setTimeout(() => {
+          setProgress(new Map());
+          setStudioView("documents");
+        }, 1000);
+      });
+
+      // Still need a worker for transcription bridge (whisper runs on main thread)
+      // but we don't need it for processing. Keep a minimal worker ref for compatibility.
       const worker = new Worker(new URL("./worker/pipeline.ts", import.meta.url), {
         type: "module",
       });
@@ -184,7 +224,21 @@ export function App() {
         worker.postMessage({ type: "init" });
       });
       if (cancelled) return;
-      worker.onmessage = handleWorkerMessage;
+      // Worker message handler for transcription bridge only
+      worker.onmessage = (event: MessageEvent) => {
+        const { type, ...data } = event.data;
+        if (type === "transcribe-request") {
+          void handleTranscribeRequest(
+            data as {
+              requestId: string;
+              file: string;
+              audioBytes: Uint8Array<ArrayBuffer>;
+              mimeType: string;
+              config: TranscriptionConfig;
+            },
+          );
+        }
+      };
       setWorkerReady(true);
     }
 
@@ -308,6 +362,7 @@ export function App() {
     return () => {
       cancelled = true;
       workerRef.current?.terminate();
+      workerPoolRef.current?.terminate();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once, mirrors onMount
   }, []);
@@ -341,6 +396,14 @@ export function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Redacted-markdown drafts (`DocumentDetail`'s free-text autosave) can end up holding
+  // PII a user left in place or pasted unredacted — bound their local retention by
+  // default rather than only via an explicit "clear" action. Runs once per app load, not
+  // once per draft, so a draft never outlives 30 days of the app simply never reopening.
+  useEffect(() => {
+    void pruneDrafts(30 * 24 * 60 * 60 * 1000);
   }, []);
 
   async function handleFiles(fileList: FileList | File[]): Promise<void> {
@@ -400,12 +463,21 @@ export function App() {
       })),
     );
 
-    console.log("[App] posting to worker:", fileInputs.length, "files");
-    workerRef.current!.postMessage({
-      type: "process",
-      files: fileInputs,
-      config: JSON.parse(JSON.stringify(configRef.current)),
-    });
+    console.log("[App] posting to worker pool:", fileInputs.length, "files");
+    const pool = workerPoolRef.current;
+    if (!pool) {
+      setError("Worker pool not initialized");
+      return;
+    }
+    
+    try {
+      const results = await pool.processFiles(fileInputs, JSON.parse(JSON.stringify(configRef.current)));
+      // Results are handled via callbacks, but we can also use the returned array
+      console.log("[App] Worker pool completed:", results.length, "files");
+    } catch (error) {
+      console.error("[App] Worker pool error:", error);
+      setError(error instanceof Error ? error.message : "Worker pool processing failed");
+    }
   }
 
 
@@ -502,9 +574,14 @@ export function App() {
   const selectedResult = selectedDocumentName
     ? results.find((r) => r.name === selectedDocumentName)
     : undefined;
-  const selectedOriginalAvailable = selectedResult
-    ? files.some((f) => effectiveFileName(f) === selectedResult.frontmatter.source)
-    : false;
+  // The in-memory `File` this result came from, when this session's the one that
+  // processed it — undefined once hydrated from a prior session's persisted library,
+  // where only the processed output survives. `DocumentDetail` uses its presence/absence
+  // to gate the native-viewer split view and the redacted-draft autosave, both of which
+  // need real file bytes.
+  const selectedOriginalFile = selectedResult
+    ? files.find((f) => effectiveFileName(f) === selectedResult.frontmatter.source)
+    : undefined;
 
   const navItem = (label: string, active: boolean, onClick: () => void) => (
     <button
@@ -606,14 +683,14 @@ export function App() {
         <DocumentDetail
           result={selectedResult}
           findings={findingsFor(selectedResult)}
-          originalAvailable={selectedOriginalAvailable}
+          originalFile={selectedOriginalFile}
           onBack={() => setStudioView("documents")}
           onAddFinding={(start, end, category) =>
             handleAddFinding(selectedResult, start, end, category)
           }
           onRemoveFinding={(i) => handleRemoveFinding(selectedResult, i)}
-          onExport={(findings) =>
-            downloadText(selectedResult.name, reExportMarkdown(selectedResult, findings))
+          onExportBody={(body) =>
+            downloadText(selectedResult.name, wrapRedactedBody(selectedResult, body))
           }
         />
       )}
