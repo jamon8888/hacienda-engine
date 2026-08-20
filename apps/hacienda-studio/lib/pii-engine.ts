@@ -17,14 +17,14 @@
  * implementation; see the plan's C3 entry. `scanForPii` never has anything to
  * record — `PiiPipeline::scan` always returns an empty `audit_log`
  * (`hacienda-core/src/pii/pipeline.rs`), because nothing was redacted.
+ *
+ * The `hacienda-wasm` package (`crates/hacienda-wasm/pkg`, produced by `wasm-pack`)
+ * is load**ed lazily** rather than statically imported: it may not exist until
+ * `npm run build:wasm` has run, and a static top-level import would make the whole
+ * app (including the AI chat, which never touches PII) fail to boot in Vite whenever
+ * the build output is missing. See `initPiiEngine` below.
  */
-import initHaciendaWasm, {
-  process as wasmProcess,
-  scan as wasmScan,
-  AuditHandle,
-  loadNerModel as loadWasmNerModel,
-} from "hacienda-wasm";
-import haciendaWasmUrl from "hacienda-wasm/hacienda_wasm_bg.wasm?url";
+import type { AuditHandle } from "hacienda-wasm";
 
 export interface PiiEntity {
   category: string;
@@ -42,14 +42,22 @@ export interface PiiPipelineResult {
   entities: PiiEntity[];
 }
 
+type WasmModule = typeof import("hacienda-wasm");
+
+let wasmModule: WasmModule | null = null;
+let wasmUrl: string | null = null;
 let ready: Promise<void> | null = null;
 
 /** Idempotent; safe to call from every worker that needs the engine. */
 export function initPiiEngine(): Promise<void> {
   if (!ready) {
-    ready = initHaciendaWasm({ module_or_path: fetch(haciendaWasmUrl) }).then(
-      () => undefined,
-    );
+    ready = (async () => {
+      const mod = await import("hacienda-wasm");
+      const { default: url } = await import("hacienda-wasm/hacienda_wasm_bg.wasm?url");
+      wasmModule = mod;
+      wasmUrl = url;
+      await mod.default({ module_or_path: fetch(url) });
+    })();
   }
   return ready;
 }
@@ -57,7 +65,7 @@ export function initPiiEngine(): Promise<void> {
 /** Detect only — `redacted_text` on the result equals `text`. */
 export async function scanForPii(text: string): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  return (await wasmScan(text)) as PiiPipelineResult;
+  return (await wasmModule!.scan(text)) as PiiPipelineResult;
 }
 
 /**
@@ -79,7 +87,7 @@ export async function loadPiiNerModel(
   encoderConfig: Uint8Array,
 ): Promise<void> {
   await initPiiEngine();
-  loadWasmNerModel(weights, tokenizer, encoderConfig);
+  wasmModule!.loadNerModel(weights, tokenizer, encoderConfig);
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple
@@ -96,7 +104,7 @@ let auditHandle: Promise<AuditHandle> | null = null;
 /** Opens (or resumes, across a reload) the audit chain. Idempotent, like `initPiiEngine`. */
 function getAuditHandle(): Promise<AuditHandle> {
   if (!auditHandle) {
-    auditHandle = AuditHandle.open(
+    auditHandle = wasmModule!.AuditHandle.open(
       AUDIT_DB_NAME,
       AUDIT_NODE_ID,
       AUDIT_CONFIG_HASH,
@@ -119,8 +127,31 @@ function getAuditHandle(): Promise<AuditHandle> {
  */
 export async function redactPii(text: string): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  const result = (await wasmProcess(text)) as PiiPipelineResult;
+  const result = (await wasmModule!.process(text)) as PiiPipelineResult;
   const handle = await getAuditHandle();
   await handle.recordResult(result);
   return result;
+}
+
+/**
+ * The chain's current head, for the redesign's Audit tab. Reflects every redaction
+ * recorded so far in this browser profile (`redactPii` appends per-document, not
+ * per-tab), not one specific document's own entry — `AuditHandle` doesn't expose a
+ * per-document lookup today, only the running tip and whole-chain `verify()`. Good
+ * enough to prove "nothing in the chain has been tampered with since it was written";
+ * a document-scoped view would need a new wasm-side method (see the redesign plan's
+ * Audit tab note).
+ */
+export async function getAuditChainTip(): Promise<string> {
+  await initPiiEngine();
+  const handle = await getAuditHandle();
+  return handle.tip();
+}
+
+/** Recomputes every chain hash from genesis; resolves on success, throws on the first
+ * mismatch (never returns a boolean a caller could accidentally ignore). */
+export async function verifyAuditChain(): Promise<void> {
+  await initPiiEngine();
+  const handle = await getAuditHandle();
+  await handle.verify();
 }

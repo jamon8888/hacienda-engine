@@ -1,5 +1,14 @@
 @import 'tailwindcss';
 
+/*
+  AI Elements `message` component (MessageResponse) is built on Streamdown.
+  Tailwind v4 needs this @source so streamdown's emitted classes are scanned and
+  its styles are applied. Path is relative to this file (apps/hacienda-studio/),
+  and streamdown is hoisted to the workspace root node_modules.
+*/
+@source "../node_modules/streamdown/dist/*.js";
+@source "../../node_modules/streamdown/dist/*.js";
+
 @custom-variant dark (&:is(.dark *));
 
 @utility container {
@@ -85,6 +94,29 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 222.2 84% 4.9%;
     --radius: 0.5rem;
+  }
+
+  /* Redesign: Hacienda Studio ships dark-only, no light/dark toggle in the mockup —
+   * `.dark` is applied unconditionally in `main.tsx` rather than gated behind
+   * `prefers-color-scheme`, so this is the app's one real palette, not an alternate. */
+  .dark {
+    --background: 222 22% 7%;
+    --foreground: 210 20% 96%;
+    --card: 222 20% 10%;
+    --card-foreground: 210 20% 96%;
+    --primary: 28 92% 54%;
+    --primary-foreground: 20 40% 10%;
+    --secondary: 222 15% 16%;
+    --secondary-foreground: 210 20% 96%;
+    --muted: 222 15% 14%;
+    --muted-foreground: 215 12% 62%;
+    --accent: 222 15% 17%;
+    --accent-foreground: 210 20% 96%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 210 20% 96%;
+    --border: 222 15% 18%;
+    --input: 222 15% 18%;
+    --ring: 28 92% 54%;
   }
 }
 
