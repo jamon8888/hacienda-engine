@@ -6,6 +6,7 @@ import { Studio } from "./pages/Studio";
 import { Documents } from "./pages/Documents";
 import { DocumentDetail } from "./pages/DocumentDetail";
 import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
+import { WorkerPool, createWorkerPool } from "./lib/worker-pool";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import {
   saveDocument,
@@ -109,7 +110,7 @@ export function App() {
   // always writing an entry, never mutating `result.piiFindings` itself.
   const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
 
-  const workerRef = useRef<Worker | null>(null);
+  const workerPoolRef = useRef<WorkerPool | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
   // Track D3's follow-up (see `worker/transcribe-bridge.ts`'s header): the one `WhisperBridge`
@@ -166,18 +167,55 @@ export function App() {
       }
       if (cancelled) return;
 
-      const worker = new Worker(new URL("./worker/pipeline.ts", import.meta.url), {
-        type: "module",
+      // Initialize worker pool with transcription handler. Every pool worker can send a
+      // "transcribe-request" (whisper can't run inside a worker — see
+      // `worker/transcribe-bridge.ts`'s header); `respond` is bound by `WorkerPool` to
+      // the *specific* worker instance that asked, so there's no separate "just for
+      // transcription" worker needed — that used to mean an extra full model load.
+      const pool = await createWorkerPool(
+        { poolSize: 3 },
+        async (data, respond) => {
+          await handleTranscribeRequest(
+            data as {
+              requestId: string;
+              file: string;
+              audioBytes: Uint8Array<ArrayBuffer>;
+              mimeType: string;
+              config: TranscriptionConfig;
+            },
+            respond,
+          );
+        }
+      );
+      workerPoolRef.current = pool;
+
+      // Set up pool callbacks
+      pool.setProgressHandler((update) => {
+        setProgress((prev) => new Map(prev).set(update.file, update));
       });
-      workerRef.current = worker;
-      await new Promise<void>((resolve) => {
-        worker.onmessage = (e) => {
-          if (e.data.type === "ready") resolve();
-        };
-        worker.postMessage({ type: "init" });
+      pool.setFileCompleteHandler((result) => {
+        setResults((prev) => [...prev, result]);
+        setProgress((prev) =>
+          new Map(prev).set(result.name, { ...result, stage: "complete", percent: 100 })
+        );
+        void saveDocument(result);
       });
-      if (cancelled) return;
-      worker.onmessage = handleWorkerMessage;
+      pool.setErrorHandler((file, error) => {
+        setError(`${file}: ${error}`);
+        setFileErrors((prev) => new Map(prev).set(file, error));
+      });
+      pool.setWarningHandler((message) => {
+        console.warn("[WorkerPool] Warning:", message);
+        // Could show a toast notification here
+      });
+      pool.setBatchCompleteHandler(() => {
+        // Batch complete - transition to documents view after a delay
+        setTimeout(() => {
+          setProgress(new Map());
+          setStudioView("documents");
+        }, 1000);
+      });
+
       setWorkerReady(true);
     }
 
@@ -190,21 +228,16 @@ export function App() {
     // an unanswered request is exactly the failure mode `transcriptionBridge`'s own timeout
     // exists to catch, but answering promptly here means that file's real error reaches the
     // UI in milliseconds, not after a 15-minute wait.
-    async function handleTranscribeRequest(data: {
-      requestId: string;
-      file: string;
-      audioBytes: Uint8Array<ArrayBuffer>;
-      mimeType: string;
-      config: TranscriptionConfig;
-    }): Promise<void> {
-      const worker = workerRef.current;
-      if (!worker) {
-        console.error(
-          "[App] transcribe-request received with no worker to reply to — dropping",
-          data.requestId,
-        );
-        return;
-      }
+    async function handleTranscribeRequest(
+      data: {
+        requestId: string;
+        file: string;
+        audioBytes: Uint8Array<ArrayBuffer>;
+        mimeType: string;
+        config: TranscriptionConfig;
+      },
+      respond: (response: { result?: unknown; error?: string }) => void,
+    ): Promise<void> {
       try {
         if (!whisperBridgeRef.current) {
           const { WhisperBridge } = await import("./lib/transcription/whisper-bridge");
@@ -237,70 +270,16 @@ export function App() {
             );
           },
         );
-        worker.postMessage({ type: "transcribe-response", requestId: data.requestId, result });
+        respond({ result });
       } catch (e) {
-        worker.postMessage({
-          type: "transcribe-response",
-          requestId: data.requestId,
-          error: e instanceof Error ? e.message : "Unknown error",
-        });
-      }
-    }
-
-    function handleWorkerMessage(event: MessageEvent) {
-      const { type, ...data } = event.data;
-      switch (type) {
-        case "progress":
-          setProgress((prev) => new Map(prev).set(data.file, data as ProgressUpdate));
-          break;
-        case "transcribe-request":
-          // Fire-and-forget from this switch's point of view: `handleTranscribeRequest`
-          // always settles by posting its own "transcribe-response" (success or error)
-          // back to the worker, so nothing here needs to await or otherwise react to it.
-          void handleTranscribeRequest(
-            data as {
-              requestId: string;
-              file: string;
-              audioBytes: Uint8Array<ArrayBuffer>;
-              mimeType: string;
-              config: TranscriptionConfig;
-            },
-          );
-          break;
-        case "file-complete": {
-          const result = data as ProcessedFile;
-          setResults((prev) => [...prev, result]);
-          setProgress((prev) =>
-            new Map(prev).set(data.name, { ...data, stage: "complete", percent: 100 }),
-          );
-          // Redesign: write-through into the persisted library so the document survives
-          // a reload — see `lib/persistence.ts`'s header for what is/isn't kept.
-          void saveDocument(result);
-          break;
-        }
-        case "batch-complete":
-          downloadZip(data.zip);
-          // Clears the per-file progress bars (`progress` empty ⇒ `update` is undefined ⇒
-          // each renders null) once the batch settles. Deliberately does NOT clear `files`
-          // too: `files` also drives the Studio page's per-file row list, which is meant to
-          // persist — same as `results`, which is never cleared — so a user can still see
-          // and edit a file's findings after this 1s delay.
-          setTimeout(() => {
-            setProgress(new Map());
-            setStudioView("documents");
-          }, 1000);
-          break;
-        case "error":
-          setError(`${data.file}: ${data.message}`);
-          setFileErrors((prev) => new Map(prev).set(data.file, data.message));
-          break;
+        respond({ error: e instanceof Error ? e.message : "Unknown error" });
       }
     }
 
     init();
     return () => {
       cancelled = true;
-      workerRef.current?.terminate();
+      workerPoolRef.current?.terminate();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once, mirrors onMount
   }, []);
@@ -401,12 +380,21 @@ export function App() {
       })),
     );
 
-    console.log("[App] posting to worker:", fileInputs.length, "files");
-    workerRef.current!.postMessage({
-      type: "process",
-      files: fileInputs,
-      config: JSON.parse(JSON.stringify(configRef.current)),
-    });
+    console.log("[App] posting to worker pool:", fileInputs.length, "files");
+    const pool = workerPoolRef.current;
+    if (!pool) {
+      setError("Worker pool not initialized");
+      return;
+    }
+    
+    try {
+      const results = await pool.processFiles(fileInputs, JSON.parse(JSON.stringify(configRef.current)));
+      // Results are handled via callbacks, but we can also use the returned array
+      console.log("[App] Worker pool completed:", results.length, "files");
+    } catch (error) {
+      console.error("[App] Worker pool error:", error);
+      setError(error instanceof Error ? error.message : "Worker pool processing failed");
+    }
   }
 
 

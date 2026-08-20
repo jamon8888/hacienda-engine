@@ -33,7 +33,8 @@ import {
   initPiiEngine,
   redactPii,
   scanForPii,
-  loadPiiNerModel,
+  redactPiiWithModelEntities,
+  scanForPiiWithModelEntities,
   type PiiEntity,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
@@ -109,23 +110,10 @@ async function initNerBackend(): Promise<void> {
     nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
     console.log("[Worker] Neural NER backend loaded");
 
-    // Feeds the same already-fetched bytes into hacienda-wasm's own PII pipeline so
-    // `redactPii`/`scanForPii` (below) detect with the real model instead of regex
-    // alone — no second download. This is a separate try/catch on purpose: a build of
-    // `hacienda-wasm` without the `ner-candle-wasm` feature doesn't export
-    // `loadNerModel` at all, and that must not take down the entity-glossary NER pass
-    // above, which is otherwise unrelated. Accepted cost: the model now runs twice per
-    // document — once here for the entity glossary, once inside hacienda-wasm's own
-    // pipeline for PII redaction — sharing the fetched bytes but not the inference call.
-    try {
-      await loadPiiNerModel(model, tokenizer, encoderConfig);
-      console.log("[Worker] hacienda-wasm PII NER backend loaded");
-    } catch (e) {
-      console.warn(
-        "[Worker] hacienda-wasm PII NER backend unavailable, PII detection stays regex-only:",
-        e,
-      );
-    }
+    // Tier 1.1: No longer loading model into hacienda-wasm for duplicate inference.
+    // PII detection now reuses the entity glossary NER results via
+    // redactPiiWithModelEntities/scanForPiiWithModelEntities.
+    // The hacienda-wasm regex-only fallback is used when neural NER is unavailable.
   } catch (e) {
     console.warn(
       "[Worker] Neural NER backend unavailable, using regex/compromise fallback:",
@@ -209,6 +197,56 @@ function isRawNerEntity(value: unknown): value is RawNerEntity {
     typeof v.start === "number" &&
     typeof v.end === "number"
   );
+}
+
+/**
+ * Map NER category (from xberg/entity glossary) to PII category (for hacienda-wasm).
+ * Mirrors hacienda-core/src/pii/ner.rs to_pii_category function.
+ */
+function nerCategoryToPiiCategory(nerCategory: string): string {
+  const lower = nerCategory.toLowerCase();
+  switch (lower) {
+    case "person":
+      return "Person";
+    case "organization":
+      return "Organization";
+    case "location":
+      return "Address";
+    case "email":
+      return "Email";
+    case "phone":
+      return "PhoneNumber";
+    case "url":
+      return "Url";
+    case "date":
+      return "Date";
+    case "time":
+      return "Time";
+    case "money":
+      return "Money";
+    case "percent":
+      return "Percent";
+    case "ssn":
+    case "social_security_number":
+      return "Ssn";
+    case "credit_card":
+    case "creditcard":
+      return "CreditCard";
+    case "iban":
+      return "Iban";
+    case "passport":
+    case "passport_number":
+      return "PassportNumber";
+    case "address":
+      return "Address";
+    case "full_name":
+    case "fullname":
+    case "name":
+      return "FullName";
+    default:
+      // Unknown categories pass through as custom
+      return nerCategory;
+  }
 }
 
 const MA_TERMS =
@@ -500,6 +538,9 @@ async function processFile(
   // Runs on the original `markdown`, before entities are enriched/registered/linked,
   // so both the export filter below and `renderAnnotatedMarkdown`'s overlap check
   // (Track F4/L7) work off the same coordinates.
+  //
+  // Tier 1.1 optimization: reuse NER results from entity glossary pass instead of
+  // running inference a second time. Convert xberg BridgeEntity[] to PII model entities.
   let piiEntitiesFound = 0;
   let piiFindings: PiiEntity[] = [];
   if (config.enablePiiDetection) {
@@ -507,9 +548,24 @@ async function processFile(
     postProgress({ file: input.name, stage: "pii", percent: 82 });
     try {
       const piiStart = performance.now();
+
+      // Convert entity glossary NER results (xbergEntities) to PII model entity format
+      // This eliminates the duplicate GLiNER2 inference pass (Tier 1.1)
+      const modelEntities = xbergEntities
+        .filter((e): e is RawNerEntity => isRawNerEntity(e))
+        .filter((e) => (config.nerCategories as string[]).includes(e.category.toLowerCase()))
+        .map((e) => ({
+          category: nerCategoryToPiiCategory(e.category),
+          text: e.text,
+          start: e.start,
+          end: e.end,
+          confidence: 1.0, // xberg entities don't always have confidence, default to 1.0
+        }));
+
       const piiResult = config.redactPiiInOutput
-        ? await redactPii(markdown)
-        : await scanForPii(markdown);
+        ? await redactPiiWithModelEntities(markdown, modelEntities)
+        : await scanForPiiWithModelEntities(markdown, modelEntities);
+
       const piiMs = performance.now() - piiStart;
       console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
       piiFindings = piiResult.entities;
