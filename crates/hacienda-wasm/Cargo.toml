@@ -22,6 +22,7 @@ hacienda-core = { path = "../../hacienda-core", default-features = false }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+wasm-bindgen-rayon = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `uuid` (Track L3) turned out not to need this — its wasm32 randomness is a

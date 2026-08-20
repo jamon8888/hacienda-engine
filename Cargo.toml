@@ -296,3 +296,8 @@ lto = "fat"
 [profile.release.package.hacienda-wasm]
 opt-level = 3
 codegen-units = 1
+
+# Tier 3.1: Enable atomics and bulk-memory for wasm-bindgen-rayon threading
+# Required for in-document parallelism via wasm-bindgen-rayon
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+atomics,+bulk-memory,+mutable-globals"]
