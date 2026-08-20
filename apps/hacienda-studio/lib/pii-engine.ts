@@ -25,6 +25,7 @@
  * the build output is missing. See `initPiiEngine` below.
  */
 import type { AuditHandle } from "hacienda-wasm";
+import { initializeWasmWithCache } from "./wasm-cache";
 
 export interface PiiEntity {
   category: string;
@@ -56,7 +57,9 @@ export function initPiiEngine(): Promise<void> {
       const { default: url } = await import("hacienda-wasm/hacienda_wasm_bg.wasm?url");
       wasmModule = mod;
       wasmUrl = url;
-      await mod.default({ module_or_path: fetch(url) });
+      // Tier 2.2: served from Cache API/IndexedDB on repeat visits instead of a fresh
+      // network fetch — falls back to a plain `fetch(url)` internally on any cache miss.
+      await mod.default({ module_or_path: initializeWasmWithCache(url) });
     })();
   }
   return ready;
@@ -88,6 +91,42 @@ export async function loadPiiNerModel(
 ): Promise<void> {
   await initPiiEngine();
   wasmModule!.loadNerModel(weights, tokenizer, encoderConfig);
+}
+
+/**
+ * Detect and redact using pre-computed model entities (bypasses NER inference).
+ * Model entities should be in the format: { category, text, start, end, confidence }
+ * where category is a PII category string (e.g., "Person", "Email", "PhoneNumber", etc.)
+ */
+export async function redactPiiWithModelEntities(
+  text: string,
+  modelEntities: Array<{
+    category: string;
+    text: string;
+    start: number;
+    end: number;
+    confidence: number;
+  }>,
+): Promise<PiiPipelineResult> {
+  await initPiiEngine();
+  return (await wasmModule!.process_with_model_entities(text, modelEntities)) as PiiPipelineResult;
+}
+
+/**
+ * Detect without rewriting text, using pre-computed model entities (bypasses NER inference).
+ */
+export async function scanForPiiWithModelEntities(
+  text: string,
+  modelEntities: Array<{
+    category: string;
+    text: string;
+    start: number;
+    end: number;
+    confidence: number;
+  }>,
+): Promise<PiiPipelineResult> {
+  await initPiiEngine();
+  return (await wasmModule!.scan_with_model_entities(text, modelEntities)) as PiiPipelineResult;
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple

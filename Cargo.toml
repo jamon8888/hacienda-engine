@@ -290,5 +290,43 @@ debug = false
 # mirroring xberg's own `[profile.release.package.xberg-wasm] opt-level = "z"` rather
 # than changing `[profile.release]` (and therefore hacienda-cli/hacienda-api) workspace-wide.
 [profile.release.package.hacienda-wasm]
-opt-level = "z"
+opt-level = 3
 codegen-units = 1
+
+# `lto` cannot be set per-package via `[profile.*.package.*]` (Cargo only allows
+# opt-level/codegen-units/debug/debug-assertions/overflow-checks/strip there), so
+# hacienda-wasm's speed-over-size tradeoff needs its own profile rather than reusing
+# `[profile.release]` — doing that would silently apply fat LTO to every workspace
+# member's release build, including the hacienda-cli/hacienda-api server binaries.
+# Build with `wasm-pack build --profile wasm-release` (see `build:wasm` script).
+[profile.wasm-release]
+inherits = "release"
+lto = "fat"
+
+[profile.wasm-release.package.hacienda-wasm]
+opt-level = 3
+codegen-units = 1
+
+# Tier 1.3 (SIMD128) and Tier 3.1 prep (atomics/bulk-memory) both require
+# `[target.wasm32-unknown-unknown] rustflags` in `.cargo/config.toml` — Cargo does
+# not read `rustflags` from this manifest file. Note for whoever revisits this:
+# `.cargo/` is repo-gitignored (see `.gitignore`), so a `.cargo/config.toml` added
+# locally never actually ships in a fresh clone or CI — that's why earlier attempts
+# at this silently regressed between branches. Either `git add -f .cargo/config.toml`
+# or stop ignoring `.cargo/` before relying on it again.
+#
+# SIMD128 was tried and reverted: `-C target-feature=+simd128` breaks the
+# `ner-candle-wasm` wasm32 build — `candle-core` 0.11.0's CPU backend
+# (`candle-core/src/cpu/mod.rs`) references an undefined `CurrentCpuBF16` type in its
+# bf16 path once simd128 is on, hit through this app's F16 GLiNER2 model weights.
+# Confirmed directly: `cargo check -p hacienda-wasm --target wasm32-unknown-unknown
+# --features ner-candle-wasm` is clean without the flag, fails with 38 errors with it.
+# Upstream candle-core bug, not fixable from this workspace — re-enable only after
+# upgrading past whichever release actually fixes the bf16 CPU path, verified with
+# that same command.
+#
+# Tier 3.1's atomics/bulk-memory/mutable-globals flags need a nightly Rust toolchain
+# with `std` rebuilt for wasm32 with atomics — not pinned in this workspace yet, and
+# `wasm-bindgen-rayon` itself refuses to compile without them actually applied
+# (`compile_error!` in its own `lib.rs`). The `atomics` Cargo feature alone is not
+# sufficient.

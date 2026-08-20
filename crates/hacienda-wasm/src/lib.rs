@@ -8,7 +8,7 @@
 //! stores) were building toward — it wraps `IndexedDbAuditStore` directly rather than
 //! re-implementing the chain in TypeScript.
 
-use hacienda_core::pii::{PiiPipeline, PipelineConfig};
+use hacienda_core::pii::{ModelEntity, PiiPipeline, PipelineConfig};
 use hacienda_core::redaction::pseudonym::{EnvKeyResolver, Pseudonymiser};
 use hacienda_core::redaction::{RedactionConfig, RedactionEngine, RedactionMode};
 use hacienda_core::tenancy::TenantId;
@@ -40,6 +40,42 @@ pub async fn scan(text: String) -> Result<JsValue, JsValue> {
     let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
         .map_err(to_js_err)?;
     let result = pipeline.scan(&text).await.map_err(to_js_err)?;
+    serde_wasm_bindgen::to_value(&result).map_err(to_js_err)
+}
+
+/// Detect and redact using pre-computed model entities (bypasses NER inference).
+/// Takes pre-computed model entities as a JS array of objects with fields:
+/// category, text, start, end, confidence.
+#[wasm_bindgen]
+pub async fn process_with_model_entities(
+    text: String,
+    model_entities: JsValue,
+) -> Result<JsValue, JsValue> {
+    let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
+        .map_err(to_js_err)?;
+    let model_entities: Vec<ModelEntity> = serde_wasm_bindgen::from_value(model_entities)
+        .map_err(to_js_err)?;
+    let result = pipeline
+        .process_with_model_entities(&text, model_entities)
+        .await
+        .map_err(to_js_err)?;
+    serde_wasm_bindgen::to_value(&result).map_err(to_js_err)
+}
+
+/// Detect without rewriting `text`, using pre-computed model entities (bypasses NER inference).
+#[wasm_bindgen]
+pub async fn scan_with_model_entities(
+    text: String,
+    model_entities: JsValue,
+) -> Result<JsValue, JsValue> {
+    let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
+        .map_err(to_js_err)?;
+    let model_entities: Vec<ModelEntity> = serde_wasm_bindgen::from_value(model_entities)
+        .map_err(to_js_err)?;
+    let result = pipeline
+        .scan_with_model_entities(&text, model_entities)
+        .await
+        .map_err(to_js_err)?;
     serde_wasm_bindgen::to_value(&result).map_err(to_js_err)
 }
 
