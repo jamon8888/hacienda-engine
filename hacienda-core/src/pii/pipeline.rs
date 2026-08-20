@@ -234,6 +234,77 @@ impl PiiPipeline {
         metrics.merge_ms = merge_start.elapsed().as_millis() as u64;
         metrics.entities_detected = entities.len() as u32;
 
+
+    /// Detect and redact using pre-computed model entities, bypassing the NER detector.
+    ///
+    /// This allows callers who have already run NER inference (e.g., for an entity glossary)
+    /// to reuse those results instead of running inference a second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiiError::Ner`] if regex detection fails. Pre-computed model entities
+    /// are trusted and not re-validated.
+    pub async fn process_with_model_entities(
+        &self,
+        text: &str,
+        model_entities: Vec<ModelEntity>,
+    ) -> Result<PipelineResult, PiiError> {
+        let start = Instant::now();
+        let (entities, mut metrics) = self.detect_with_model_entities(text, model_entities).await?;
+
+        let redaction_start = Instant::now();
+        let redaction = self.redaction_engine.redact(text, &entities)?;
+        metrics.redaction_ms = redaction_start.elapsed().as_millis() as u64;
+        metrics.entities_redacted = redaction.metrics.entities_redacted;
+        metrics.total_ms = start.elapsed().as_millis() as u64;
+
+        Ok(PipelineResult {
+            redacted_text: redaction.text,
+            entities,
+            audit_log: redaction.audit_log,
+            metrics,
+        })
+    }
+
+    /// Detect without rewriting the text, using pre-computed model entities.
+    ///
+    /// See [`process_with_model_entities`] for details.
+    pub async fn scan_with_model_entities(
+        &self,
+        text: &str,
+        model_entities: Vec<ModelEntity>,
+    ) -> Result<PipelineResult, PiiError> {
+        let start = Instant::now();
+        let (entities, mut metrics) = self.detect_with_model_entities(text, model_entities).await?;
+        metrics.total_ms = start.elapsed().as_millis() as u64;
+
+        Ok(PipelineResult {
+            redacted_text: text.to_string(),
+            entities,
+            audit_log: Vec::new(),
+            metrics,
+        })
+    }
+
+    async fn detect_with_model_entities(
+        &self,
+        text: &str,
+        model_entities: Vec<ModelEntity>,
+    ) -> Result<(Vec<MergedEntity>, PipelineMetrics), PiiError> {
+        let mut metrics = PipelineMetrics::default();
+
+        let regex_start = Instant::now();
+        let regex_entities = self.regex_engine.find_all(text);
+        metrics.regex_ms = regex_start.elapsed().as_millis() as u64;
+
+        // Use pre-computed model entities instead of running the detector
+        metrics.model_ms = 0; // No model inference performed
+
+        let merge_start = Instant::now();
+        let entities = merge_entities(regex_entities, model_entities, &self.merge_config);
+        metrics.merge_ms = merge_start.elapsed().as_millis() as u64;
+        metrics.entities_detected = entities.len() as u32;
+
         Ok((entities, metrics))
     }
 }
@@ -725,3 +796,11 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
+
+

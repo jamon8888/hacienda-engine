@@ -90,6 +90,42 @@ export async function loadPiiNerModel(
   wasmModule!.loadNerModel(weights, tokenizer, encoderConfig);
 }
 
+/**
+ * Detect and redact using pre-computed model entities (bypasses NER inference).
+ * Model entities should be in the format: { category, text, start, end, confidence }
+ * where category is a PII category string (e.g., "Person", "Email", "PhoneNumber", etc.)
+ */
+export async function redactPiiWithModelEntities(
+  text: string,
+  modelEntities: Array<{
+    category: string;
+    text: string;
+    start: number;
+    end: number;
+    confidence: number;
+  }>,
+): Promise<PiiPipelineResult> {
+  await initPiiEngine();
+  return (await wasmModule!.process_with_model_entities(text, modelEntities)) as PiiPipelineResult;
+}
+
+/**
+ * Detect without rewriting text, using pre-computed model entities (bypasses NER inference).
+ */
+export async function scanForPiiWithModelEntities(
+  text: string,
+  modelEntities: Array<{
+    category: string;
+    text: string;
+    start: number;
+    end: number;
+    confidence: number;
+  }>,
+): Promise<PiiPipelineResult> {
+  await initPiiEngine();
+  return (await wasmModule!.scan_with_model_entities(text, modelEntities)) as PiiPipelineResult;
+}
+
 // One IndexedDB database per browser profile — Studio has no concept of multiple
 // concurrent writers (one worker, processed sequentially) or of a varying redaction
 // config, so `AUDIT_NODE_ID`/`AUDIT_CONFIG_HASH` are stable literals rather than
