@@ -111,7 +111,7 @@ export class WorkerPool {
         // binary that each worker fetches internally during its own `init()` handshake
         // (see `lib/pii-engine.ts`'s `initPiiEngine`), not to this `worker/pipeline.ts`
         // module script — a Worker must always be constructed from its real module URL.
-        const worker = new Worker(new URL("./worker/pipeline.ts", import.meta.url), {
+        const worker = new Worker(new URL("../worker/pipeline.ts", import.meta.url), {
           type: "module",
           name: `hacienda-worker-${i}`
         });

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Download } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { CodeLines } from "@/components/CodeLines";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { PiiPanel } from "@/components/PiiPanel";
@@ -38,8 +38,8 @@ export function DocumentDetail({
   /** The in-memory `File` this result was produced from, when this session's the one
    * that processed it — undefined for a document hydrated from a prior session's
    * persisted library (see `lib/persistence.ts`), where only the processed output
-   * survives, never the original bytes. Drives both the native-viewer split view and
-   * the free-text redacted-draft autosave below, since both need real file bytes. */
+   * survives, never the original bytes. Drives both the Source tab's native viewer and
+   * the Redacted tab's free-text draft autosave, since both need real file bytes. */
   originalFile: File | undefined;
   onBack: () => void;
   onAddFinding: (start: number, end: number, category: string) => void;
@@ -54,7 +54,6 @@ export function DocumentDetail({
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
   const [contentHash, setContentHash] = useState<string | undefined>(undefined);
   const [draft, setDraft] = useState<string | undefined>(undefined);
-  const [saveStatus, setSaveStatus] = useState<"saving" | "saved" | null>(null);
 
   const modeResult = useMemo(() => applyRedactionMode(findings, mode), [findings, mode]);
   const docPath = `documents/${result.name}`;
@@ -64,9 +63,10 @@ export function DocumentDetail({
       : null;
 
   const viewerKind = getViewerKind(result.frontmatter.source);
+  const hasViewer = !!(viewerKind && previewUrl);
 
-  // Object URL for the native viewer, built from this-session bytes only — revoked on
-  // cleanup/file change like `App.tsx`'s previous `previewUrls` map did per-entry.
+  // Object URL for the Source tab's native viewer, built from this-session bytes only —
+  // revoked on cleanup/file change like `App.tsx`'s previous `previewUrls` map did per-entry.
   useEffect(() => {
     if (!originalFile) {
       setPreviewUrl(undefined);
@@ -95,27 +95,34 @@ export function DocumentDetail({
   }, [originalFile]);
 
   // Restore-on-open: adopts a saved draft only if nothing has been typed yet (`draft` is
-  // still unset) by the time the lookup resolves, same as the prior split-view screen.
+  // still unset) by the time the lookup resolves.
   useEffect(() => {
     if (!contentHash) return;
     let cancelled = false;
     loadDraft(contentHash).then((saved) => {
-      if (!cancelled && saved !== undefined) setDraft((prev) => prev ?? saved);
+      if (!cancelled && saved !== undefined) {
+        setDraft((prev) => prev ?? saved);
+        if (saved !== undefined) toast("Restored your last redacted draft for this file");
+      }
     });
     return () => {
       cancelled = true;
     };
   }, [contentHash]);
 
-  // Debounced (~1s) autosave, mirroring the prior split-view screen's timing.
+  // Debounced (~1s) autosave — a toast on each successful save is the visible proof this
+  // edit actually persisted (IndexedDB, keyed by content hash) rather than just living in
+  // component state, since a reload/navigation away is exactly when a user wants to know
+  // whether their edit survived.
   const pendingSaveRef = useRef<{ hash: string; draft: string } | null>(null);
   useEffect(() => {
     if (!contentHash || draft === undefined) return;
     pendingSaveRef.current = { hash: contentHash, draft };
-    setSaveStatus("saving");
     const timer = setTimeout(() => {
       pendingSaveRef.current = null;
-      saveDraft(contentHash, draft).then(() => setSaveStatus("saved"));
+      saveDraft(contentHash, draft)
+        .then(() => toast.success("Redacted draft saved"))
+        .catch(() => toast.error("Couldn't save the redacted draft"));
     }, 1000);
     return () => clearTimeout(timer);
   }, [contentHash, draft]);
@@ -128,9 +135,7 @@ export function DocumentDetail({
   );
 
   // A redaction-mode button is a deliberate reset, not a merge: it replaces whatever the
-  // user was editing with a fresh computation for the newly-chosen mode. Simpler than the
-  // prior split-view's "the draft always wins once it exists" rule, since that rule
-  // predates per-mode switching — there was only ever one way to compute the seed then.
+  // user was editing with a fresh computation for the newly-chosen mode.
   function selectMode(next: RedactionMode) {
     setMode(next);
     const nextResult = applyRedactionMode(findings, next);
@@ -140,34 +145,6 @@ export function DocumentDetail({
   }
 
   const redactedBody = draft ?? computedMarkdown ?? undefined;
-  const hasViewer = !!(viewerKind && previewUrl);
-
-  const findingsPane = (
-    <div className="flex flex-col gap-2">
-      <MarkdownEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
-      <PiiPanel findings={findings} onRemove={onRemoveFinding} />
-    </div>
-  );
-
-  const redactedPane =
-    redactedBody === undefined ? (
-      <p className="p-4 text-sm text-muted-foreground">
-        {"reason" in modeResult ? modeResult.reason : ""}
-      </p>
-    ) : originalFile ? (
-      <div className="flex flex-col gap-1 px-4 pb-4">
-        <RedactedEditor value={redactedBody} onChange={setDraft} />
-        {saveStatus && (
-          <span className="self-end text-xs text-muted-foreground">
-            {saveStatus === "saving" ? "Saving…" : "Saved"}
-          </span>
-        )}
-      </div>
-    ) : (
-      <div className="px-4 pb-4">
-        <CodeLines text={redactedBody} />
-      </div>
-    );
 
   return (
     <div className="flex flex-1 flex-col">
@@ -211,68 +188,75 @@ export function DocumentDetail({
         </div>
       )}
 
-      {hasViewer ? (
-        <ResizablePanelGroup orientation="horizontal" className="mx-4 mt-3 h-[70vh] rounded-lg border">
-          <ResizablePanel defaultSize="50" minSize="25" className="min-w-0 overflow-auto p-2">
-            {(viewerKind === "docx" || viewerKind === "doc") && (
-              <DocxViewerPreview src={previewUrl} fileName={result.name} isDark showUpload={false} onIsDarkChange={() => {}} />
-            )}
-            {(viewerKind === "xlsx" || viewerKind === "xls") && (
-              <XlsxViewerPreview src={previewUrl} fileName={result.name} isDark showUpload={false} onIsDarkChange={() => {}} />
-            )}
-            {(viewerKind === "pptx" || viewerKind === "ppt") && (
-              <PptxViewerPreview src={previewUrl} fileName={result.name} showUpload={false} />
-            )}
-            {viewerKind === "pdf" && <PDFViewer src={previewUrl} fileName={result.name} showUpload={false} />}
-          </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel defaultSize="50" minSize="25" className="min-w-0 overflow-auto">
-            <Tabs defaultValue="redacted" className="h-full">
-              <TabsList variant="line" className="mx-4 mt-2 w-fit">
-                <TabsTrigger value="redacted">Redacted</TabsTrigger>
-                <TabsTrigger value="findings">Findings</TabsTrigger>
-              </TabsList>
-              <TabsContent value="redacted">{redactedPane}</TabsContent>
-              <TabsContent value="findings" className="px-4 pb-4">
-                {findingsPane}
-              </TabsContent>
-            </Tabs>
-          </ResizablePanel>
-        </ResizablePanelGroup>
-      ) : (
-        <Tabs defaultValue="redacted" className="flex-1">
-          <TabsList className="mx-4 mt-3 w-fit">
-            <TabsTrigger value="redacted">Redacted</TabsTrigger>
-            <TabsTrigger value="source">Source</TabsTrigger>
-            <TabsTrigger value="findings">Findings</TabsTrigger>
-            <TabsTrigger value="layout">Layout</TabsTrigger>
-            <TabsTrigger value="audit">Audit</TabsTrigger>
-          </TabsList>
+      <Tabs defaultValue="redacted" className="flex-1">
+        <TabsList className="mx-4 mt-3 w-fit">
+          <TabsTrigger value="redacted">Redacted</TabsTrigger>
+          <TabsTrigger value="source">Source</TabsTrigger>
+          <TabsTrigger value="findings">Findings</TabsTrigger>
+          <TabsTrigger value="layout">Layout</TabsTrigger>
+          <TabsTrigger value="audit">Audit</TabsTrigger>
+        </TabsList>
 
-          <TabsContent value="redacted" className="flex-1">
-            {redactedPane}
-          </TabsContent>
+        {/* Redacted is the one editing surface in this view — marking new PII and
+            free-text redaction edits both live here, not in Source (which is a pure
+            viewer, native or read-only). */}
+        <TabsContent value="redacted" className="flex-1 px-4 pb-4">
+          <div className="flex flex-col gap-5">
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                Mark additional PII
+              </p>
+              <MarkdownEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">Redacted output</p>
+              {redactedBody === undefined ? (
+                <p className="text-sm text-muted-foreground">
+                  {"reason" in modeResult ? modeResult.reason : ""}
+                </p>
+              ) : originalFile ? (
+                <RedactedEditor value={redactedBody} onChange={setDraft} />
+              ) : (
+                <CodeLines text={redactedBody} />
+              )}
+            </div>
+          </div>
+        </TabsContent>
 
-          <TabsContent value="source" className="flex-1 px-4 pb-4">
-            <MarkdownEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
-          </TabsContent>
+        <TabsContent value="source" className="flex-1 px-4 pb-4">
+          {hasViewer ? (
+            <div className="h-[70vh] overflow-auto rounded-lg border border-border p-2">
+              {(viewerKind === "docx" || viewerKind === "doc") && (
+                <DocxViewerPreview src={previewUrl} fileName={result.name} isDark showUpload={false} onIsDarkChange={() => {}} />
+              )}
+              {(viewerKind === "xlsx" || viewerKind === "xls") && (
+                <XlsxViewerPreview src={previewUrl} fileName={result.name} isDark showUpload={false} onIsDarkChange={() => {}} />
+              )}
+              {(viewerKind === "pptx" || viewerKind === "ppt") && (
+                <PptxViewerPreview src={previewUrl} fileName={result.name} showUpload={false} />
+              )}
+              {viewerKind === "pdf" && <PDFViewer src={previewUrl} fileName={result.name} showUpload={false} />}
+            </div>
+          ) : (
+            <CodeLines text={result.rawMarkdown} />
+          )}
+        </TabsContent>
 
-          <TabsContent value="findings" className="flex-1 px-4 pb-4">
-            <PiiPanel findings={findings} onRemove={onRemoveFinding} />
-          </TabsContent>
+        <TabsContent value="findings" className="flex-1 px-4 pb-4">
+          <PiiPanel findings={findings} onRemove={onRemoveFinding} />
+        </TabsContent>
 
-          <TabsContent value="layout" className="flex-1 px-4 pb-4">
-            <p className="p-4 text-sm text-muted-foreground">
-              Layout data (block/bounding-box positions) isn't produced by this pipeline
-              output yet — nothing to show for this document.
-            </p>
-          </TabsContent>
+        <TabsContent value="layout" className="flex-1 px-4 pb-4">
+          <p className="p-4 text-sm text-muted-foreground">
+            Layout data (block/bounding-box positions) isn't produced by this pipeline
+            output yet — nothing to show for this document.
+          </p>
+        </TabsContent>
 
-          <TabsContent value="audit" className="flex-1 px-4 pb-4">
-            <AuditTab />
-          </TabsContent>
-        </Tabs>
-      )}
+        <TabsContent value="audit" className="flex-1 px-4 pb-4">
+          <AuditTab />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -296,9 +280,12 @@ function AuditTab() {
     try {
       await verifyAuditChain();
       setStatus("ok");
+      toast.success("Chain verified — no tampering detected");
     } catch (e) {
       setStatus("error");
-      setError(e instanceof Error ? e.message : "Chain verification failed");
+      const message = e instanceof Error ? e.message : "Chain verification failed";
+      setError(message);
+      toast.error(message);
     }
   }
 

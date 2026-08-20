@@ -1,5 +1,8 @@
+import { Archive, Trash2, Play } from "lucide-react";
 import { FileUpload } from "@/components/extend/file-upload";
+import { Button } from "@/components/ui/button";
 import { effectiveFileName } from "@/lib/file-filter";
+import { exportDocumentsZip } from "@/lib/export-zip";
 import type { ProcessedFile, ProgressUpdate } from "@/lib/types";
 
 const UPLOAD_ACCEPT =
@@ -14,6 +17,7 @@ const STAGE_ORDER: ProgressUpdate["stage"][] = [
 ];
 
 const STAGE_LABELS: Record<ProgressUpdate["stage"], string> = {
+  queued: "queued",
   extract: "extract",
   transcribe: "transcribe",
   ner: "ner",
@@ -50,11 +54,21 @@ function StagePills({ update }: { update: ProgressUpdate | undefined }) {
   );
 }
 
+function formatBytes(bytes: number): string {
+  return bytes < 1024 * 1024
+    ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+    : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function Studio({
   workerReady,
   folderMode,
   onToggleFolderMode,
   onFilesAccepted,
+  pendingFiles,
+  onRemovePending,
+  onClearPending,
+  onProcessQueue,
   files,
   progress,
   results,
@@ -65,6 +79,13 @@ export function Studio({
   folderMode: boolean;
   onToggleFolderMode: (e: React.MouseEvent) => void;
   onFilesAccepted: (files: File[]) => void;
+  /** Files dropped/picked but not yet sent to the worker — reviewable and removable
+   * before the user confirms with "Process N files", matching the mockup's two-step
+   * upload flow (queue, then process) instead of processing on drop. */
+  pendingFiles: File[];
+  onRemovePending: (index: number) => void;
+  onClearPending: () => void;
+  onProcessQueue: () => void;
   files: File[];
   progress: Map<string, ProgressUpdate>;
   results: ProcessedFile[];
@@ -75,6 +96,7 @@ export function Studio({
   const processedCount = files.filter(
     (f) => progress.get(effectiveFileName(f))?.stage === "complete",
   ).length;
+  const isProcessing = files.length > 0;
 
   return (
     <div className="mx-auto w-full max-w-3xl flex-1 px-6 py-10">
@@ -83,11 +105,20 @@ export function Studio({
           <h1 className="text-2xl font-semibold">Add documents</h1>
           <p className="text-sm text-muted-foreground">Files never leave this browser tab.</p>
         </div>
-        {files.length > 0 && (
-          <span className="text-sm text-muted-foreground">
-            {processedCount} processed
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {isProcessing && (
+            <span className="text-sm text-muted-foreground">{processedCount} processed</span>
+          )}
+          {results.length > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => exportDocumentsZip(results.map((result) => ({ result })))}
+            >
+              <Archive className="size-4" /> Download folder
+            </Button>
+          )}
+        </div>
       </div>
 
       <FileUpload
@@ -120,7 +151,46 @@ export function Studio({
         {folderMode ? "or choose individual files" : "or choose a folder"}
       </button>
 
-      {files.length > 0 && (
+      {pendingFiles.length > 0 && (
+        <section className="mt-8 rounded-lg border border-border">
+          <ul>
+            {pendingFiles.map((file, i) => (
+              <li
+                key={`${effectiveFileName(file)}-${i}`}
+                className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 last:border-b-0"
+              >
+                <span className="truncate text-sm">{effectiveFileName(file)}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground">{formatBytes(file.size)}</span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${effectiveFileName(file)}`}
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={() => onRemovePending(i)}
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <div className="flex items-center justify-between px-4 py-3">
+            <button
+              type="button"
+              className="text-sm text-muted-foreground hover:text-foreground"
+              onClick={onClearPending}
+            >
+              Clear all
+            </button>
+            <Button onClick={onProcessQueue}>
+              <Play className="size-4" /> Process {pendingFiles.length} file
+              {pendingFiles.length === 1 ? "" : "s"}
+            </Button>
+          </div>
+        </section>
+      )}
+
+      {isProcessing && (
         <section className="mt-8 flex flex-col gap-2" aria-live="polite">
           {files.map((file) => {
             const key = effectiveFileName(file);

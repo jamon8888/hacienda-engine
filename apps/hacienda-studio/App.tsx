@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Toaster } from "./components/ui/sonner";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Landing } from "./pages/Landing";
 import { Assets } from "./pages/Assets";
@@ -77,6 +78,9 @@ export function App() {
     tessdata: false,
   });
   const [files, setFiles] = useState<File[]>([]);
+  // Redesign: files land here first — reviewable, removable — and only move into `files`
+  // (which drives the worker pool) once the user confirms via `handleProcessQueue`.
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [progress, setProgress] = useState<Map<string, ProgressUpdate>>(new Map());
   const [results, setResults] = useState<ProcessedFile[]>([]);
   const [config, setConfig] = useState<AppConfig>({ ...DEFAULT_CONFIG });
@@ -196,7 +200,7 @@ export function App() {
       pool.setFileCompleteHandler((result) => {
         setResults((prev) => [...prev, result]);
         setProgress((prev) =>
-          new Map(prev).set(result.name, { ...result, stage: "complete", percent: 100 })
+          new Map(prev).set(result.name, { file: result.name, stage: "complete", percent: 100 })
         );
         void saveDocument(result);
       });
@@ -323,8 +327,13 @@ export function App() {
     void pruneDrafts(30 * 24 * 60 * 60 * 1000);
   }, []);
 
-  async function handleFiles(fileList: FileList | File[]): Promise<void> {
-    console.log("[App] handleFiles called with", fileList.length, "files");
+  // Redesign: matches the mockup's two-step flow — a dropped/picked batch lands in a
+  // review queue first (`pendingFiles`), with per-file removal and a "Clear all", and
+  // only actually starts processing once the user confirms via `handleProcessQueue`.
+  // Validation still happens here, at drop time, so a bad file is reported immediately
+  // rather than silently sitting in the queue until the user clicks process.
+  function handleFilesAccepted(fileList: FileList | File[]): void {
+    console.log("[App] handleFilesAccepted called with", fileList.length, "files");
     const fileArray = Array.from(fileList);
     const validFiles: File[] = [];
     let skippedJunk = 0;
@@ -364,16 +373,30 @@ export function App() {
     }
 
     if (validFiles.length === 0) return;
-
-    setFiles((prev) => [...prev, ...validFiles]);
+    setPendingFiles((prev) => [...prev, ...validFiles]);
     setError(null);
+  }
+
+  function handleRemovePending(index: number): void {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function handleClearPending(): void {
+    setPendingFiles([]);
+  }
+
+  async function handleProcessQueue(): Promise<void> {
+    const queued = pendingFiles;
+    if (queued.length === 0) return;
+    setPendingFiles([]);
+    setFiles((prev) => [...prev, ...queued]);
 
     // Send to worker — `name` carries the folder-relative path when the file came from a
     // directory picker, so it survives into the worker's output filename (and, via
     // JSZip's own path handling, the exported zip's folder structure) rather than being
     // flattened to a basename.
     const fileInputs = await Promise.all(
-      validFiles.map(async (f) => ({
+      queued.map(async (f) => ({
         name: effectiveFileName(f),
         bytes: await f.arrayBuffer(),
         type: f.type || "application/octet-stream",
@@ -386,7 +409,7 @@ export function App() {
       setError("Worker pool not initialized");
       return;
     }
-    
+
     try {
       const results = await pool.processFiles(fileInputs, JSON.parse(JSON.stringify(configRef.current)));
       // Results are handled via callbacks, but we can also use the returned array
@@ -519,7 +542,13 @@ export function App() {
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <header className="flex items-center justify-between border-b border-border bg-card px-6 py-3">
         <div className="flex items-center gap-4">
-          <h1 className="text-xl font-semibold">Hacienda Studio</h1>
+          <button
+            type="button"
+            className="text-xl font-semibold transition-opacity hover:opacity-80"
+            onClick={() => setRoute("landing")}
+          >
+            Hacienda Studio
+          </button>
           <nav aria-label="App sections" className="flex items-center gap-1">
             {navItem("Studio", route === "studio", goToStudio)}
             {navItem("Assets", route === "assets", () => setRoute("assets"))}
@@ -575,7 +604,11 @@ export function App() {
           workerReady={workerReady}
           folderMode={folderMode}
           onToggleFolderMode={toggleFolderMode}
-          onFilesAccepted={(accepted) => handleFiles(accepted)}
+          onFilesAccepted={handleFilesAccepted}
+          pendingFiles={pendingFiles}
+          onRemovePending={handleRemovePending}
+          onClearPending={handleClearPending}
+          onProcessQueue={handleProcessQueue}
           files={files}
           progress={progress}
           results={results}
@@ -612,6 +645,7 @@ export function App() {
       {showConfig && (
         <ConfigPanel config={config} onChange={setConfig} onDone={() => setShowConfig(false)} />
       )}
+      <Toaster />
     </div>
   );
 }

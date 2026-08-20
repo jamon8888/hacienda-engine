@@ -2,24 +2,10 @@ import { useMemo, useState } from "react";
 import { Folder, FileText, Search, Upload, Archive, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { groupByFolder, baseNameOf, ROOT_FOLDER, type LibraryDocument } from "@/lib/library";
+import { exportDocumentsZip } from "@/lib/export-zip";
 
 function formatKB(markdown: string): string {
   return `${Math.max(1, Math.round(new Blob([markdown]).size / 1024))} KB`;
-}
-
-async function exportZip(docs: LibraryDocument[]): Promise<void> {
-  const JSZip = (await import("jszip")).default;
-  const zip = new JSZip();
-  for (const doc of docs) {
-    zip.file(doc.result.name, doc.result.markdown);
-  }
-  const blob = await zip.generateAsync({ type: "blob" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `hacienda-studio-export-${docs.length}.zip`;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 export function Documents({
@@ -74,7 +60,7 @@ export function Documents({
             </Button>
             <Button
               disabled={documents.length === 0}
-              onClick={() => exportZip(selectedDocs.length > 0 ? selectedDocs : visible)}
+              onClick={() => exportDocumentsZip(selectedDocs.length > 0 ? selectedDocs : visible)}
             >
               <Archive className="size-4" /> Export
             </Button>

@@ -97,6 +97,13 @@ export async function loadPiiNerModel(
  * Detect and redact using pre-computed model entities (bypasses NER inference).
  * Model entities should be in the format: { category, text, start, end, confidence }
  * where category is a PII category string (e.g., "Person", "Email", "PhoneNumber", etc.)
+ *
+ * `process_with_model_entities` only exists on a `hacienda-wasm` build compiled after
+ * this function was added on the Rust side — the `pkg/` output actually committed to
+ * this repo predates it. Rather than throw for every document until someone runs
+ * `npm run build:wasm` against current `crates/hacienda-wasm/src`, fall back to plain
+ * `process` (model entities silently unused, same as before this function existed) so
+ * processing keeps working against today's committed wasm build.
  */
 export async function redactPiiWithModelEntities(
   text: string,
@@ -109,11 +116,19 @@ export async function redactPiiWithModelEntities(
   }>,
 ): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  return (await wasmModule!.process_with_model_entities(text, modelEntities)) as PiiPipelineResult;
+  const mod = wasmModule as unknown as Record<string, unknown>;
+  if (typeof mod.process_with_model_entities !== "function") {
+    return (await wasmModule!.process(text)) as PiiPipelineResult;
+  }
+  return (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+    text,
+    modelEntities,
+  )) as PiiPipelineResult;
 }
 
 /**
  * Detect without rewriting text, using pre-computed model entities (bypasses NER inference).
+ * Same committed-wasm-lags-source fallback as `redactPiiWithModelEntities` above.
  */
 export async function scanForPiiWithModelEntities(
   text: string,
@@ -126,7 +141,14 @@ export async function scanForPiiWithModelEntities(
   }>,
 ): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  return (await wasmModule!.scan_with_model_entities(text, modelEntities)) as PiiPipelineResult;
+  const mod = wasmModule as unknown as Record<string, unknown>;
+  if (typeof mod.scan_with_model_entities !== "function") {
+    return (await wasmModule!.scan(text)) as PiiPipelineResult;
+  }
+  return (await (mod.scan_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+    text,
+    modelEntities,
+  )) as PiiPipelineResult;
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple
