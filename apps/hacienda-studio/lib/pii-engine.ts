@@ -25,6 +25,7 @@
  * the build output is missing. See `initPiiEngine` below.
  */
 import type { AuditHandle } from "hacienda-wasm";
+import { z } from "zod";
 
 export interface PiiEntity {
   category: string;
@@ -42,11 +43,62 @@ export interface PiiPipelineResult {
   entities: PiiEntity[];
 }
 
+/**
+ * Input model entity for PII detection with pre-computed entities.
+ * Mirrors `hacienda_core::pii::ModelEntity` on the Rust side.
+ */
+export interface ModelEntityInput {
+  category: string;
+  text: string;
+  start: number;
+  end: number;
+  confidence: number;
+}
+
+/** Zod schema for validating model entities from the worker. */
+const ModelEntityInputSchema = z.object({
+  category: z.string().min(1),
+  text: z.string(),
+  start: z.number().int().nonnegative(),
+  end: z.number().int().nonnegative(),
+  confidence: z.number().min(0).max(1),
+}).strict();
+
+/** Zod schema for validating an array of model entities. */
+const ModelEntityArraySchema = z.array(ModelEntityInputSchema);
+
+/** Zod schema for validating PiiPipelineResult from WASM. */
+const PiiPipelineResultSchema = z.object({
+  redacted_text: z.string(),
+  entities: z.array(z.object({
+    category: z.string(),
+    text: z.string(),
+    start: z.number().int().nonnegative(),
+    end: z.number().int().nonnegative(),
+    confidence: z.number(),
+    source: z.string(),
+    format_preserving: z.boolean(),
+    redact_template: z.string(),
+  })),
+}).strict();
+
 type WasmModule = typeof import("hacienda-wasm");
 
 let wasmModule: WasmModule | null = null;
 let wasmUrl: string | null = null;
 let ready: Promise<void> | null = null;
+
+/**
+ * Initialize the PII engine and return the WASM module.
+ * Throws if the module cannot be loaded.
+ */
+async function getWasmModule(): Promise<WasmModule> {
+  await initPiiEngine();
+  if (!wasmModule) {
+    throw new Error("WASM module not initialized");
+  }
+  return wasmModule;
+}
 
 /** Idempotent; safe to call from every worker that needs the engine. */
 export function initPiiEngine(): Promise<void> {
@@ -64,8 +116,9 @@ export function initPiiEngine(): Promise<void> {
 
 /** Detect only — `redacted_text` on the result equals `text`. */
 export async function scanForPii(text: string): Promise<PiiPipelineResult> {
-  await initPiiEngine();
-  return (await wasmModule!.scan(text)) as PiiPipelineResult;
+  const mod = await getWasmModule();
+  const result = await mod.scan(text);
+  return PiiPipelineResultSchema.parse(result);
 }
 
 /**
@@ -86,8 +139,34 @@ export async function loadPiiNerModel(
   tokenizer: Uint8Array,
   encoderConfig: Uint8Array,
 ): Promise<void> {
-  await initPiiEngine();
-  wasmModule!.loadNerModel(weights, tokenizer, encoderConfig);
+  const mod = await getWasmModule();
+  await mod.loadNerModel(weights, tokenizer, encoderConfig);
+}
+
+/**
+ * Validate and parse model entities from the worker.
+ * Ensures all spans are finite integers and confidence is in [0, 1].
+ */
+function validateModelEntities(
+  modelEntities: unknown
+): ModelEntityInput[] {
+  const parsed = ModelEntityArraySchema.parse(modelEntities);
+  
+  // Additional validation: start <= end
+  for (const entity of parsed) {
+    if (entity.start > entity.end) {
+      throw new Error(
+        `Invalid model entity: start (${entity.start}) > end (${entity.end}) for category ${entity.category}`
+      );
+    }
+    if (!Number.isFinite(entity.start) || !Number.isFinite(entity.end)) {
+      throw new Error(
+        `Invalid model entity: non-finite offsets for category ${entity.category}`
+      );
+    }
+  }
+  
+  return parsed;
 }
 
 /**
@@ -97,16 +176,12 @@ export async function loadPiiNerModel(
  */
 export async function redactPiiWithModelEntities(
   text: string,
-  modelEntities: Array<{
-    category: string;
-    text: string;
-    start: number;
-    end: number;
-    confidence: number;
-  }>,
+  modelEntities: unknown,
 ): Promise<PiiPipelineResult> {
-  await initPiiEngine();
-  return (await wasmModule!.process_with_model_entities(text, modelEntities)) as PiiPipelineResult;
+  const mod = await getWasmModule();
+  const validatedEntities = validateModelEntities(modelEntities);
+  const result = await mod.process_with_model_entities(text, validatedEntities);
+  return PiiPipelineResultSchema.parse(result);
 }
 
 /**
@@ -114,16 +189,12 @@ export async function redactPiiWithModelEntities(
  */
 export async function scanForPiiWithModelEntities(
   text: string,
-  modelEntities: Array<{
-    category: string;
-    text: string;
-    start: number;
-    end: number;
-    confidence: number;
-  }>,
+  modelEntities: unknown,
 ): Promise<PiiPipelineResult> {
-  await initPiiEngine();
-  return (await wasmModule!.scan_with_model_entities(text, modelEntities)) as PiiPipelineResult;
+  const mod = await getWasmModule();
+  const validatedEntities = validateModelEntities(modelEntities);
+  const result = await mod.scan_with_model_entities(text, validatedEntities);
+  return PiiPipelineResultSchema.parse(result);
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple
@@ -140,11 +211,14 @@ let auditHandle: Promise<AuditHandle> | null = null;
 /** Opens (or resumes, across a reload) the audit chain. Idempotent, like `initPiiEngine`. */
 function getAuditHandle(): Promise<AuditHandle> {
   if (!auditHandle) {
-    auditHandle = wasmModule!.AuditHandle.open(
-      AUDIT_DB_NAME,
-      AUDIT_NODE_ID,
-      AUDIT_CONFIG_HASH,
-    );
+    auditHandle = (async () => {
+      const mod = await getWasmModule();
+      return mod.AuditHandle.open(
+        AUDIT_DB_NAME,
+        AUDIT_NODE_ID,
+        AUDIT_CONFIG_HASH,
+      );
+    })();
   }
   return auditHandle;
 }
@@ -162,11 +236,12 @@ function getAuditHandle(): Promise<AuditHandle> {
  * whose entire purpose is being trustworthy.
  */
 export async function redactPii(text: string): Promise<PiiPipelineResult> {
-  await initPiiEngine();
-  const result = (await wasmModule!.process(text)) as PiiPipelineResult;
+  const mod = await getWasmModule();
+  const result = await mod.process(text);
+  const parsedResult = PiiPipelineResultSchema.parse(result);
   const handle = await getAuditHandle();
   await handle.recordResult(result);
-  return result;
+  return parsedResult;
 }
 
 /**
@@ -179,7 +254,7 @@ export async function redactPii(text: string): Promise<PiiPipelineResult> {
  * Audit tab note).
  */
 export async function getAuditChainTip(): Promise<string> {
-  await initPiiEngine();
+  const mod = await getWasmModule();
   const handle = await getAuditHandle();
   return handle.tip();
 }
@@ -187,7 +262,7 @@ export async function getAuditChainTip(): Promise<string> {
 /** Recomputes every chain hash from genesis; resolves on success, throws on the first
  * mismatch (never returns a boolean a caller could accidentally ignore). */
 export async function verifyAuditChain(): Promise<void> {
-  await initPiiEngine();
+  const mod = await getWasmModule();
   const handle = await getAuditHandle();
   await handle.verify();
 }

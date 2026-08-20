@@ -203,6 +203,11 @@ function isRawNerEntity(value: unknown): value is RawNerEntity {
  * Map NER category (from xberg/entity glossary) to PII category (for hacienda-wasm).
  * Mirrors hacienda-core/src/pii/ner.rs to_pii_category function.
  */
+/**
+ * Map NER category (from xberg/entity glossary) to PII category (for hacienda-wasm).
+ * Mirrors hacienda-core/src/pii/ner.rs to_pii_category function.
+ * For custom categories, returns a Serde variant object with the label.
+ */
 function nerCategoryToPiiCategory(nerCategory: string): string {
   const lower = nerCategory.toLowerCase();
   switch (lower) {
@@ -244,9 +249,41 @@ function nerCategoryToPiiCategory(nerCategory: string): string {
     case "name":
       return "FullName";
     default:
-      // Unknown categories pass through as custom
-      return nerCategory;
+      // Unknown categories pass through as custom — encode as Serde variant object
+      return JSON.stringify({ Custom: nerCategory });
   }
+}
+
+/**
+ * Convert UTF-8 byte offsets to UTF-16 code unit offsets for JavaScript string indexing.
+ * JavaScript strings use UTF-16 code units, while WASM/xberg uses UTF-8 byte offsets.
+ * This is critical for correct entity positioning with non-ASCII text.
+ */
+function utf8ToUtf16Offsets(text: string, start: number, end: number): { start: number; end: number } {
+  // Fast path: pure ASCII
+  if (!/[^\x00-\x7F]/.test(text.slice(start, end))) {
+    return { start, end };
+  }
+  
+  // Convert by counting UTF-16 code units up to the UTF-8 byte offsets
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(text);
+  
+  // Find the character positions by decoding progressively
+  let utf16Start = 0;
+  let utf16End = 0;
+  let bytePos = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  
+  // We need to find the character at the given byte offsets
+  // This is a simplified approach: decode the prefix and count code units
+  const prefixStart = decoder.decode(bytes.slice(0, start));
+  const prefixEnd = decoder.decode(bytes.slice(0, end));
+  
+  utf16Start = prefixStart.length;
+  utf16End = prefixEnd.length;
+  
+  return { start: utf16Start, end: utf16End };
 }
 
 const MA_TERMS =
@@ -551,16 +588,20 @@ async function processFile(
 
       // Convert entity glossary NER results (xbergEntities) to PII model entity format
       // This eliminates the duplicate GLiNER2 inference pass (Tier 1.1)
+      // xberg uses UTF-8 byte offsets; convert to UTF-16 for JavaScript string indexing
       const modelEntities = xbergEntities
         .filter((e): e is RawNerEntity => isRawNerEntity(e))
         .filter((e) => (config.nerCategories as string[]).includes(e.category.toLowerCase()))
-        .map((e) => ({
-          category: nerCategoryToPiiCategory(e.category),
-          text: e.text,
-          start: e.start,
-          end: e.end,
-          confidence: 1.0, // xberg entities don't always have confidence, default to 1.0
-        }));
+        .map((e) => {
+          const { start, end } = utf8ToUtf16Offsets(markdown, e.start, e.end);
+          return {
+            category: nerCategoryToPiiCategory(e.category),
+            text: e.text,
+            start,
+            end,
+            confidence: 1.0, // xberg entities don't always have confidence, default to 1.0
+          };
+        });
 
       const piiResult = config.redactPiiInOutput
         ? await redactPiiWithModelEntities(markdown, modelEntities)

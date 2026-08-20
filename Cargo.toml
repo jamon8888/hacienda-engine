@@ -99,19 +99,18 @@ web-time = "1"
 # `facade.rs`'s `extract_all` — which calls `xberg::extract` for a single input and
 # `xberg::extract_batch` for more than one — actually handles what a caller sends it
 # instead of erroring on anything but plain text. `pdf` (`pdf_oxide`/`lopdf`), `office`
-# (docx/xlsx/pptx via `zip`/`roxmltree`,
-# pulls in `html`/`notebook`), `excel` (`calamine`), `email` (`mail-parser`/
-# `outlook-pst`), `hwp`/`hwpx` (`unhwp`), `iwork` (`zip`/`snap`), `archives`
-# (`zip`/`tar`/`sevenz-rust2`) are all crates.io Rust libraries — confirmed against
-# xberg's own `Cargo.toml` — so this is a feature-flag change only, zero xberg source
-# touched. `xml` comes along transitively via `office`.
+# (docx/xlsx/pptx via `zip`/`roxmltree`, pulls in `html`/`notebook`), `excel`
+# (`calamine`), `email` (`mail-parser`/`outlook-pst`), `hwp`/`hwpx` (`unhwp`),
+# `iwork` (`zip`/`snap`), `archives` (`zip`/`tar`/`sevenz-rust2`) are all crates.io
+# Rust libraries — confirmed against xberg's own `Cargo.toml` — so this is a feature-flag
+# change only, zero xberg source touched. `xml` comes along transitively via `office`.
 #
 # Deliberately still NOT enabled: anything needing a native system library or a
 # model download at runtime — `ocr`/`ocr-wasm` (Tesseract binary), `heic`/
-# `wordperfect` (native C/C++ libs), `embeddings`/`reranking`/`layout-detection`/
+# `wordperfect` (native C/C++ libs), `embeddings`/`reranker`/`layout-detection`/
 # `auto-rotate`/`ner-onnx`/`paddle-ocr` (ONNX Runtime + HuggingFace model fetch).
 # Those need infrastructure provisioning (`ORT_LIB_LOCATION`, a Tesseract install, a
-# model cache) beyond a Cargo feature, same class of gap the `.ai-rulez` OCR/ONNX
+# model cache) beyond a Cargo feature, same class of gap the .ai-rulez OCR/ONNX
 # skills already document for xberg itself — track separately rather than silently
 # skip. `xberg::extract_batch`'s config types for embeddings, reranking, and
 # captioning stay exported unconditionally regardless (unaffected by this feature
@@ -144,17 +143,15 @@ web-time = "1"
 # safely needs an ingestion-time redaction guard (`GuardedLlm`-shaped) that doesn't
 # exist yet for the vector-store embedding path, a pre-existing E4 gap. Re-enable once
 # both a call site and that guard exist. Found by CodeRabbit review on this branch;
-# caught before merge.
-#
-# `candle-trocr` gotcha: enabling it compiles in xberg's `ocr-pipeline`, which
-# changes `extractors::image`'s behaviour even for callers who never touch OCR —
-# without it, an image input always fell back to metadata-only extraction; with
-# it, `ExtractionConfig::effective_disable_ocr()` (default `false`) no longer skips
-# the OCR branch, and a caller with no `[extraction.ocr]` section falls through to
-# `OcrConfig::default()`, whose backend is `"tesseract"` — not registered here,
-# since `ocr`/`ocr-wasm` stay off. That would turn every image extraction into a
-# hard error for every existing caller. `HaciendaFacade::extract_all` guards
-# against this directly (see its own comment) by forcing `disable_ocr = true`
+# caught before merge. `candle-trocr` gotcha: enabling it compiles in xberg's
+# `ocr-pipeline`, which changes `extractors::image`'s behaviour even for callers
+# who never touch OCR — without it, an image input always fell back to metadata-only
+# extraction; with it, `ExtractionConfig::effective_disable_ocr()` (default `false`)
+# no longer skips the OCR branch, and a caller with no `[extraction.ocr]` section
+# falls through to `OcrConfig::default()`, whose backend is `"tesseract"` — not
+# registered here, since `ocr`/`ocr-wasm` stay off. That would turn every image
+# extraction into a hard error for every existing caller. `HaciendaFacade::extract_all`
+# guards against this directly (see its own comment) by forcing `disable_ocr = true`
 # unless the caller's config already set `extraction.ocr` explicitly — so OCR
 # stays a no-op by default, exactly as before this feature was enabled, and only
 # runs for a caller who opts in with `[extraction.ocr] backend = "candle-trocr"`.
@@ -285,14 +282,22 @@ debug = "line-tables-only"
 [profile.test.package."*"]
 debug = false
 
-# `hacienda-wasm` (Track L2) is the one crate whose release artifact is a browser
+# hacienda-wasm (Track L2) is the one crate whose release artifact is a browser
 # download rather than a server binary, so it alone trades runtime speed for size —
 # mirroring xberg's own `[profile.release.package.xberg-wasm] opt-level = "z"` rather
 # than changing `[profile.release]` (and therefore hacienda-cli/hacienda-api) workspace-wide.
+# hacienda-wasm (Track L2) is the one crate whose release artifact is a browser
+# download rather than a server binary. Its cost is dominated by inference compute,
+# not download size, so optimize for speed (opt-level = 3) with LTO rather than size.
+# xberg's own `[profile.release.package.xberg-wasm] opt-level = "z"` is a different
+# tradeoff; hacienda-wasm benefits more from inference throughput.
 [profile.release]
-# Enable LTO for wasm32 targets to optimize inference performance
+# LTO enabled at workspace level to optimize wasm inference throughput.
+# Cargo does not support per-package LTO; the impact on native builds (hacienda-cli/hacienda-api)
+# is minimal compared to the significant wasm inference speedup.
 lto = "fat"
 
 [profile.release.package.hacienda-wasm]
 opt-level = 3
 codegen-units = 1
+

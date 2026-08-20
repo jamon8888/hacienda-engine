@@ -27,11 +27,11 @@ current baseline:
   duplication at `apps/hacienda-studio/worker/pipeline.ts:93-100`).
 - **Build profile**: `crates/hacienda-wasm` release profile uses
   `opt-level = "z"` (size-optimized) with `codegen-units = 1` and no `lto`
-  setting (`Cargo.toml:190-192`) — optimized for binary size, not inference
+  setting (`Cargo.toml` `[profile.release.package.hacienda-wasm]`) — optimized for binary size, not inference
   speed.
 - **SIMD**: not enabled. No `.cargo/config.toml` exists; no
   `target-feature=+simd128` anywhere in the build.
-- **Threading**: deliberately disabled. `hacienda-core/Cargo.toml:108-113`
+- **Threading**: deliberately disabled. `hacienda-core/Cargo.toml` (atomics feature and SendWrapper usage)
   documents that the wasm32 target is built **without** the `atomics`
   feature, using `SendWrapper` on the assumption of single-threaded
   execution.
@@ -78,7 +78,7 @@ merge them safely; no new dependencies.
 ### 1.2 Fix the release build profile
 
 `crates/hacienda-wasm`'s release profile
-(root `Cargo.toml:190-192`) is tuned for binary size
+(root `Cargo.toml` `[profile.release.package.hacienda-wasm]`) is tuned for binary size
 (`opt-level = "z"`), which is the wrong tradeoff for a wasm module whose cost
 is dominated by inference compute, not download size.
 
@@ -148,7 +148,7 @@ repeat visits, reinforcing the browser's own compile cache.
 ### 3.1 In-document threading via wasm-bindgen-rayon
 
 `hacienda-core` currently opts **out** of threading by design
-(`hacienda-core/Cargo.toml:108-113`, `SendWrapper` usage assumes
+(`hacienda-core/Cargo.toml` (atomics feature and SendWrapper usage), `SendWrapper` usage assumes
 single-threaded execution). Enabling `wasm-bindgen-rayon` would parallelize
 within a single large document (as opposed to Tier 2's across-document
 parallelism), which matters most for very large files.
@@ -188,4 +188,3 @@ fuel-limited execution is a specific requirement.
 4. Tier 2.1 (worker pool) if batch throughput is still the bottleneck.
 5. Tier 3.1 (threading) only if large single documents remain slow after
    Tier 1/2, given its cost and the design change it requires.
-

@@ -46,6 +46,10 @@ pub async fn scan(text: String) -> Result<JsValue, JsValue> {
 /// Detect and redact using pre-computed model entities (bypasses NER inference).
 /// Takes pre-computed model entities as a JS array of objects with fields:
 /// category, text, start, end, confidence.
+///
+/// # Errors
+/// Returns a JS error if the model_entities cannot be deserialized, or if the pipeline fails.
+/// The error message includes the operation name and the original Serde error for debugging.
 #[wasm_bindgen]
 pub async fn process_with_model_entities(
     text: String,
@@ -54,7 +58,7 @@ pub async fn process_with_model_entities(
     let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
         .map_err(to_js_err)?;
     let model_entities: Vec<ModelEntity> = serde_wasm_bindgen::from_value(model_entities)
-        .map_err(to_js_err)?;
+        .map_err(|e| to_js_err(format!("process_with_model_entities: failed to deserialize model_entities: {}", e)))?;
     let result = pipeline
         .process_with_model_entities(&text, model_entities)
         .await
@@ -63,6 +67,10 @@ pub async fn process_with_model_entities(
 }
 
 /// Detect without rewriting `text`, using pre-computed model entities (bypasses NER inference).
+///
+/// # Errors
+/// Returns a JS error if the model_entities cannot be deserialized, or if the pipeline fails.
+/// The error message includes the operation name and the original Serde error for debugging.
 #[wasm_bindgen]
 pub async fn scan_with_model_entities(
     text: String,
@@ -71,7 +79,7 @@ pub async fn scan_with_model_entities(
     let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
         .map_err(to_js_err)?;
     let model_entities: Vec<ModelEntity> = serde_wasm_bindgen::from_value(model_entities)
-        .map_err(to_js_err)?;
+        .map_err(|e| to_js_err(format!("scan_with_model_entities: failed to deserialize model_entities: {}", e)))?;
     let result = pipeline
         .scan_with_model_entities(&text, model_entities)
         .await
