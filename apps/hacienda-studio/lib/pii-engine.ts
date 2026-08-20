@@ -25,6 +25,7 @@
  * the build output is missing. See `initPiiEngine` below.
  */
 import type { AuditHandle } from "hacienda-wasm";
+import { initializeWasmWithCache } from "./wasm-cache";
 
 export interface PiiEntity {
   category: string;
@@ -56,7 +57,9 @@ export function initPiiEngine(): Promise<void> {
       const { default: url } = await import("hacienda-wasm/hacienda_wasm_bg.wasm?url");
       wasmModule = mod;
       wasmUrl = url;
-      await mod.default({ module_or_path: fetch(url) });
+      // Tier 2.2: served from Cache API/IndexedDB on repeat visits instead of a fresh
+      // network fetch — falls back to a plain `fetch(url)` internally on any cache miss.
+      await mod.default({ module_or_path: initializeWasmWithCache(url) });
     })();
   }
   return ready;

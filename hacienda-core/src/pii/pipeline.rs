@@ -8,7 +8,7 @@ use crate::pii::config::PipelineConfig;
 use crate::pii::engine::RegexEngine;
 use crate::pii::merge::{merge_entities, MergedEntity};
 use crate::pii::ner::{to_pii_category, NerDetector};
-use crate::pii::types::{MergeConfig, MergePriority};
+use crate::pii::types::{MergeConfig, MergePriority, ModelEntity};
 use crate::pii::PiiError;
 use crate::redaction::pseudonym::category_label;
 use crate::redaction::{Pseudonymiser, RedactionAuditEntry, RedactionEngine, RedactionMode};
@@ -234,6 +234,8 @@ impl PiiPipeline {
         metrics.merge_ms = merge_start.elapsed().as_millis() as u64;
         metrics.entities_detected = entities.len() as u32;
 
+        Ok((entities, metrics))
+    }
 
     /// Detect and redact using pre-computed model entities, bypassing the NER detector.
     ///

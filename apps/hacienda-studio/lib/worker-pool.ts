@@ -1,9 +1,9 @@
 // Worker pool manager for cross-document parallelism (Tier 2.1)
 // Distributes files across multiple workers to maximize CPU utilization
-// Includes Tier 2.2: Cold-start caching for Wasm modules
+// Tier 2.2 (cold-start Wasm caching) is wired into `lib/pii-engine.ts`'s
+// `initPiiEngine`, where the actual hacienda_wasm_bg.wasm fetch happens.
 
 import type { FileInput, ProcessedFile, ProgressUpdate, AppConfig } from "./types";
-import { initializeWasmWithCache } from "./wasm-cache";
 
 export interface WorkerPoolConfig {
   /** Number of workers in the pool (default: conservative 3) */
@@ -56,14 +56,19 @@ export class WorkerPool {
   private taskQueue: WorkerTask[] = [];
   private initializing: Promise<void> | null = null;
   
-  // Transcription handler (main thread only - for whisper)
-  private transcribeHandler?: (data: {
-    requestId: string;
-    file: string;
-    audioBytes: Uint8Array<ArrayBuffer>;
-    mimeType: string;
-    config: any;
-  }) => Promise<void>;
+  // Transcription handler (main thread only - for whisper). `respond` must be called
+  // exactly once with the result so the reply reaches the *originating* pool worker —
+  // there is no single "the worker" anymore now that there are `poolSize` of them.
+  private transcribeHandler?: (
+    data: {
+      requestId: string;
+      file: string;
+      audioBytes: Uint8Array<ArrayBuffer>;
+      mimeType: string;
+      config: any;
+    },
+    respond: (response: { result?: unknown; error?: string }) => void,
+  ) => Promise<void>;
 
   // Progress tracking
   private onProgress?: (update: ProgressUpdate) => void;
@@ -82,13 +87,18 @@ export class WorkerPool {
    * 
    * Includes Tier 2.2: Wasm module cold-start caching via Cache API / IndexedDB
    */
-  async initialize(transcribeHandler?: (data: {
-    requestId: string;
-    file: string;
-    audioBytes: Uint8Array<ArrayBuffer>;
-    mimeType: string;
-    config: any;
-  }) => Promise<void>): Promise<void> {
+  async initialize(
+    transcribeHandler?: (
+      data: {
+        requestId: string;
+        file: string;
+        audioBytes: Uint8Array<ArrayBuffer>;
+        mimeType: string;
+        config: any;
+      },
+      respond: (response: { result?: unknown; error?: string }) => void,
+    ) => Promise<void>,
+  ): Promise<void> {
     if (this.initializing) return this.initializing;
 
     this.transcribeHandler = transcribeHandler;
@@ -97,16 +107,11 @@ export class WorkerPool {
       console.log(`[WorkerPool] Initializing ${this.config.poolSize} workers...`);
       
       const initPromises = Array.from({ length: this.config.poolSize }, async (_, i) => {
-        // Tier 2.2: Fetch Wasm module with caching
-        const wasmUrl = new URL("./pipeline.ts", import.meta.url).href;
-        const cachedResponse = await initializeWasmWithCache(wasmUrl, (update) => {
-          this.onProgress?.({ file: `worker-${i}`, stage: update.stage, percent: update.percent });
-        });
-        
-        // Create worker from cached response if available, otherwise use standard URL
-        const workerUrl = cachedResponse.url === wasmUrl ? cachedResponse : new URL("./worker/pipeline.ts", import.meta.url);
-        
-        const worker = new Worker(workerUrl, {
+        // Tier 2.2's cold-start caching applies to the compiled hacienda_wasm_bg.wasm
+        // binary that each worker fetches internally during its own `init()` handshake
+        // (see `lib/pii-engine.ts`'s `initPiiEngine`), not to this `worker/pipeline.ts`
+        // module script — a Worker must always be constructed from its real module URL.
+        const worker = new Worker(new URL("./worker/pipeline.ts", import.meta.url), {
           type: "module",
           name: `hacienda-worker-${i}`
         });
@@ -299,16 +304,18 @@ export class WorkerPool {
    * Handle transcription request from worker
    */
   private async transcribeRequest(instance: WorkerInstance, data: any): Promise<void> {
-    try {
-      await this.transcribeHandler?.(data);
-    } catch (error) {
-      console.error("[WorkerPool] Transcription handler error:", error);
-      // Send error response back to worker
+    const respond = (response: { result?: unknown; error?: string }) => {
       instance.worker.postMessage({
         type: "transcribe-response",
         requestId: data.requestId,
-        error: error instanceof Error ? error.message : String(error),
+        ...response,
       });
+    };
+    try {
+      await this.transcribeHandler?.(data, respond);
+    } catch (error) {
+      console.error("[WorkerPool] Transcription handler error:", error);
+      respond({ error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -389,13 +396,16 @@ export class WorkerPool {
  */
 export async function createWorkerPool(
   config?: Partial<WorkerPoolConfig>,
-  transcribeHandler?: (data: {
-    requestId: string;
-    file: string;
-    audioBytes: Uint8Array<ArrayBuffer>;
-    mimeType: string;
-    config: any;
-  }) => Promise<void>
+  transcribeHandler?: (
+    data: {
+      requestId: string;
+      file: string;
+      audioBytes: Uint8Array<ArrayBuffer>;
+      mimeType: string;
+      config: any;
+    },
+    respond: (response: { result?: unknown; error?: string }) => void,
+  ) => Promise<void>,
 ): Promise<WorkerPool> {
   const pool = new WorkerPool(config);
   await pool.initialize(transcribeHandler);

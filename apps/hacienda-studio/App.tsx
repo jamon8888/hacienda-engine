@@ -110,7 +110,6 @@ export function App() {
   // always writing an entry, never mutating `result.piiFindings` itself.
   const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
 
-  const workerRef = useRef<Worker | null>(null);
   const workerPoolRef = useRef<WorkerPool | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
@@ -168,18 +167,24 @@ export function App() {
       }
       if (cancelled) return;
 
-      // Initialize worker pool with transcription handler
+      // Initialize worker pool with transcription handler. Every pool worker can send a
+      // "transcribe-request" (whisper can't run inside a worker — see
+      // `worker/transcribe-bridge.ts`'s header); `respond` is bound by `WorkerPool` to
+      // the *specific* worker instance that asked, so there's no separate "just for
+      // transcription" worker needed — that used to mean an extra full model load.
       const pool = await createWorkerPool(
         { poolSize: 3 },
-        async (data) => {
-          // Transcription handler - runs on main thread
-          await handleTranscribeRequest(data as {
-            requestId: string;
-            file: string;
-            audioBytes: Uint8Array<ArrayBuffer>;
-            mimeType: string;
-            config: TranscriptionConfig;
-          });
+        async (data, respond) => {
+          await handleTranscribeRequest(
+            data as {
+              requestId: string;
+              file: string;
+              audioBytes: Uint8Array<ArrayBuffer>;
+              mimeType: string;
+              config: TranscriptionConfig;
+            },
+            respond,
+          );
         }
       );
       workerPoolRef.current = pool;
@@ -211,34 +216,6 @@ export function App() {
         }, 1000);
       });
 
-      // Still need a worker for transcription bridge (whisper runs on main thread)
-      // but we don't need it for processing. Keep a minimal worker ref for compatibility.
-      const worker = new Worker(new URL("./worker/pipeline.ts", import.meta.url), {
-        type: "module",
-      });
-      workerRef.current = worker;
-      await new Promise<void>((resolve) => {
-        worker.onmessage = (e) => {
-          if (e.data.type === "ready") resolve();
-        };
-        worker.postMessage({ type: "init" });
-      });
-      if (cancelled) return;
-      // Worker message handler for transcription bridge only
-      worker.onmessage = (event: MessageEvent) => {
-        const { type, ...data } = event.data;
-        if (type === "transcribe-request") {
-          void handleTranscribeRequest(
-            data as {
-              requestId: string;
-              file: string;
-              audioBytes: Uint8Array<ArrayBuffer>;
-              mimeType: string;
-              config: TranscriptionConfig;
-            },
-          );
-        }
-      };
       setWorkerReady(true);
     }
 
@@ -251,21 +228,16 @@ export function App() {
     // an unanswered request is exactly the failure mode `transcriptionBridge`'s own timeout
     // exists to catch, but answering promptly here means that file's real error reaches the
     // UI in milliseconds, not after a 15-minute wait.
-    async function handleTranscribeRequest(data: {
-      requestId: string;
-      file: string;
-      audioBytes: Uint8Array<ArrayBuffer>;
-      mimeType: string;
-      config: TranscriptionConfig;
-    }): Promise<void> {
-      const worker = workerRef.current;
-      if (!worker) {
-        console.error(
-          "[App] transcribe-request received with no worker to reply to — dropping",
-          data.requestId,
-        );
-        return;
-      }
+    async function handleTranscribeRequest(
+      data: {
+        requestId: string;
+        file: string;
+        audioBytes: Uint8Array<ArrayBuffer>;
+        mimeType: string;
+        config: TranscriptionConfig;
+      },
+      respond: (response: { result?: unknown; error?: string }) => void,
+    ): Promise<void> {
       try {
         if (!whisperBridgeRef.current) {
           const { WhisperBridge } = await import("./lib/transcription/whisper-bridge");
@@ -298,70 +270,15 @@ export function App() {
             );
           },
         );
-        worker.postMessage({ type: "transcribe-response", requestId: data.requestId, result });
+        respond({ result });
       } catch (e) {
-        worker.postMessage({
-          type: "transcribe-response",
-          requestId: data.requestId,
-          error: e instanceof Error ? e.message : "Unknown error",
-        });
-      }
-    }
-
-    function handleWorkerMessage(event: MessageEvent) {
-      const { type, ...data } = event.data;
-      switch (type) {
-        case "progress":
-          setProgress((prev) => new Map(prev).set(data.file, data as ProgressUpdate));
-          break;
-        case "transcribe-request":
-          // Fire-and-forget from this switch's point of view: `handleTranscribeRequest`
-          // always settles by posting its own "transcribe-response" (success or error)
-          // back to the worker, so nothing here needs to await or otherwise react to it.
-          void handleTranscribeRequest(
-            data as {
-              requestId: string;
-              file: string;
-              audioBytes: Uint8Array<ArrayBuffer>;
-              mimeType: string;
-              config: TranscriptionConfig;
-            },
-          );
-          break;
-        case "file-complete": {
-          const result = data as ProcessedFile;
-          setResults((prev) => [...prev, result]);
-          setProgress((prev) =>
-            new Map(prev).set(data.name, { ...data, stage: "complete", percent: 100 }),
-          );
-          // Redesign: write-through into the persisted library so the document survives
-          // a reload — see `lib/persistence.ts`'s header for what is/isn't kept.
-          void saveDocument(result);
-          break;
-        }
-        case "batch-complete":
-          downloadZip(data.zip);
-          // Clears the per-file progress bars (`progress` empty ⇒ `update` is undefined ⇒
-          // each renders null) once the batch settles. Deliberately does NOT clear `files`
-          // too: `files` also drives the Studio page's per-file row list, which is meant to
-          // persist — same as `results`, which is never cleared — so a user can still see
-          // and edit a file's findings after this 1s delay.
-          setTimeout(() => {
-            setProgress(new Map());
-            setStudioView("documents");
-          }, 1000);
-          break;
-        case "error":
-          setError(`${data.file}: ${data.message}`);
-          setFileErrors((prev) => new Map(prev).set(data.file, data.message));
-          break;
+        respond({ error: e instanceof Error ? e.message : "Unknown error" });
       }
     }
 
     init();
     return () => {
       cancelled = true;
-      workerRef.current?.terminate();
       workerPoolRef.current?.terminate();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once, mirrors onMount

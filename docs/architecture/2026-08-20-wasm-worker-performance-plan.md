@@ -93,22 +93,27 @@ is dominated by inference compute, not download size.
 
 **Effort:** Low — a two-line Cargo.toml change plus a rebuild and benchmark.
 
-### 1.3 Enable SIMD128
+### 1.3 Enable SIMD128 — attempted, reverted, blocked upstream
 
-No `.cargo/config.toml` exists in the repo and no build path sets
-`target-feature=+simd128`. For matmul-heavy Candle inference this is
-typically a 2–4x speedup and is supported in all target browsers
-(Chrome 91+, Firefox 89+, Safari 16.4+).
+For matmul-heavy Candle inference `target-feature=+simd128` is typically a
+2–4x speedup and is supported in all target browsers (Chrome 91+,
+Firefox 89+, Safari 16.4+) — but enabling it here breaks the actual
+`ner-candle-wasm` build: `candle-core` 0.11.0's wasm32 CPU backend
+(`candle-core/src/cpu/mod.rs`) references an undefined `CurrentCpuBF16`
+type in its bf16 code path once simd128 is on, which this app's F16 GLiNER2
+model weights exercise. Confirmed directly via
+`cargo check -p hacienda-wasm --target wasm32-unknown-unknown --features
+ner-candle-wasm` with and without the flag: clean without simd128, 38
+errors with it. This is an upstream candle-core bug/gap, not something
+fixable from this workspace.
 
-**Plan:**
-- Add `.cargo/config.toml` (or set `RUSTFLAGS` in the `build:wasm` script)
-  scoping `target-feature=+simd128` to the `wasm32-unknown-unknown` target.
-- Rebuild both `hacienda-wasm` and, if feasible, request the same flag be
-  applied to the `@xberg-io/xberg-wasm` build (or track its removal once
-  Tier 1.1 lands and it's no longer needed).
-- Benchmark before/after.
+**Status:** Reverted. `.cargo/config.toml` documents this instead of
+enabling the flag. Re-attempt only after upgrading past whichever
+candle-core release actually fixes the bf16 CPU path for simd128 on
+wasm32 — verify with the same direct `cargo check` command before assuming
+a version bump fixed it.
 
-**Effort:** Low — config change plus rebuild and benchmark.
+**Effort:** Low to flip back on, once unblocked upstream.
 
 ## Tier 2 — Moderate effort, after Tier 1 lands
 
