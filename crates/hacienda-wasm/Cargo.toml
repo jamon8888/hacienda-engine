@@ -16,6 +16,9 @@ crate-type = ["cdylib", "rlib"]
 # by default so the lean regex-only artifact stays buildable without pulling in the
 # candle/xberg-gliner dependency chain.
 ner-candle-wasm = ["hacienda-core/ner-candle-wasm"]
+# Enable Wasm atomics for threading (Tier 3.1). Requires nightly Rust with atomics support.
+# Enables hacienda-core's atomics feature for thread-safe IndexedDB audit store.
+atomics = ["hacienda-core/atomics"]
 
 [dependencies]
 hacienda-core = { path = "../../hacienda-core", default-features = false }
@@ -48,3 +51,4 @@ uuid = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 uuid = { workspace = true, features = ["js"] }
+
