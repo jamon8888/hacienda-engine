@@ -41,9 +41,9 @@ function StagePills({ update }: { update: ProgressUpdate | undefined }) {
             className={
               "rounded-md border px-2 py-0.5 font-mono text-[11px] " +
               (done
-                ? "border-emerald-500/40 text-emerald-500"
+                ? "border-emerald-500/40 font-medium text-emerald-500"
                 : active
-                  ? "border-primary text-primary"
+                  ? "border-primary font-medium text-primary"
                   : "border-border text-muted-foreground")
             }
           >
@@ -100,7 +100,7 @@ export function Studio({
   const isProcessing = files.length > 0;
 
   return (
-    <div className="mx-auto w-full max-w-3xl flex-1 px-6 py-10">
+    <div className="flex flex-1 flex-col px-6 py-10">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Add documents</h1>
@@ -153,7 +153,10 @@ export function Studio({
       </button>
 
       {pendingFiles.length > 0 && (
-        <section className="mt-8 rounded-lg border border-border">
+        <section aria-labelledby="studio-pending-heading" className="mt-8 rounded-lg border border-border">
+          <h2 id="studio-pending-heading" className="sr-only">
+            Selected files
+          </h2>
           <ul>
             {pendingFiles.map((file, i) => (
               <li
@@ -166,7 +169,7 @@ export function Studio({
                   <button
                     type="button"
                     aria-label={`Remove ${effectiveFileName(file)}`}
-                    className="text-muted-foreground hover:text-destructive"
+                    className="inline-flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                     onClick={() => onRemovePending(i)}
                   >
                     <Trash2 className="size-4" />
@@ -192,7 +195,14 @@ export function Studio({
       )}
 
       {isProcessing && (
-        <section className="mt-8 flex flex-col gap-2" aria-live="polite">
+        <section
+          aria-labelledby="studio-processing-heading"
+          className="mt-8 flex flex-col gap-2"
+          aria-live="polite"
+        >
+          <h2 id="studio-processing-heading" className="sr-only">
+            Processing
+          </h2>
           {files.map((file) => {
             const key = effectiveFileName(file);
             const update = progress.get(key);

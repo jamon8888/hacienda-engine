@@ -53,8 +53,8 @@ export function Assets({
   const allReady = assets.xbergWasm && assets.nerModel && assets.tessdata;
 
   return (
-    <div className="mx-auto w-full max-w-2xl flex-1 px-6 py-16">
-      <h1 className="text-3xl font-semibold">Prepare the workspace</h1>
+    <div className="flex flex-1 flex-col px-6 py-16">
+      <h1 className="text-2xl font-semibold">Prepare the workspace</h1>
       <p className="mt-2 max-w-lg text-muted-foreground">
         These assets are cached on your device so processing runs offline. Cached assets
         are skipped automatically on future visits.
