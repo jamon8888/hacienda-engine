@@ -134,6 +134,8 @@ export function App() {
   const workerPoolRef = useRef<WorkerPool | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
   // Track D3's follow-up (see `worker/transcribe-bridge.ts`'s header): the one `WhisperBridge`
   // instance for this tab, created lazily on the first "transcribe-request" the worker sends
   // and reused for every request after that — instance reuse is what makes `load()`'s
@@ -464,7 +466,22 @@ export function App() {
       console.log("[App] Worker pool completed:", results.length, "files");
     } catch (error) {
       console.error("[App] Worker pool error:", error);
-      setError(error instanceof Error ? error.message : "Worker pool processing failed");
+      const message = error instanceof Error ? error.message : "Worker pool processing failed";
+      setError(message);
+      // `pool.processFiles` rejects the whole batch's promise on a hard worker
+      // crash (e.g. a wasm trap), not just the one file that triggered it — files
+      // that did finish already got their own "complete" stage via the
+      // file-complete callback above, so only mark whichever ones are still
+      // stuck mid-pipeline, rather than the entire queued batch.
+      setFileErrors((prev) => {
+        const next = new Map(prev);
+        for (const input of fileInputs) {
+          if (progressRef.current.get(input.name)?.stage !== "complete") {
+            next.set(input.name, message);
+          }
+        }
+        return next;
+      });
     }
   }
 

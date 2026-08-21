@@ -347,7 +347,16 @@ export class WorkerPool {
       instance.currentTask.reject(new Error(`Worker error: ${error}`));
       instance.currentTask = null;
     }
+    // A wasm trap (e.g. "RuntimeError: unreachable executed") leaves that worker's
+    // wasm linear memory permanently corrupted — every later call into it just
+    // traps again, which is why one bad file can otherwise produce a burst of
+    // identical errors as other in-flight work in the same worker unwinds. Kill
+    // the worker outright instead of marking it merely idle, so the pool's next
+    // `growPool()` spawns a clean replacement rather than routing more files at
+    // an instance that can never recover.
+    instance.worker.terminate();
     instance.busy = false;
+    this.workers = this.workers.filter((w) => w !== instance);
   }
 
   /**
