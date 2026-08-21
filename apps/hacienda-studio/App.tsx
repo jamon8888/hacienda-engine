@@ -1,12 +1,29 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, Suspense, lazy } from "react";
 import { Toaster } from "./components/ui/sonner";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Landing } from "./pages/Landing";
 import { Assets } from "./pages/Assets";
 import { Studio } from "./pages/Studio";
-import { Documents } from "./pages/Documents";
 import { DocumentDetail } from "./pages/DocumentDetail";
-import { loadNerModel, isModelCached, preloadXbergWasm, validateFile } from "./lib/asset-loader";
+
+// Lazy, not a static import like the other pages: `pages/Documents.tsx` pulls in
+// `components/extend/file-system.tsx`, a large in-progress file-browser view whose
+// Dialog/ScrollArea usage (`DialogPanel`, `ScrollAreaPrimitive.Content`) was written
+// against Base UI's API, not the Radix-based primitives actually installed in
+// `components/ui/`. A broken *transitive* import throws at module-evaluation time in
+// ESM — with a static import here, that would crash the whole app on first load,
+// before the user ever navigates to Documents, taking Studio's upload/extraction flow
+// down with it. Lazy-loading confines the failure to the Documents screen itself.
+const Documents = lazy(() =>
+  import("./pages/Documents").then((m) => ({ default: m.Documents })),
+);
+import {
+  loadNerModel,
+  isModelCached,
+  preloadXbergWasm,
+  validateFile,
+  checkPdfPageSafety,
+} from "./lib/asset-loader";
 import { WorkerPool, createWorkerPool } from "./lib/worker-pool";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import {
@@ -123,6 +140,12 @@ export function App() {
   // idempotency (skip re-download/re-init once a model is loaded) actually apply across a
   // whole batch, and across batches, instead of just within a single call.
   const whisperBridgeRef = useRef<WhisperBridge | null>(null);
+  // Populated by `checkPdfPageSafety` in `handleFilesAccepted` for PDFs whose page count
+  // makes OCR a memory risk; read back in `handleProcessQueue` when building each file's
+  // `FileInput`. Keyed by the `File` object itself (stable across `pendingFiles`/`files`
+  // state, which hold the same references) rather than by name, since folder uploads can
+  // have same-named siblings in different subdirectories.
+  const disableOcrForFileRef = useRef<WeakMap<File, boolean>>(new WeakMap());
 
   useEffect(() => {
     let cancelled = false;
@@ -332,12 +355,13 @@ export function App() {
   // only actually starts processing once the user confirms via `handleProcessQueue`.
   // Validation still happens here, at drop time, so a bad file is reported immediately
   // rather than silently sitting in the queue until the user clicks process.
-  function handleFilesAccepted(fileList: FileList | File[]): void {
+  async function handleFilesAccepted(fileList: FileList | File[]): Promise<void> {
     console.log("[App] handleFilesAccepted called with", fileList.length, "files");
     const fileArray = Array.from(fileList);
     const validFiles: File[] = [];
     let skippedJunk = 0;
     const unsupported: string[] = [];
+    const pageSafetyWarnings: string[] = [];
 
     for (const file of fileArray) {
       const name = effectiveFileName(file);
@@ -352,6 +376,22 @@ export function App() {
         console.warn("[App] skipping unsupported file:", name, validation.error);
         continue;
       }
+
+      // PDF-only, and cheap relative to actual extraction (just a pdfium page count) —
+      // catches the case a plain size check misses: a scanned document well under the
+      // 50MB cap can still have enough pages to make OCR a memory risk (see
+      // `checkPdfPageSafety`'s header).
+      const pageSafety = await checkPdfPageSafety(file);
+      if (!pageSafety.valid) {
+        unsupported.push(pageSafety.error || "PDF rejected");
+        console.warn("[App] skipping PDF over page-count limit:", name, pageSafety.error);
+        continue;
+      }
+      if (pageSafety.disableOcr) {
+        disableOcrForFileRef.current.set(file, true);
+        if (pageSafety.warning) pageSafetyWarnings.push(pageSafety.warning);
+      }
+
       validFiles.push(file);
     }
 
@@ -370,6 +410,13 @@ export function App() {
       setSkipNotice(`Skipped ${skipParts.join(" and ")} file${totalSkipped === 1 ? "" : "s"}.`);
     } else {
       setSkipNotice(null);
+    }
+
+    if (pageSafetyWarnings.length > 0) {
+      setSkipNotice((prev) => {
+        const combined = [prev, ...pageSafetyWarnings].filter(Boolean).join(" ");
+        return combined || null;
+      });
     }
 
     if (validFiles.length === 0) return;
@@ -400,6 +447,7 @@ export function App() {
         name: effectiveFileName(f),
         bytes: await f.arrayBuffer(),
         type: f.type || "application/octet-stream",
+        disableOcr: disableOcrForFileRef.current.get(f),
       })),
     );
 
@@ -618,12 +666,14 @@ export function App() {
       )}
 
       {route === "studio" && studioView === "documents" && (
-        <Documents
-          documents={libraryDocuments}
-          onOpenDocument={openDocument}
-          onDeleteDocuments={handleDeleteDocuments}
-          onAddFiles={() => setStudioView("upload")}
-        />
+        <Suspense fallback={null}>
+          <Documents
+            documents={libraryDocuments}
+            files={files}
+            onOpenDocument={openDocument}
+            onAddFiles={() => setStudioView("upload")}
+          />
+        </Suspense>
       )}
 
       {route === "studio" && studioView === "document" && selectedResult && (
@@ -639,6 +689,10 @@ export function App() {
           onExportBody={(body) =>
             downloadText(selectedResult.name, wrapRedactedBody(selectedResult, body))
           }
+          onDelete={() => {
+            handleDeleteDocuments([selectedResult.name]);
+            setStudioView("documents");
+          }}
         />
       )}
 

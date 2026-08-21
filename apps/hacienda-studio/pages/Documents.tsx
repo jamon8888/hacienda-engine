@@ -1,165 +1,167 @@
-import { useMemo, useState } from "react";
-import { Folder, FileText, Search, Upload, Archive, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Archive, Upload, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { groupByFolder, baseNameOf, ROOT_FOLDER, type LibraryDocument } from "@/lib/library";
+import { FileSystem } from "@/components/extend/file-system";
+import type { FileSystemFileItem } from "@/components/extend/file-system";
+import { DocxViewerPreview } from "@/components/extend/docx-viewer";
+import { XlsxViewerPreview } from "@/components/extend/xlsx-viewer";
+import { PptxViewerPreview } from "@/components/extend/pptx-viewer";
+import { PDFViewer } from "@/components/extend/pdf-viewer";
+import { toFileSystemItems, type LibraryDocument } from "@/lib/library";
+import { getViewerKind } from "@/lib/viewer-kind";
+import { effectiveFileName } from "@/lib/file-filter";
 import { exportDocumentsZip } from "@/lib/export-zip";
 
-function formatKB(markdown: string): string {
-  return `${Math.max(1, Math.round(new Blob([markdown]).size / 1024))} KB`;
-}
-
+/**
+ * Redesign: the Documents page is now `components/extend/file-system.tsx`'s
+ * macOS-Finder-style browser (icon/list/gallery views, folders inferred from path,
+ * search, sort — all built in) instead of a hand-rolled table. Folders fall out of
+ * `LibraryDocument.result.name`'s slashes for free; `lib/library.ts`'s
+ * `toFileSystemItems` is the only mapping needed.
+ *
+ * `FileSystem`'s selection model is single-item (`onSelectionChange?: (item) => void`,
+ * no multi-select array), so the old checkbox-based bulk export/delete doesn't have an
+ * equivalent here. Export now always zips everything currently in the library; deleting
+ * a single document moved to `DocumentDetail`'s header instead of a grid bulk action.
+ */
 export function Documents({
   documents,
+  files,
   onOpenDocument,
-  onDeleteDocuments,
   onAddFiles,
 }: {
   documents: LibraryDocument[];
+  /** This session's in-memory originals — only files processed in this tab session
+   * have bytes here (see `lib/persistence.ts`'s header); a hydrated-from-storage
+   * document has none, so its grid thumbnail falls back to a generic icon. */
+  files: File[];
   onOpenDocument: (name: string) => void;
-  onDeleteDocuments: (names: string[]) => void;
   onAddFiles: () => void;
 }) {
-  const [activeFolder, setActiveFolder] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const items = useMemo(() => toFileSystemItems(documents), [documents]);
+  const byPath = useMemo(
+    () => new Map(documents.map((d) => [d.result.name, d] as const)),
+    [documents],
+  );
 
-  const folders = useMemo(() => groupByFolder(documents), [documents]);
-  const visible = useMemo(() => {
-    let list = activeFolder === null ? documents : documents.filter((d) => d.folder === activeFolder);
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      list = list.filter((d) => baseNameOf(d.result.name).toLowerCase().includes(q));
-    }
-    return list;
-  }, [documents, activeFolder, query]);
-
-  function toggle(name: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
+  function findOriginalFile(item: FileSystemFileItem): File | undefined {
+    const doc = byPath.get(item.path);
+    if (!doc) return undefined;
+    return files.find((f) => effectiveFileName(f) === doc.result.frontmatter.source);
   }
 
-  const selectedDocs = documents.filter((d) => selected.has(d.result.name));
-
   return (
-    <div className="flex flex-1 gap-6 px-6 py-8">
-      <div>
-        <div className="mb-6 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold">Documents</h1>
-            <p className="text-sm text-muted-foreground">
-              {documents.length} processed · stored locally on this device
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={onAddFiles}>
-              <Upload className="size-4" /> Add files
-            </Button>
-            <Button
-              disabled={documents.length === 0}
-              onClick={() => exportDocumentsZip(selectedDocs.length > 0 ? selectedDocs : visible)}
-            >
-              <Archive className="size-4" /> Export
-            </Button>
-            {selected.size > 0 && (
-              <Button
-                variant="destructive"
-                onClick={() => {
-                  onDeleteDocuments([...selected]);
-                  setSelected(new Set());
-                }}
-              >
-                <Trash2 className="size-4" /> Delete ({selected.size})
-              </Button>
-            )}
-          </div>
+    <div className="flex flex-1 flex-col px-6 py-8">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Documents</h1>
+          <p className="text-sm text-muted-foreground">
+            {documents.length} processed · stored locally on this device
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={onAddFiles}>
+            <Upload className="size-4" /> Add files
+          </Button>
+          <Button
+            disabled={documents.length === 0}
+            onClick={() => exportDocumentsZip(documents.map((d) => ({ result: d.result })))}
+          >
+            <Archive className="size-4" /> Export
+          </Button>
         </div>
       </div>
 
-      <div className="flex flex-1 gap-6">
-        <aside className="w-56 shrink-0">
-          <button
-            type="button"
-            onClick={() => setActiveFolder(null)}
-            className={
-              "flex w-full items-center justify-between rounded-md px-3 py-2 text-sm " +
-              (activeFolder === null ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/60")
-            }
-          >
-            <span className="flex items-center gap-2">
-              <FileText className="size-4" /> All documents
-            </span>
-            <span>{documents.length}</span>
-          </button>
-          {folders.map((f) => (
-            <button
-              key={f.name}
-              type="button"
-              onClick={() => setActiveFolder(f.name)}
-              className={
-                "mt-1 flex w-full items-center justify-between rounded-md px-3 py-2 text-sm " +
-                (activeFolder === f.name ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/60")
-              }
-            >
-              <span className="flex items-center gap-2 truncate">
-                <Folder className="size-4 text-primary" />
-                {f.name === ROOT_FOLDER ? "Root" : f.name}
-              </span>
-              <span>{f.documents.length}</span>
-            </button>
-          ))}
-        </aside>
+      <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border">
+        {documents.length === 0 ? (
+          <p className="p-8 text-center text-sm text-muted-foreground">No documents yet.</p>
+        ) : (
+          <FileSystem
+            items={items}
+            title="Documents"
+            defaultView="icons"
+            onFileOpen={(file) => onOpenDocument(file.path)}
+            renderFilePreview={(file) => (
+              <DocumentThumbnail file={file} originalFile={findOriginalFile(file)} />
+            )}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
 
-        <div className="flex-1 rounded-lg border border-border">
-          <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-            <Search className="size-4 text-muted-foreground" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search all folders"
-              className="w-full bg-transparent text-sm outline-none"
-            />
-          </div>
+/**
+ * Grid-cell preview: a live, scaled-down instance of the same native viewer
+ * `DocumentDetail`'s Source tab uses, for a file type that has one and whose original
+ * bytes are still in memory this session. Everything else gets a generic icon — "for
+ * type that can", per the redesign brief, not a fabricated thumbnail.
+ *
+ * Known tradeoff: this mounts a real docx/xlsx/pptx/pdf parser per visible grid cell.
+ * Fine for a modest library; a very large one would want virtualization or a lazy
+ * generated-thumbnail pipeline instead, neither of which this on-device app has.
+ */
+function DocumentThumbnail({
+  file,
+  originalFile,
+}: {
+  file: FileSystemFileItem;
+  originalFile: File | undefined;
+}) {
+  const [url, setUrl] = useState<string | undefined>(undefined);
+  const isImage = file.contentType?.startsWith("image/") ?? false;
+  const viewerKind = getViewerKind(file.name ?? file.path);
 
-          {visible.length === 0 ? (
-            <p className="p-8 text-center text-sm text-muted-foreground">
-              No documents yet.
-            </p>
-          ) : (
-            <ul>
-              {visible.map((doc) => (
-                <li
-                  key={doc.result.name}
-                  className="flex items-center gap-3 border-b border-border px-3 py-3 last:border-b-0 hover:bg-muted/40"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(doc.result.name)}
-                    onChange={() => toggle(doc.result.name)}
-                    className="accent-primary"
-                  />
-                  <FileText className="size-4 text-muted-foreground" />
-                  <button
-                    type="button"
-                    className="flex-1 truncate text-left text-sm"
-                    onClick={() => onOpenDocument(doc.result.name)}
-                  >
-                    {baseNameOf(doc.result.name)}
-                  </button>
-                  <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
-                    {doc.findings.length} finding{doc.findings.length === 1 ? "" : "s"}
-                  </span>
-                  <span className="w-16 text-right text-xs text-muted-foreground">
-                    {formatKB(doc.result.markdown)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+  useEffect(() => {
+    if (!originalFile) {
+      setUrl(undefined);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(originalFile);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [originalFile]);
+
+  if (!url || (!isImage && !viewerKind)) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-muted/30">
+        <FileText className="size-8 text-muted-foreground" />
+        <span className="font-mono text-[0.6875rem] uppercase tracking-wide text-muted-foreground">
+          {(file.name ?? file.path).split(".").pop()}
+        </span>
+      </div>
+    );
+  }
+
+  if (isImage) {
+    return (
+      <img
+        src={url}
+        alt={file.name ?? file.path}
+        className="h-full w-full object-cover"
+      />
+    );
+  }
+
+  // Renders at 4x size then scales down 4x — a cheap way to get a readable-looking
+  // thumbnail from a viewer component built for full-size display, without a second
+  // "compact mode" rendering path for each of these four viewers.
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-background">
+      <div
+        className="pointer-events-none absolute left-0 top-0 origin-top-left"
+        style={{ width: "400%", height: "400%", transform: "scale(0.25)" }}
+      >
+        {(viewerKind === "docx" || viewerKind === "doc") && (
+          <DocxViewerPreview src={url} isDark showUpload={false} showToolbar={false} onIsDarkChange={() => {}} />
+        )}
+        {(viewerKind === "xlsx" || viewerKind === "xls") && (
+          <XlsxViewerPreview src={url} isDark showUpload={false} showToolbar={false} onIsDarkChange={() => {}} />
+        )}
+        {(viewerKind === "pptx" || viewerKind === "ppt") && (
+          <PptxViewerPreview src={url} showUpload={false} showToolbar={false} />
+        )}
+        {viewerKind === "pdf" && <PDFViewer src={url} showUpload={false} showToolbar={false} />}
       </div>
     </div>
   );

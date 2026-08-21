@@ -7,6 +7,7 @@
  */
 import type { ProcessedFile } from "./types";
 import type { PiiEntity } from "./pii-engine";
+import type { FileSystemFileItem } from "@/components/extend/file-system";
 
 export const ROOT_FOLDER = "";
 
@@ -42,4 +43,39 @@ export function groupByFolder(documents: LibraryDocument[]): LibraryFolder[] {
   return [...byFolder.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([name, docs]) => ({ name, documents: docs }));
+}
+
+const EXTENSION_CONTENT_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+};
+
+function contentTypeFor(name: string): string | undefined {
+  const ext = name.split(".").pop()?.toLowerCase();
+  return ext ? EXTENSION_CONTENT_TYPES[ext] : undefined;
+}
+
+/**
+ * Maps the library onto `components/extend/file-system.tsx`'s `FileSystem` component —
+ * the macOS-Finder-style grid/list browser this redesign's Documents page uses. Folders
+ * fall out of `path`'s slashes for free (the component infers them), so this is just a
+ * per-document projection, not a second grouping pass.
+ */
+export function toFileSystemItems(documents: LibraryDocument[]): FileSystemFileItem[] {
+  return documents.map((doc) => ({
+    kind: "file",
+    path: doc.result.name,
+    name: doc.baseName,
+    contentType: contentTypeFor(doc.result.name),
+    size: new Blob([doc.result.markdown]).size,
+    metadata: { findings: String(doc.findings.length) },
+  }));
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Download } from "lucide-react";
+import { ArrowLeft, Download, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -32,6 +32,7 @@ export function DocumentDetail({
   onAddFinding,
   onRemoveFinding,
   onExportBody,
+  onDelete,
 }: {
   result: ProcessedFile;
   findings: PiiEntity[];
@@ -49,6 +50,11 @@ export function DocumentDetail({
    * only place with `result.markdown`'s split already worked out (see `reExportMarkdown`
    * there). */
   onExportBody: (body: string) => void;
+  /** Removes this document from the library entirely (both in-memory and persisted —
+   * see `App.tsx`'s `handleDeleteDocuments`) and returns to the library. The grid view's
+   * `FileSystem` component has no multi-select API to hang a bulk-delete action off of
+   * (see `pages/Documents.tsx`'s header), so single-document delete lives here instead. */
+  onDelete: () => void;
 }) {
   const [mode, setMode] = useState<RedactionMode>("mask");
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
@@ -176,6 +182,9 @@ export function DocumentDetail({
             onClick={() => redactedBody !== undefined && onExportBody(redactedBody)}
           >
             <Download className="size-4" /> Redacted
+          </Button>
+          <Button size="sm" variant="outline" onClick={onDelete}>
+            <Trash2 className="size-4" /> Delete
           </Button>
         </div>
       </div>

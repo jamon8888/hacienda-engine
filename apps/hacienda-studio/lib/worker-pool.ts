@@ -55,7 +55,8 @@ export class WorkerPool {
   private config: WorkerPoolConfig;
   private taskQueue: WorkerTask[] = [];
   private initializing: Promise<void> | null = null;
-  
+  private growing: Promise<void> | null = null;
+
   // Transcription handler (main thread only - for whisper). `respond` must be called
   // exactly once with the result so the reply reaches the *originating* pool worker —
   // there is no single "the worker" anymore now that there are `poolSize` of them.
@@ -82,10 +83,11 @@ export class WorkerPool {
   }
 
   /**
-   * Initialize the worker pool - creates and initializes all workers.
-   * Must be called before processFiles().
-   * 
-   * Includes Tier 2.2: Wasm module cold-start caching via Cache API / IndexedDB
+   * Register the transcription handler. Does not spawn any workers — each one holds a
+   * full GLiNER2 model (~600MB), so spawning `poolSize` of them up front (e.g. on app
+   * mount, before any file is even chosen) reserved ~1.8GB of baseline memory
+   * regardless of how many files the user actually uploads. Workers are now spawned
+   * lazily by `growPool()`, sized to what each batch actually needs.
    */
   async initialize(
     transcribeHandler?: (
@@ -100,13 +102,30 @@ export class WorkerPool {
     ) => Promise<void>,
   ): Promise<void> {
     if (this.initializing) return this.initializing;
-
     this.transcribeHandler = transcribeHandler;
+    this.initializing = Promise.resolve();
+    return this.initializing;
+  }
 
-    this.initializing = (async () => {
-      console.log(`[WorkerPool] Initializing ${this.config.poolSize} workers...`);
-      
-      const initPromises = Array.from({ length: this.config.poolSize }, async (_, i) => {
+  /**
+   * Spawns workers until the pool has at least `target` of them (capped at
+   * `poolSize`), reusing any already running. Called from `processFiles()` sized to
+   * that batch's file count — a single-file upload only ever pays for one ~600MB
+   * model, not `poolSize` of them.
+   */
+  private async growPool(target: number): Promise<void> {
+    if (this.growing) await this.growing;
+
+    const capped = Math.min(target, this.config.poolSize);
+    if (this.workers.length >= capped) return;
+
+    this.growing = (async () => {
+      const start = this.workers.length;
+      const toSpawn = capped - start;
+      console.log(`[WorkerPool] Growing pool from ${start} to ${capped} workers...`);
+
+      const initPromises = Array.from({ length: toSpawn }, async (_, offset) => {
+        const i = start + offset;
         // Tier 2.2's cold-start caching applies to the compiled hacienda_wasm_bg.wasm
         // binary that each worker fetches internally during its own `init()` handshake
         // (see `lib/pii-engine.ts`'s `initPiiEngine`), not to this `worker/pipeline.ts`
@@ -136,16 +155,16 @@ export class WorkerPool {
 
         // Initialize the worker
         await this.sendInit(worker);
-        
+
         this.workers.push(instance);
         console.log(`[WorkerPool] Worker ${i} ready`);
       });
 
       await Promise.all(initPromises);
-      console.log(`[WorkerPool] All ${this.workers.length} workers initialized`);
+      console.log(`[WorkerPool] Pool now has ${this.workers.length} workers`);
     })();
 
-    return this.initializing;
+    return this.growing;
   }
 
   /**
@@ -176,6 +195,10 @@ export class WorkerPool {
     await this.initialize();
 
     if (files.length === 0) return [];
+
+    // Only pay for as many workers (and their ~600MB models) as this batch can
+    // actually use — one file never needs three workers.
+    await this.growPool(files.length);
 
     console.log(`[WorkerPool] Processing ${files.length} files across ${this.workers.length} workers`);
 
@@ -387,6 +410,7 @@ export class WorkerPool {
     
     this.workers = [];
     this.initializing = null;
+    this.growing = null;
     console.log("[WorkerPool] All workers terminated");
   }
 }

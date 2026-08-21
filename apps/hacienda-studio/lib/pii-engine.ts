@@ -94,9 +94,21 @@ export async function loadPiiNerModel(
 }
 
 /**
+ * The wire shape `hacienda-core`'s `PiiCategory` (Rust, `#[serde(rename_all =
+ * "snake_case")]`) actually deserializes: a unit variant (`Email`, `PhoneNumber`, ...)
+ * is a bare lowercase-snake_case string (`"email"`, `"phone_number"`); the one tuple
+ * variant, `Custom(String)`, is externally tagged as `{ custom: "<label>" }` — NOT a
+ * bare string, since only unit variants get that shorthand under serde's default
+ * (externally tagged) enum representation. `worker/pipeline.ts`'s
+ * `nerCategoryToPiiCategory` must produce exactly this shape.
+ */
+export type PiiCategoryWire = string | { custom: string };
+
+/**
  * Detect and redact using pre-computed model entities (bypasses NER inference).
  * Model entities should be in the format: { category, text, start, end, confidence }
- * where category is a PII category string (e.g., "Person", "Email", "PhoneNumber", etc.)
+ * where `category` is the `PiiCategoryWire` shape above (e.g. `"phone_number"` or
+ * `{ custom: "Date" }`) — see that type's doc for why it isn't just a string.
  *
  * `process_with_model_entities` only exists on a `hacienda-wasm` build compiled after
  * this function was added on the Rust side — the `pkg/` output actually committed to
@@ -108,7 +120,7 @@ export async function loadPiiNerModel(
 export async function redactPiiWithModelEntities(
   text: string,
   modelEntities: Array<{
-    category: string;
+    category: PiiCategoryWire;
     text: string;
     start: number;
     end: number;
@@ -133,7 +145,7 @@ export async function redactPiiWithModelEntities(
 export async function scanForPiiWithModelEntities(
   text: string,
   modelEntities: Array<{
-    category: string;
+    category: PiiCategoryWire;
     text: string;
     start: number;
     end: number;
