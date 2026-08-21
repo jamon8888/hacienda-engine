@@ -133,3 +133,11 @@ coverage.xml
 AGENTS.md
 CLAUDE.md
 # END ai-rulez
+
+# Project build/runtime caches (wasm toolchain homes, npm caches, temp copies)
+.wasm-home/
+.cargo-wasm-home/
+.rustup-tools/
+.target-wasm/
+.tmp-cp/
+.tmp-npmcache/

@@ -70,6 +70,13 @@ export function loadNerModel(weights: Uint8Array, tokenizer: Uint8Array, encoder
 export function process(text: string): Promise<any>;
 
 /**
+ * Detect and redact using pre-computed model entities (bypasses NER inference).
+ * Takes pre-computed model entities as a JS array of objects with fields:
+ * category, text, start, end, confidence.
+ */
+export function process_with_model_entities(text: string, model_entities: any): Promise<any>;
+
+/**
  * Redact `text` under `mode` ("mask", "hash", "pseudonymize", or "remove") with no
  * detected spans — exercises `RedactionEngine::redact`'s construction path, including
  * the AES-SIV `Pseudonymiser`, without depending on `PiiPipeline` detection.
@@ -81,6 +88,11 @@ export function redact_empty(text: string, mode: string): any;
  * `redacted_text` equal to the input.
  */
 export function scan(text: string): Promise<any>;
+
+/**
+ * Detect without rewriting `text`, using pre-computed model entities (bypasses NER inference).
+ */
+export function scan_with_model_entities(text: string, model_entities: any): Promise<any>;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -94,8 +106,10 @@ export interface InitOutput {
     readonly isNerModelLoaded: () => number;
     readonly loadNerModel: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly process: (a: number, b: number) => any;
+    readonly process_with_model_entities: (a: number, b: number, c: any) => any;
     readonly redact_empty: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly scan: (a: number, b: number) => any;
+    readonly scan_with_model_entities: (a: number, b: number, c: any) => any;
     readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___wasm_bindgen_bf7b0d491ce864c2___JsValue__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___web_sys_c2086d39a3c4ab29___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsValue___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___js_sys_f311ed201db48e3e___Function_fn_wasm_bindgen_bf7b0d491ce864c2___JsValue_____wasm_bindgen_bf7b0d491ce864c2___sys__Undefined___js_sys_f311ed201db48e3e___Function_fn_wasm_bindgen_bf7b0d491ce864c2___JsValue_____wasm_bindgen_bf7b0d491ce864c2___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;

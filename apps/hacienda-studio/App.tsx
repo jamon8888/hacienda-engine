@@ -21,10 +21,12 @@ import {
   loadNerModel,
   isModelCached,
   preloadXbergWasm,
+  loadTessdata,
   validateFile,
   checkPdfPageSafety,
 } from "./lib/asset-loader";
 import { WorkerPool, createWorkerPool } from "./lib/worker-pool";
+import { detectDeviceTier, poolSizeForTier } from "./lib/device-tier";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
 import {
   saveDocument,
@@ -160,7 +162,21 @@ export function App() {
         await preloadXbergWasm();
         console.log("[App] preloadXbergWasm done");
 
-        if (await isModelCached()) {
+        // A `low`-tier device is exactly the case the 600MB GLiNER2 model risks not
+        // fitting alongside a worker's own wasm heap — skip even attempting to load
+        // it (cached or not; the risk is holding it resident in memory, not the
+        // download) and go straight to the regex/compromise fallback `selectNerBridge`
+        // already falls back to when `nerRuntime` is null. Visible in the UI rather
+        // than silent, same as the existing download-failure path below.
+        const deviceTier = detectDeviceTier();
+        if (deviceTier === "low") {
+          console.log("[App] low device-memory tier — skipping neural NER model");
+          setNerModelDegraded(true);
+          setError(
+            "This device's available memory is limited — using regex-only PII detection instead of the neural model.",
+          );
+          setAssets((a) => ({ ...a, nerModel: true }));
+        } else if (await isModelCached()) {
           setAssets((a) => ({ ...a, nerModel: true }));
         } else {
           try {
@@ -174,6 +190,14 @@ export function App() {
           }
         }
 
+        try {
+          await loadTessdata("eng");
+        } catch (e) {
+          // OCR degrades silently to "no OCR text" the same way a missing bridge
+          // already does inside the worker (`selectOcrBridge` returns `undefined`)
+          // — not worth surfacing an error banner for a non-essential capability.
+          console.warn("[App] Tesseract tessdata download failed, OCR unavailable:", e);
+        }
         setAssets((a) => ({ ...a, tessdata: true }));
         localStorage.setItem("xberg-studio-visited", "true");
       } catch (e) {
@@ -202,7 +226,7 @@ export function App() {
       // the *specific* worker instance that asked, so there's no separate "just for
       // transcription" worker needed — that used to mean an extra full model load.
       const pool = await createWorkerPool(
-        { poolSize: 3 },
+        { poolSize: poolSizeForTier(detectDeviceTier()) },
         async (data, respond) => {
           await handleTranscribeRequest(
             data as {

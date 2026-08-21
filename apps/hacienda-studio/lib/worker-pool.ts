@@ -30,7 +30,11 @@ interface WorkerInstance {
 }
 
 const DEFAULT_CONFIG: WorkerPoolConfig = {
-  poolSize: 3, // Conservative: limited by RAM per worker (model ~600MB each)
+  // Safe-default floor for a caller that omits `poolSize` entirely. `App.tsx` always
+  // passes an explicit value computed from `lib/device-tier.ts`'s `poolSizeForTier` —
+  // this fallback shouldn't assume anything about the caller's RAM (each worker holds
+  // a ~600MB model), so it stays at the conservative floor rather than the old flat 3.
+  poolSize: 1,
   maxQueueDepth: 10,
 };
 
@@ -225,8 +229,8 @@ export class WorkerPool {
         files: assignedFiles,
         config,
         results: [] as ProcessedFile[],
-        resolve: () => {}, // Will be set below
-        reject: () => {}, // Will be set below
+        resolve: (_results: ProcessedFile[]) => {}, // Will be set below
+        reject: (_error: Error) => {}, // Will be set below
       },
     }));
 
@@ -444,5 +448,3 @@ export async function createWorkerPool(
   await pool.initialize(transcribeHandler);
   return pool;
 }
-
-export type { WorkerPoolConfig };

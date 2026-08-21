@@ -18,6 +18,7 @@ const STAGE_ORDER: ProgressUpdate["stage"][] = [
 
 const STAGE_LABELS: Record<ProgressUpdate["stage"], string> = {
   queued: "queued",
+  "wasm-load": "wasm-load",
   extract: "extract",
   transcribe: "transcribe",
   ner: "ner",

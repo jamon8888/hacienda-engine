@@ -330,3 +330,18 @@ codegen-units = 1
 # `wasm-bindgen-rayon` itself refuses to compile without them actually applied
 # (`compile_error!` in its own `lib.rs`). The `atomics` Cargo feature alone is not
 # sufficient.
+
+# Patches the upstream candle-core bug the SIMD128 note above describes:
+# `candle-core/src/cpu/mod.rs` re-exports `CurrentCpuBF16`/`CurrentCpuF16` from the
+# AVX2 and NEON backends, but never defined them in `simd128.rs` at all — not a
+# missing re-export, the wasm32+simd128 backend just never had a bf16/f16 path. Fixed
+# in `vendor/candle-core-0.11.0-wasm-fix/src/cpu/simd128.rs` with a plain scalar
+# (non-vectorized) `CpuBF16`/`CpuF16` implementation: correct, but not accelerated —
+# `CurrentCpu` (f32, the actual "2-4x speedup" path) is untouched and keeps real
+# v128 SIMD. Verified via the same repro command the note above names: `cargo check
+# -p hacienda-wasm --target wasm32-unknown-unknown --features ner-candle-wasm` with
+# `RUSTFLAGS="-C target-feature=+simd128"` is clean with this patch, fails the same
+# 38-error way without it. Drop this patch once a candle-core release upstream fixes
+# the wasm32 bf16/f16 gap.
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core-0.11.0-wasm-fix" }

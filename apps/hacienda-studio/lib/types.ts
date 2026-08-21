@@ -76,7 +76,7 @@ export interface ProgressUpdate {
    * `onProgress` (resample and transcribe phases), so this is real progress, not a fixed
    * placeholder — same guarantee every other stage here already gives the UI.
    */
-  stage: "queued" | "extract" | "transcribe" | "ner" | "pii" | "link" | "complete" | "error";
+  stage: "queued" | "extract" | "transcribe" | "ner" | "pii" | "link" | "complete" | "error" | "wasm-load";
   percent: number;
   message?: string;
 }

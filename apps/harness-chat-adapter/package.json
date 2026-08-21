@@ -1,0 +1,24 @@
+{
+  "name": "@hacienda-engine/harness-chat-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone adapter that exposes a Vercel AI SDK-compatible /api/chat streaming endpoint backed by the DeepSeek Harness RPC (session.create + session.prompt + assistant/chunk deltas).",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

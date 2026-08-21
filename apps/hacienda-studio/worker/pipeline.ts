@@ -30,7 +30,7 @@ import {
   isBridgeEntityArray,
   type BridgeEntity,
 } from "../lib/ner-bridge";
-import { createNerBackend, loadNerModel } from "../lib/asset-loader";
+import { createNerBackend, loadNerModel, loadTessdata } from "../lib/asset-loader";
 import {
   initPiiEngine,
   redactPii,
@@ -193,6 +193,98 @@ export function selectNerBridge(
         return extractEntities(text, categories);
       }
       throw err;
+    }
+  };
+}
+
+/**
+ * xberg-wasm has no in-binary OCR backend (see `xberg-wasm/src/bridge/ocr.rs`'s own
+ * header: "There is no in-binary fallback: when no backend is injected, OCR is
+ * unavailable") — every `engine.extract()` call needs an `ocr` bridge injected into
+ * `XbergEngine`'s constructor, the same injection point `ner` already uses. Without
+ * one, `extractConfig.ocr.backend = "tesseract-wasm"` below is a no-op string nobody
+ * reads: scanned pages and embedded images silently got zero OCR text. `null` means
+ * the backend failed to load (network/wasm error); `selectOcrBridge` returns
+ * `undefined` in that case, matching "no backend injected" exactly — there's no
+ * regex-style fallback for OCR the way there is for NER.
+ */
+type OcrRuntime = Awaited<ReturnType<typeof createOcrBackend>>;
+let ocrRuntime: OcrRuntime | null = null;
+
+async function createOcrBackend() {
+  const { createOCREngine } = await import("tesseract-wasm");
+  const engine = await createOCREngine();
+  const tessdata = await loadTessdata("eng");
+  engine.loadModel(tessdata);
+  return engine;
+}
+
+async function initOcrBackend(): Promise<void> {
+  try {
+    ocrRuntime = await createOcrBackend();
+    console.log("[Worker] Tesseract OCR backend loaded");
+  } catch (e) {
+    console.warn("[Worker] OCR backend unavailable:", e);
+    ocrRuntime = null;
+  }
+}
+
+/**
+ * Shape `xberg-wasm`'s injected-OCR contract expects back, per
+ * `xberg-wasm/src/bridge/ocr.rs`'s `OcrResult`/`OcrLineResult` — confirmed from that
+ * source, not guessed, including that `lines` is optional on the wire (a missing/
+ * malformed array degrades to empty rather than an error).
+ */
+interface OcrBridgeResult {
+  text: string;
+  lines: Array<{
+    text: string;
+    confidence: number;
+    bbox?: { x: number; y: number; width: number; height: number };
+  }>;
+}
+
+/**
+ * Takes the runtime explicitly, same rationale as `selectNerBridge`: a pure function
+ * of its input, testable without touching worker/module state or a real wasm engine.
+ */
+export function selectOcrBridge(
+  runtime: OcrRuntime | null,
+): ((imageBytes: Uint8Array, opts: { language: string }) => Promise<OcrBridgeResult>) | undefined {
+  if (!runtime) return undefined;
+  return async (imageBytes) => {
+    // The Rust side hands us encoded (PNG/JPEG) image bytes, not raw pixels —
+    // tesseract-wasm's `loadImage` wants an `ImageBitmap`/`ImageData`, so decode
+    // first. `createImageBitmap` is available in a dedicated worker's global scope.
+    // `.buffer` alone would be wrong if `imageBytes` is a view into a larger
+    // buffer (wrong byteOffset/length); slice to the view's exact bytes.
+    const bytes = imageBytes.buffer.slice(
+      imageBytes.byteOffset,
+      imageBytes.byteOffset + imageBytes.byteLength,
+    ) as ArrayBuffer;
+    const bitmap = await createImageBitmap(new Blob([bytes]));
+    try {
+      runtime.loadImage(bitmap);
+      const lines = runtime.getTextBoxes("line");
+      return {
+        text: lines.map((l) => l.text).join("\n"),
+        lines: lines.map((l) => ({
+          text: l.text,
+          confidence: l.confidence,
+          bbox: {
+            x: l.rect.left,
+            y: l.rect.top,
+            width: l.rect.right - l.rect.left,
+            height: l.rect.bottom - l.rect.top,
+          },
+        })),
+      };
+    } finally {
+      // Keeps the loaded model, drops just this page's image data — matches
+      // `OCREngine.clearImage()`'s own documented intent (no way to shrink wasm
+      // memory otherwise until the whole engine is destroyed).
+      runtime.clearImage();
+      bitmap.close();
     }
   };
 }
@@ -415,6 +507,10 @@ async function initEngine(): Promise<void> {
   // while this is still in flight correctly falls back to the regex/compromise bridge and
   // later files upgrade to neural NER transparently once it resolves.
   void initNerBackend();
+  // Small (~4MB tessdata + a small wasm binary) but same non-blocking treatment for
+  // consistency — a file processed before this resolves just skips OCR for that run,
+  // same degrade-then-upgrade behavior as NER above.
+  void initOcrBackend();
 }
 
 async function processFile(
@@ -517,7 +613,7 @@ async function processFile(
 
       const engine = new XbergEngine(
         { bridgeTimeoutMs: 30000 },
-        { ner: { ner: selectNerBridge(nerRuntime) } },
+        { ner: { ner: selectNerBridge(nerRuntime) }, ocr: { ocr: selectOcrBridge(ocrRuntime) } },
       );
 
       console.log(`[Worker] Calling engine.extract for ${input.name}...`);
