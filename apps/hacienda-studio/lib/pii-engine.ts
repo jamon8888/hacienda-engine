@@ -116,6 +116,17 @@ export type PiiCategoryWire = string | { custom: string };
  * `npm run build:wasm` against current `crates/hacienda-wasm/src`, fall back to plain
  * `process` (model entities silently unused, same as before this function existed) so
  * processing keeps working against today's committed wasm build.
+ *
+ * The `typeof` check alone isn't sufficient, either: a `pkg/` rebuild can regenerate
+ * `hacienda_wasm.js`'s wasm-bindgen JS glue (which declares this export) without the
+ * underlying compiled `hacienda_wasm_bg.wasm` binary actually containing it — e.g. a
+ * feature-flag mismatch between the `wasm-pack` invocation that produced the `.js` and
+ * the one that produced the `.wasm`. That surfaces as `wasm.process_with_model_entities
+ * is not a function` thrown *from inside* the wrapper the `typeof` check just approved
+ * (confirmed live: `hacienda_wasm.js`'s `scan_with_model_entities` wrapper existed and
+ * passed the check, then threw exactly that on the first real call). Catch and fall
+ * back the same way as a missing wrapper, so a half-rebuilt `pkg/` degrades instead of
+ * failing every document.
  */
 export async function redactPiiWithModelEntities(
   text: string,
@@ -129,18 +140,26 @@ export async function redactPiiWithModelEntities(
 ): Promise<PiiPipelineResult> {
   await initPiiEngine();
   const mod = wasmModule as unknown as Record<string, unknown>;
-  if (typeof mod.process_with_model_entities !== "function") {
-    return (await wasmModule!.process(text)) as PiiPipelineResult;
+  if (typeof mod.process_with_model_entities === "function") {
+    try {
+      return (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+        text,
+        modelEntities,
+      )) as PiiPipelineResult;
+    } catch (err) {
+      console.warn(
+        "[pii-engine] process_with_model_entities exists but isn't callable (stale/mismatched wasm build?) — falling back to process():",
+        err,
+      );
+    }
   }
-  return (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
-    text,
-    modelEntities,
-  )) as PiiPipelineResult;
+  return (await wasmModule!.process(text)) as PiiPipelineResult;
 }
 
 /**
  * Detect without rewriting text, using pre-computed model entities (bypasses NER inference).
- * Same committed-wasm-lags-source fallback as `redactPiiWithModelEntities` above.
+ * Same committed-wasm-lags-source, wrapper-exists-but-binary-doesn't fallback as
+ * `redactPiiWithModelEntities` above.
  */
 export async function scanForPiiWithModelEntities(
   text: string,
@@ -154,13 +173,20 @@ export async function scanForPiiWithModelEntities(
 ): Promise<PiiPipelineResult> {
   await initPiiEngine();
   const mod = wasmModule as unknown as Record<string, unknown>;
-  if (typeof mod.scan_with_model_entities !== "function") {
-    return (await wasmModule!.scan(text)) as PiiPipelineResult;
+  if (typeof mod.scan_with_model_entities === "function") {
+    try {
+      return (await (mod.scan_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+        text,
+        modelEntities,
+      )) as PiiPipelineResult;
+    } catch (err) {
+      console.warn(
+        "[pii-engine] scan_with_model_entities exists but isn't callable (stale/mismatched wasm build?) — falling back to scan():",
+        err,
+      );
+    }
   }
-  return (await (mod.scan_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
-    text,
-    modelEntities,
-  )) as PiiPipelineResult;
+  return (await wasmModule!.scan(text)) as PiiPipelineResult;
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple

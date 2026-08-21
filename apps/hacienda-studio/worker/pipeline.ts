@@ -15,6 +15,8 @@ import {
   WasmOcrConfig,
   WasmNerConfig,
   WasmNerBackendKind,
+  WasmImageExtractionConfig,
+  WasmSecurityLimits,
 } from "@xberg-io/xberg-wasm";
 import initWasm from "@xberg-io/xberg-wasm";
 // Let the bundler resolve and emit the binary. The previous absolute
@@ -36,6 +38,7 @@ import {
   redactPiiWithModelEntities,
   scanForPiiWithModelEntities,
   type PiiEntity,
+  type PiiCategoryWire,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
@@ -67,6 +70,40 @@ export { relativeEntityLink, renderAnnotatedMarkdown };
 // file's header for why the split exists (the worker needs a "build-zip" round trip
 // that runs independently of processFiles(), not just once at the end of it).
 export { buildEntityFile, buildGlossaryIndex };
+
+// Browser/wasm32-specific extraction tuning. xberg's own OCR memory throttle
+// (`adapt_batch_size_to_memory`) never activates in the browser build (its
+// `get_available_memory()` only implements the syscall for native Linux/macOS), so
+// these are the mitigations xberg's docs actually expose for wasm — see
+// docs-site/src/content/docs/guides/ocr.mdx and reference/api-wasm.md in the xberg repo.
+
+// xberg's own OCR troubleshooting guide recommends 150 DPI as the floor for "faster
+// throughput" / "significantly less memory" on large PDFs (300 is xberg's balanced
+// default, 600 is accuracy-first). `maxDpi` is capped at the same value so
+// `autoAdjustDpi` (on by default) can never escalate back up to a heavier DPI for a
+// low-quality page — that escalation is exactly the unbounded-memory path we're
+// avoiding. `minDpi` is left at its default floor: autoAdjustDpi lowering further when
+// a page doesn't need 150 only saves more memory, never costs anything.
+const OCR_TARGET_DPI = 150;
+
+// A native server can reasonably wait out the default 600s extraction timeout; a
+// browser tab blocking a worker for 10 minutes on one pathological upload is a bad UX
+// on its own, independent of memory. 90s is generous for OCR on a normal-sized upload
+// (page-count-limited by `checkPdfPageSafety` in lib/asset-loader.ts) while still
+// failing a stuck extraction back to the user instead of hanging indefinitely.
+const EXTRACTION_TIMEOUT_SECS = 90n;
+
+// Lowered from xberg's native-oriented defaults (100MB / 500MB / 50MB) to match this
+// app's own 50MB upload cap (`validateFile` in lib/asset-loader.ts) — a single upload
+// can never legitimately need more extracted-text growth, archive expansion, or
+// embedded-file size than the cap it was admitted under, so these bound worst-case
+// memory for a zip-bomb-style or otherwise adversarial file without affecting any
+// normal document.
+const SECURITY_LIMITS = {
+  maxContentSize: 30 * 1024 * 1024,
+  maxArchiveSize: 100 * 1024 * 1024,
+};
+const MAX_EMBEDDED_FILE_BYTES = 20n * 1024n * 1024n;
 
 let wasmReady: Promise<void> | null = null;
 
@@ -200,52 +237,64 @@ function isRawNerEntity(value: unknown): value is RawNerEntity {
 }
 
 /**
- * Map NER category (from xberg/entity glossary) to PII category (for hacienda-wasm).
- * Mirrors hacienda-core/src/pii/ner.rs to_pii_category function.
+ * Map NER category (from xberg/entity glossary) to the wire format
+ * `hacienda-core`'s `PiiCategory` enum actually deserializes — mirrors
+ * `hacienda-core/src/pii/ner.rs`'s `to_pii_category` function exactly, variant for
+ * variant. `PiiCategory` derives `#[serde(rename_all = "snake_case")]`: every unit
+ * variant is a bare lowercase-snake_case string (`"phone_number"`, `"full_name"`, ...),
+ * but the one tuple variant, `Custom(String)`, is externally tagged as
+ * `{ custom: "<label>" }` — a bare string there does not deserialize (confirmed via a
+ * live upload after the Aug 2026 hacienda-wasm rebuild: `process_with_model_entities`
+ * had never actually run against real model entities before that rebuild, since the
+ * stale committed `pkg/` output didn't export it yet — this category-shape mismatch
+ * was dormant the whole time, masked by that staleness, and only surfaced once the
+ * function started being called for real).
  */
-function nerCategoryToPiiCategory(nerCategory: string): string {
+function nerCategoryToPiiCategory(nerCategory: string): PiiCategoryWire {
   const lower = nerCategory.toLowerCase();
   switch (lower) {
     case "person":
-      return "Person";
+      return "person";
     case "organization":
-      return "Organization";
+      return "organization";
     case "location":
-      return "Address";
+      return "address";
     case "email":
-      return "Email";
+      return "email";
     case "phone":
-      return "PhoneNumber";
+      return "phone_number";
     case "url":
-      return "Url";
+      return "url";
     case "date":
-      return "Date";
+      return { custom: "Date" };
     case "time":
-      return "Time";
+      return { custom: "Time" };
     case "money":
-      return "Money";
+      return { custom: "Money" };
     case "percent":
-      return "Percent";
+      return { custom: "Percent" };
     case "ssn":
     case "social_security_number":
-      return "Ssn";
+      return "ssn";
     case "credit_card":
     case "creditcard":
-      return "CreditCard";
+      return "credit_card";
     case "iban":
-      return "Iban";
+      return "iban";
     case "passport":
     case "passport_number":
-      return "PassportNumber";
+      return "passport_number";
     case "address":
-      return "Address";
+      return "address";
     case "full_name":
     case "fullname":
     case "name":
-      return "FullName";
+      return "full_name";
     default:
-      // Unknown categories pass through as custom
-      return nerCategory;
+      // Unknown categories pass through as custom, matching `to_pii_category`'s
+      // `_ => PiiCategory::Custom(label.clone())` fallback — the *original* NER
+      // category text (not lowercased), since that's what Rust's `label.clone()` uses.
+      return { custom: nerCategory };
   }
 }
 
@@ -428,6 +477,38 @@ async function processFile(
       extractConfig.ocr = WasmOcrConfig.default();
       extractConfig.ocr.backend = "tesseract-wasm";
       extractConfig.ocr.language = ["eng"];
+
+      extractConfig.images = WasmImageExtractionConfig.default();
+      extractConfig.images.targetDpi = OCR_TARGET_DPI;
+      extractConfig.images.maxDpi = OCR_TARGET_DPI;
+
+      extractConfig.extractionTimeoutSecs = EXTRACTION_TIMEOUT_SECS;
+      extractConfig.maxEmbeddedFileBytes = MAX_EMBEDDED_FILE_BYTES;
+      extractConfig.securityLimits = WasmSecurityLimits.default();
+      extractConfig.securityLimits.maxContentSize = SECURITY_LIMITS.maxContentSize;
+      extractConfig.securityLimits.maxArchiveSize = SECURITY_LIMITS.maxArchiveSize;
+
+      // Set by `lib/asset-loader.ts`'s `checkPdfPageSafety` for documents whose page
+      // count makes per-page OCR raster+text accumulation a memory risk — xberg-wasm's
+      // own OCR batch-size throttle never actually shrinks anything in the browser
+      // build (`adapt_batch_size_to_memory`'s `get_available_memory()` always returns 0
+      // on wasm32), so nothing else caps this. Native text extraction is unaffected.
+      //
+      // `extractConfig.disableOcr` only turns off OCR *text recognition* — it does not
+      // stop `extractConfig.images` from rasterizing every page at `OCR_TARGET_DPI`
+      // regardless (`extractImages`/`includePageRasters` are independent flags on
+      // `WasmImageExtractionConfig`, defaulted on above). For a long, image-heavy PDF
+      // that rasterization is the same memory spike the page-count check exists to
+      // avoid, and left unthrottled it traps the whole wasm module (`RuntimeError:
+      // unreachable executed`, confirmed live on a 16MB/many-page scanned PDF) instead
+      // of failing gracefully — so gate it behind the same safety flag.
+      if (input.disableOcr) {
+        extractConfig.disableOcr = true;
+        extractConfig.images.extractImages = false;
+        extractConfig.images.includePageRasters = false;
+        extractConfig.images.runOcrOnImages = false;
+        console.log(`[Worker] OCR and page rasterization disabled for ${input.name} (page-count safety limit)`);
+      }
 
       const nerConfig = WasmNerConfig.default();
       nerConfig.backend = WasmNerBackendKind.Onnx;

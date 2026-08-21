@@ -4,6 +4,15 @@ export interface FileInput {
   name: string;
   bytes: ArrayBuffer;
   type: string;
+  /**
+   * Set by `lib/asset-loader.ts`'s `checkPdfPageSafety` for PDFs whose page count makes
+   * full-document OCR a memory risk (xberg-wasm's OCR batch-size throttle,
+   * `adapt_batch_size_to_memory`, is a no-op in the browser build — see that function's
+   * `get_available_memory()`, which only implements the syscall for native Linux/macOS
+   * targets and always returns 0 on wasm32). Native text extraction still runs; only the
+   * scanned-page OCR fallback is skipped for this file.
+   */
+  disableOcr?: boolean;
 }
 
 export interface Entity {

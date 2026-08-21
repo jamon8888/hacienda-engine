@@ -425,6 +425,77 @@ export function validateFile(file: File): { valid: boolean; error?: string } {
   return { valid: true };
 }
 
+/**
+ * Above this page count, a PDF is rejected outright rather than sent to the worker.
+ * Real business documents (contracts, reports, decks) essentially never reach this;
+ * scanned books/archives routinely do, and those are exactly the documents whose
+ * per-page OCR raster + text results accumulate for the whole file with no cap (see
+ * `disableOcr` on `FileInput`).
+ */
+const HARD_MAX_PDF_PAGES = 400;
+
+/**
+ * Above this page count, native text extraction still runs but the OCR fallback for
+ * scanned/low-quality pages is skipped for this file — xberg-wasm's own OCR batch-size
+ * throttle (`adapt_batch_size_to_memory` in the `xberg` crate) never actually shrinks
+ * anything in the browser build, so nothing else caps per-page OCR memory as page count
+ * grows. Chosen well below `HARD_MAX_PDF_PAGES` so a document only large enough to be
+ * risky, not pathological, still gets processed instead of rejected.
+ */
+const OCR_SAFE_PAGE_LIMIT = 75;
+
+export interface PdfPageSafety {
+  valid: boolean;
+  error?: string;
+  /** True when this file's OCR fallback should be skipped for memory safety. */
+  disableOcr?: boolean;
+  /** Set alongside `disableOcr: true`, for surfacing to the user. */
+  warning?: string;
+}
+
+/**
+ * Checks a PDF's page count via the pdfium engine `lib/pdf-thumbnail-utils.ts` already
+ * loads for thumbnails (no extra dependency), and decides whether the document is safe
+ * to OCR in-browser. Non-PDF files, and PDFs pdfium fails to open (corrupt file, unusual
+ * encoding, etc.), pass through unchanged — this is a memory-safety guard on top of
+ * `validateFile`, not a replacement for the extractor's own error handling, so a pdfium
+ * failure here fails open rather than blocking an upload the real extraction might
+ * still handle fine.
+ */
+export async function checkPdfPageSafety(file: File): Promise<PdfPageSafety> {
+  const type = file.type || "";
+  if (!type.startsWith("application/pdf") && !file.name.toLowerCase().endsWith(".pdf")) {
+    return { valid: true };
+  }
+
+  let url: string | null = null;
+  try {
+    const { getPdfPageCount } = await import("./pdf-thumbnail-utils");
+    url = URL.createObjectURL(file);
+    const pageCount = await getPdfPageCount(url);
+
+    if (pageCount > HARD_MAX_PDF_PAGES) {
+      return {
+        valid: false,
+        error: `PDF has ${pageCount} pages (limit ${HARD_MAX_PDF_PAGES}) — too large to process safely in-browser.`,
+      };
+    }
+    if (pageCount > OCR_SAFE_PAGE_LIMIT) {
+      return {
+        valid: true,
+        disableOcr: true,
+        warning: `${file.name} has ${pageCount} pages — OCR for scanned pages was skipped to keep memory use safe; native text was still extracted.`,
+      };
+    }
+    return { valid: true };
+  } catch (e) {
+    console.warn("[asset-loader] PDF page-count check failed, proceeding without it:", e);
+    return { valid: true };
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
 export const SUPPORTED_MIME_PREFIXES = [
   "application/pdf",
   "application/vnd.openxmlformats-officedocument",
