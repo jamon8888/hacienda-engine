@@ -420,10 +420,22 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     async function hydrate() {
-      const [persistedDocs, persistedEdits] = await Promise.all([
-        listDocuments(),
-        listEditedFindings(),
-      ]);
+      // Non-fatal: IndexedDB can be unavailable (private browsing) or over quota, and
+      // this is a read-only convenience (repopulating the library from a previous
+      // session) — not something the Studio route should crash on. An uncaught
+      // rejection here would otherwise be unhandled, since `hydrate()` below is called
+      // without awaiting or attaching a `.catch()` of its own.
+      let persistedDocs: Awaited<ReturnType<typeof listDocuments>>;
+      let persistedEdits: Awaited<ReturnType<typeof listEditedFindings>>;
+      try {
+        [persistedDocs, persistedEdits] = await Promise.all([
+          listDocuments(),
+          listEditedFindings(),
+        ]);
+      } catch (e) {
+        console.warn("[App] Failed to hydrate document library from IndexedDB:", e);
+        return;
+      }
       if (cancelled || persistedDocs.length === 0) return;
       setResults((prev) => {
         const existing = new Set(prev.map((r) => r.name));
