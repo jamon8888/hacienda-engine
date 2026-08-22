@@ -17,8 +17,45 @@ export default {
       console.error('[hacienda-artifacts] ctx.fs unavailable; RPCs will fail')
     }
 
+    // `fsSvc.resolve` only uses `cwd` as a default base for RELATIVE paths — it
+    // is not a containment boundary (dsh-fs-local's own docs: "a resolution
+    // default, NOT a containment boundary"), and reads are never fenced by a
+    // sandboxing backend either (only writeText/editText are). An absolute path
+    // or a `../` traversal from the client would otherwise resolve straight
+    // through to any host file readable by the process. `contains` gives us
+    // the same canonical-identity check the write-side sandbox uses, so every
+    // RPC below rejects a target outside the workspace root before touching it.
+    let rootTargetPromise = null
+    function workspaceRoot() {
+      if (!rootTargetPromise) rootTargetPromise = fsSvc.resolve('.', {})
+      return rootTargetPromise
+    }
+
     async function resolvePath(p) {
-      return fsSvc.resolve(p, {})
+      const target = await fsSvc.resolve(p, {})
+      const root = await workspaceRoot()
+      if (!fsSvc.contains(root, target)) {
+        const err = new Error('path escapes the workspace root')
+        err.code = 'FS_OUTSIDE_WORKSPACE'
+        throw err
+      }
+      return target
+    }
+
+    // Both `read-file-text` and `scan-artifacts` read the same file's full text
+    // independently (the client fires them back-to-back for a preview), and
+    // `readText` has no size cap of its own — a large file would otherwise be
+    // buffered twice with no bound. One shared limit, checked via `stat` before
+    // either read touches file content.
+    const MAX_TEXT_READ_BYTES = 10 * 1024 * 1024
+    async function readTextBounded(target) {
+      const info = await fsSvc.stat(target)
+      if (info && typeof info.size === 'number' && info.size > MAX_TEXT_READ_BYTES) {
+        const err = new Error('file too large to preview (' + info.size + ' bytes)')
+        err.code = 'FS_TOO_LARGE'
+        throw err
+      }
+      return fsSvc.readText(target)
     }
 
     function entryKind(e) {
@@ -57,7 +94,7 @@ export default {
       const path = args && args.path
       if (!path) return { error: 'missing path' }
       try {
-        return { path, text: await fsSvc.readText(await resolvePath(path)) }
+        return { path, text: await readTextBounded(await resolvePath(path)) }
       } catch (err) {
         return { error: String((err && err.message) || err) }
       }
@@ -110,7 +147,7 @@ export default {
       try {
         const isTextLike = !/(\.(png|jpe?g|gif|webp|svg|pdf|docx|xlsx|pptx|zip|gz))$/i.test(path)
         if (!isTextLike) return { path, spans: [], binary: true }
-        const text = await fsSvc.readText(await resolvePath(path))
+        const text = await readTextBounded(await resolvePath(path))
         return { path, spans: scanText(text), detector: 'regex-feedback-tier' }
       } catch (err) {
         return { error: String((err && err.message) || err) }

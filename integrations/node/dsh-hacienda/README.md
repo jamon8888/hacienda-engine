@@ -30,9 +30,13 @@ hacienda-engine's harness plugin rows so they survive a web-bundle rebuild.
 To ship the browser Artifacts view, the client entry (lib/client.js) must be bundled
 into the artifact the harness's `dsh-client-modules` serves under
 `/plugins/hacienda-artifacts/client.js`. That is the C3 web build
-(`pnpm run build:web` over this package's client entry + the DSH web frontend).
+(`pnpm run build:web` over this package's client entry + the DSH web frontend) —
+no such build script exists yet in this package.
 Until that build runs, the Host RPCs and `scan_folder` tool still work; the browser
-tab is the last slice to light up.
+tab is the last slice to light up. Enabling the tab additionally requires
+uncommenting the `dsh.client` roster entry at the bottom of `cordis.patch.yml`
+(it ships commented out on purpose — activating it before the build artifact
+exists gives `dsh.client` a plugin id with nothing on disk to scan).
 
 See `superpowers/plans/2026-08-18-dsh-hacienda-plugin-implementation.md` (Phase C3)
 and `docs/superpowers/specs/2026-08-18-M2-dsh-plugin-export-and-assure.md` §13–§16.

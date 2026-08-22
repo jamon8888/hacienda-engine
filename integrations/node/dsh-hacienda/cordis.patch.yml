@@ -57,8 +57,12 @@
 # The "Files / Artifacts" view's browser code ships as a prebuilt bundle served
 # by dsh-client-modules under /plugins/<id>/client.js. That bundle is produced
 # by the C3 web build (`pnpm run build:web` over @hacienda/dsh-hacienda's client
-# entry, lib/client.js). The roster row below is declared so the modules node
-# half scans it once the build emits the artifact; a build that has not run yet
-# yields no browser UI (the Host RPCs and scan_folder tool work regardless).
+# entry, lib/client.js) — no such build script exists yet, so no bundle exists
+# yet either. The roster row below is a YAML COMMENT, not a disabled row: it is
+# not parsed at all until a human uncomments it, and dsh.client would fail to
+# scan a plugin id with no artifact on disk. Do not uncomment this until the C3
+# web build lands and produces that artifact (see README.md "Build / C3 path");
+# until then the Host RPCs and scan_folder tool work, but the browser tab does
+# not appear.
 # - dsh.client:
 #     - hacienda-artifacts: '@hacienda/dsh-hacienda'

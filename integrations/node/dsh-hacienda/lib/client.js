@@ -46,11 +46,13 @@ export default {
     const DEFAULT = { glyph: '•', color: '#9ca3af' }
 
     function metaFor(name, isFolder) {
-      if (isFolder) return FOLDER
-      if (IMG_RE.test(name)) return { glyph: 'IMG', color: '#be185d' }
+      if (isFolder) return { ...FOLDER, kind: 'Folder' }
+      if (IMG_RE.test(name)) return { glyph: 'IMG', color: '#be185d', kind: 'Image' }
       const dot = name.lastIndexOf('.')
       const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
-      return KIND_META[ext] || DEFAULT
+      const known = KIND_META[ext]
+      if (known) return { ...known, kind: ext.toUpperCase() }
+      return { ...DEFAULT, kind: ext ? ext.toUpperCase() : 'File' }
     }
     function isText(name) {
       const dot = name.lastIndexOf('.')
@@ -129,13 +131,23 @@ export default {
       const [preview, setPreview] = React.useState(null) // { path, kind:'text'|'img'|'download', text?, url? }
       const [err, setErr] = React.useState(null)
 
+      // `load` and `openFile` both fire host RPCs whose responses can resolve
+      // out of order (a slow `list-workspace` for a folder the user already
+      // navigated away from, or an overlapping `openFile` on two rows). Every
+      // async call bumps this ref and stamps its own request number; a
+      // response only touches state when it's still the most recent request,
+      // so a stale response can no longer overwrite newer state.
+      const requestRef = React.useRef(0)
+
       const load = React.useCallback(function (path) {
+        const request = ++requestRef.current
         setState({ loading: true, items: [], error: null, path: '' })
         setPreview(null)
         setErr(null)
         host
           .call('list-workspace', { path })
           .then(function (res) {
+            if (request !== requestRef.current) return
             setState({
               loading: false,
               items: (res && res.items) || [],
@@ -144,6 +156,7 @@ export default {
             })
           })
           .catch(function (e) {
+            if (request !== requestRef.current) return
             setState({ loading: false, items: [], error: String((e && e.message) || e), path })
           })
       }, [])
@@ -152,20 +165,28 @@ export default {
       }, [target, load])
 
       function openFile(item) {
+        const request = ++requestRef.current
         setErr(null)
         if (IMG_RE.test(item.name || item.path)) {
           host
             .call('file-download-url', { path: item.path })
             .then(function (r) {
+              if (request !== requestRef.current) return
+              if (r && r.error) {
+                setErr(r.error)
+                return
+              }
               setPreview(r && r.url ? { path: item.path, kind: 'img', url: r.url } : { path: item.path, kind: 'download', url: r && r.url })
             })
             .catch(function (e) {
+              if (request !== requestRef.current) return
               setErr(String((e && e.message) || e))
             })
         } else if (isText(item.name || item.path)) {
           host
             .call('read-file-text', { path: item.path })
             .then(function (r) {
+              if (request !== requestRef.current) return
               if (r && r.error) {
                 setErr(r.error)
                 return
@@ -174,22 +195,31 @@ export default {
               host
                 .call('scan-artifacts', { path: item.path })
                 .then(function (s) {
+                  if (request !== requestRef.current) return
                   setPreview({ path: item.path, kind: 'text', text: r.text, spans: (s && s.spans) || [] })
                 })
                 .catch(function () {
+                  if (request !== requestRef.current) return
                   setPreview({ path: item.path, kind: 'text', text: r.text, spans: [] })
                 })
             })
             .catch(function (e) {
+              if (request !== requestRef.current) return
               setErr(String((e && e.message) || e))
             })
         } else {
           host
             .call('file-download-url', { path: item.path })
             .then(function (r) {
+              if (request !== requestRef.current) return
+              if (r && r.error) {
+                setErr(r.error)
+                return
+              }
               setPreview({ path: item.path, kind: 'download', url: r && r.url })
             })
             .catch(function (e) {
+              if (request !== requestRef.current) return
               setErr(String((e && e.message) || e))
             })
         }
@@ -306,17 +336,24 @@ export default {
             null,
             sorted.map(function (item) {
               const m = metaFor(item.name || item.path, item.kind === 'folder')
+              const activate = function () {
+                if (item.kind === 'folder') setTarget(item.path)
+                else openFile(item)
+              }
               return React.createElement(
                 'tr',
                 {
                   key: item.path,
-                  onClick: function () {
-                    if (item.kind === 'folder') setTarget(item.path)
-                    else openFile(item)
-                  },
-                  onDoubleClick: function () {
-                    if (item.kind === 'folder') setTarget(item.path)
-                    else openFile(item)
+                  tabIndex: 0,
+                  role: 'button',
+                  'aria-label': item.name,
+                  onClick: activate,
+                  onDoubleClick: activate,
+                  onKeyDown: function (e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      activate()
+                    }
                   },
                   style: { cursor: 'pointer' },
                 },
