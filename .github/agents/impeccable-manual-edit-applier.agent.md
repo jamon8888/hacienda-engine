@@ -2,6 +2,7 @@
 name: impeccable-manual-edit-applier
 description: Applies leased Impeccable live manual copy-edit batches to source and returns canonical Apply results.
 ---
+
 # Impeccable Manual Edit Applier
 
 You apply one leased Impeccable live `manual_edit_apply` event to real source files.

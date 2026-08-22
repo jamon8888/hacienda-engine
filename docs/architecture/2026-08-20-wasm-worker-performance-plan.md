@@ -60,6 +60,7 @@ and run inference independently. This means two wasm heaps holding the same
 weights, and two forward passes per document for no functional benefit.
 
 **Plan:**
+
 - Consolidate on a single loaded model instance per worker. Either:
   - (a) Have `hacienda-wasm`'s PII pipeline consume the NER output already
     produced by the entity-glossary pass instead of re-running inference, or
@@ -83,6 +84,7 @@ merge them safely; no new dependencies.
 is dominated by inference compute, not download size.
 
 **Plan:**
+
 - Change `opt-level` from `"z"` to `3`.
 - Add `lto = "fat"` to the same profile block.
 - Rebuild via `npm run build:wasm` and confirm the build still completes
@@ -124,6 +126,7 @@ Replace the sequential `for` loop in `processFiles`
 dedicated workers that round-robin files.
 
 **Plan:**
+
 - Size the pool by **available RAM ÷ per-worker model footprint**, not
   `navigator.hardwareConcurrency` — each worker holds a full model instance,
   so pooling before Tier 1.1 lands would double-count the duplication
@@ -159,6 +162,7 @@ within a single large document (as opposed to Tier 2's across-document
 parallelism), which matters most for very large files.
 
 **Plan (if pursued):**
+
 - Requires a nightly Rust toolchain with `std` rebuilt for
   `wasm32-unknown-unknown` with `atomics`/`bulk-memory`.
 - Requires COOP/COEP cross-origin isolation, which is already configured in
@@ -193,4 +197,3 @@ fuel-limited execution is a specific requirement.
 4. Tier 2.1 (worker pool) if batch throughput is still the bottleneck.
 5. Tier 3.1 (threading) only if large single documents remain slow after
    Tier 1/2, given its cost and the design change it requires.
-
