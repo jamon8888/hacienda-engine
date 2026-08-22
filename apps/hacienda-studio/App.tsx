@@ -6,6 +6,7 @@ import { Landing } from "./pages/Landing";
 import { Assets } from "./pages/Assets";
 import { Studio } from "./pages/Studio";
 import { DocumentDetail } from "./pages/DocumentDetail";
+import { Settings } from "./pages/Settings";
 
 // Lazy, not a static import like the other pages: `pages/Documents.tsx` pulls in
 // `components/extend/file-system.tsx`, a large in-progress file-browser view whose
@@ -85,7 +86,7 @@ function wrapRedactedBody(result: ProcessedFile, body: string): string {
   return frontmatter + "\n" + body + glossary;
 }
 
-type Route = "landing" | "assets" | "studio";
+type Route = "landing" | "assets" | "studio" | "settings";
 type StudioView = "upload" | "documents" | "document";
 
 export function App() {
@@ -105,7 +106,6 @@ export function App() {
   const [progress, setProgress] = useState<Map<string, ProgressUpdate>>(new Map());
   const [results, setResults] = useState<ProcessedFile[]>([]);
   const [config, setConfig] = useState<AppConfig>({ ...DEFAULT_CONFIG });
-  const [showConfig, setShowConfig] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Toggles the *same* `#file-input` element between file- and directory-picking rather
   // than adding a second `<input type="file">` — every e2e test's `input[type="file"]`
@@ -694,15 +694,9 @@ export function App() {
           <nav aria-label="App sections" className="flex items-center gap-1">
             {navItem("Studio", route === "studio", goToStudio)}
             {navItem("Assets", route === "assets", () => setRoute("assets"))}
+            {navItem("Settings", route === "settings", () => setRoute("settings"))}
           </nav>
         </div>
-        <button
-          className="config-toggle rounded-md bg-muted px-4 py-2 text-sm text-foreground transition-colors hover:bg-primary hover:text-primary-foreground"
-          aria-expanded={showConfig}
-          onClick={() => setShowConfig((v) => !v)}
-        >
-          ⚙ Settings
-        </button>
       </header>
 
       {error && (
@@ -745,6 +739,10 @@ export function App() {
 
       {route === "assets" && (
         <Assets assets={assets} nerModelDegraded={nerModelDegraded} nerModelProgress={nerModelProgress} onContinue={goToStudio} />
+      )}
+
+      {route === "settings" && (
+        <Settings config={config} onChange={setConfig} />
       )}
 
       {route === "studio" && studioView === "upload" && (
@@ -797,9 +795,6 @@ export function App() {
         />
       )}
 
-      {showConfig && (
-        <ConfigPanel config={config} onChange={setConfig} onDone={() => setShowConfig(false)} />
-      )}
       <Toaster />
     </div>
   );
