@@ -18,18 +18,7 @@ export function Settings({ config, onChange }: Props) {
   const storageTotal = 10_000; // MB
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="border-b border-border bg-card px-6 py-3">
-        <nav className="mx-auto flex max-w-6xl items-center justify-between">
-          <div className="font-semibold">Hacienda Studio</div>
-          <div className="flex items-center gap-4 text-sm">
-            <a className="hover:underline">Studio</a>
-            <a className="hover:underline">Ressources</a>
-            <a className="rounded-md bg-muted px-3 py-1">Paramètres</a>
-          </div>
-        </nav>
-      </header>
-      <main className="mx-auto w-full max-w-3xl px-6 py-12">
+    <main className="mx-auto w-full max-w-3xl px-6 py-12">
         <h1 className="text-2xl font-semibold">Paramètres</h1>
         <p className="mt-1 text-sm text-muted-foreground">Valeurs par défaut pour les nouveaux lots, plus tout ce qui est mis en cache sur cet appareil.</p>
 
@@ -114,6 +103,5 @@ export function Settings({ config, onChange }: Props) {
           </div>
         </section>
       </main>
-    </div>
   );
 }
