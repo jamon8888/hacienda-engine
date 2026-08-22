@@ -25,6 +25,7 @@ hacienda extracts text and structure from a wide range of document formats and t
 | **Usage Metering**            | Per-principal entity/byte counts from audit chain                           |
 | **Studio** *(in development)* | Browser workspace for local, zero-egress redaction — in-browser extraction/NER, knowledge-graph export |
 | **Vertical NER**              | GLiNER2 base + per-vertical LoRA adapters (business_law taxonomy)           |
+| **DeepSeek Harness plugin** *(bundle)* | Artifacts view (browse/preview/download workspace files, regex-PII-highlighted previews) + Ollama and Exa search rows for DSH profiles (`integrations/node/dsh-hacienda`) |
 
 ## Quick Start
 
@@ -407,6 +408,7 @@ gh workflow run publish.yaml -f tag=v0.2.0
 | `apps/hacienda-studio`     | React 18 + Vite + shadcn/ui + CodeMirror 6 browser app  |
 | `sdks/python`              | Python client SDK (`hacienda-sdk` on PyPI)              |
 | `sdks/typescript`          | TypeScript client SDK (`@hacienda-engine/sdk` on npm)   |
+| `integrations/node/dsh-hacienda` | DeepSeek Harness bundle: Artifacts view (host + client), Ollama/Exa rows |
 
 ## Bindings
 
