@@ -693,8 +693,8 @@ export function App() {
           </button>
           <nav aria-label="App sections" className="flex items-center gap-1">
             {navItem("Studio", route === "studio", goToStudio)}
-            {navItem("Assets", route === "assets", () => setRoute("assets"))}
-            {navItem("Settings", route === "settings", () => setRoute("settings"))}
+            {navItem("Ressources", route === "assets", () => setRoute("assets"))}
+            {navItem("Paramètres", route === "settings", () => setRoute("settings"))}
           </nav>
         </div>
       </header>

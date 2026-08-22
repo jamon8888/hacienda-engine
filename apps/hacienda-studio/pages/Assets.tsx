@@ -22,20 +22,20 @@ const ASSET_INFO: Record<
   { label: string; description: string; sizeMB: number; optional: boolean }
 > = {
   xbergWasm: {
-    label: "Pipeline runtime",
-    description: "Document parsing and redaction core",
+    label: "Runtime du pipeline",
+    description: "Cœur d'analyse et de rédaction des documents",
     sizeMB: 48,
     optional: false,
   },
   nerModel: {
-    label: "Entity recognition model",
-    description: "Named-entity model for person, org and location spans",
+    label: "Modèle de reconnaissance d'entités",
+    description: "Modèle d'entités nommées pour personnes, organisations et lieux",
     sizeMB: 1170,
     optional: true,
   },
   tessdata: {
-    label: "Optical recognition data",
-    description: "English language data for scanned pages",
+    label: "Données de reconnaissance optique",
+    description: "Données en anglais pour les pages scannées",
     sizeMB: 22,
     optional: true,
   },
@@ -56,10 +56,9 @@ export function Assets({
 
   return (
     <div className="flex flex-1 flex-col px-6 py-16">
-      <h1 className="text-2xl font-semibold">Prepare the workspace</h1>
+      <h1 className="text-2xl font-semibold">Préparer l'espace de travail</h1>
       <p className="mt-2 max-w-lg text-muted-foreground">
-        These assets are cached on your device so processing runs offline. Cached assets
-        are skipped automatically on future visits.
+        Ces ressources sont mises en cache sur votre appareil pour un traitement hors ligne. Les ressources mises en cache sont automatiquement ignorées lors des visites futures.
       </p>
 
       <div className="mt-8 flex flex-col gap-3">
@@ -88,7 +87,7 @@ export function Assets({
                 </span>
                 {info.optional && (
                   <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    Optional
+                    Optionnel
                   </span>
                 )}
               </div>
@@ -101,12 +100,12 @@ export function Assets({
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
                 {degraded
-                  ? "Unavailable — falling back to regex-only detection"
+                  ? "Indisponible — retour à la détection regex uniquement"
                   : ready
-                    ? "Ready"
+                    ? "Prêt"
                     : isDownloading && nerModelProgress?.totalBytes
-                      ? `Downloading… ${progressPct}%`
-                      : "Downloading…"}
+                      ? `Téléchargement… ${progressPct}%`
+                      : "Téléchargement…"}
               </p>
             </div>
           );
@@ -115,11 +114,11 @@ export function Assets({
 
       <div className="mt-6 flex items-center gap-3">
         <Button size="lg" disabled={!allReady} onClick={onContinue}>
-          {allReady ? "Open the studio" : "Loading assets…"}
+          {allReady ? "Ouvrir le studio" : "Chargement des ressources…"}
         </Button>
         {!allReady && (
           <Button size="lg" variant="outline" onClick={onContinue}>
-            Continue without loading
+            Continuer sans charger
           </Button>
         )}
       </div>

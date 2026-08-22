@@ -4,42 +4,42 @@ import { Button } from "@/components/ui/button";
 const FEATURES = [
   {
     icon: Lock,
-    title: "Extract anything",
-    body: "PDF, DOCX, XLSX, PPTX, CSV and plain text are converted to clean markdown with a layout map.",
+    title: "Extraire n'importe quoi",
+    body: "PDF, DOCX, XLSX, PPTX, CSV et texte brut sont convertis en markdown propre avec une carte de mise en page.",
   },
   {
     icon: EyeOff,
-    title: "Find personal data",
-    body: "PII is surfaced with confidence scores, tuned by sensitivity and vertical presets.",
+    title: "Trouver les données personnelles",
+    body: "Les PII sont affichées avec des scores de confiance, ajustés par sensibilité et presets verticaux.",
   },
   {
     icon: Layers,
-    title: "Redact your way",
-    body: "Mask, hash, pseudonymize or remove each span — previewed live against the original.",
+    title: "Masquer à votre façon",
+    body: "Masquez, hachez, pseudonymisez ou supprimez chaque portion — aperçu en direct contre l'original.",
   },
   {
     icon: ScanEye,
-    title: "Review and export",
-    body: "Edit the redacted markdown by hand, then export a zip with originals, redactions and findings.",
+    title: "Revoir et exporter",
+    body: "Modifiez le markdown masqué à la main, puis exportez une archive avec originaux, masquages et résultats.",
   },
   {
     icon: ShieldCheck,
-    title: "Tamper-evident trail",
-    body: "Every redaction appends to a hash-chained local audit log you can verify at any time.",
+    title: "Traçabilité inviolable",
+    body: "Chaque masquage s'ajoute à un journal d'audit local chaîné par hachage que vous pouvez vérifier à tout moment.",
   },
   {
     icon: Server,
-    title: "No server, no account",
-    body: "Documents are processed in a Web Worker and cached in IndexedDB on your own device.",
+    title: "Pas de serveur, pas de compte",
+    body: "Les documents sont traités dans un Web Worker et mis en cache dans IndexedDB sur votre appareil.",
   },
 ];
 
 import type { OnboardingState } from "@/lib/types";
 
 const ASSET_LABELS: Record<keyof OnboardingState["assets"], string> = {
-  xbergWasm: "Pipeline runtime",
-  nerModel: "Entity recognition model",
-  tessdata: "Optical recognition data",
+  xbergWasm: "Runtime du pipeline",
+  nerModel: "Modèle de reconnaissance d'entités",
+  tessdata: "Données de reconnaissance optique",
 };
 
 export function Landing({
@@ -60,7 +60,7 @@ export function Landing({
       <section className="border-b border-border px-6 py-24">
         <div className="mx-auto max-w-3xl">
           <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground">
-            <Lock className="size-3" /> Local-first pipeline · zero uploads
+            <Lock className="size-3" /> Pipeline local · zéro upload
           </span>
           {/* Asset loading progress on first visit - single bar */}
           {(!assets.xbergWasm || !assets.nerModel || !assets.tessdata) && (() => {
@@ -100,23 +100,23 @@ export function Landing({
             );
           })()}
           <h1 className="mt-6 text-5xl font-semibold leading-tight tracking-tight">
-            Redact sensitive documents without letting them leave your laptop.
+            Masquez les documents sensibles sans qu'ils quittent votre ordinateur.
           </h1>
           <p className="mt-6 max-w-xl text-base leading-relaxed text-muted-foreground">
-            Hacienda Studio runs the whole extraction, detection and redaction pipeline
-            in your browser. Drop files in, review what the pipeline found, correct it,
-            and export clean copies with an auditable trail.
+            Hacienda Studio exécute l'intégralité du pipeline d'extraction, détection et rédaction
+            dans votre navigateur. Déposez des fichiers, revoyez ce que le pipeline a trouvé, corrigez-le
+            et exportez des copies propres avec une piste d'audit.
           </p>
           <div className="mt-8 flex items-center gap-3">
             <Button size="lg" onClick={onPrepare}>
-              Prepare the workspace →
+              Préparer l'espace de travail →
             </Button>
             <Button size="lg" variant="outline" onClick={onSkip}>
-              Skip to the studio
+              Passer au studio
             </Button>
           </div>
           <div className="mt-10 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            {["Extract", "Recognise", "Chunk", "Entities", "PII", "Redact"].map(
+            {["Extraire", "Reconnaître", "Découper", "Entités", "PII", "Masquer"].map(
               (step, i, arr) => (
                 <span key={step} className="flex items-center gap-2">
                   <span className="rounded-md border border-border px-2 py-1 font-mono">
@@ -132,7 +132,7 @@ export function Landing({
 
       <section className="border-b border-border px-6 py-16">
         <div className="mx-auto max-w-5xl">
-          <h2 className="mb-8 text-2xl font-semibold">What the studio does</h2>
+          <h2 className="mb-8 text-2xl font-semibold">Ce que fait le studio</h2>
           <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-3">
             {FEATURES.map(({ icon: Icon, title, body }) => (
               <div key={title} className="bg-card p-6">
@@ -148,19 +148,19 @@ export function Landing({
       <section className="px-6 py-16">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-6">
           <div>
-            <h2 className="text-2xl font-semibold">Ready when you are</h2>
+            <h2 className="text-2xl font-semibold">Prêt quand vous l'êtes</h2>
             <p className="mt-2 text-muted-foreground">
-              Load the on-device assets once; everything after that works offline.
+              Chargez les ressources une fois sur l'appareil ; tout fonctionne ensuite hors ligne.
             </p>
           </div>
           <Button size="lg" onClick={onPrepare}>
-            Start setup
+            Démarrer la configuration
           </Button>
         </div>
       </section>
 
       <footer className="border-t border-border px-6 py-8 text-center text-sm text-muted-foreground">
-        Hacienda Studio — documents are processed on-device. No accounts, no server storage.
+        Hacienda Studio — les documents sont traités sur l'appareil. Pas de compte, pas de stockage serveur.
       </footer>
     </div>
   );
