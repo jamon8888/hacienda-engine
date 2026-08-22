@@ -16,9 +16,12 @@ const TESSDATA_STORE = "tessdata";
  * Override the base to self-host the weights, e.g. for firms that require all
  * traffic to stay within the EU.
  */
-const MODEL_BASE =
+const RAW_MODEL_BASE =
   import.meta.env.VITE_MODEL_BASE_URL ??
   "https://huggingface.co/jamon8888/gliner2-guardrails-pii-f16/resolve/main";
+const MODEL_BASE = import.meta.env.DEV && RAW_MODEL_BASE.startsWith('https://huggingface.co')
+  ? RAW_MODEL_BASE.replace('https://huggingface.co', '/hf-model')
+  : RAW_MODEL_BASE;
 const MODEL_URL = `${MODEL_BASE}/model.safetensors`;
 const TOKENIZER_URL = `${MODEL_BASE}/tokenizer.json`;
 // The encoder config (mdeberta-v3-base), not the top-level extractor config —
@@ -282,31 +285,52 @@ export async function fetchAsset(
     if (ranged) return ranged;
   }
 
-  const chunks: Uint8Array[] = [];
-  let receivedBytes = 0;
-  let totalBytes: number | null = null;
-  await fetchStreamed(
-    url,
-    {},
-    stallTimeoutMs,
-    (chunk) => {
-      chunks.push(chunk);
-      receivedBytes += chunk.length;
-      onProgress?.({ receivedBytes, totalBytes });
-    },
-    (response) => {
-      totalBytes = Number(response.headers.get("content-length")) || null;
-    },
-  );
+  const doFetch = async (u: string) => {
+    const chunks: Uint8Array[] = [];
+    let receivedBytes = 0;
+    let totalBytes: number | null = null;
+    await fetchStreamed(
+      u,
+      {},
+      stallTimeoutMs,
+      (chunk) => {
+        chunks.push(chunk);
+        receivedBytes += chunk.length;
+        onProgress?.({ receivedBytes, totalBytes });
+      },
+      (response) => {
+        totalBytes = Number(response.headers.get("content-length")) || null;
+      },
+    );
+    const bytes = new Uint8Array(receivedBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    assertNotHtmlBody(bytes, u);
+    return bytes;
+  };
 
-  const bytes = new Uint8Array(receivedBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
+  try {
+    return await doFetch(url);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Hugging Face XET returns 405 for Range probes or  HTML fallback for
+    // bad URLs — retry autonomously with ?download=true which forces a
+    // direct download and bypasses the XET bridge.
+    if (msg.includes("405") && !url.includes("?download=true")) {
+      console.warn(`[asset-loader] 405 for ${url}, retrying with ?download=true`);
+      return doFetch(`${url}?download=true`);
+    }
+    // If the body was HTML (SPA fallback), the URL never resolved — also
+    // retry with download param once before giving up.
+    if (msg.includes("does not resolve") && !url.includes("?download=true")) {
+      console.warn(`[asset-loader] HTML fallback for ${url}, retrying with ?download=true`);
+      return doFetch(`${url}?download=true`);
+    }
+    throw e;
   }
-  assertNotHtmlBody(bytes, url);
-  return bytes;
 }
 
 async function getDB() {
@@ -331,6 +355,20 @@ export async function isModelCached(): Promise<boolean> {
   return !!(model && tokenizer && config);
 }
 
+async function clearStaleModelCache(): Promise<void> {
+  try {
+    const db = await getDB();
+    const tx = db.transaction(MODEL_STORE, "readwrite");
+    await Promise.all([
+      tx.store.delete("gliner2-guardrails-pii-model"),
+      tx.store.delete("gliner2-guardrails-pii-tokenizer"),
+      tx.store.delete("gliner2-guardrails-pii-config"),
+      tx.done,
+    ]);
+    console.log("[asset-loader] Cleared stale model cache");
+  } catch {}
+}
+
 export async function loadNerModel(
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<{
@@ -353,30 +391,46 @@ export async function loadNerModel(
 
   // Only the model's own progress is reported — it dwarfs the tokenizer (~16MB) and config
   // (<1KB), so tracking all three separately would add complexity without changing what the
-  // user sees in any meaningful way.
-  const downloadStart = performance.now();
-  const [modelData, tokenizerData, configData] = await Promise.all([
-    fetchAsset(MODEL_URL, { onProgress, parallel: true }),
-    fetchAsset(TOKENIZER_URL),
-    fetchAsset(ENCODER_CONFIG_URL),
-  ]);
-  const downloadMs = performance.now() - downloadStart;
-  console.log(`[PERF] Download: ${downloadMs.toFixed(0)}ms (${(modelData.byteLength / 1024 / 1024).toFixed(1)} MB)`);
+  // user sees in any meaningful way. Self-healing: on 405/HTML failure (XET
+  // 405 or SPA fallback) clear any half-written IndexedDB entries and retry
+  // once autonomously — no manual "Delete database" needed.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const downloadStart = performance.now();
+      const [modelData, tokenizerData, configData] = await Promise.all([
+        fetchAsset(MODEL_URL, { onProgress, parallel: false }),
+        fetchAsset(TOKENIZER_URL),
+        fetchAsset(ENCODER_CONFIG_URL),
+      ]);
+      const downloadMs = performance.now() - downloadStart;
+      console.log(`[PERF] Download: ${downloadMs.toFixed(0)}ms (${(modelData.byteLength / 1024 / 1024).toFixed(1)} MB)`);
 
-  // Cache in IndexedDB
-  const tx = db.transaction(MODEL_STORE, "readwrite");
-  await Promise.all([
-    tx.store.put(modelData, "gliner2-guardrails-pii-model"),
-    tx.store.put(tokenizerData, "gliner2-guardrails-pii-tokenizer"),
-    tx.store.put(configData, "gliner2-guardrails-pii-config"),
-    tx.done,
-  ]);
+      // Cache in IndexedDB
+      const tx = db.transaction(MODEL_STORE, "readwrite");
+      await Promise.all([
+        tx.store.put(modelData, "gliner2-guardrails-pii-model"),
+        tx.store.put(tokenizerData, "gliner2-guardrails-pii-tokenizer"),
+        tx.store.put(configData, "gliner2-guardrails-pii-config"),
+        tx.done,
+      ]);
 
-  return {
-    model: modelData,
-    tokenizer: tokenizerData,
-    encoderConfig: configData,
-  };
+      return {
+        model: modelData,
+        tokenizer: tokenizerData,
+        encoderConfig: configData,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const isRetriable = msg.includes("405") || msg.includes("does not resolve") || msg.includes("HTML");
+      if (attempt === 0 && isRetriable) {
+        console.warn("[asset-loader] Model download failed, clearing stale cache and retrying autonomously:", e);
+        await clearStaleModelCache();
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error("Model download failed after retry");
 }
 
 export async function createNerBackend(
@@ -442,7 +496,7 @@ const HARD_MAX_PDF_PAGES = 400;
  * grows. Chosen well below `HARD_MAX_PDF_PAGES` so a document only large enough to be
  * risky, not pathological, still gets processed instead of rejected.
  */
-const OCR_SAFE_PAGE_LIMIT = 75;
+const OCR_SAFE_PAGE_LIMIT = 20;
 
 export interface PdfPageSafety {
   valid: boolean;

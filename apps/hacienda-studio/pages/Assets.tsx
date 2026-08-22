@@ -44,10 +44,12 @@ const ASSET_INFO: Record<
 export function Assets({
   assets,
   nerModelDegraded,
+  nerModelProgress,
   onContinue,
 }: {
   assets: OnboardingState["assets"];
   nerModelDegraded: boolean;
+  nerModelProgress: { receivedBytes: number; totalBytes: number | null } | null;
   onContinue: () => void;
 }) {
   const allReady = assets.xbergWasm && assets.nerModel && assets.tessdata;
@@ -65,6 +67,11 @@ export function Assets({
           const info = ASSET_INFO[key];
           const ready = assets[key];
           const degraded = key === "nerModel" && nerModelDegraded;
+          const isDownloading = key === "nerModel" && !ready && !degraded && nerModelProgress;
+          const progressPct = isDownloading && nerModelProgress?.totalBytes
+            ? Math.min(100, Math.round((nerModelProgress.receivedBytes / nerModelProgress.totalBytes) * 100))
+            : 0;
+          const barWidth = ready ? "100%" : isDownloading && nerModelProgress?.totalBytes ? `${progressPct}%` : "0%";
           return (
             <div key={key} className="rounded-lg border border-border bg-card p-4">
               <div className="flex items-center gap-2">
@@ -89,7 +96,7 @@ export function Assets({
               <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
                 <div
                   className="h-full bg-primary transition-[width] duration-300 ease-out"
-                  style={{ width: ready ? "100%" : "0%" }}
+                  style={{ width: barWidth }}
                 />
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
@@ -97,7 +104,9 @@ export function Assets({
                   ? "Unavailable — falling back to regex-only detection"
                   : ready
                     ? "Ready"
-                    : "Downloading…"}
+                    : isDownloading && nerModelProgress?.totalBytes
+                      ? `Downloading… ${progressPct}%`
+                      : "Downloading…"}
               </p>
             </div>
           );

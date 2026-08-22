@@ -96,6 +96,7 @@ export function App() {
     nerModel: false,
     tessdata: false,
   });
+  const [nerModelProgress, setNerModelProgress] = useState<{ receivedBytes: number; totalBytes: number | null } | null>(null);
   const [files, setFiles] = useState<File[]>([]);
   // Redesign: files land here first — reviewable, removable — and only move into `files`
   // (which drives the worker pool) once the user confirms via `handleProcessQueue`.
@@ -154,6 +155,47 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
 
+    // Fresh-start: ?reset=1 clears all IndexedDB, Cache API, localStorage, sessionStorage,
+    // and forces a hard reload to see first-user asset download flow.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("reset") === "1") {
+      (async () => {
+        try {
+          // Delete all IndexedDB databases (models, library, drafts, wasm cache)
+          const dbs = await indexedDB.databases?.();
+          if (dbs && dbs.length) {
+            await Promise.all(
+              dbs.map((db) => {
+                return new Promise<void>((resolve) => {
+                  const req = indexedDB.deleteDatabase(db.name || "");
+                  req.onsuccess = () => resolve();
+                  req.onerror = () => resolve();
+                  req.onblocked = () => resolve();
+                });
+              })
+            );
+            console.log("[App] Reset: cleared IndexedDB databases", dbs.map(d => d.name));
+          }
+          // Clear Cache API (wasm modules)
+          const g: any = globalThis as any;
+          if (typeof g.caches !== "undefined" && g.caches) {
+            const names = await g.caches.keys();
+            await Promise.all(names.map((n: string) => g.caches.delete(n)));
+            console.log("[App] Reset: cleared Cache API", names);
+          }
+          localStorage.clear();
+          sessionStorage.clear();
+          // Remove the reset param and reload to start clean
+          const url = new URL(window.location.href);
+          url.searchParams.delete("reset");
+          window.location.replace(url.toString());
+        } catch (e) {
+          console.warn("[App] Reset cleanup failed", e);
+        }
+      })();
+      return;
+    }
+
     async function preloadAssets() {
       try {
         console.log("[App] preloadAssets started");
@@ -180,13 +222,15 @@ export function App() {
           setAssets((a) => ({ ...a, nerModel: true }));
         } else {
           try {
-            await loadNerModel();
+            await loadNerModel((p) => setNerModelProgress(p));
             setAssets((a) => ({ ...a, nerModel: true }));
+            setNerModelProgress(null);
           } catch (e) {
             console.warn("[App] NER model download failed, using fallback:", e);
             setNerModelDegraded(true);
             setError("Neural PII backend unavailable — falling back to regex-only detection.");
             setAssets((a) => ({ ...a, nerModel: true }));
+            setNerModelProgress(null);
           }
         }
 
@@ -685,7 +729,7 @@ export function App() {
       )}
 
       {route === "assets" && (
-        <Assets assets={assets} nerModelDegraded={nerModelDegraded} onContinue={goToStudio} />
+        <Assets assets={assets} nerModelDegraded={nerModelDegraded} nerModelProgress={nerModelProgress} onContinue={goToStudio} />
       )}
 
       {route === "studio" && studioView === "upload" && (
@@ -713,6 +757,7 @@ export function App() {
             files={files}
             onOpenDocument={openDocument}
             onAddFiles={() => setStudioView("upload")}
+            onDeleteDocuments={handleDeleteDocuments}
           />
         </Suspense>
       )}

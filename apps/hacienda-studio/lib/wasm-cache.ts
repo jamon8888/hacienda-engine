@@ -28,9 +28,10 @@ export async function cacheWasmModule(
   const { cacheName, maxAgeMs } = { ...DEFAULT_CACHE_CONFIG, ...config };
   
   try {
-    // Try Cache API first (modern browsers)
-    if ("caches" in window) {
-      const cache = await caches.open(cacheName);
+    // Try Cache API first (modern browsers) — `globalThis` works in both Window and Worker
+    const g: any = globalThis as any;
+    if (typeof g.caches !== "undefined" && g.caches) {
+      const cache = await g.caches.open(cacheName);
       const clonedResponse = response.clone();
       
       // Add cache metadata headers
@@ -119,10 +120,11 @@ export async function getCachedWasmModule(
 ): Promise<Response | null> {
   const { cacheName, maxAgeMs } = { ...DEFAULT_CACHE_CONFIG, ...config };
   
-  // Try Cache API first
+  // Try Cache API first — Worker global is `self`, not `window`
   try {
-    if ("caches" in window) {
-      const cache = await caches.open(cacheName);
+    const g: any = globalThis as any;
+    if (typeof g.caches !== "undefined" && g.caches) {
+      const cache = await g.caches.open(cacheName);
       const cachedResponse = await cache.match(url);
       
       if (cachedResponse) {
@@ -228,8 +230,9 @@ export async function clearWasmCache(config: Partial<CacheConfig> = {}): Promise
   const { cacheName } = { ...DEFAULT_CACHE_CONFIG, ...config };
   
   try {
-    if ("caches" in window) {
-      await caches.delete(cacheName);
+    const g: any = globalThis as any;
+    if (typeof g.caches !== "undefined" && g.caches) {
+      await g.caches.delete(cacheName);
       console.log("[WasmCache] Cleared Cache API cache");
     }
   } catch (e) {

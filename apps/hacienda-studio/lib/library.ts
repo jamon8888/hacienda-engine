@@ -47,9 +47,17 @@ export function groupByFolder(documents: LibraryDocument[]): LibraryFolder[] {
 
 const EXTENSION_CONTENT_TYPES: Record<string, string> = {
   pdf: "application/pdf",
+  dpf: "application/pdf",
+  doc: "application/msword",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  xslt: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xlst: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xlsm: "application/vnd.ms-excel.sheet.macroEnabled.12",
+  ppt: "application/vnd.ms-powerpoint",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  pptm: "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -70,12 +78,16 @@ function contentTypeFor(name: string): string | undefined {
  * per-document projection, not a second grouping pass.
  */
 export function toFileSystemItems(documents: LibraryDocument[]): FileSystemFileItem[] {
-  return documents.map((doc) => ({
-    kind: "file",
-    path: doc.result.name,
-    name: doc.baseName,
-    contentType: contentTypeFor(doc.result.name),
-    size: new Blob([doc.result.markdown]).size,
-    metadata: { findings: String(doc.findings.length) },
-  }));
+  return documents.map((doc) => {
+    const source = doc.result.frontmatter.source;
+    const sourceBase = source.split("/").pop() ?? doc.baseName;
+    return {
+      kind: "file",
+      path: doc.result.name,
+      name: sourceBase,
+      contentType: contentTypeFor(source) ?? contentTypeFor(doc.result.name),
+      size: new Blob([doc.result.markdown]).size,
+      metadata: { findings: String(doc.findings.length) },
+    };
+  });
 }

@@ -6,12 +6,21 @@ export type ViewerKind = "pdf" | "docx" | "doc" | "xlsx" | "xls" | "pptx" | "ppt
 // pane silently renders blank.
 const EXTENSION_VIEWER_KIND: Record<string, ViewerKind> = {
   pdf: "pdf",
+  // common typo: dpf
+  dpf: "pdf",
   docx: "docx",
   doc: "doc",
   xlsx: "xlsx",
   xls: "xls",
+  // frequent typos / aliases user reported
+  xslt: "xlsx",
+  xlst: "xlsx",
+  xlxs: "xlsx",
+  xlsm: "xlsx",
+  xlsb: "xlsx",
   pptx: "pptx",
   ppt: "ppt",
+  pptm: "pptx",
 };
 
 /**
