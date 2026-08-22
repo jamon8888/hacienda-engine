@@ -132,16 +132,17 @@ export interface AppConfig {
    * later, can be told which id to derive against — matters once key rotation exists. */
   pseudonymKeyId: string;
   /**
-   * Which engine extracts PDF text. `"xberg"` (default, unchanged behavior) routes PDFs
-   * through `@xberg-io/xberg-wasm`'s `pdf_oxide` backend, same as every other document
-   * format. `"liteparse"` routes PDFs through `@llamaindex/liteparse-wasm` (PDFium-backed)
-   * instead — see `docs/superpowers/specs/2026-08-22-liteparse-pdf-extraction-design.md`
-   * for why: `pdf_oxide` has open crash-class bugs and no bounded-memory large-document
-   * path, both fixed by switching engines for PDF specifically. Non-PDF formats always go
-   * through xberg-wasm regardless of this flag — LiteParse's wasm build has no DOCX/XLSX/
-   * PPTX support (that requires a native LibreOffice subprocess, not available in-browser).
-   * Config-gated rather than a straight cutover until the rollout steps in that spec's §9
-   * (real-browser memory validation, large-doc validation) are done.
+   * Which engine extracts PDF text. `"liteparse"` (default) routes PDFs through
+   * `@llamaindex/liteparse-wasm` (PDFium-backed) — see `docs/superpowers/specs/
+   * 2026-08-22-liteparse-pdf-extraction-design.md` for why: xberg-wasm's `pdf_oxide`
+   * backend has open crash-class bugs and no bounded-memory large-document path, both
+   * fixed by switching engines for PDF specifically. `"xberg"` is kept as an internal
+   * escape hatch (regression testing, a fast rollback if LiteParse regresses on some
+   * document class) but is intentionally not exposed in ConfigPanel — this was a
+   * config-gated rollout while under evaluation; it's the default now. Non-PDF formats
+   * always go through xberg-wasm regardless of this flag — LiteParse's wasm build has no
+   * DOCX/XLSX/PPTX support (that requires a native LibreOffice subprocess, not available
+   * in-browser).
    */
   pdfEngine: "xberg" | "liteparse";
 }
@@ -169,5 +170,5 @@ export const DEFAULT_CONFIG: AppConfig = {
   redactionMode: "mask",
   pseudonymPassphrase: "",
   pseudonymKeyId: "session",
-  pdfEngine: "xberg",
+  pdfEngine: "liteparse",
 };

@@ -341,20 +341,6 @@ export function ConfigPanel({
             onChange={(e) => onChange({ ...config, chunkSize: Number(e.target.value) })}
           />
         </div>
-        <div className={fieldLabel + " mt-2"}>
-          <label htmlFor="pdf-engine">PDF extraction engine</label>
-          <select
-            id="pdf-engine"
-            className={control}
-            value={config.pdfEngine}
-            onChange={(e) =>
-              onChange({ ...config, pdfEngine: e.target.value as AppConfig["pdfEngine"] })
-            }
-          >
-            <option value="xberg">xberg (default)</option>
-            <option value="liteparse">LiteParse (PDFium, experimental)</option>
-          </select>
-        </div>
       </section>
 
       <footer className="mt-8 border-t border-border pt-3 text-right">
