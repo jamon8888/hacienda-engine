@@ -32,6 +32,24 @@ extend-exclude = [
   # hand-authored) — its `__wbg_*_<hash>` export names embed random hex suffixes that
   # occasionally spell real words ("ba", "ede") by coincidence, not typos to fix.
   "crates/hacienda-wasm/pkg/",
+  # `.github/skills/` is vendored Claude Code skill reference documentation (e.g.
+  # `impeccable`), not this repo's own prose — same category ci-lint.yaml's markdown-lint
+  # step already excludes `.agents/skills`/`superpowers`/`.ai-rulez` for. Confirmed failing
+  # here specifically (e.g. "UDID" flagged as a typo for "UUID" in an iOS reference doc —
+  # UDID is the correct, real term), not a hypothetical.
+  ".github/skills/",
+  # vendor/candle-{core,transformers}-0.11.0-wasm-fix/ are the upstream crates.io sources
+  # for two wasm32 bugfix patches (see root Cargo.toml's `[patch.crates-io]`), copied
+  # verbatim aside from the specific patched lines — third-party ML library source, not
+  # this repo's prose, same "machine/vendored output" category as
+  # `crates/hacienda-wasm/pkg/` above. Confirmed failing here specifically: numpy/tensor
+  # API names like "arange", ML jargon like "mmaped"/"layrnorm", not real typos.
+  "vendor/candle-core-0.11.0-wasm-fix/",
+  "vendor/candle-transformers-0.11.0-wasm-fix/",
+  # vendor/xberg-wasm-ner-fix/pkg/web/ is a locally-built @xberg-io/xberg-wasm binary plus
+  # wasm-bindgen's own generated JS/TS glue around it — same "machine output, not
+  # hand-authored" category as crates/hacienda-wasm/pkg/ above.
+  "vendor/xberg-wasm-ner-fix/",
 ]
 
 [default.extend-words]
@@ -59,5 +77,16 @@ loaction = "loaction"
 # The "mis-" prefix in "mis-scoring"/"mis-counting" (hacienda-core, crates/hacienda-rag,
 # CHANGELOG.md) reads as a truncated "miss"/"mist" to the checker; it is not one.
 mis = "mis"
+# French UI copy in apps/hacienda-studio/{App,pages/Assets,pages/Landing,pages/Settings}.tsx
+# (the interface was translated to French) — same false-positive class the
+# docs/architecture/ exclusion above already documents ("ressources" read as "resources",
+# "sur" as "sure"), just as scattered words in .tsx files rather than whole doc files, so a
+# word-level allowlist fits better than excluding those files (which also have real English
+# code around the French strings that should stay checked).
+ressources = "ressources"
+sur = "sur"
+appareil = "appareil"
+espace = "espace"
+convertis = "convertis"
 
 [default.extend-identifiers]
