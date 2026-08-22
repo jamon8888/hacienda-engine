@@ -392,6 +392,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `embeddings`/`reranking`/`layout-detection`/`ner-onnx`/`candle-ocr` (ONNX Runtime plus a
   HuggingFace model fetch) are deliberately still not enabled — those need infrastructure
   provisioning beyond a feature flag, not a decision to skip them.
+- **`@hacienda/dsh-hacienda` — DeepSeek Harness bundle (Approach A: a distribution, not
+  a fork) shipping hacienda-engine as plugin rows for DSH profiles**
+  (`integrations/node/dsh-hacienda`). Composed via `cordis.patch.yml`:
+  - `hacienda-host` — host RPCs (`list-workspace`, `read-file-text`, `file-download-url`,
+    `scan-artifacts`) plus a `scan_folder` model tool, all over `ctx.fs` (`lib/host.js`).
+  - `hacienda-artifacts-client` — a `conversation.view` tab ("Files") registered in the
+    harness's view ring (`lib/client.js`): browses the workspace, opens markdown/text/code
+    files inline and images inline, and offers a download link for everything else, with
+    filetype-glyph icons, file sizes, sortable listing, and root/up/refresh navigation.
+    Clicking a previewable file also runs the `scan-artifacts` regex PII tier
+    against it and highlights the returned spans inline in the preview, with a "N PII
+    detected" badge — reuses hacienda's own regex patterns, no ML model in the loop for
+    this feedback tier.
+  - `llm-pi-ai-ollama` — Ollama local models via the shipped `@deepseek-ai/dsh-llm-pi-ai`
+    adapter (config-only, e.g. Gemma in the model picker).
+  - `web-search-exa` + `web-fetch-http` — Exa deep search and anonymous URL fetch;
+    `EXA_API_KEY` is read from the environment at boot and never committed.
+  - No document content lives in this package's code — the Artifacts view streams
+    everything from `ctx.fs` at request time.
+  - The browser tab's client bundle still needs the C3 web build (`pnpm run build:web`,
+    wiring `@extend-ai`'s DOCX/PPTX/XLSX/PDF viewers and CodeMirror 6 through the
+    deepseek-harness source tree) to be served at
+    `/plugins/hacienda-artifacts/client.js`; until that build runs, the host RPCs and
+    `scan_folder` tool already work standalone. Plan and design spec:
+    `superpowers/plans/2026-08-18-dsh-hacienda-plugin-implementation.md` and
+    `docs/superpowers/specs/2026-08-18-M2-dsh-plugin-export-and-assure.md`.
 - **SDK parity pass against `xberg-sdks`.** Both `sdks/python` and `sdks/typescript` had
   fallen behind hacienda-api's own route table: the audit API was restored to 5 endpoints
   (this changelog's "full 5-endpoint audit API is live again" entry, below) but only

@@ -1,0 +1,26 @@
+{
+  "name": "@hacienda/dsh-hacienda",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness bundle: hacienda-engine's Artifacts view, folder scanning, Ollama local models and Exa deep search, composed as an Approach-A profile bundle.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-web-search-exa": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-web-fetch-http": "^0.1.0-rc.7"
+  }
+}
