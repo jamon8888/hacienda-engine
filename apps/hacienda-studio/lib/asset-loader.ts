@@ -398,7 +398,14 @@ export async function loadNerModel(
     try {
       const downloadStart = performance.now();
       const [modelData, tokenizerData, configData] = await Promise.all([
-        fetchAsset(MODEL_URL, { onProgress, parallel: false }),
+        // `parallel: true`: this ~600MB weights file is exactly the case
+        // `FetchAssetOptions.parallel`'s doc comment describes — a single stream's
+        // slow-start ramp dominates the transfer, and a stall anywhere in that one
+        // stream (see `stallTimeoutMs` below) previously meant re-downloading the
+        // whole 600MB from scratch. Splitting into concurrent ranges bounds a stall's
+        // cost to one chunk's retry instead. Falls back to the plain sequential path
+        // automatically if the server doesn't answer the range probe with 206.
+        fetchAsset(MODEL_URL, { onProgress, parallel: true }),
         fetchAsset(TOKENIZER_URL),
         fetchAsset(ENCODER_CONFIG_URL),
       ]);

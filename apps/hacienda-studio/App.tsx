@@ -201,6 +201,48 @@ export function App() {
       return;
     }
 
+    // Resolves NER model availability honestly — from the real device-tier check and
+    // IndexedDB cache state, never from the `xberg-studio-visited` flag. That flag used
+    // to gate this too: a degraded fallback (a stalled/failed download, not a genuine
+    // "unsupported" state) set `visited` alongside `nerModelDegraded`, so every later
+    // load trusted the flag and skipped ever calling `isModelCached()` or retrying —
+    // one bad download permanently locked the app into regex-only detection with no
+    // further error shown. Calling this on every load instead means a since-recovered
+    // network, or a since-completed download from another tab, is picked up.
+    async function resolveNerModel() {
+      // A `low`-tier device is exactly the case the 600MB GLiNER2 model risks not
+      // fitting alongside a worker's own wasm heap — skip even attempting to load
+      // it (cached or not; the risk is holding it resident in memory, not the
+      // download) and go straight to the regex/compromise fallback `selectNerBridge`
+      // already falls back to when `nerRuntime` is null. Visible in the UI rather
+      // than silent, same as the existing download-failure path below.
+      const deviceTier = detectDeviceTier();
+      if (deviceTier === "low") {
+        console.log("[App] low device-memory tier — skipping neural NER model");
+        setNerModelDegraded(true);
+        setError(
+          "This device's available memory is limited — using regex-only PII detection instead of the neural model.",
+        );
+        setAssets((a) => ({ ...a, nerModel: true }));
+        return;
+      }
+      if (await isModelCached()) {
+        setAssets((a) => ({ ...a, nerModel: true }));
+        return;
+      }
+      try {
+        await loadNerModel((p) => setNerModelProgress(p));
+        setAssets((a) => ({ ...a, nerModel: true }));
+        setNerModelProgress(null);
+      } catch (e) {
+        console.warn("[App] NER model download failed, using fallback:", e);
+        setNerModelDegraded(true);
+        setError("Neural PII backend unavailable — falling back to regex-only detection.");
+        setAssets((a) => ({ ...a, nerModel: true }));
+        setNerModelProgress(null);
+      }
+    }
+
     async function preloadAssets() {
       try {
         console.log("[App] preloadAssets started");
@@ -209,35 +251,7 @@ export function App() {
         await preloadXbergWasm();
         console.log("[App] preloadXbergWasm done");
 
-        // A `low`-tier device is exactly the case the 600MB GLiNER2 model risks not
-        // fitting alongside a worker's own wasm heap — skip even attempting to load
-        // it (cached or not; the risk is holding it resident in memory, not the
-        // download) and go straight to the regex/compromise fallback `selectNerBridge`
-        // already falls back to when `nerRuntime` is null. Visible in the UI rather
-        // than silent, same as the existing download-failure path below.
-        const deviceTier = detectDeviceTier();
-        if (deviceTier === "low") {
-          console.log("[App] low device-memory tier — skipping neural NER model");
-          setNerModelDegraded(true);
-          setError(
-            "This device's available memory is limited — using regex-only PII detection instead of the neural model.",
-          );
-          setAssets((a) => ({ ...a, nerModel: true }));
-        } else if (await isModelCached()) {
-          setAssets((a) => ({ ...a, nerModel: true }));
-        } else {
-          try {
-            await loadNerModel((p) => setNerModelProgress(p));
-            setAssets((a) => ({ ...a, nerModel: true }));
-            setNerModelProgress(null);
-          } catch (e) {
-            console.warn("[App] NER model download failed, using fallback:", e);
-            setNerModelDegraded(true);
-            setError("Neural PII backend unavailable — falling back to regex-only detection.");
-            setAssets((a) => ({ ...a, nerModel: true }));
-            setNerModelProgress(null);
-          }
-        }
+        await resolveNerModel();
 
         try {
           await loadTessdata("eng");
@@ -263,7 +277,10 @@ export function App() {
     async function init() {
       const visited = localStorage.getItem("xberg-studio-visited");
       if (visited) {
-        setAssets({ xbergWasm: true, nerModel: true, tessdata: true });
+        // `xbergWasm`/tessdata are one-time, disk-cached downloads — safe to trust the
+        // flag for those. The NER model is not: see `resolveNerModel`'s doc comment.
+        setAssets((a) => ({ ...a, xbergWasm: true, tessdata: true }));
+        await resolveNerModel();
       } else {
         await preloadAssets();
       }
