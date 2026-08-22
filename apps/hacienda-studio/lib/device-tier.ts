@@ -5,24 +5,30 @@
  *
  * `navigator.deviceMemory` (Chrome/Edge only, `undefined` on Firefox/Safari) reports
  * an approximate figure the spec quantizes to {0.25, 0.5, 1, 2, 4, 8} — any machine
- * with 8GB or more reports exactly `8`, never higher. That cap is fine for a coarse
- * tier (we only need "can this comfortably hold a 600MB model", not an exact number),
- * but it does mean 8GB and 64GB machines land in the same tier.
- *
- * When `deviceMemory` is unavailable, `navigator.hardwareConcurrency` (logical core
- * count, broadly supported) is used as a secondary signal — low core count usually
- * correlates with lower-end hardware.
+ * with 8GB or more reports exactly `8`, never higher. That cap means an 8GB machine
+ * is indistinguishable from a 64GB one by `deviceMemory` alone. Each pool worker
+ * holds its own ~600MB NER model plus its own wasm heap (`lib/worker-pool.ts`), so
+ * naively treating every `mem === 8` machine as "plenty of headroom" and handing it a
+ * 3-worker pool (~1.8GB of NER models alone, before wasm/OCR/browser overhead) is
+ * exactly what OOM-freezes an 8GB laptop. `hardwareConcurrency` (logical core count)
+ * is used as a secondary signal to split that ambiguous case: real high-RAM desktops
+ * (>8GB) also tend to have more cores than a typical 8GB laptop, so only bump to
+ * "high" when both signals agree.
  */
 export type DeviceTier = "low" | "medium" | "high";
 
+const HIGH_TIER_MIN_CORES = 8;
+
 export function detectDeviceTier(): DeviceTier {
   const mem = (navigator as unknown as { deviceMemory?: number }).deviceMemory;
+  const cores = navigator.hardwareConcurrency ?? 4;
   if (mem !== undefined) {
     if (mem <= 2) return "low";
     if (mem <= 4) return "medium";
-    return "high"; // 8 is the spec's ceiling — covers an 8GB machine same as higher
+    // mem === 8 is the spec's ceiling and covers an 8GB machine same as a much
+    // larger one — only trust it as "high" when core count corroborates it.
+    return cores >= HIGH_TIER_MIN_CORES ? "high" : "medium";
   }
-  const cores = navigator.hardwareConcurrency ?? 4;
   if (cores <= 2) return "low";
   if (cores <= 4) return "medium";
   return "high";

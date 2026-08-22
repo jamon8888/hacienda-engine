@@ -505,6 +505,13 @@ export interface PdfPageSafety {
   disableOcr?: boolean;
   /** Set alongside `disableOcr: true`, for surfacing to the user. */
   warning?: string;
+  /**
+   * Set whenever the pdfium page-count probe below actually ran and succeeded — absent
+   * (not 0) when the file isn't a PDF, or when the probe itself failed and this fails
+   * open. `lib/pdf-liteparse.ts` reuses this instead of running its own page-count pass,
+   * since `openDocumentUrl`+`getPdfPageCount` already paid that cost here.
+   */
+  pageCount?: number;
 }
 
 /**
@@ -532,6 +539,7 @@ export async function checkPdfPageSafety(file: File): Promise<PdfPageSafety> {
       return {
         valid: false,
         error: `PDF has ${pageCount} pages (limit ${HARD_MAX_PDF_PAGES}) — too large to process safely in-browser.`,
+        pageCount,
       };
     }
     if (pageCount > OCR_SAFE_PAGE_LIMIT) {
@@ -539,9 +547,10 @@ export async function checkPdfPageSafety(file: File): Promise<PdfPageSafety> {
         valid: true,
         disableOcr: true,
         warning: `${file.name} has ${pageCount} pages — OCR for scanned pages was skipped to keep memory use safe; native text was still extracted.`,
+        pageCount,
       };
     }
-    return { valid: true };
+    return { valid: true, pageCount };
   } catch (e) {
     console.warn("[asset-loader] PDF page-count check failed, proceeding without it:", e);
     return { valid: true };

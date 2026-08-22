@@ -152,6 +152,10 @@ export function App() {
   // state, which hold the same references) rather than by name, since folder uploads can
   // have same-named siblings in different subdirectories.
   const disableOcrForFileRef = useRef<WeakMap<File, boolean>>(new WeakMap());
+  // Same pattern as `disableOcrForFileRef`, for the pdfium page count `checkPdfPageSafety`
+  // already computed — `lib/pdf-liteparse.ts`'s batch-vs-whole-document decision reuses
+  // this instead of re-opening the PDF to count pages a second time.
+  const pdfPageCountForFileRef = useRef<WeakMap<File, number>>(new WeakMap());
 
   useEffect(() => {
     let cancelled = false;
@@ -462,6 +466,9 @@ export function App() {
         disableOcrForFileRef.current.set(file, true);
         if (pageSafety.warning) pageSafetyWarnings.push(pageSafety.warning);
       }
+      if (pageSafety.pageCount !== undefined) {
+        pdfPageCountForFileRef.current.set(file, pageSafety.pageCount);
+      }
 
       validFiles.push(file);
     }
@@ -519,6 +526,7 @@ export function App() {
         bytes: await f.arrayBuffer(),
         type: f.type || "application/octet-stream",
         disableOcr: disableOcrForFileRef.current.get(f),
+        pdfPageCount: pdfPageCountForFileRef.current.get(f),
       })),
     );
 

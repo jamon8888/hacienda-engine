@@ -31,6 +31,7 @@ import {
   type BridgeEntity,
 } from "../lib/ner-bridge";
 import { createNerBackend, loadNerModel, loadTessdata } from "../lib/asset-loader";
+import { extractPdfWithLiteParse, toLiteParseOcrEngine } from "../lib/pdf-liteparse";
 import {
   initPiiEngine,
   redactPii,
@@ -507,10 +508,30 @@ async function initEngine(): Promise<void> {
   // while this is still in flight correctly falls back to the regex/compromise bridge and
   // later files upgrade to neural NER transparently once it resolves.
   void initNerBackend();
-  // Small (~4MB tessdata + a small wasm binary) but same non-blocking treatment for
-  // consistency — a file processed before this resolves just skips OCR for that run,
-  // same degrade-then-upgrade behavior as NER above.
-  void initOcrBackend();
+  // Unlike NER, this IS awaited: it's small (~4MB tessdata + a small wasm binary, seconds
+  // not minutes) and, unlike NER, there is no regex-style fallback for OCR — a file whose
+  // first page needs OCR before this resolves silently gets zero text for that page with
+  // no error and no way to "upgrade" later (see `selectOcrBridge`'s header). Awaiting it
+  // here means the worker's "ready" handshake — which gates the file input — only fires
+  // once OCR is actually usable, closing that race instead of leaving it to chance.
+  await initOcrBackend();
+}
+
+/** Shared by both extraction branches (xberg and LiteParse) in `processFile` below. */
+function logExtractionError(fileName: string, extractError: unknown): void {
+  console.error(`[Worker] EXTRACTION FAILED for ${fileName}:`, extractError);
+  console.error("[Worker] Extraction error type:", typeof extractError);
+  console.error(
+    "[Worker] Extraction error constructor:",
+    (extractError as { constructor?: { name?: string } })?.constructor?.name,
+  );
+  if (extractError instanceof Error) {
+    console.error("[Worker] Extraction error name:", extractError.name);
+    console.error("[Worker] Extraction error message:", extractError.message);
+    console.error("[Worker] Extraction error stack:", extractError.stack);
+  } else {
+    console.error("[Worker] Raw extraction error:", JSON.stringify(extractError));
+  }
 }
 
 async function processFile(
@@ -557,6 +578,49 @@ async function processFile(
     console.log(
       `[Worker] Transcription complete: ${markdown.substring(0, 100)}...`,
     );
+  } else if (input.type === "application/pdf" && config.pdfEngine === "liteparse") {
+    // See docs/superpowers/specs/2026-08-22-liteparse-pdf-extraction-design.md — PDFium-
+    // backed, bounded-memory-batched alternative to xberg-wasm's `pdf_oxide` path below,
+    // used only when `config.pdfEngine` opts in. Every non-PDF format, and PDFs when this
+    // flag is off, keep going through the xberg branch unchanged.
+    console.log(`[Worker] Extracting PDF via LiteParse for ${input.name}...`);
+    try {
+      if (!input.disableOcr && !ocrRuntime) {
+        // Same rationale as the xberg branch below: no regex-style OCR fallback exists,
+        // so silence here would mean scanned pages silently produce zero text.
+        console.warn(`[Worker] OCR backend unavailable for ${input.name} — scanned/image content will export with no text.`);
+        self.postMessage({
+          type: "warning",
+          file: input.name,
+          message: "OCR engine failed to load — scanned pages or images in this file will export with no extracted text.",
+        });
+      }
+
+      const extractStart = performance.now();
+      const { markdown: liteparseMarkdown } = await extractPdfWithLiteParse(
+        new Uint8Array(input.bytes),
+        {
+          ocrEngine: ocrRuntime ? toLiteParseOcrEngine(ocrRuntime) : null,
+          disableOcr: !!input.disableOcr,
+          pageCount: input.pdfPageCount,
+          dpi: OCR_TARGET_DPI,
+        },
+      );
+      const extractMs = performance.now() - extractStart;
+      console.log(`[Worker] LiteParse extract completed in ${extractMs.toFixed(0)}ms for ${input.name}`);
+      postProgress({ file: input.name, stage: "extract", percent: 50 });
+
+      if (!liteparseMarkdown) {
+        console.error(`[Worker] No content extracted from ${input.name} via LiteParse`);
+        throw new Error("No content extracted");
+      }
+
+      markdown = liteparseMarkdown;
+      console.log(`[Worker] Extracted ${markdown.length} chars from ${input.name} via LiteParse`);
+    } catch (extractError) {
+      logExtractionError(input.name, extractError);
+      throw extractError;
+    }
   } else {
     console.log(`[Worker] Extracting content from ${input.name}...`);
     try {
@@ -604,6 +668,16 @@ async function processFile(
         extractConfig.images.includePageRasters = false;
         extractConfig.images.runOcrOnImages = false;
         console.log(`[Worker] OCR and page rasterization disabled for ${input.name} (page-count safety limit)`);
+      } else if (!ocrRuntime) {
+        // `selectOcrBridge(null)` below returns `undefined`, i.e. "no backend injected" —
+        // xberg-wasm has no regex-style fallback for that (unlike NER), so scanned pages
+        // and embedded images silently produce zero text unless we say something here.
+        console.warn(`[Worker] OCR backend unavailable for ${input.name} — scanned/image content will export with no text.`);
+        self.postMessage({
+          type: "warning",
+          file: input.name,
+          message: "OCR engine failed to load — scanned pages or images in this file will export with no extracted text.",
+        });
       }
 
       const nerConfig = WasmNerConfig.default();
@@ -631,16 +705,7 @@ async function processFile(
       markdown = result.results[0].content;
       console.log(`[Worker] Extracted ${markdown.length} chars from ${input.name}`);
     } catch (extractError) {
-      console.error(`[Worker] EXTRACTION FAILED for ${input.name}:`, extractError);
-      console.error("[Worker] Extraction error type:", typeof extractError);
-      console.error("[Worker] Extraction error constructor:", extractError?.constructor?.name);
-      if (extractError instanceof Error) {
-        console.error("[Worker] Extraction error name:", extractError.name);
-        console.error("[Worker] Extraction error message:", extractError.message);
-        console.error("[Worker] Extraction error stack:", extractError.stack);
-      } else {
-        console.error("[Worker] Raw extraction error:", JSON.stringify(extractError));
-      }
+      logExtractionError(input.name, extractError);
       throw extractError;
     }
   }
