@@ -8,9 +8,19 @@
       name="description"
       content="Convert documents to RAG-ready Markdown with entity-linked metadata. 100% local via WebAssembly."
     />
+    <!--
+      Keep this connect-src in sync with `vercel.json`'s Content-Security-Policy header —
+      both apply in production simultaneously (a request must satisfy the intersection of
+      all active CSPs), so a host missing from either one blocks the request regardless of
+      what the other allows. `us.aws.cdn.hf.co` and `cdn.huggingface.co` are two concrete
+      hosts Hugging Face's `resolve/main/...` endpoint has redirected a model download to;
+      the wildcards below (`*.huggingface.co`, `*.hf.co`) cover those plus any other
+      regional/CDN subdomain HF might redirect to next, rather than chasing each one as it
+      shows up in a Content-Security-Policy console error.
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="connect-src 'self' blob: ws: wss: https://huggingface.co https://us.aws.cdn.hf.co https://cdn.huggingface.co https://raw.githubusercontent.com"
+      content="connect-src 'self' blob: ws: wss: https://huggingface.co https://*.huggingface.co https://*.hf.co https://raw.githubusercontent.com"
     />
   </head>
   <body>
