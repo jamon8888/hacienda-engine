@@ -34,10 +34,24 @@ const FEATURES = [
   },
 ];
 
+import type { OnboardingState } from "@/lib/types";
+
+const ASSET_LABELS: Record<keyof OnboardingState["assets"], string> = {
+  xbergWasm: "Pipeline runtime",
+  nerModel: "Entity recognition model",
+  tessdata: "Optical recognition data",
+};
+
 export function Landing({
+  assets,
+  nerModelProgress,
+  nerModelDegraded,
   onPrepare,
   onSkip,
 }: {
+  assets: OnboardingState["assets"];
+  nerModelProgress: { receivedBytes: number; totalBytes: number | null } | null;
+  nerModelDegraded: boolean;
   onPrepare: () => void;
   onSkip: () => void;
 }) {
@@ -48,6 +62,33 @@ export function Landing({
           <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground">
             <Lock className="size-3" /> Local-first pipeline · zero uploads
           </span>
+          {/* Asset loading progress on first visit */}
+          {( !assets.xbergWasm || !assets.nerModel || !assets.tessdata) && (
+            <div className="mt-4 space-y-2">
+              {(Object.keys(ASSET_LABELS) as Array<keyof OnboardingState["assets"]>).map((key) => {
+                const ready = assets[key];
+                const isNer = key === "nerModel";
+                const isDownloading = isNer && !ready && !nerModelDegraded && nerModelProgress;
+                const progressPct = isDownloading && nerModelProgress?.totalBytes
+                  ? Math.min(100, Math.round((nerModelProgress.receivedBytes / nerModelProgress.totalBytes) * 100))
+                  : 0;
+                const barWidth = ready ? "100%" : isDownloading && nerModelProgress?.totalBytes ? `${progressPct}%` : "0%";
+                return (
+                  <div key={key} className="rounded-md border border-border bg-card/50 px-3 py-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">{ASSET_LABELS[key]}</span>
+                      <span className="text-muted-foreground">
+                        {ready ? "Prêt" : isNer && nerModelDegraded ? "Dégradé" : isDownloading && nerModelProgress?.totalBytes ? `${progressPct}%` : "Téléchargement…"}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                      <div className="h-full bg-primary transition-[width] duration-300" style={{ width: barWidth }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <h1 className="mt-6 text-5xl font-semibold leading-tight tracking-tight">
             Redact sensitive documents without letting them leave your laptop.
           </h1>

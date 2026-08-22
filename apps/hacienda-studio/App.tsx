@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, Suspense, lazy } from "react";
+import { toast } from "sonner";
 import { Toaster } from "./components/ui/sonner";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Landing } from "./pages/Landing";
@@ -303,7 +304,7 @@ export function App() {
       });
       pool.setWarningHandler((message) => {
         console.warn("[WorkerPool] Warning:", message);
-        // Could show a toast notification here
+        toast.warning(message);
       });
       pool.setBatchCompleteHandler(() => {
         // Batch complete - transition to documents view after a delay
@@ -725,7 +726,13 @@ export function App() {
       )}
 
       {route === "landing" && (
-        <Landing onPrepare={() => setRoute("assets")} onSkip={goToStudio} />
+        <Landing
+          assets={assets}
+          nerModelProgress={nerModelProgress}
+          nerModelDegraded={nerModelDegraded}
+          onPrepare={() => setRoute("assets")}
+          onSkip={goToStudio}
+        />
       )}
 
       {route === "assets" && (
