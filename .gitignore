@@ -55,12 +55,23 @@ vendor/bundle/
 *.gem
 
 # PHP
-vendor/
+vendor/*
 composer.lock
 
 # Go
-vendor/
+vendor/*
 go.sum
+
+# The blanket `vendor/*` ignores above (PHP/Go convention) were silently swallowing this
+# workspace's own Rust `[patch.crates-io]` sources — `vendor/candle-core-0.11.0-wasm-fix`
+# (pre-existing) and `vendor/candle-transformers-0.11.0-wasm-fix` (this workspace's own
+# patched forks, see root Cargo.toml's `[patch.crates-io]` section for why each exists) were
+# never actually committed, meaning a fresh clone or CI would fail to build `hacienda-wasm`'s
+# `ner-candle-wasm` feature at all. Un-ignore them explicitly — `vendor/*` (not `vendor/`)
+# above is what makes this negation effective: negating a child cannot resurrect it if the
+# parent directory itself was excluded.
+!vendor/candle-core-0.11.0-wasm-fix/
+!vendor/candle-transformers-0.11.0-wasm-fix/
 
 # Java
 target/

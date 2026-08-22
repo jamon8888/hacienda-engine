@@ -345,3 +345,23 @@ codegen-units = 1
 # the wasm32 bf16/f16 gap.
 [patch.crates-io]
 candle-core = { path = "vendor/candle-core-0.11.0-wasm-fix" }
+
+# Patches an upstream candle-transformers bug: `debertav2.rs`'s `XSoftmax::apply` and
+# `DebertaV2DisentangledSelfAttention::disentangled_attention_bias` both hardcode f32
+# scalar tensors (`Tensor::new(&[f32::MIN], ..)`, `Tensor::new(&[0 as f32], ..)`) and
+# then combine them via `where_cond`/`broadcast_add` with tensors that carry the
+# model's actual working dtype. That's fine for every caller that keeps the model in
+# f32 (candle-transformers' own `DTYPE` constant), but GLiNER2 is loaded as F16 on
+# wasm32 to fit in linear memory (`xberg-gliner/src/candle/encoder.rs`'s
+# `from_buffered_safetensors`), and every forward call — not an edge case, every single
+# one — hits candle-core's cpu backend "dtype mismatch" bail the moment those hardcoded
+# f32 tensors meet an f16 activation. Confirmed as the exact root cause of Hacienda
+# Studio's silent NER-neural-backend-always-falls-back-to-regex behavior
+# (`worker/pipeline.ts`'s `selectNerBridge` catches this by message string). Fixed in
+# `vendor/candle-transformers-0.11.0-wasm-fix/src/models/debertav2.rs` by casting those
+# tensors to the model's actual dtype (`query_layer.dtype()` / `input.dtype()` /
+# `output.dtype()`) before use, instead of assuming f32. Reported upstream:
+# https://github.com/xberg-io/xberg/issues (filed against xberg, which vendors this
+# transitively through xberg-gliner) — drop this patch once a fix lands there or in
+# huggingface/candle directly.
+candle-transformers = { path = "vendor/candle-transformers-0.11.0-wasm-fix" }
