@@ -1,0 +1,4 @@
+/* Placeholder referenced only by the conditional `hacienda-wasm/...wasm?url`
+   alias in vite.config.ts when the wasm build is absent. Not real WebAssembly:
+   PII init throws (`src/__stubs__/hacienda-wasm.ts`) before this URL is ever
+   fetched, so it only needs to be resolvable for Vite's import analysis. */

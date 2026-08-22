@@ -8,7 +8,7 @@ use crate::pii::config::PipelineConfig;
 use crate::pii::engine::RegexEngine;
 use crate::pii::merge::{merge_entities, MergedEntity};
 use crate::pii::ner::{to_pii_category, NerDetector};
-use crate::pii::types::{MergeConfig, MergePriority};
+use crate::pii::types::{MergeConfig, MergePriority, ModelEntity};
 use crate::pii::PiiError;
 use crate::redaction::pseudonym::category_label;
 use crate::redaction::{Pseudonymiser, RedactionAuditEntry, RedactionEngine, RedactionMode};
@@ -236,6 +236,135 @@ impl PiiPipeline {
 
         Ok((entities, metrics))
     }
+
+    /// Detect and redact using pre-computed model entities, bypassing the NER detector.
+    ///
+    /// This allows callers who have already run NER inference (e.g., for an entity glossary)
+    /// to reuse those results instead of running inference a second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiiError::Ner`] if regex detection fails, or
+    /// [`PiiError::InvalidModelEntity`] if any pre-computed model entity fails
+    /// validation (see [`validate_model_entity`]).
+    pub async fn process_with_model_entities(
+        &self,
+        text: &str,
+        model_entities: Vec<ModelEntity>,
+    ) -> Result<PipelineResult, PiiError> {
+        let start = Instant::now();
+        let (entities, mut metrics) = self.detect_with_model_entities(text, model_entities).await?;
+
+        let redaction_start = Instant::now();
+        let redaction = self.redaction_engine.redact(text, &entities)?;
+        metrics.redaction_ms = redaction_start.elapsed().as_millis() as u64;
+        metrics.entities_redacted = redaction.metrics.entities_redacted;
+        metrics.total_ms = start.elapsed().as_millis() as u64;
+
+        Ok(PipelineResult {
+            redacted_text: redaction.text,
+            entities,
+            audit_log: redaction.audit_log,
+            metrics,
+        })
+    }
+
+    /// Detect without rewriting the text, using pre-computed model entities.
+    ///
+    /// See [`process_with_model_entities`] for details.
+    pub async fn scan_with_model_entities(
+        &self,
+        text: &str,
+        model_entities: Vec<ModelEntity>,
+    ) -> Result<PipelineResult, PiiError> {
+        let start = Instant::now();
+        let (entities, mut metrics) = self.detect_with_model_entities(text, model_entities).await?;
+        metrics.total_ms = start.elapsed().as_millis() as u64;
+
+        Ok(PipelineResult {
+            redacted_text: text.to_string(),
+            entities,
+            audit_log: Vec::new(),
+            metrics,
+        })
+    }
+
+    async fn detect_with_model_entities(
+        &self,
+        text: &str,
+        model_entities: Vec<ModelEntity>,
+    ) -> Result<(Vec<MergedEntity>, PipelineMetrics), PiiError> {
+        let mut metrics = PipelineMetrics::default();
+
+        let regex_start = Instant::now();
+        let regex_entities = self.regex_engine.find_all(text);
+        metrics.regex_ms = regex_start.elapsed().as_millis() as u64;
+
+        // Use pre-computed model entities instead of running the detector. Validated,
+        // not "trusted and not re-validated" as this used to say — see
+        // `validate_model_entity`'s own doc comment for why a caller-supplied span can't
+        // be handed to `RedactionEngine::redact` as-is.
+        for entity in &model_entities {
+            validate_model_entity(text, entity)?;
+        }
+        metrics.model_ms = 0; // No model inference performed
+
+        let merge_start = Instant::now();
+        let entities = merge_entities(regex_entities, model_entities, &self.merge_config);
+        metrics.merge_ms = merge_start.elapsed().as_millis() as u64;
+        metrics.entities_detected = entities.len() as u32;
+
+        Ok((entities, metrics))
+    }
+}
+
+/// Validates one caller-supplied [`ModelEntity`] before it's allowed anywhere near
+/// [`merge_entities`]/[`RedactionEngine::redact`].
+///
+/// `process_with_model_entities`/`scan_with_model_entities` exist so a caller who already
+/// ran NER inference (e.g. for an entity glossary) doesn't pay for it twice — but that
+/// means these spans never pass through this pipeline's own detector, only whatever
+/// produced them upstream (a WASM bridge, a different process, a different language
+/// entirely). `RedactionEngine::redact` skips a reversed, out-of-bounds, or
+/// non-UTF-8-boundary span rather than panicking on it, which is the right behavior for
+/// *its* contract but the wrong one here: silently skipping means `redacted_text` comes
+/// back with that PII span left completely unredacted, with nothing in the result to
+/// indicate anything was wrong. Rejecting up front with a real error is the only way a
+/// caller finds out.
+fn validate_model_entity(text: &str, entity: &ModelEntity) -> Result<(), PiiError> {
+    let invalid = |reason: String| PiiError::InvalidModelEntity {
+        start: entity.start,
+        end: entity.end,
+        reason,
+    };
+
+    if entity.start >= entity.end {
+        return Err(invalid("start must be less than end".to_string()));
+    }
+    let (start, end) = (entity.start as usize, entity.end as usize);
+    if end > text.len() {
+        return Err(invalid(format!(
+            "end exceeds text length ({} bytes)",
+            text.len()
+        )));
+    }
+    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return Err(invalid(
+            "span does not fall on a UTF-8 character boundary".to_string(),
+        ));
+    }
+    if !entity.confidence.is_finite() || !(0.0..=1.0).contains(&entity.confidence) {
+        return Err(invalid(format!(
+            "confidence {} is not a finite value in [0, 1]",
+            entity.confidence
+        )));
+    }
+    if text[start..end] != entity.text {
+        return Err(invalid(
+            "text does not match the content of the span it claims to cover".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
@@ -395,6 +524,100 @@ mod tests {
         assert!(categories.contains(&PiiCategory::Person));
         assert!(categories.contains(&PiiCategory::Email));
         assert!(!result.redacted_text.contains("alice@example.com"));
+    }
+
+    fn model_entity(category: PiiCategory, text: &str, start: u32, confidence: f32) -> ModelEntity {
+        ModelEntity {
+            category,
+            text: text.to_string(),
+            start,
+            end: start + text.len() as u32,
+            confidence,
+        }
+    }
+
+    #[tokio::test]
+    async fn should_accept_a_valid_model_entity() {
+        let text = "Alice Martin works here";
+        let entity = model_entity(PiiCategory::Person, "Alice Martin", 0, 0.95);
+        let result = pipeline(vec![])
+            .process_with_model_entities(text, vec![entity])
+            .await
+            .unwrap();
+
+        assert_eq!(result.entities.len(), 1);
+        assert!(!result.redacted_text.contains("Alice Martin"));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_model_entity_with_a_reversed_span() {
+        let text = "Alice Martin works here";
+        let entity = ModelEntity {
+            start: 12,
+            end: 0,
+            ..model_entity(PiiCategory::Person, "Alice Martin", 0, 0.95)
+        };
+        let err = pipeline(vec![])
+            .process_with_model_entities(text, vec![entity])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PiiError::InvalidModelEntity { .. }));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_model_entity_out_of_bounds() {
+        let text = "short";
+        let entity = ModelEntity {
+            end: 999,
+            ..model_entity(PiiCategory::Person, "short", 0, 0.95)
+        };
+        let err = pipeline(vec![])
+            .process_with_model_entities(text, vec![entity])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PiiError::InvalidModelEntity { .. }));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_model_entity_off_a_utf8_boundary() {
+        // byte 1 is inside the multi-byte "é" — not a valid char boundary.
+        let text = "émail";
+        let entity = ModelEntity {
+            start: 1,
+            end: 2,
+            ..model_entity(PiiCategory::Person, "m", 1, 0.95)
+        };
+        let err = pipeline(vec![])
+            .process_with_model_entities(text, vec![entity])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PiiError::InvalidModelEntity { .. }));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_model_entity_with_non_finite_confidence() {
+        let text = "Alice Martin works here";
+        let entity = model_entity(PiiCategory::Person, "Alice Martin", 0, f32::NAN);
+        let err = pipeline(vec![])
+            .process_with_model_entities(text, vec![entity])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PiiError::InvalidModelEntity { .. }));
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_model_entity_whose_text_does_not_match_its_span() {
+        let text = "Alice Martin works here";
+        // Span [0, 12) is "Alice Martin" in `text`, but the entity claims different text.
+        let entity = ModelEntity {
+            end: 12,
+            ..model_entity(PiiCategory::Person, "Bob Jones", 0, 0.95)
+        };
+        let err = pipeline(vec![])
+            .process_with_model_entities(text, vec![entity])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PiiError::InvalidModelEntity { .. }));
     }
 
     #[tokio::test]
@@ -725,3 +948,11 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
+
+

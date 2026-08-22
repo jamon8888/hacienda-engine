@@ -17,14 +17,15 @@
  * implementation; see the plan's C3 entry. `scanForPii` never has anything to
  * record — `PiiPipeline::scan` always returns an empty `audit_log`
  * (`hacienda-core/src/pii/pipeline.rs`), because nothing was redacted.
+ *
+ * The `hacienda-wasm` package (`crates/hacienda-wasm/pkg`, produced by `wasm-pack`)
+ * is load**ed lazily** rather than statically imported: it may not exist until
+ * `npm run build:wasm` has run, and a static top-level import would make the whole
+ * app (including the AI chat, which never touches PII) fail to boot in Vite whenever
+ * the build output is missing. See `initPiiEngine` below.
  */
-import initHaciendaWasm, {
-  process as wasmProcess,
-  scan as wasmScan,
-  AuditHandle,
-  loadNerModel as loadWasmNerModel,
-} from "hacienda-wasm";
-import haciendaWasmUrl from "hacienda-wasm/hacienda_wasm_bg.wasm?url";
+import type { AuditHandle } from "hacienda-wasm";
+import { initializeWasmWithCache } from "./wasm-cache";
 
 export interface PiiEntity {
   category: string;
@@ -42,22 +43,47 @@ export interface PiiPipelineResult {
   entities: PiiEntity[];
 }
 
+type WasmModule = typeof import("hacienda-wasm");
+
+let wasmModule: WasmModule | null = null;
+let wasmUrl: string | null = null;
 let ready: Promise<void> | null = null;
 
 /** Idempotent; safe to call from every worker that needs the engine. */
 export function initPiiEngine(): Promise<void> {
   if (!ready) {
-    ready = initHaciendaWasm({ module_or_path: fetch(haciendaWasmUrl) }).then(
-      () => undefined,
-    );
+    ready = (async () => {
+      const mod = await import("hacienda-wasm");
+      const { default: url } = await import("hacienda-wasm/hacienda_wasm_bg.wasm?url");
+      wasmModule = mod;
+      wasmUrl = url;
+      // Tier 2.2: served from Cache API/IndexedDB on repeat visits instead of a fresh
+      // network fetch — falls back to a plain `fetch(url)` internally on any cache miss.
+      await mod.default({ module_or_path: initializeWasmWithCache(url) });
+    })();
   }
   return ready;
+}
+
+/** Replaces every `wasmModule!` non-null assertion below with one real check — every
+ * caller here already awaits `initPiiEngine()` first, so this should never actually
+ * throw, but a scattered `!` silently produces "Cannot read properties of null" from
+ * deep inside a wasm call if that invariant is ever violated (e.g. a future refactor
+ * that calls one of these functions without awaiting init first) instead of a message
+ * that says what actually went wrong. */
+function getWasmModule(): WasmModule {
+  if (!wasmModule) {
+    throw new Error(
+      "[pii-engine] hacienda-wasm module not initialized — call initPiiEngine() first",
+    );
+  }
+  return wasmModule;
 }
 
 /** Detect only — `redacted_text` on the result equals `text`. */
 export async function scanForPii(text: string): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  return (await wasmScan(text)) as PiiPipelineResult;
+  return (await getWasmModule().scan(text)) as PiiPipelineResult;
 }
 
 /**
@@ -79,7 +105,110 @@ export async function loadPiiNerModel(
   encoderConfig: Uint8Array,
 ): Promise<void> {
   await initPiiEngine();
-  loadWasmNerModel(weights, tokenizer, encoderConfig);
+  getWasmModule().loadNerModel(weights, tokenizer, encoderConfig);
+}
+
+/**
+ * The wire shape `hacienda-core`'s `PiiCategory` (Rust, `#[serde(rename_all =
+ * "snake_case")]`) actually deserializes: a unit variant (`Email`, `PhoneNumber`, ...)
+ * is a bare lowercase-snake_case string (`"email"`, `"phone_number"`); the one tuple
+ * variant, `Custom(String)`, is externally tagged as `{ custom: "<label>" }` — NOT a
+ * bare string, since only unit variants get that shorthand under serde's default
+ * (externally tagged) enum representation. `worker/pipeline.ts`'s
+ * `nerCategoryToPiiCategory` must produce exactly this shape.
+ */
+export type PiiCategoryWire = string | { custom: string };
+
+/** The five fields `process_with_model_entities`/`scan_with_model_entities` (and their
+ * JS wrappers below) need per entity — shared instead of repeated inline in both. */
+export interface ModelEntity {
+  category: PiiCategoryWire;
+  text: string;
+  start: number;
+  end: number;
+  confidence: number;
+}
+
+/**
+ * Detect and redact using pre-computed model entities (bypasses NER inference).
+ * Model entities should be in the format: { category, text, start, end, confidence }
+ * where `category` is the `PiiCategoryWire` shape above (e.g. `"phone_number"` or
+ * `{ custom: "Date" }`) — see that type's doc for why it isn't just a string.
+ *
+ * `process_with_model_entities` only exists on a `hacienda-wasm` build compiled after
+ * this function was added on the Rust side — the `pkg/` output actually committed to
+ * this repo predates it. Rather than throw for every document until someone runs
+ * `npm run build:wasm` against current `crates/hacienda-wasm/src`, fall back to plain
+ * `process` (model entities silently unused, same as before this function existed) so
+ * processing keeps working against today's committed wasm build.
+ *
+ * The `typeof` check alone isn't sufficient, either: a `pkg/` rebuild can regenerate
+ * `hacienda_wasm.js`'s wasm-bindgen JS glue (which declares this export) without the
+ * underlying compiled `hacienda_wasm_bg.wasm` binary actually containing it — e.g. a
+ * feature-flag mismatch between the `wasm-pack` invocation that produced the `.js` and
+ * the one that produced the `.wasm`. That surfaces as `wasm.process_with_model_entities
+ * is not a function` thrown *from inside* the wrapper the `typeof` check just approved
+ * (confirmed live: `hacienda_wasm.js`'s `scan_with_model_entities` wrapper existed and
+ * passed the check, then threw exactly that on the first real call). Catch and fall
+ * back the same way as a missing wrapper, so a half-rebuilt `pkg/` degrades instead of
+ * failing every document.
+ */
+export async function redactPiiWithModelEntities(
+  text: string,
+  modelEntities: ModelEntity[],
+): Promise<PiiPipelineResult> {
+  await initPiiEngine();
+  const mod = wasmModule as unknown as Record<string, unknown>;
+  let result: PiiPipelineResult;
+  if (typeof mod.process_with_model_entities === "function") {
+    try {
+      result = (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+        text,
+        modelEntities,
+      )) as PiiPipelineResult;
+    } catch (err) {
+      console.warn(
+        "[pii-engine] process_with_model_entities exists but isn't callable (stale/mismatched wasm build?) — falling back to process():",
+        err,
+      );
+      result = (await getWasmModule().process(text)) as PiiPipelineResult;
+    }
+  } else {
+    result = (await getWasmModule().process(text)) as PiiPipelineResult;
+  }
+  // Same audit-chain invariant `redactPii` documents above — this path was missing it
+  // entirely, so every model-entity redaction (the entity-glossary reuse path, which is
+  // the common case now per Tier 1.1) silently never reached the audit trail.
+  const handle = await getAuditHandle();
+  await handle.recordResult(result);
+  return result;
+}
+
+/**
+ * Detect without rewriting text, using pre-computed model entities (bypasses NER inference).
+ * Same committed-wasm-lags-source, wrapper-exists-but-binary-doesn't fallback as
+ * `redactPiiWithModelEntities` above.
+ */
+export async function scanForPiiWithModelEntities(
+  text: string,
+  modelEntities: ModelEntity[],
+): Promise<PiiPipelineResult> {
+  await initPiiEngine();
+  const mod = wasmModule as unknown as Record<string, unknown>;
+  if (typeof mod.scan_with_model_entities === "function") {
+    try {
+      return (await (mod.scan_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+        text,
+        modelEntities,
+      )) as PiiPipelineResult;
+    } catch (err) {
+      console.warn(
+        "[pii-engine] scan_with_model_entities exists but isn't callable (stale/mismatched wasm build?) — falling back to scan():",
+        err,
+      );
+    }
+  }
+  return (await getWasmModule().scan(text)) as PiiPipelineResult;
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple
@@ -96,7 +225,7 @@ let auditHandle: Promise<AuditHandle> | null = null;
 /** Opens (or resumes, across a reload) the audit chain. Idempotent, like `initPiiEngine`. */
 function getAuditHandle(): Promise<AuditHandle> {
   if (!auditHandle) {
-    auditHandle = AuditHandle.open(
+    auditHandle = getWasmModule().AuditHandle.open(
       AUDIT_DB_NAME,
       AUDIT_NODE_ID,
       AUDIT_CONFIG_HASH,
@@ -119,8 +248,31 @@ function getAuditHandle(): Promise<AuditHandle> {
  */
 export async function redactPii(text: string): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  const result = (await wasmProcess(text)) as PiiPipelineResult;
+  const result = (await getWasmModule().process(text)) as PiiPipelineResult;
   const handle = await getAuditHandle();
   await handle.recordResult(result);
   return result;
+}
+
+/**
+ * The chain's current head, for the redesign's Audit tab. Reflects every redaction
+ * recorded so far in this browser profile (`redactPii` appends per-document, not
+ * per-tab), not one specific document's own entry — `AuditHandle` doesn't expose a
+ * per-document lookup today, only the running tip and whole-chain `verify()`. Good
+ * enough to prove "nothing in the chain has been tampered with since it was written";
+ * a document-scoped view would need a new wasm-side method (see the redesign plan's
+ * Audit tab note).
+ */
+export async function getAuditChainTip(): Promise<string> {
+  await initPiiEngine();
+  const handle = await getAuditHandle();
+  return handle.tip();
+}
+
+/** Recomputes every chain hash from genesis; resolves on success, throws on the first
+ * mismatch (never returns a boolean a caller could accidentally ignore). */
+export async function verifyAuditChain(): Promise<void> {
+  await initPiiEngine();
+  const handle = await getAuditHandle();
+  await handle.verify();
 }

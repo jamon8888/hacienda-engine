@@ -95,7 +95,62 @@ pub struct VerticalConfig {
     pub labels: Vec<String>,
 }
 
+/// Zero-shot labels for [`VerticalConfig::comprehensive`], one per [`crate::pii::PiiCategory`]
+/// variant that is not already one of [`BASE_CATEGORY_NAMES`] (`Email`, `PhoneNumber`,
+/// `Person`, `Organization` are excluded: the base categories already ask the model for
+/// these concepts directly, via `EntityCategory::Email`/`Phone`/`Person`/`Organization`
+/// rather than a `Custom` label, so requesting them again under a second label spelling
+/// would just ask twice for the same thing). Labels that collide with
+/// [`crate::pii::ner::to_pii_category`]'s alias table (`address`, `ssn`, `passport`,
+/// `credit_card`, `iban`, `full_name`) use that table's exact spelling so detections land
+/// on their real [`crate::pii::PiiCategory`] variant instead of falling through to
+/// `Custom(label)`.
+const COMPREHENSIVE_LABELS: [&str; 29] = [
+    "address",
+    "ssn",
+    "passport",
+    "drivers_license",
+    "eu_vat",
+    "national_id",
+    "tax_id",
+    "credit_card",
+    "iban",
+    "bank_account",
+    "routing_number",
+    "swift_bic",
+    "crypto_wallet",
+    "medical_record_number",
+    "health_plan_number",
+    "diagnosis",
+    "medication",
+    "username",
+    "password",
+    "api_key",
+    "secret_token",
+    "jwt_token",
+    "ip_address",
+    "mac_address",
+    "url",
+    "license_plate",
+    "vehicle_vin",
+    "date_of_birth",
+    "full_name",
+];
+
 impl VerticalConfig {
+    /// A built-in vertical requesting every [`crate::pii::PiiCategory`] the taxonomy
+    /// defines, beyond the five categories every pipeline already requests by default.
+    /// Strictly opt-in: nothing constructs this except a caller that asks for it by
+    /// name (e.g. `--vertical comprehensive` on the CLI) — [`PipelineConfig::default`]
+    /// still leaves `vertical` at `None`. See [`COMPREHENSIVE_LABELS`] for what's
+    /// excluded and why.
+    pub fn comprehensive() -> Self {
+        Self {
+            id: "comprehensive".to_string(),
+            labels: COMPREHENSIVE_LABELS.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     /// Validate this vertical's shape.
     ///
     /// Checks, independent of redaction mode and of whether a model is actually
@@ -510,6 +565,21 @@ mod tests {
         // Untouched sections keep their defaults rather than failing to deserialize.
         assert_eq!(config.redaction.mode, RedactionMode::default());
         assert_eq!(config.redaction.mode, RedactionMode::Mask);
+    }
+
+    #[test]
+    fn should_accept_the_comprehensive_vertical() {
+        VerticalConfig::comprehensive().validate().unwrap();
+    }
+
+    #[test]
+    fn should_size_the_comprehensive_vertical_to_the_taxonomy_minus_the_base_categories() {
+        // PiiCategory has 33 named variants plus `Custom(String)`; 4 of the named
+        // variants (Email, PhoneNumber, Person, Organization) are already requested
+        // via the base categories, so the comprehensive vertical adds the remaining 29.
+        let comprehensive = VerticalConfig::comprehensive();
+        assert_eq!(comprehensive.labels.len(), 29);
+        assert_eq!(comprehensive.id, "comprehensive");
     }
 
     #[test]

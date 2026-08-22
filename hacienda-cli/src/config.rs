@@ -12,11 +12,11 @@
 //! happen after parsing. `HaciendaConfig`'s own `#[serde(default, deny_unknown_fields)]`
 //! then fills in anything still missing and rejects anything unrecognised.
 
-use crate::cli::{ExtractArgs, Mode, ScanArgs};
+use crate::cli::{ExtractArgs, Mode, ScanArgs, Vertical};
 use anyhow::{Context, Result};
 use hacienda::HaciendaConfig;
 use hacienda_core::glossary::GlossaryConfig;
-use hacienda_core::pii::PipelineConfig;
+use hacienda_core::pii::{PipelineConfig, VerticalConfig};
 use hacienda_core::redaction::RedactionMode;
 use hacienda_core::review::ReviewConfig;
 use serde_json::Value;
@@ -157,6 +157,13 @@ fn merge_json(base: &mut Value, overlay: Value) {
 
 /// Apply `--mode`/`--threshold`/`--model-dir`/`--lora-dir` on top of the loaded config.
 ///
+/// Map a `--vertical` flag value onto its built-in [`VerticalConfig`].
+fn resolve_vertical(vertical: Vertical) -> VerticalConfig {
+    match vertical {
+        Vertical::Comprehensive => VerticalConfig::comprehensive(),
+    }
+}
+
 /// Materialises `config.pii` with [`PipelineConfig::default`] when a flag is given but
 /// no `[pii]` section was loaded. The previous version only mutated `config.pii` when it
 /// was already `Some`, so `--mode hash` against a config with no `[pii]` section silently
@@ -171,6 +178,7 @@ fn apply_cli_overrides(
             || args.threshold.is_some()
             || args.model_dir.is_some()
             || args.lora_dir.is_some()
+            || args.vertical.is_some()
         {
             let pii = config.pii.get_or_insert_with(PipelineConfig::default);
             if let Some(mode) = args.mode {
@@ -190,13 +198,21 @@ fn apply_cli_overrides(
             if let Some(dir) = args.lora_dir.clone() {
                 pii.model.lora_adapter_dir = Some(dir);
             }
+            if let Some(vertical) = args.vertical {
+                pii.vertical = Some(resolve_vertical(vertical));
+            }
         }
     }
 
     if let Some(args) = scan_args {
-        if let Some(threshold) = args.threshold {
+        if args.threshold.is_some() || args.vertical.is_some() {
             let pii = config.pii.get_or_insert_with(PipelineConfig::default);
-            pii.model_threshold_default = threshold;
+            if let Some(threshold) = args.threshold {
+                pii.model_threshold_default = threshold;
+            }
+            if let Some(vertical) = args.vertical {
+                pii.vertical = Some(resolve_vertical(vertical));
+            }
         }
     }
 
@@ -316,6 +332,7 @@ mod tests {
             threshold: None,
             model_dir: None,
             lora_dir: None,
+            vertical: None,
             format: crate::cli::Format::Text,
             audit_out: None,
             vault: None,
@@ -345,6 +362,7 @@ mod tests {
             threshold: None,
             model_dir: None,
             lora_dir: None,
+            vertical: None,
             format: crate::cli::Format::Text,
             audit_out: None,
             vault: None,

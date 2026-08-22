@@ -4,6 +4,22 @@ export interface FileInput {
   name: string;
   bytes: ArrayBuffer;
   type: string;
+  /**
+   * Set by `lib/asset-loader.ts`'s `checkPdfPageSafety` for PDFs whose page count makes
+   * full-document OCR a memory risk (xberg-wasm's OCR batch-size throttle,
+   * `adapt_batch_size_to_memory`, is a no-op in the browser build — see that function's
+   * `get_available_memory()`, which only implements the syscall for native Linux/macOS
+   * targets and always returns 0 on wasm32). Native text extraction still runs; only the
+   * scanned-page OCR fallback is skipped for this file.
+   */
+  disableOcr?: boolean;
+  /**
+   * Set by `lib/asset-loader.ts`'s `checkPdfPageSafety` for PDFs — the pdfium page count
+   * it already computed, reused by `lib/pdf-liteparse.ts` to decide `parse()` vs
+   * `openBatchSession()` without a second page-count pass. `undefined` for non-PDFs, or
+   * if the probe failed and `checkPdfPageSafety` failed open.
+   */
+  pdfPageCount?: number;
 }
 
 export interface Entity {
@@ -67,7 +83,7 @@ export interface ProgressUpdate {
    * `onProgress` (resample and transcribe phases), so this is real progress, not a fixed
    * placeholder — same guarantee every other stage here already gives the UI.
    */
-  stage: "queued" | "extract" | "transcribe" | "ner" | "pii" | "link" | "complete" | "error";
+  stage: "queued" | "extract" | "transcribe" | "ner" | "pii" | "link" | "complete" | "error" | "wasm-load";
   percent: number;
   message?: string;
 }
@@ -92,6 +108,14 @@ export type NerCategory =
 
 export interface AppConfig {
   nerCategories: NerCategory[];
+  /**
+   * Zero-shot labels handed to the NER backend in addition to `nerCategories`, via
+   * `WasmNerConfig.customLabels` — the open-vocabulary escape hatch from the fixed
+   * `NerCategory` union above. Additive, never a replacement (`worker/pipeline.ts`).
+   * Empty by default; populated by opting into a preset like "Comprehensive PII" in
+   * `ConfigPanel.tsx`, mirroring `hacienda-core`'s `VerticalConfig::comprehensive()`.
+   */
+  nerCustomLabels: string[];
   outputFormat: "markdown" | "plain" | "json";
   chunkSize: number;
   enableTranscription: boolean;
@@ -115,6 +139,20 @@ export interface AppConfig {
   /** Travels with a token (`[CATEGORY:key_id:...]`) so the same passphrase, entered again
    * later, can be told which id to derive against — matters once key rotation exists. */
   pseudonymKeyId: string;
+  /**
+   * Which engine extracts PDF text. `"liteparse"` (default) routes PDFs through
+   * `@llamaindex/liteparse-wasm` (PDFium-backed) — see `docs/superpowers/specs/
+   * 2026-08-22-liteparse-pdf-extraction-design.md` for why: xberg-wasm's `pdf_oxide`
+   * backend has open crash-class bugs and no bounded-memory large-document path, both
+   * fixed by switching engines for PDF specifically. `"xberg"` is kept as an internal
+   * escape hatch (regression testing, a fast rollback if LiteParse regresses on some
+   * document class) but is intentionally not exposed in ConfigPanel — this was a
+   * config-gated rollout while under evaluation; it's the default now. Non-PDF formats
+   * always go through xberg-wasm regardless of this flag — LiteParse's wasm build has no
+   * DOCX/XLSX/PPTX support (that requires a native LibreOffice subprocess, not available
+   * in-browser).
+   */
+  pdfEngine: "xberg" | "liteparse";
 }
 
 export interface OnboardingState {
@@ -128,6 +166,7 @@ export interface OnboardingState {
 
 export const DEFAULT_CONFIG: AppConfig = {
   nerCategories: ["person", "organization", "location", "email", "phone"],
+  nerCustomLabels: [],
   outputFormat: "markdown",
   chunkSize: 1000,
   enableTranscription: false,
@@ -140,4 +179,5 @@ export const DEFAULT_CONFIG: AppConfig = {
   redactionMode: "mask",
   pseudonymPassphrase: "",
   pseudonymKeyId: "session",
+  pdfEngine: "liteparse",
 };

@@ -1,26 +1,46 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, Suspense, lazy } from "react";
+import { toast } from "sonner";
+import { Toaster } from "./components/ui/sonner";
 import { ConfigPanel } from "./components/ConfigPanel";
-import { buildFileRows } from "./components/FileBrowser";
-import { AssetLoadingScreen } from "./components/screens/AssetLoadingScreen";
-import { UploadScreen } from "./components/screens/UploadScreen";
-import { QueueScreen } from "./components/screens/QueueScreen";
-import { FileBrowserScreen } from "./components/screens/FileBrowserScreen";
-import { DetailScreen } from "./components/screens/DetailScreen";
+import { Landing } from "./pages/Landing";
+import { Assets } from "./pages/Assets";
+import { Studio } from "./pages/Studio";
+import { DocumentDetail } from "./pages/DocumentDetail";
+import { Settings } from "./pages/Settings";
+
+// Lazy, not a static import like the other pages: `pages/Documents.tsx` pulls in
+// `components/extend/file-system.tsx`, a large in-progress file-browser view whose
+// Dialog/ScrollArea usage (`DialogPanel`, `ScrollAreaPrimitive.Content`) was written
+// against Base UI's API, not the Radix-based primitives actually installed in
+// `components/ui/`. A broken *transitive* import throws at module-evaluation time in
+// ESM — with a static import here, that would crash the whole app on first load,
+// before the user ever navigates to Documents, taking Studio's upload/extraction flow
+// down with it. Lazy-loading confines the failure to the Documents screen itself.
+const Documents = lazy(() =>
+  import("./pages/Documents").then((m) => ({ default: m.Documents })),
+);
 import {
   loadNerModel,
   isModelCached,
   preloadXbergWasm,
+  loadTessdata,
   validateFile,
-  type DownloadProgress,
+  checkPdfPageSafety,
 } from "./lib/asset-loader";
+import { WorkerPool, createWorkerPool } from "./lib/worker-pool";
+import { detectDeviceTier, poolSizeForTier } from "./lib/device-tier";
 import { effectiveFileName, isJunkFile } from "./lib/file-filter";
-import { renderAnnotatedMarkdown } from "./lib/annotate";
-import { reExportMarkdown, resolveExportContent } from "./lib/export-resolve";
-import { getViewerKind } from "./lib/viewer-kind";
-import { computeContentHash } from "./lib/content-hash";
-import { loadDraft, saveDraft, pruneDrafts } from "./lib/redaction-store";
+import {
+  saveDocument,
+  saveEditedFindings,
+  deleteDocument,
+  listDocuments,
+  listEditedFindings,
+} from "./lib/persistence";
+import { pruneDrafts } from "./lib/redaction-store";
+import { folderOf } from "./lib/library";
+import type { LibraryDocument } from "./lib/library";
 import { DEFAULT_CONFIG } from "./lib/types";
-import type { Screen } from "./lib/screens";
 import type { AppConfig, OnboardingState, ProcessedFile, ProgressUpdate } from "./lib/types";
 import type { PiiEntity } from "./lib/pii-engine";
 // Type-only: erased at compile time, so this does not pull `@remotion/whisper-web` into the
@@ -49,21 +69,43 @@ function downloadText(fileName: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Wraps an already-spliced redacted body (`DocumentDetail`'s free-text draft, or a
+ * mode-recomputed rendering) with `result.markdown`'s original frontmatter and entity
+ * glossary. Uses the same `lastIndexOf`-based glossary extraction `lib/export-resolve.ts`'s
+ * `reExportMarkdown` documents: a first-match regex would misfire if the source document's
+ * own body happens to contain a literal "## Entities" heading before the pipeline's
+ * appended one.
+ */
+function wrapRedactedBody(result: ProcessedFile, body: string): string {
+  const frontmatterMatch = result.markdown.match(/^---\n[\s\S]*?\n---/);
+  const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
+  const glossaryMarker = "\n## Entities\n\n";
+  const glossaryStart = result.markdown.lastIndexOf(glossaryMarker);
+  const glossary = glossaryStart === -1 ? "" : result.markdown.slice(glossaryStart);
+  return frontmatter + "\n" + body + glossary;
+}
+
+type Route = "landing" | "assets" | "studio" | "settings";
+type StudioView = "upload" | "documents" | "document";
+
 export function App() {
-  // Replaces the prior `onboardingComplete: boolean` + `openResultName: string | null`
-  // pair — see `lib/screens.ts`'s header for why folding both into one discriminated
-  // union removes a whole class of "which of two names is authoritative" bug.
-  const [screen, setScreen] = useState<Screen>({ kind: "asset-loading" });
+  const [route, setRoute] = useState<Route>("landing");
+  const [studioView, setStudioView] = useState<StudioView>("upload");
+  const [selectedDocumentName, setSelectedDocumentName] = useState<string | null>(null);
   const [assets, setAssets] = useState<OnboardingState["assets"]>({
     xbergWasm: false,
     nerModel: false,
     tessdata: false,
   });
+  const [nerModelProgress, setNerModelProgress] = useState<{ receivedBytes: number; totalBytes: number | null } | null>(null);
   const [files, setFiles] = useState<File[]>([]);
+  // Redesign: files land here first — reviewable, removable — and only move into `files`
+  // (which drives the worker pool) once the user confirms via `handleProcessQueue`.
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [progress, setProgress] = useState<Map<string, ProgressUpdate>>(new Map());
   const [results, setResults] = useState<ProcessedFile[]>([]);
   const [config, setConfig] = useState<AppConfig>({ ...DEFAULT_CONFIG });
-  const [showConfig, setShowConfig] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Toggles the *same* `#file-input` element between file- and directory-picking rather
   // than adding a second `<input type="file">` — every e2e test's `input[type="file"]`
@@ -72,19 +114,10 @@ export function App() {
   // Folder drops routinely carry OS noise and unsupported files; report the count once
   // instead of a per-file error banner that just overwrites itself.
   const [skipNotice, setSkipNotice] = useState<string | null>(null);
-  // Non-fatal config degradations the worker reports mid-batch (taxonomy load failure,
-  // pseudonymize key derivation failure, per-file NER failure) — the batch still
-  // completes, but the output doesn't fully match what the user configured, so this is
-  // surfaced rather than left to only the worker console.
-  const [warnings, setWarnings] = useState<string[]>([]);
   // `assets.nerModel` stays true even when the neural backend failed to load, because the
   // app has a legitimate regex-only fallback and onboarding must not get stuck on a
   // blocked model download. This flag is what actually records the failure.
   const [nerModelDegraded, setNerModelDegraded] = useState(false);
-  // Byte-level NER model download progress, threaded into `AssetLoadingScreen` for the
-  // "clear loading progress" requirement — null whenever no download is in flight
-  // (cached model, not-yet-started, or finished/failed).
-  const [nerDownloadProgress, setNerDownloadProgress] = useState<DownloadProgress | null>(null);
   // The drop zone renders before the worker finishes its handshake, and the handshake is
   // slow — it compiles a 48 MB WASM module. Dropping a file into that window used to throw
   // on a null worker and silently do nothing.
@@ -101,70 +134,114 @@ export function App() {
   // the Finder list's "edited" badge keys off, via `handleAddFinding`/`handleRemoveFinding`
   // always writing an entry, never mutating `result.piiFindings` itself.
   const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
-  // Keyed by `ProcessedFile.name` (the `.md` output name), object URLs backing the
-  // docx/xlsx/pptx/pdf preview viewers below. `results` is never cleared mid-session
-  // (see the batch-complete handler above), so these are revoked only on unmount.
-  const [previewUrls, setPreviewUrls] = useState<Map<string, string>>(new Map());
-  // A single viewer-scoped dark toggle — this app has no app-wide dark mode.
-  const [viewerDark, setViewerDark] = useState(false);
-  // Track K2: the redacted pane's free-text buffer per result, keyed by `ProcessedFile.name`.
-  // Seeded lazily from `renderAnnotatedMarkdown` the first time a result's split view opens
-  // (see `redactedDraftFor` below); once present, edits here are independent of
-  // `piiFindings`/`entities` offsets, same scope cut as `MarkdownEditor`'s own edit model.
-  const [redactedDrafts, setRedactedDrafts] = useState<Map<string, string>>(new Map());
-  // Track K/Phase 4: SHA-256 hex of each input file's bytes, keyed by `effectiveFileName`
-  // (the same key `progress`/`fileErrors` use) — computed once in `handleFiles` from bytes
-  // already being read for the worker upload, and used as the IndexedDB autosave key so a
-  // draft survives a reload without being tied to a filename.
-  const [contentHashes, setContentHashes] = useState<Map<string, string>>(new Map());
-  // Autosave status for whichever result the detail screen currently has open — null
-  // outside the detail screen or before any edit has triggered a save.
-  const [saveStatus, setSaveStatus] = useState<"saving" | "saved" | null>(null);
 
-  const workerRef = useRef<Worker | null>(null);
+  const workerPoolRef = useRef<WorkerPool | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
-  const previewUrlsRef = useRef(previewUrls);
-  previewUrlsRef.current = previewUrls;
-
-  useEffect(() => {
-    setPreviewUrls((prev) => {
-      const next = new Map(prev);
-      let changed = false;
-      for (const result of results) {
-        if (next.has(result.name)) continue;
-        const file = files.find(
-          (f) => effectiveFileName(f) === result.frontmatter.source,
-        );
-        if (!file) {
-          console.warn(`[App] No matching file for result ${result.name} (source: ${result.frontmatter.source}). files:`, files.map(f => effectiveFileName(f)));
-          continue;
-        }
-        console.log(`[App] Creating preview URL for ${result.name} from file ${file.name}`);
-        next.set(result.name, URL.createObjectURL(file));
-        changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, [results, files]);
-
-  useEffect(() => {
-    // Reads the ref (not `previewUrls`) so the map at the moment of unmount is
-    // revoked, not the empty map this effect's own closure was created with.
-    return () => {
-      for (const url of previewUrlsRef.current.values()) URL.revokeObjectURL(url);
-    };
-  }, []);
-
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
   // Track D3's follow-up (see `worker/transcribe-bridge.ts`'s header): the one `WhisperBridge`
   // instance for this tab, created lazily on the first "transcribe-request" the worker sends
   // and reused for every request after that — instance reuse is what makes `load()`'s
   // idempotency (skip re-download/re-init once a model is loaded) actually apply across a
   // whole batch, and across batches, instead of just within a single call.
   const whisperBridgeRef = useRef<WhisperBridge | null>(null);
+  // Populated by `checkPdfPageSafety` in `handleFilesAccepted` for PDFs whose page count
+  // makes OCR a memory risk; read back in `handleProcessQueue` when building each file's
+  // `FileInput`. Keyed by the `File` object itself (stable across `pendingFiles`/`files`
+  // state, which hold the same references) rather than by name, since folder uploads can
+  // have same-named siblings in different subdirectories.
+  const disableOcrForFileRef = useRef<WeakMap<File, boolean>>(new WeakMap());
+  // Same pattern as `disableOcrForFileRef`, for the pdfium page count `checkPdfPageSafety`
+  // already computed — `lib/pdf-liteparse.ts`'s batch-vs-whole-document decision reuses
+  // this instead of re-opening the PDF to count pages a second time.
+  const pdfPageCountForFileRef = useRef<WeakMap<File, number>>(new WeakMap());
 
   useEffect(() => {
     let cancelled = false;
+
+    // Fresh-start: ?reset=1 clears all IndexedDB, Cache API, localStorage, sessionStorage,
+    // and forces a hard reload to see first-user asset download flow.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("reset") === "1") {
+      (async () => {
+        try {
+          // Delete all IndexedDB databases (models, library, drafts, wasm cache)
+          const dbs = await indexedDB.databases?.();
+          if (dbs && dbs.length) {
+            await Promise.all(
+              dbs.map((db) => {
+                return new Promise<void>((resolve) => {
+                  const req = indexedDB.deleteDatabase(db.name || "");
+                  req.onsuccess = () => resolve();
+                  req.onerror = () => resolve();
+                  req.onblocked = () => resolve();
+                });
+              })
+            );
+            console.log("[App] Reset: cleared IndexedDB databases", dbs.map(d => d.name));
+          }
+          // Clear Cache API (wasm modules)
+          const g: any = globalThis as any;
+          if (typeof g.caches !== "undefined" && g.caches) {
+            const names = await g.caches.keys();
+            await Promise.all(names.map((n: string) => g.caches.delete(n)));
+            console.log("[App] Reset: cleared Cache API", names);
+          }
+          localStorage.clear();
+          sessionStorage.clear();
+          // Remove the reset param and reload to start clean
+          const url = new URL(window.location.href);
+          url.searchParams.delete("reset");
+          window.location.replace(url.toString());
+        } catch (e) {
+          console.warn("[App] Reset cleanup failed", e);
+        }
+      })();
+      return;
+    }
+
+    // Resolves NER model availability honestly — from the real device-tier check and
+    // IndexedDB cache state, never from the `xberg-studio-visited` flag. That flag used
+    // to gate this too: a degraded fallback (a stalled/failed download, not a genuine
+    // "unsupported" state) set `visited` alongside `nerModelDegraded`, so every later
+    // load trusted the flag and skipped ever calling `isModelCached()` or retrying —
+    // one bad download permanently locked the app into regex-only detection with no
+    // further error shown. Calling this on every load instead means a since-recovered
+    // network, or a since-completed download from another tab, is picked up.
+    async function resolveNerModel() {
+      // A `low`-tier device is exactly the case the 600MB GLiNER2 model risks not
+      // fitting alongside a worker's own wasm heap — skip even attempting to load
+      // it (cached or not; the risk is holding it resident in memory, not the
+      // download) and go straight to the regex/compromise fallback `selectNerBridge`
+      // already falls back to when `nerRuntime` is null. Visible in the UI rather
+      // than silent, same as the existing download-failure path below.
+      const deviceTier = detectDeviceTier();
+      if (deviceTier === "low") {
+        console.log("[App] low device-memory tier — skipping neural NER model");
+        setNerModelDegraded(true);
+        setError(
+          "This device's available memory is limited — using regex-only PII detection instead of the neural model.",
+        );
+        setAssets((a) => ({ ...a, nerModel: true }));
+        return;
+      }
+      if (await isModelCached()) {
+        setAssets((a) => ({ ...a, nerModel: true }));
+        return;
+      }
+      try {
+        await loadNerModel((p) => setNerModelProgress(p));
+        setAssets((a) => ({ ...a, nerModel: true }));
+        setNerModelProgress(null);
+      } catch (e) {
+        console.warn("[App] NER model download failed, using fallback:", e);
+        setNerModelDegraded(true);
+        setError("Neural PII backend unavailable — falling back to regex-only detection.");
+        setAssets((a) => ({ ...a, nerModel: true }));
+        setNerModelProgress(null);
+      }
+    }
 
     async function preloadAssets() {
       try {
@@ -174,22 +251,16 @@ export function App() {
         await preloadXbergWasm();
         console.log("[App] preloadXbergWasm done");
 
-        if (await isModelCached()) {
-          setAssets((a) => ({ ...a, nerModel: true }));
-        } else {
-          try {
-            await loadNerModel((p) => setNerDownloadProgress(p));
-            setAssets((a) => ({ ...a, nerModel: true }));
-          } catch (e) {
-            console.warn("[App] NER model download failed, using fallback:", e);
-            setNerModelDegraded(true);
-            setError("Neural PII backend unavailable — falling back to regex-only detection.");
-            setAssets((a) => ({ ...a, nerModel: true }));
-          } finally {
-            setNerDownloadProgress(null);
-          }
-        }
+        await resolveNerModel();
 
+        try {
+          await loadTessdata("eng");
+        } catch (e) {
+          // OCR degrades silently to "no OCR text" the same way a missing bridge
+          // already does inside the worker (`selectOcrBridge` returns `undefined`)
+          // — not worth surfacing an error banner for a non-essential capability.
+          console.warn("[App] Tesseract tessdata download failed, OCR unavailable:", e);
+        }
         setAssets((a) => ({ ...a, tessdata: true }));
         localStorage.setItem("xberg-studio-visited", "true");
       } catch (e) {
@@ -206,25 +277,73 @@ export function App() {
     async function init() {
       const visited = localStorage.getItem("xberg-studio-visited");
       if (visited) {
-        setScreen({ kind: "upload" });
-        setAssets({ xbergWasm: true, nerModel: true, tessdata: true });
+        // `xbergWasm`/tessdata are one-time, disk-cached downloads — safe to trust the
+        // flag for those. The NER model is not: see `resolveNerModel`'s doc comment.
+        setAssets((a) => ({ ...a, xbergWasm: true, tessdata: true }));
+        await resolveNerModel();
       } else {
         await preloadAssets();
       }
       if (cancelled) return;
 
-      const worker = new Worker(new URL("./worker/pipeline.ts", import.meta.url), {
-        type: "module",
+      // Initialize worker pool with transcription handler. Every pool worker can send a
+      // "transcribe-request" (whisper can't run inside a worker — see
+      // `worker/transcribe-bridge.ts`'s header); `respond` is bound by `WorkerPool` to
+      // the *specific* worker instance that asked, so there's no separate "just for
+      // transcription" worker needed — that used to mean an extra full model load.
+      const pool = await createWorkerPool(
+        { poolSize: poolSizeForTier(detectDeviceTier()) },
+        async (data, respond) => {
+          await handleTranscribeRequest(
+            data as {
+              requestId: string;
+              file: string;
+              audioBytes: Uint8Array<ArrayBuffer>;
+              mimeType: string;
+              config: TranscriptionConfig;
+            },
+            respond,
+          );
+        }
+      );
+      workerPoolRef.current = pool;
+
+      // Set up pool callbacks
+      pool.setProgressHandler((update) => {
+        setProgress((prev) => new Map(prev).set(update.file, update));
       });
-      workerRef.current = worker;
-      await new Promise<void>((resolve) => {
-        worker.onmessage = (e) => {
-          if (e.data.type === "ready") resolve();
-        };
-        worker.postMessage({ type: "init" });
+      pool.setFileCompleteHandler((result) => {
+        setResults((prev) => [...prev, result]);
+        // `progress` is keyed by the *input* file name throughout its lifecycle — every
+        // `postProgress` call in worker/pipeline.ts (including its own final "complete"
+        // update) keys on `input.name`. `result.name` is the *output* document name
+        // (input name with its extension swapped to `.md`), so keying on it here created
+        // a second, stale-forever entry instead of updating the real one.
+        setProgress((prev) =>
+          new Map(prev).set(result.frontmatter.source, {
+            file: result.frontmatter.source,
+            stage: "complete",
+            percent: 100,
+          })
+        );
+        void saveDocument(result);
       });
-      if (cancelled) return;
-      worker.onmessage = handleWorkerMessage;
+      pool.setErrorHandler((file, error) => {
+        setError(`${file}: ${error}`);
+        setFileErrors((prev) => new Map(prev).set(file, error));
+      });
+      pool.setWarningHandler((message) => {
+        console.warn("[WorkerPool] Warning:", message);
+        toast.warning(message);
+      });
+      pool.setBatchCompleteHandler(() => {
+        // Batch complete - transition to documents view after a delay
+        setTimeout(() => {
+          setProgress(new Map());
+          setStudioView("documents");
+        }, 1000);
+      });
+
       setWorkerReady(true);
     }
 
@@ -237,21 +356,16 @@ export function App() {
     // an unanswered request is exactly the failure mode `transcriptionBridge`'s own timeout
     // exists to catch, but answering promptly here means that file's real error reaches the
     // UI in milliseconds, not after a 15-minute wait.
-    async function handleTranscribeRequest(data: {
-      requestId: string;
-      file: string;
-      audioBytes: Uint8Array<ArrayBuffer>;
-      mimeType: string;
-      config: TranscriptionConfig;
-    }): Promise<void> {
-      const worker = workerRef.current;
-      if (!worker) {
-        console.error(
-          "[App] transcribe-request received with no worker to reply to — dropping",
-          data.requestId,
-        );
-        return;
-      }
+    async function handleTranscribeRequest(
+      data: {
+        requestId: string;
+        file: string;
+        audioBytes: Uint8Array<ArrayBuffer>;
+        mimeType: string;
+        config: TranscriptionConfig;
+      },
+      respond: (response: { result?: unknown; error?: string }) => void,
+    ): Promise<void> {
       try {
         if (!whisperBridgeRef.current) {
           const { WhisperBridge } = await import("./lib/transcription/whisper-bridge");
@@ -284,94 +398,71 @@ export function App() {
             );
           },
         );
-        worker.postMessage({ type: "transcribe-response", requestId: data.requestId, result });
+        respond({ result });
       } catch (e) {
-        worker.postMessage({
-          type: "transcribe-response",
-          requestId: data.requestId,
-          error: e instanceof Error ? e.message : "Unknown error",
-        });
-      }
-    }
-
-    function handleWorkerMessage(event: MessageEvent) {
-      const { type, ...data } = event.data;
-      switch (type) {
-        case "progress":
-          setProgress((prev) => new Map(prev).set(data.file, data as ProgressUpdate));
-          break;
-        case "transcribe-request":
-          // Fire-and-forget from this switch's point of view: `handleTranscribeRequest`
-          // always settles by posting its own "transcribe-response" (success or error)
-          // back to the worker, so nothing here needs to await or otherwise react to it.
-          void handleTranscribeRequest(
-            data as {
-              requestId: string;
-              file: string;
-              audioBytes: Uint8Array<ArrayBuffer>;
-              mimeType: string;
-              config: TranscriptionConfig;
-            },
-          );
-          break;
-        case "file-complete":
-          setResults((prev) => [...prev, data as ProcessedFile]);
-          setProgress((prev) =>
-            new Map(prev).set(data.name, { ...data, stage: "complete", percent: 100 }),
-          );
-          break;
-        case "batch-complete":
-          // queue → browser: the worker has settled every file in this batch. Zip
-          // building is now a deliberate, on-demand action (the file-browser screen's
-          // "Download redacted zip" button, via handleDownloadZip's "build-zip" message)
-          // rather than something that runs unconditionally here.
-          setScreen({ kind: "browser" });
-          // Clears the per-file progress bars (`progress` empty ⇒ `update` is undefined ⇒
-          // each renders null) once the batch settles. Deliberately does NOT clear `files`
-          // too: `files` also drives `FileBrowser`'s per-file row list (Track I3), which is
-          // meant to persist — same as `results`, which is never cleared — so a user can
-          // still see and edit a file's findings (Track I4) after this 1s delay. Clearing
-          // `files` here used to make the FileBrowser row (and its `.file-edited-badge`)
-          // disappear ~1s after upload, even while the "Processed this batch" edit UI below
-          // stayed mounted and functional — a real bug, not a test-timing issue.
-          setTimeout(() => {
-            setProgress(new Map());
-          }, 1000);
-          break;
-        case "error":
-          console.error("[App] Worker error received:", data);
-          console.error("[App] Error file:", data.file);
-          console.error("[App] Error message:", data.message);
-          setError(`${data.file}: ${data.message}`);
-          setFileErrors((prev) => new Map(prev).set(data.file, data.message));
-          break;
-        case "warning":
-          console.warn("[App] Worker warning received:", data);
-          setWarnings((prev) => [
-            ...prev,
-            data.file ? `${data.file}: ${data.message}` : data.message,
-          ]);
-          break;
-        case "zip-ready":
-          downloadZip(data.zip);
-          break;
+        respond({ error: e instanceof Error ? e.message : "Unknown error" });
       }
     }
 
     init();
     return () => {
       cancelled = true;
-      workerRef.current?.terminate();
+      workerPoolRef.current?.terminate();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once, mirrors onMount
   }, []);
 
-  async function handleFiles(fileList: FileList | File[]): Promise<void> {
-    console.log("[App] handleFiles called with", fileList.length, "files");
+  // Redesign: hydrate the document library from IndexedDB on mount, so documents
+  // processed in a previous tab session still show up in the Documents page. Read-only
+  // merge into `results`/`editedFindings` — this session's own worker output (via
+  // `saveDocument`/`saveEditedFindings` above) is what keeps storage in sync going
+  // forward, not a re-read here.
+  useEffect(() => {
+    let cancelled = false;
+    async function hydrate() {
+      const [persistedDocs, persistedEdits] = await Promise.all([
+        listDocuments(),
+        listEditedFindings(),
+      ]);
+      if (cancelled || persistedDocs.length === 0) return;
+      setResults((prev) => {
+        const existing = new Set(prev.map((r) => r.name));
+        const toAdd = persistedDocs
+          .map((d) => d.result)
+          .filter((r) => !existing.has(r.name));
+        return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+      });
+      if (persistedEdits.size > 0) {
+        setEditedFindings((prev) => new Map([...persistedEdits, ...prev]));
+      }
+      setStudioView((v) => (v === "upload" ? "documents" : v));
+    }
+    hydrate();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Redacted-markdown drafts (`DocumentDetail`'s free-text autosave) can end up holding
+  // PII a user left in place or pasted unredacted — bound their local retention by
+  // default rather than only via an explicit "clear" action. Runs once per app load, not
+  // once per draft, so a draft never outlives 30 days of the app simply never reopening.
+  useEffect(() => {
+    void pruneDrafts(30 * 24 * 60 * 60 * 1000);
+  }, []);
+
+  // Redesign: matches the mockup's two-step flow — a dropped/picked batch lands in a
+  // review queue first (`pendingFiles`), with per-file removal and a "Clear all", and
+  // only actually starts processing once the user confirms via `handleProcessQueue`.
+  // Validation still happens here, at drop time, so a bad file is reported immediately
+  // rather than silently sitting in the queue until the user clicks process.
+  async function handleFilesAccepted(fileList: FileList | File[]): Promise<void> {
+    console.log("[App] handleFilesAccepted called with", fileList.length, "files");
     const fileArray = Array.from(fileList);
     const validFiles: File[] = [];
     let skippedJunk = 0;
     const unsupported: string[] = [];
+    const pageSafetyWarnings: string[] = [];
 
     for (const file of fileArray) {
       const name = effectiveFileName(file);
@@ -386,6 +477,25 @@ export function App() {
         console.warn("[App] skipping unsupported file:", name, validation.error);
         continue;
       }
+
+      // PDF-only, and cheap relative to actual extraction (just a pdfium page count) —
+      // catches the case a plain size check misses: a scanned document well under the
+      // 50MB cap can still have enough pages to make OCR a memory risk (see
+      // `checkPdfPageSafety`'s header).
+      const pageSafety = await checkPdfPageSafety(file);
+      if (!pageSafety.valid) {
+        unsupported.push(pageSafety.error || "PDF rejected");
+        console.warn("[App] skipping PDF over page-count limit:", name, pageSafety.error);
+        continue;
+      }
+      if (pageSafety.disableOcr) {
+        disableOcrForFileRef.current.set(file, true);
+        if (pageSafety.warning) pageSafetyWarnings.push(pageSafety.warning);
+      }
+      if (pageSafety.pageCount !== undefined) {
+        pdfPageCountForFileRef.current.set(file, pageSafety.pageCount);
+      }
+
       validFiles.push(file);
     }
 
@@ -406,38 +516,76 @@ export function App() {
       setSkipNotice(null);
     }
 
-    if (validFiles.length === 0) return;
+    if (pageSafetyWarnings.length > 0) {
+      setSkipNotice((prev) => {
+        const combined = [prev, ...pageSafetyWarnings].filter(Boolean).join(" ");
+        return combined || null;
+      });
+    }
 
-    setFiles((prev) => [...prev, ...validFiles]);
+    if (validFiles.length === 0) return;
+    setPendingFiles((prev) => [...prev, ...validFiles]);
     setError(null);
-    setWarnings([]);
+  }
+
+  function handleRemovePending(index: number): void {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function handleClearPending(): void {
+    setPendingFiles([]);
+  }
+
+  async function handleProcessQueue(): Promise<void> {
+    const queued = pendingFiles;
+    if (queued.length === 0) return;
+    setPendingFiles([]);
+    setFiles((prev) => [...prev, ...queued]);
 
     // Send to worker — `name` carries the folder-relative path when the file came from a
     // directory picker, so it survives into the worker's output filename (and, via
     // JSZip's own path handling, the exported zip's folder structure) rather than being
-    // flattened to a basename. `hash` rides along on the same `arrayBuffer()` read (Track
-    // K/Phase 4's autosave key) rather than re-reading each file a second time, and is
-    // stripped back out before posting — `FileInput` (`lib/types.ts`) has no `hash` field.
+    // flattened to a basename.
     const fileInputs = await Promise.all(
-      validFiles.map(async (f) => {
-        const bytes = await f.arrayBuffer();
-        const hash = await computeContentHash(bytes);
-        return { name: effectiveFileName(f), bytes, type: f.type || "application/octet-stream", hash };
-      }),
+      queued.map(async (f) => ({
+        name: effectiveFileName(f),
+        bytes: await f.arrayBuffer(),
+        type: f.type || "application/octet-stream",
+        disableOcr: disableOcrForFileRef.current.get(f),
+        pdfPageCount: pdfPageCountForFileRef.current.get(f),
+      })),
     );
-    setContentHashes((prev) => {
-      const next = new Map(prev);
-      for (const fi of fileInputs) next.set(fi.name, fi.hash);
-      return next;
-    });
 
-    console.log("[App] posting to worker:", fileInputs.length, "files");
-    workerRef.current!.postMessage({
-      type: "process",
-      files: fileInputs.map(({ name, bytes, type }) => ({ name, bytes, type })),
-      config: JSON.parse(JSON.stringify(configRef.current)),
-    });
-    setScreen({ kind: "queue" });
+    console.log("[App] posting to worker pool:", fileInputs.length, "files");
+    const pool = workerPoolRef.current;
+    if (!pool) {
+      setError("Worker pool not initialized");
+      return;
+    }
+
+    try {
+      const results = await pool.processFiles(fileInputs, JSON.parse(JSON.stringify(configRef.current)));
+      // Results are handled via callbacks, but we can also use the returned array
+      console.log("[App] Worker pool completed:", results.length, "files");
+    } catch (error) {
+      console.error("[App] Worker pool error:", error);
+      const message = error instanceof Error ? error.message : "Worker pool processing failed";
+      setError(message);
+      // `pool.processFiles` rejects the whole batch's promise on a hard worker
+      // crash (e.g. a wasm trap), not just the one file that triggered it — files
+      // that did finish already got their own "complete" stage via the
+      // file-complete callback above, so only mark whichever ones are still
+      // stuck mid-pipeline, rather than the entire queued batch.
+      setFileErrors((prev) => {
+        const next = new Map(prev);
+        for (const input of fileInputs) {
+          if (progressRef.current.get(input.name)?.stage !== "complete") {
+            next.set(input.name, message);
+          }
+        }
+        return next;
+      });
+    }
   }
 
 
@@ -480,6 +628,7 @@ export function App() {
           redact_template: `[${category.toUpperCase()}]`,
         },
       ].sort((a, b) => a.start - b.start);
+      void saveEditedFindings(result.name, next);
       return new Map(prev).set(result.name, next);
     });
   }
@@ -492,161 +641,88 @@ export function App() {
     setEditedFindings((prev) => {
       const current = prev.get(result.name) ?? result.piiFindings;
       const next = current.filter((_, i) => i !== index);
+      void saveEditedFindings(result.name, next);
       return new Map(prev).set(result.name, next);
     });
   }
 
-  function handleExportEdited(result: ProcessedFile): void {
-    downloadText(result.name, reExportMarkdown(result, findingsFor(result)));
-  }
-
-  // Track K/Phase 2: "Download redacted zip" — a worker round-trip rather than a
-  // main-thread zip rebuild, since only the worker retains the live `BatchEntityRegistry`
-  // instance (`lastBatch` in `worker/pipeline.ts`) that `assembleZip` needs. `overrides`
-  // only carries entries that actually diverge from `result.markdown`, so files nobody
-  // touched still export exactly what the pipeline produced.
-  function handleDownloadZip(): void {
-    const overrides: Record<string, string> = {};
-    for (const result of results) {
-      const content = resolveExportContent(result, redactedDrafts, editedFindings);
-      if (content !== result.markdown) overrides[result.name] = content;
-    }
-    workerRef.current!.postMessage({ type: "build-zip", overrides });
-  }
-
-  function handleDownloadFile(result: ProcessedFile): void {
-    const content = resolveExportContent(result, redactedDrafts, editedFindings);
-    const blob = new Blob([content], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = result.name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
-
-  // Track K2: the split view's right pane starts as the same redacted rendering the export
-  // path produces, then diverges once the user edits it (see `redactedDrafts`' own comment).
-  function redactedDraftFor(result: ProcessedFile): string {
-    const existing = redactedDrafts.get(result.name);
-    if (existing !== undefined) return existing;
-    const docPath = "documents/" + result.name;
-    return renderAnnotatedMarkdown(result.rawMarkdown, result.entities, findingsFor(result), docPath);
-  }
-
-  function handleRedactedChange(result: ProcessedFile, next: string): void {
-    setRedactedDrafts((prev) => new Map(prev).set(result.name, next));
-  }
-
-  const openDetailResult =
-    screen.kind === "detail" ? results.find((r) => r.frontmatter.source === screen.inputName) : undefined;
-
-  // Redacted drafts are user-editable free text that can end up holding PII (a user can
-  // leave identifiers in it, or paste unredacted content into it) — bound their local
-  // retention by default rather than only via an explicit "clear" action, same reasoning
-  // as `pruneDrafts`'s own doc comment. Runs once per app load, not once per draft, so a
-  // draft never outlives 30 days of the app simply never being reopened either.
-  useEffect(() => {
-    void pruneDrafts(30 * 24 * 60 * 60 * 1000);
-  }, []);
-
-  // Track K/Phase 4: restore-on-open. Fires once per detail-screen open, looks up a saved
-  // draft by content hash, and adopts it only if `redactedDrafts` still has no entry for
-  // this result by the time the lookup resolves — `redactedDraftFor`'s synchronous
-  // `renderAnnotatedMarkdown` fallback already renders immediately (no blank flash), and an
-  // in-session edit (including a first keystroke that lands before this resolves) always
-  // wins over a stale on-disk draft rather than being silently clobbered by it.
-  useEffect(() => {
-    if (!openDetailResult) return;
-    const result = openDetailResult;
-    const hash = contentHashes.get(result.frontmatter.source);
-    if (!hash) return;
-    let cancelled = false;
-    loadDraft(hash).then((saved) => {
-      if (cancelled || saved === undefined) return;
-      setRedactedDrafts((prev) => (prev.has(result.name) ? prev : new Map(prev).set(result.name, saved)));
+  // Redesign: removes a document from both the in-memory library and the persisted
+  // one — used by the Documents page's bulk delete. `files`/`progress` are left alone:
+  // they're this-session upload-queue state, not the library, and a document deleted
+  // here may not even correspond to an entry in them (e.g. one hydrated from a prior
+  // session).
+  function handleDeleteDocuments(names: string[]): void {
+    const nameSet = new Set(names);
+    setResults((prev) => prev.filter((r) => !nameSet.has(r.name)));
+    setEditedFindings((prev) => {
+      const next = new Map(prev);
+      for (const name of names) next.delete(name);
+      return next;
     });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on which file is open, not on redactedDrafts/results identity
-  }, [openDetailResult?.name]);
-
-  // Track K/Phase 4: debounced (~1s) autosave of the open detail screen's own draft. Only
-  // ever watches `openDetailResult`'s entry in `redactedDrafts` — while the detail screen
-  // is open, that is the only entry `handleRedactedChange` can touch.
-  //
-  // Split into two effects on purpose. `redactedDrafts` replaces its `Map` reference on
-  // every keystroke (see `handleRedactedChange`), so a single effect keyed on it would
-  // re-run its cleanup on every keystroke too — and an unconditional flush-on-cleanup
-  // (needed so Back/switch-file within the debounce window doesn't drop the last edit)
-  // would then write on every keystroke, defeating the debounce entirely. Keeping the
-  // latest pending write in a ref lets the flush-on-cleanup effect depend on
-  // `openDetailResult` alone, so it only fires on navigation/unmount, not on typing.
-  const pendingSaveRef = useRef<{ hash: string; draft: string } | null>(null);
-
-  useEffect(() => {
-    if (!openDetailResult) {
-      setSaveStatus(null);
-      return;
-    }
-    const result = openDetailResult;
-    const hash = contentHashes.get(result.frontmatter.source);
-    const draft = redactedDrafts.get(result.name);
-    if (!hash || draft === undefined) return;
-    pendingSaveRef.current = { hash, draft };
-    setSaveStatus("saving");
-    const timer = setTimeout(() => {
-      pendingSaveRef.current = null;
-      saveDraft(hash, draft).then(() => setSaveStatus("saved"));
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [openDetailResult, contentHashes, redactedDrafts]);
-
-  useEffect(() => {
-    return () => {
-      const pending = pendingSaveRef.current;
-      if (pending) {
-        pendingSaveRef.current = null;
-        void saveDraft(pending.hash, pending.draft);
-      }
-    };
-  }, [openDetailResult]);
-
-  // `progress` is keyed by whatever name the worker was sent — the folder-relative path
-  // for a directory upload, the basename otherwise — so lookups have to use the same key,
-  // not `file.name`, or every folder-uploaded file's progress card silently never appears.
-  const completedCount = files.filter(
-    (f) => progress.get(effectiveFileName(f))?.stage === "complete",
-  ).length;
-
-  if (screen.kind === "asset-loading") {
-    return (
-      <AssetLoadingScreen
-        assets={assets}
-        nerModelDegraded={nerModelDegraded}
-        nerDownloadProgress={nerDownloadProgress}
-        onComplete={() => {
-          setScreen({ kind: "upload" });
-          localStorage.setItem("xberg-studio-visited", "true");
-        }}
-      />
-    );
+    for (const name of names) void deleteDocument(name);
   }
+
+  function goToStudio(): void {
+    setRoute("studio");
+    setStudioView(results.length > 0 ? "documents" : "upload");
+  }
+
+  function openDocument(name: string): void {
+    setSelectedDocumentName(name);
+    setStudioView("document");
+  }
+
+  const libraryDocuments: LibraryDocument[] = results.map((result) => ({
+    result,
+    findings: findingsFor(result),
+    folder: folderOf(result.name),
+    baseName: result.name,
+  }));
+
+  const selectedResult = selectedDocumentName
+    ? results.find((r) => r.name === selectedDocumentName)
+    : undefined;
+  // The in-memory `File` this result came from, when this session's the one that
+  // processed it — undefined once hydrated from a prior session's persisted library,
+  // where only the processed output survives. `DocumentDetail` uses its presence/absence
+  // to gate the native-viewer split view and the redacted-draft autosave, both of which
+  // need real file bytes.
+  const selectedOriginalFile = selectedResult
+    ? files.find((f) => effectiveFileName(f) === selectedResult.frontmatter.source)
+    : undefined;
+
+  const navItem = (label: string, active: boolean, onClick: () => void) => (
+    <button
+      key={label}
+      type="button"
+      className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+        active
+          ? "bg-muted font-medium text-foreground"
+          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+      }`}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
       <header className="flex items-center justify-between border-b border-border bg-card px-6 py-3">
-        <h1 className="text-xl font-semibold">Hacienda Studio</h1>
-        <button
-          className="config-toggle rounded-md bg-muted px-4 py-2 text-sm text-foreground transition-colors hover:bg-primary hover:text-primary-foreground"
-          aria-expanded={showConfig}
-          onClick={() => setShowConfig((v) => !v)}
-        >
-          ⚙ Config
-        </button>
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            className="text-xl font-semibold transition-opacity hover:opacity-80"
+            onClick={() => setRoute("landing")}
+          >
+            Hacienda Studio
+          </button>
+          <nav aria-label="App sections" className="flex items-center gap-1">
+            {navItem("Studio", route === "studio", goToStudio)}
+            {navItem("Ressources", route === "assets", () => setRoute("assets"))}
+            {navItem("Paramètres", route === "settings", () => setRoute("settings"))}
+          </nav>
+        </div>
       </header>
 
       {error && (
@@ -677,95 +753,75 @@ export function App() {
         </div>
       )}
 
-      {warnings.length > 0 && (
-        <div
-          className="config-warning-banner flex items-start justify-between gap-3 border-b border-border bg-amber-500/15 px-6 py-3 text-sm text-amber-900 dark:text-amber-200"
-          role="status"
-        >
-          <ul className="flex flex-col gap-1">
-            {warnings.map((w, i) => (
-              <li key={i}>⚠️ {w}</li>
-            ))}
-          </ul>
-          <button
-            aria-label="Dismiss warnings"
-            className="text-lg leading-none"
-            onClick={() => setWarnings([])}
-          >
-            ✕
-          </button>
-        </div>
+      {route === "landing" && (
+        <Landing
+          assets={assets}
+          nerModelProgress={nerModelProgress}
+          nerModelDegraded={nerModelDegraded}
+          onPrepare={() => setRoute("assets")}
+          onSkip={goToStudio}
+        />
       )}
 
-      <main className="flex flex-1 flex-col">
-        {screen.kind === "upload" && (
-          <UploadScreen
-            workerReady={workerReady}
-            folderMode={folderMode}
-            onToggleFolderMode={toggleFolderMode}
-            onFilesAccepted={(accepted) => handleFiles(accepted)}
-          />
-        )}
-
-        {screen.kind === "queue" && (
-          <QueueScreen files={files} progress={progress} completedCount={completedCount} />
-        )}
-
-        {screen.kind === "browser" && (
-          <FileBrowserScreen
-            rows={buildFileRows(
-              files,
-              progress,
-              results,
-              fileErrors,
-              new Set(editedFindings.keys()),
-              new Map(results.map((r) => [r.name, findingsFor(r)] as const)),
-            )}
-            onOpen={(name) => setScreen({ kind: "detail", inputName: name })}
-            onAddMore={() => setScreen({ kind: "upload" })}
-            onDownloadZip={handleDownloadZip}
-            onDownloadFile={handleDownloadFile}
-            previewUrls={previewUrls}
-          />
-        )}
-
-        {screen.kind === "detail" &&
-          (() => {
-            // `openDetailResult` already resolves `screen.inputName` (the original input
-            // file name, e.g. "note.docx") against `result.frontmatter.source` — not
-            // `result.name`, the output markdown's own name (e.g. "note.md"), which would
-            // never match.
-            const result = openDetailResult;
-            if (!result) return null;
-            const findings = findingsFor(result);
-            const edited = editedFindings.has(result.name);
-            return (
-              <DetailScreen
-                result={result}
-                viewerKind={getViewerKind(result.frontmatter.source)}
-                previewUrl={previewUrls.get(result.name)}
-                viewerDark={viewerDark}
-                onViewerDarkChange={setViewerDark}
-                redactedValue={redactedDraftFor(result)}
-                onRedactedChange={(next) => handleRedactedChange(result, next)}
-                saveStatus={saveStatus}
-                findings={findings}
-                edited={edited}
-                onAddFinding={(start, end, category) =>
-                  handleAddFinding(result, start, end, category)
-                }
-                onRemoveFinding={(i) => handleRemoveFinding(result, i)}
-                onExportEdited={() => handleExportEdited(result)}
-                onDownloadZip={handleDownloadZip}
-                onBack={() => setScreen({ kind: "browser" })}
-              />
-            );
-          })()}
-      </main>
-
-      {showConfig && (
-        <ConfigPanel config={config} onChange={setConfig} onDone={() => setShowConfig(false)} />
+      {route === "assets" && (
+        <Assets assets={assets} nerModelDegraded={nerModelDegraded} nerModelProgress={nerModelProgress} onContinue={goToStudio} />
       )}
+
+      {route === "settings" && (
+        <Settings config={config} onChange={setConfig} />
+      )}
+
+      {route === "studio" && studioView === "upload" && (
+        <Studio
+          workerReady={workerReady}
+          folderMode={folderMode}
+          onToggleFolderMode={toggleFolderMode}
+          onFilesAccepted={handleFilesAccepted}
+          pendingFiles={pendingFiles}
+          onRemovePending={handleRemovePending}
+          onClearPending={handleClearPending}
+          onProcessQueue={handleProcessQueue}
+          files={files}
+          progress={progress}
+          results={results}
+          fileErrors={fileErrors}
+          onOpenDocument={openDocument}
+        />
+      )}
+
+      {route === "studio" && studioView === "documents" && (
+        <Suspense fallback={null}>
+          <Documents
+            documents={libraryDocuments}
+            files={files}
+            onOpenDocument={openDocument}
+            onAddFiles={() => setStudioView("upload")}
+            onDeleteDocuments={handleDeleteDocuments}
+          />
+        </Suspense>
+      )}
+
+      {route === "studio" && studioView === "document" && selectedResult && (
+        <DocumentDetail
+          result={selectedResult}
+          findings={findingsFor(selectedResult)}
+          originalFile={selectedOriginalFile}
+          onBack={() => setStudioView("documents")}
+          onAddFinding={(start, end, category) =>
+            handleAddFinding(selectedResult, start, end, category)
+          }
+          onRemoveFinding={(i) => handleRemoveFinding(selectedResult, i)}
+          onExportBody={(body) =>
+            downloadText(selectedResult.name, wrapRedactedBody(selectedResult, body))
+          }
+          onDelete={() => {
+            handleDeleteDocuments([selectedResult.name]);
+            setStudioView("documents");
+          }}
+        />
+      )}
+
+      <Toaster />
     </div>
   );
 }

@@ -45,7 +45,6 @@ import {
   DialogContent,
   DialogFooter,
   DialogHeader,
-  DialogPanel,
   DialogTitle,
 } from "@/components/ui/dialog"
 import {
@@ -63,7 +62,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
-import { ScrollArea, ScrollAreaPrimitive } from "@/components/ui/scroll-area"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
   SelectContent,
@@ -2040,11 +2039,10 @@ export function FileSystem({
     : ""
   const activeViewOption = VIEW_OPTIONS.find((option) => option.value === view)
   const viewerCloseToolbarAction = (
-    <DialogClose
-      aria-label="Close preview"
-      render={<Button type="button" variant="ghost" size="icon-sm" />}
-    >
-      <HugeiconsIcon icon={Cancel01Icon} className="size-4" />
+    <DialogClose aria-label="Close preview" asChild>
+      <Button type="button" variant="ghost" size="icon-sm">
+        <HugeiconsIcon icon={Cancel01Icon} className="size-4" />
+      </Button>
     </DialogClose>
   )
 
@@ -2391,7 +2389,7 @@ function FileSystemSearchField({
         className="pointer-events-none absolute left-2 size-3.5 text-muted-foreground"
       />
       <input
-        ref={inputRef}
+        ref={inputRef as React.Ref<HTMLInputElement>}
         type="text"
         role="searchbox"
         aria-label="Search files"
@@ -2436,20 +2434,18 @@ function FileSystemSearchField({
 
   return (
     <Popover open={isExpanded} onOpenChange={onExpandedChange}>
-      <PopoverTrigger
-        render={
-          <button
-            type="button"
-            aria-label="Search"
-            title="Search"
-            className={cn(TOOLBAR_ICON_BUTTON_CLASSNAME, "relative")}
-          />
-        }
-      >
-        <HugeiconsIcon icon={Search01Icon} className="size-4" />
-        {value ? (
-          <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
-        ) : null}
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Search"
+          title="Search"
+          className={cn(TOOLBAR_ICON_BUTTON_CLASSNAME, "relative")}
+        >
+          <HugeiconsIcon icon={Search01Icon} className="size-4" />
+          {value ? (
+            <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
+          ) : null}
+        </button>
       </PopoverTrigger>
       <PopoverContent align="end" sideOffset={6} className="w-64 p-1">
         {input}
@@ -2608,22 +2604,20 @@ function FileSystemFilterMenu({
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger
-        render={
-          <Button
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            aria-label="Filter"
-            title="Filter"
-            className="relative size-7 sm:size-7"
-          />
-        }
-      >
-        <HugeiconsIcon icon={FilterIcon} className="size-4" />
-        {filters.length > 0 ? (
-          <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
-        ) : null}
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          aria-label="Filter"
+          title="Filter"
+          className="relative size-7 sm:size-7"
+        >
+          <HugeiconsIcon icon={FilterIcon} className="size-4" />
+          {filters.length > 0 ? (
+            <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
+          ) : null}
+        </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-44">
         <DropdownMenuSub>
@@ -2727,15 +2721,13 @@ function FileSystemFilterPill({
         {FILTER_TYPE_LABELS[filter.type]}
       </span>
       <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <button
-              type="button"
-              className={cn(FILTER_PILL_BUTTON_CLASSNAME, "text-primary")}
-            />
-          }
-        >
-          {FILTER_OPERATOR_LABELS[filter.operator]}
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(FILTER_PILL_BUTTON_CLASSNAME, "text-primary")}
+          >
+            {FILTER_OPERATOR_LABELS[filter.operator]}
+          </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-28">
           {filterOperatorChoices(filter).map((operator) => (
@@ -2750,18 +2742,16 @@ function FileSystemFilterPill({
       </DropdownMenu>
       {filter.type === "fileType" ? (
         <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <button
-                type="button"
-                title={selectedTypeLabels.join(", ")}
-                className={FILTER_PILL_BUTTON_CLASSNAME}
-              />
-            }
-          >
-            {filter.value.length === 1
-              ? selectedTypeLabels[0]
-              : `${filter.value.length} selected`}
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              title={selectedTypeLabels.join(", ")}
+              className={FILTER_PILL_BUTTON_CLASSNAME}
+            >
+              {filter.value.length === 1
+                ? selectedTypeLabels[0]
+                : `${filter.value.length} selected`}
+            </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-60">
             <FileSystemFileTypeCommand
@@ -2783,12 +2773,10 @@ function FileSystemFilterPill({
         </button>
       ) : (
         <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <button type="button" className={FILTER_PILL_BUTTON_CLASSNAME} />
-            }
-          >
-            {filter.value[0]}
+          <DropdownMenuTrigger asChild>
+            <button type="button" className={FILTER_PILL_BUTTON_CLASSNAME}>
+              {filter.value[0]}
+            </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             <ScrollArea orientation="vertical" className="h-auto max-h-72">
@@ -3103,7 +3091,7 @@ function FileSystemDateRangeDialog({
         <DialogHeader>
           <DialogTitle>Custom date range</DialogTitle>
         </DialogHeader>
-        <DialogPanel className="flex flex-col gap-4">
+        <div className="flex flex-col gap-4">
           <div className="flex gap-3">
             {dateField("From", fromInput, (value) => {
               setFromInput(value)
@@ -3135,7 +3123,7 @@ function FileSystemDateRangeDialog({
               </Button>
             ))}
           </div>
-        </DialogPanel>
+        </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>
             Cancel
@@ -4131,7 +4119,7 @@ function FileSystemPierreTree({
   // filters are active their matches are revealed instead, and the
   // remembered disclosure is the pre-filter one.
   React.useLayoutEffect(() => {
-    const expansionStore = treeExpansionRef.current
+    const expansionStore = treeExpansionRef.current!
     const savedExpansion = expansionStore.get(currentPath) ?? []
 
     if (hasActiveFiltersRef.current) {
@@ -4473,7 +4461,7 @@ function FileSystemColumnsView(props: FileSystemViewProps) {
           scrollbar hides; the viewport alone only observes its own box. Its
           built-in inline min-width (fit-content) would beat a min-w-full
           class, so the full-width floor is inline too. */}
-      <ScrollAreaPrimitive.Content
+      <div
         className="flex h-full w-max"
         style={{ minWidth: "100%" }}
         onKeyDown={handleKeyDown}
@@ -4546,7 +4534,7 @@ function FileSystemColumnsView(props: FileSystemViewProps) {
             </div>
           </ScrollArea>
         ) : null}
-      </ScrollAreaPrimitive.Content>
+      </div>
     </ScrollArea>
   )
 }
@@ -4649,9 +4637,9 @@ const FileSystemColumn = React.memo(function FileSystemColumn({
                   tabIndex={entry.path === tabStopChildPath ? 0 : -1}
                   ref={(element) => {
                     if (element) {
-                      rowRefs.current.set(entry.path, element)
+                      rowRefs.current?.set(entry.path, element)
                     } else {
-                      rowRefs.current.delete(entry.path)
+                      rowRefs.current?.delete(entry.path)
                     }
                   }}
                   // Selecting on press (mouse only) starts mounting the
@@ -5137,7 +5125,9 @@ function FileSystemGalleryView(props: FileSystemViewProps) {
               <div
                 key={path}
                 ref={stageHostRefs.get(path)}
-                inert={!isActiveStage || undefined}
+                // @types/react 18 doesn't type `inert` on HTMLAttributes yet
+                // (it's a real DOM attribute React 18 passes through fine).
+                {...({ inert: !isActiveStage || undefined } as React.HTMLAttributes<HTMLDivElement>)}
                 className={cn(
                   "absolute inset-0 flex items-center justify-center p-3",
                   !isActiveStage && "invisible opacity-0"

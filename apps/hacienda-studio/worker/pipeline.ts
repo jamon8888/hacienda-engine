@@ -15,6 +15,8 @@ import {
   WasmOcrConfig,
   WasmNerConfig,
   WasmNerBackendKind,
+  WasmImageExtractionConfig,
+  WasmSecurityLimits,
 } from "@xberg-io/xberg-wasm";
 import initWasm from "@xberg-io/xberg-wasm";
 // Let the bundler resolve and emit the binary. The previous absolute
@@ -28,13 +30,16 @@ import {
   isBridgeEntityArray,
   type BridgeEntity,
 } from "../lib/ner-bridge";
-import { createNerBackend, loadNerModel } from "../lib/asset-loader";
+import { createNerBackend, loadNerModel, loadTessdata } from "../lib/asset-loader";
+import { extractPdfWithLiteParse, toLiteParseOcrEngine } from "../lib/pdf-liteparse";
 import {
   initPiiEngine,
   redactPii,
   scanForPii,
-  loadPiiNerModel,
+  redactPiiWithModelEntities,
+  scanForPiiWithModelEntities,
   type PiiEntity,
+  type PiiCategoryWire,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
@@ -66,6 +71,40 @@ export { relativeEntityLink, renderAnnotatedMarkdown };
 // file's header for why the split exists (the worker needs a "build-zip" round trip
 // that runs independently of processFiles(), not just once at the end of it).
 export { buildEntityFile, buildGlossaryIndex };
+
+// Browser/wasm32-specific extraction tuning. xberg's own OCR memory throttle
+// (`adapt_batch_size_to_memory`) never activates in the browser build (its
+// `get_available_memory()` only implements the syscall for native Linux/macOS), so
+// these are the mitigations xberg's docs actually expose for wasm — see
+// docs-site/src/content/docs/guides/ocr.mdx and reference/api-wasm.md in the xberg repo.
+
+// xberg's own OCR troubleshooting guide recommends 150 DPI as the floor for "faster
+// throughput" / "significantly less memory" on large PDFs (300 is xberg's balanced
+// default, 600 is accuracy-first). `maxDpi` is capped at the same value so
+// `autoAdjustDpi` (on by default) can never escalate back up to a heavier DPI for a
+// low-quality page — that escalation is exactly the unbounded-memory path we're
+// avoiding. `minDpi` is left at its default floor: autoAdjustDpi lowering further when
+// a page doesn't need 150 only saves more memory, never costs anything.
+const OCR_TARGET_DPI = 150;
+
+// A native server can reasonably wait out the default 600s extraction timeout; a
+// browser tab blocking a worker for 10 minutes on one pathological upload is a bad UX
+// on its own, independent of memory. 90s is generous for OCR on a normal-sized upload
+// (page-count-limited by `checkPdfPageSafety` in lib/asset-loader.ts) while still
+// failing a stuck extraction back to the user instead of hanging indefinitely.
+const EXTRACTION_TIMEOUT_SECS = 90n;
+
+// Lowered from xberg's native-oriented defaults (100MB / 500MB / 50MB) to match this
+// app's own 50MB upload cap (`validateFile` in lib/asset-loader.ts) — a single upload
+// can never legitimately need more extracted-text growth, archive expansion, or
+// embedded-file size than the cap it was admitted under, so these bound worst-case
+// memory for a zip-bomb-style or otherwise adversarial file without affecting any
+// normal document.
+const SECURITY_LIMITS = {
+  maxContentSize: 30 * 1024 * 1024,
+  maxArchiveSize: 100 * 1024 * 1024,
+};
+const MAX_EMBEDDED_FILE_BYTES = 20n * 1024n * 1024n;
 
 let wasmReady: Promise<void> | null = null;
 
@@ -109,23 +148,10 @@ async function initNerBackend(): Promise<void> {
     nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
     console.log("[Worker] Neural NER backend loaded");
 
-    // Feeds the same already-fetched bytes into hacienda-wasm's own PII pipeline so
-    // `redactPii`/`scanForPii` (below) detect with the real model instead of regex
-    // alone — no second download. This is a separate try/catch on purpose: a build of
-    // `hacienda-wasm` without the `ner-candle-wasm` feature doesn't export
-    // `loadNerModel` at all, and that must not take down the entity-glossary NER pass
-    // above, which is otherwise unrelated. Accepted cost: the model now runs twice per
-    // document — once here for the entity glossary, once inside hacienda-wasm's own
-    // pipeline for PII redaction — sharing the fetched bytes but not the inference call.
-    try {
-      await loadPiiNerModel(model, tokenizer, encoderConfig);
-      console.log("[Worker] hacienda-wasm PII NER backend loaded");
-    } catch (e) {
-      console.warn(
-        "[Worker] hacienda-wasm PII NER backend unavailable, PII detection stays regex-only:",
-        e,
-      );
-    }
+    // Tier 1.1: No longer loading model into hacienda-wasm for duplicate inference.
+    // PII detection now reuses the entity glossary NER results via
+    // redactPiiWithModelEntities/scanForPiiWithModelEntities.
+    // The hacienda-wasm regex-only fallback is used when neural NER is unavailable.
   } catch (e) {
     console.warn(
       "[Worker] Neural NER backend unavailable, using regex/compromise fallback:",
@@ -172,6 +198,98 @@ export function selectNerBridge(
   };
 }
 
+/**
+ * xberg-wasm has no in-binary OCR backend (see `xberg-wasm/src/bridge/ocr.rs`'s own
+ * header: "There is no in-binary fallback: when no backend is injected, OCR is
+ * unavailable") — every `engine.extract()` call needs an `ocr` bridge injected into
+ * `XbergEngine`'s constructor, the same injection point `ner` already uses. Without
+ * one, `extractConfig.ocr.backend = "tesseract-wasm"` below is a no-op string nobody
+ * reads: scanned pages and embedded images silently got zero OCR text. `null` means
+ * the backend failed to load (network/wasm error); `selectOcrBridge` returns
+ * `undefined` in that case, matching "no backend injected" exactly — there's no
+ * regex-style fallback for OCR the way there is for NER.
+ */
+type OcrRuntime = Awaited<ReturnType<typeof createOcrBackend>>;
+let ocrRuntime: OcrRuntime | null = null;
+
+async function createOcrBackend() {
+  const { createOCREngine } = await import("tesseract-wasm");
+  const engine = await createOCREngine();
+  const tessdata = await loadTessdata("eng");
+  engine.loadModel(tessdata);
+  return engine;
+}
+
+async function initOcrBackend(): Promise<void> {
+  try {
+    ocrRuntime = await createOcrBackend();
+    console.log("[Worker] Tesseract OCR backend loaded");
+  } catch (e) {
+    console.warn("[Worker] OCR backend unavailable:", e);
+    ocrRuntime = null;
+  }
+}
+
+/**
+ * Shape `xberg-wasm`'s injected-OCR contract expects back, per
+ * `xberg-wasm/src/bridge/ocr.rs`'s `OcrResult`/`OcrLineResult` — confirmed from that
+ * source, not guessed, including that `lines` is optional on the wire (a missing/
+ * malformed array degrades to empty rather than an error).
+ */
+interface OcrBridgeResult {
+  text: string;
+  lines: Array<{
+    text: string;
+    confidence: number;
+    bbox?: { x: number; y: number; width: number; height: number };
+  }>;
+}
+
+/**
+ * Takes the runtime explicitly, same rationale as `selectNerBridge`: a pure function
+ * of its input, testable without touching worker/module state or a real wasm engine.
+ */
+export function selectOcrBridge(
+  runtime: OcrRuntime | null,
+): ((imageBytes: Uint8Array, opts: { language: string }) => Promise<OcrBridgeResult>) | undefined {
+  if (!runtime) return undefined;
+  return async (imageBytes) => {
+    // The Rust side hands us encoded (PNG/JPEG) image bytes, not raw pixels —
+    // tesseract-wasm's `loadImage` wants an `ImageBitmap`/`ImageData`, so decode
+    // first. `createImageBitmap` is available in a dedicated worker's global scope.
+    // `.buffer` alone would be wrong if `imageBytes` is a view into a larger
+    // buffer (wrong byteOffset/length); slice to the view's exact bytes.
+    const bytes = imageBytes.buffer.slice(
+      imageBytes.byteOffset,
+      imageBytes.byteOffset + imageBytes.byteLength,
+    ) as ArrayBuffer;
+    const bitmap = await createImageBitmap(new Blob([bytes]));
+    try {
+      runtime.loadImage(bitmap);
+      const lines = runtime.getTextBoxes("line");
+      return {
+        text: lines.map((l) => l.text).join("\n"),
+        lines: lines.map((l) => ({
+          text: l.text,
+          confidence: l.confidence,
+          bbox: {
+            x: l.rect.left,
+            y: l.rect.top,
+            width: l.rect.right - l.rect.left,
+            height: l.rect.bottom - l.rect.top,
+          },
+        })),
+      };
+    } finally {
+      // Keeps the loaded model, drops just this page's image data — matches
+      // `OCREngine.clearImage()`'s own documented intent (no way to shrink wasm
+      // memory otherwise until the whole engine is destroyed).
+      runtime.clearImage();
+      bitmap.close();
+    }
+  };
+}
+
 function postProgress(update: ProgressUpdate): void {
   self.postMessage({ type: "progress", ...update });
 }
@@ -209,6 +327,68 @@ function isRawNerEntity(value: unknown): value is RawNerEntity {
     typeof v.start === "number" &&
     typeof v.end === "number"
   );
+}
+
+/**
+ * Map NER category (from xberg/entity glossary) to the wire format
+ * `hacienda-core`'s `PiiCategory` enum actually deserializes — mirrors
+ * `hacienda-core/src/pii/ner.rs`'s `to_pii_category` function exactly, variant for
+ * variant. `PiiCategory` derives `#[serde(rename_all = "snake_case")]`: every unit
+ * variant is a bare lowercase-snake_case string (`"phone_number"`, `"full_name"`, ...),
+ * but the one tuple variant, `Custom(String)`, is externally tagged as
+ * `{ custom: "<label>" }` — a bare string there does not deserialize (confirmed via a
+ * live upload after the Aug 2026 hacienda-wasm rebuild: `process_with_model_entities`
+ * had never actually run against real model entities before that rebuild, since the
+ * stale committed `pkg/` output didn't export it yet — this category-shape mismatch
+ * was dormant the whole time, masked by that staleness, and only surfaced once the
+ * function started being called for real).
+ */
+function nerCategoryToPiiCategory(nerCategory: string): PiiCategoryWire {
+  const lower = nerCategory.toLowerCase();
+  switch (lower) {
+    case "person":
+      return "person";
+    case "organization":
+      return "organization";
+    case "location":
+      return "address";
+    case "email":
+      return "email";
+    case "phone":
+      return "phone_number";
+    case "url":
+      return "url";
+    case "date":
+      return { custom: "Date" };
+    case "time":
+      return { custom: "Time" };
+    case "money":
+      return { custom: "Money" };
+    case "percent":
+      return { custom: "Percent" };
+    case "ssn":
+    case "social_security_number":
+      return "ssn";
+    case "credit_card":
+    case "creditcard":
+      return "credit_card";
+    case "iban":
+      return "iban";
+    case "passport":
+    case "passport_number":
+      return "passport_number";
+    case "address":
+      return "address";
+    case "full_name":
+    case "fullname":
+    case "name":
+      return "full_name";
+    default:
+      // Unknown categories pass through as custom, matching `to_pii_category`'s
+      // `_ => PiiCategory::Custom(label.clone())` fallback — the *original* NER
+      // category text (not lowercased), since that's what Rust's `label.clone()` uses.
+      return { custom: nerCategory };
+  }
 }
 
 const MA_TERMS =
@@ -328,6 +508,30 @@ async function initEngine(): Promise<void> {
   // while this is still in flight correctly falls back to the regex/compromise bridge and
   // later files upgrade to neural NER transparently once it resolves.
   void initNerBackend();
+  // Unlike NER, this IS awaited: it's small (~4MB tessdata + a small wasm binary, seconds
+  // not minutes) and, unlike NER, there is no regex-style fallback for OCR — a file whose
+  // first page needs OCR before this resolves silently gets zero text for that page with
+  // no error and no way to "upgrade" later (see `selectOcrBridge`'s header). Awaiting it
+  // here means the worker's "ready" handshake — which gates the file input — only fires
+  // once OCR is actually usable, closing that race instead of leaving it to chance.
+  await initOcrBackend();
+}
+
+/** Shared by both extraction branches (xberg and LiteParse) in `processFile` below. */
+function logExtractionError(fileName: string, extractError: unknown): void {
+  console.error(`[Worker] EXTRACTION FAILED for ${fileName}:`, extractError);
+  console.error("[Worker] Extraction error type:", typeof extractError);
+  console.error(
+    "[Worker] Extraction error constructor:",
+    (extractError as { constructor?: { name?: string } })?.constructor?.name,
+  );
+  if (extractError instanceof Error) {
+    console.error("[Worker] Extraction error name:", extractError.name);
+    console.error("[Worker] Extraction error message:", extractError.message);
+    console.error("[Worker] Extraction error stack:", extractError.stack);
+  } else {
+    console.error("[Worker] Raw extraction error:", JSON.stringify(extractError));
+  }
 }
 
 async function processFile(
@@ -374,6 +578,49 @@ async function processFile(
     console.log(
       `[Worker] Transcription complete: ${markdown.substring(0, 100)}...`,
     );
+  } else if (input.type === "application/pdf" && config.pdfEngine === "liteparse") {
+    // See docs/superpowers/specs/2026-08-22-liteparse-pdf-extraction-design.md — PDFium-
+    // backed, bounded-memory-batched alternative to xberg-wasm's `pdf_oxide` path below,
+    // used only when `config.pdfEngine` opts in. Every non-PDF format, and PDFs when this
+    // flag is off, keep going through the xberg branch unchanged.
+    console.log(`[Worker] Extracting PDF via LiteParse for ${input.name}...`);
+    try {
+      if (!input.disableOcr && !ocrRuntime) {
+        // Same rationale as the xberg branch below: no regex-style OCR fallback exists,
+        // so silence here would mean scanned pages silently produce zero text.
+        console.warn(`[Worker] OCR backend unavailable for ${input.name} — scanned/image content will export with no text.`);
+        self.postMessage({
+          type: "warning",
+          file: input.name,
+          message: "OCR engine failed to load — scanned pages or images in this file will export with no extracted text.",
+        });
+      }
+
+      const extractStart = performance.now();
+      const { markdown: liteparseMarkdown } = await extractPdfWithLiteParse(
+        new Uint8Array(input.bytes),
+        {
+          ocrEngine: ocrRuntime ? toLiteParseOcrEngine(ocrRuntime) : null,
+          disableOcr: !!input.disableOcr,
+          pageCount: input.pdfPageCount,
+          dpi: OCR_TARGET_DPI,
+        },
+      );
+      const extractMs = performance.now() - extractStart;
+      console.log(`[Worker] LiteParse extract completed in ${extractMs.toFixed(0)}ms for ${input.name}`);
+      postProgress({ file: input.name, stage: "extract", percent: 50 });
+
+      if (!liteparseMarkdown) {
+        console.error(`[Worker] No content extracted from ${input.name} via LiteParse`);
+        throw new Error("No content extracted");
+      }
+
+      markdown = liteparseMarkdown;
+      console.log(`[Worker] Extracted ${markdown.length} chars from ${input.name} via LiteParse`);
+    } catch (extractError) {
+      logExtractionError(input.name, extractError);
+      throw extractError;
+    }
   } else {
     console.log(`[Worker] Extracting content from ${input.name}...`);
     try {
@@ -391,14 +638,63 @@ async function processFile(
       extractConfig.ocr.backend = "tesseract-wasm";
       extractConfig.ocr.language = ["eng"];
 
+      extractConfig.images = WasmImageExtractionConfig.default();
+      extractConfig.images.targetDpi = OCR_TARGET_DPI;
+      extractConfig.images.maxDpi = OCR_TARGET_DPI;
+
+      extractConfig.extractionTimeoutSecs = EXTRACTION_TIMEOUT_SECS;
+      extractConfig.maxEmbeddedFileBytes = MAX_EMBEDDED_FILE_BYTES;
+      extractConfig.securityLimits = WasmSecurityLimits.default();
+      extractConfig.securityLimits.maxContentSize = SECURITY_LIMITS.maxContentSize;
+      extractConfig.securityLimits.maxArchiveSize = SECURITY_LIMITS.maxArchiveSize;
+
+      // Set by `lib/asset-loader.ts`'s `checkPdfPageSafety` for documents whose page
+      // count makes per-page OCR raster+text accumulation a memory risk — xberg-wasm's
+      // own OCR batch-size throttle never actually shrinks anything in the browser
+      // build (`adapt_batch_size_to_memory`'s `get_available_memory()` always returns 0
+      // on wasm32), so nothing else caps this. Native text extraction is unaffected.
+      //
+      // `extractConfig.disableOcr` only turns off OCR *text recognition* — it does not
+      // stop `extractConfig.images` from rasterizing every page at `OCR_TARGET_DPI`
+      // regardless (`extractImages`/`includePageRasters` are independent flags on
+      // `WasmImageExtractionConfig`, defaulted on above). For a long, image-heavy PDF
+      // that rasterization is the same memory spike the page-count check exists to
+      // avoid, and left unthrottled it traps the whole wasm module (`RuntimeError:
+      // unreachable executed`, confirmed live on a 16MB/many-page scanned PDF) instead
+      // of failing gracefully — so gate it behind the same safety flag.
+      if (input.disableOcr) {
+        extractConfig.disableOcr = true;
+        extractConfig.images.extractImages = false;
+        extractConfig.images.includePageRasters = false;
+        extractConfig.images.runOcrOnImages = false;
+        console.log(`[Worker] OCR and page rasterization disabled for ${input.name} (page-count safety limit)`);
+      } else if (!ocrRuntime) {
+        // `selectOcrBridge(null)` below returns `undefined`, i.e. "no backend injected" —
+        // xberg-wasm has no regex-style fallback for that (unlike NER), so scanned pages
+        // and embedded images silently produce zero text unless we say something here.
+        console.warn(`[Worker] OCR backend unavailable for ${input.name} — scanned/image content will export with no text.`);
+        self.postMessage({
+          type: "warning",
+          file: input.name,
+          message: "OCR engine failed to load — scanned pages or images in this file will export with no extracted text.",
+        });
+      }
+
       const nerConfig = WasmNerConfig.default();
       nerConfig.backend = WasmNerBackendKind.Onnx;
       nerConfig.categories = config.nerCategories;
+      // Additive, not a replacement — matches hacienda-core's "extend, don't replace"
+      // vertical behaviour (`ner.rs`'s `categories_with_vertical`). Empty by default,
+      // since `nerCategories`'s closed vocabulary already covers the opt-out cases and
+      // the engine rejects the whole NER result for a category name outside it — see
+      // `ConfigPanel.tsx`'s `ALL_CATEGORIES` comment. `customLabels` is the sanctioned
+      // open-vocabulary path for anything beyond that fixed set.
+      nerConfig.customLabels = config.nerCustomLabels;
       extractConfig.ner = nerConfig;
 
       const engine = new XbergEngine(
         { bridgeTimeoutMs: 30000 },
-        { ner: { ner: selectNerBridge(nerRuntime) } },
+        { ner: { ner: selectNerBridge(nerRuntime) }, ocr: { ocr: selectOcrBridge(ocrRuntime) } },
       );
 
       console.log(`[Worker] Calling engine.extract for ${input.name}...`);
@@ -416,16 +712,7 @@ async function processFile(
       markdown = result.results[0].content;
       console.log(`[Worker] Extracted ${markdown.length} chars from ${input.name}`);
     } catch (extractError) {
-      console.error(`[Worker] EXTRACTION FAILED for ${input.name}:`, extractError);
-      console.error("[Worker] Extraction error type:", typeof extractError);
-      console.error("[Worker] Extraction error constructor:", extractError?.constructor?.name);
-      if (extractError instanceof Error) {
-        console.error("[Worker] Extraction error name:", extractError.name);
-        console.error("[Worker] Extraction error message:", extractError.message);
-        console.error("[Worker] Extraction error stack:", extractError.stack);
-      } else {
-        console.error("[Worker] Raw extraction error:", JSON.stringify(extractError));
-      }
+      logExtractionError(input.name, extractError);
       throw extractError;
     }
   }
@@ -500,6 +787,9 @@ async function processFile(
   // Runs on the original `markdown`, before entities are enriched/registered/linked,
   // so both the export filter below and `renderAnnotatedMarkdown`'s overlap check
   // (Track F4/L7) work off the same coordinates.
+  //
+  // Tier 1.1 optimization: reuse NER results from entity glossary pass instead of
+  // running inference a second time. Convert xberg BridgeEntity[] to PII model entities.
   let piiEntitiesFound = 0;
   let piiFindings: PiiEntity[] = [];
   if (config.enablePiiDetection) {
@@ -507,9 +797,24 @@ async function processFile(
     postProgress({ file: input.name, stage: "pii", percent: 82 });
     try {
       const piiStart = performance.now();
+
+      // Convert entity glossary NER results (xbergEntities) to PII model entity format
+      // This eliminates the duplicate GLiNER2 inference pass (Tier 1.1)
+      const modelEntities = xbergEntities
+        .filter((e): e is RawNerEntity => isRawNerEntity(e))
+        .filter((e) => (config.nerCategories as string[]).includes(e.category.toLowerCase()))
+        .map((e) => ({
+          category: nerCategoryToPiiCategory(e.category),
+          text: e.text,
+          start: e.start,
+          end: e.end,
+          confidence: 1.0, // xberg entities don't always have confidence, default to 1.0
+        }));
+
       const piiResult = config.redactPiiInOutput
-        ? await redactPii(markdown)
-        : await scanForPii(markdown);
+        ? await redactPiiWithModelEntities(markdown, modelEntities)
+        : await scanForPiiWithModelEntities(markdown, modelEntities);
+
       const piiMs = performance.now() - piiStart;
       console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
       piiFindings = piiResult.entities;

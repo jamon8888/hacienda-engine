@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-21T00:00:00Z",
+  "title": "Design System: Hacienda Studio",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Terracotta Orange",
+        "canonical": "hsl(28 92% 54%)",
+        "tonalRamp": [
+          "hsl(28 92% 15%)",
+          "hsl(28 92% 25%)",
+          "hsl(28 92% 36%)",
+          "hsl(28 92% 46%)",
+          "hsl(28 92% 54%)",
+          "hsl(28 92% 65%)",
+          "hsl(28 92% 78%)",
+          "hsl(28 92% 90%)"
+        ]
+      },
+      "background": {
+        "role": "neutral",
+        "displayName": "Void Charcoal",
+        "canonical": "hsl(222 22% 7%)",
+        "tonalRamp": [
+          "hsl(222 22% 5%)",
+          "hsl(222 22% 10%)",
+          "hsl(222 20% 16%)",
+          "hsl(222 18% 24%)",
+          "hsl(222 16% 34%)",
+          "hsl(215 14% 48%)",
+          "hsl(215 12% 62%)",
+          "hsl(210 20% 96%)"
+        ]
+      },
+      "card": {
+        "role": "neutral",
+        "displayName": "Raised Charcoal",
+        "canonical": "hsl(222 20% 10%)",
+        "tonalRamp": [
+          "hsl(222 20% 6%)",
+          "hsl(222 20% 10%)",
+          "hsl(222 18% 16%)",
+          "hsl(222 15% 24%)",
+          "hsl(222 15% 34%)",
+          "hsl(215 13% 48%)",
+          "hsl(215 12% 62%)",
+          "hsl(210 20% 96%)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Landing hero headline only." },
+      "body": { "displayName": "Body", "purpose": "All prose and UI copy." },
+      "mono": { "displayName": "Mono", "purpose": "Machine-produced values only: pipeline stages, hashes, byte sizes, offsets." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "ease-standard", "value": "150ms ease-out", "purpose": "Hover/active color transitions on buttons and pills." }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Terracotta fill, near-black text — the one saturated element per view (primary CTA, active redaction mode).",
+      "html": "<button class=\"ds-btn-primary\">Prepare the workspace</button>",
+      "css": ".ds-btn-primary { background: hsl(28 92% 54%); color: hsl(20 40% 10%); font-weight: 500; font-size: 0.875rem; padding: 8px 16px; border-radius: 6px; border: none; transition: background 150ms ease-out; } .ds-btn-primary:hover { background: hsl(28 92% 48%); } .ds-btn-primary:focus-visible { outline: 2px solid hsl(28 92% 54%); outline-offset: 2px; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Secondary action sitting beside a primary button — hairline border, no fill.",
+      "html": "<button class=\"ds-btn-outline\">Skip to the studio</button>",
+      "css": ".ds-btn-outline { background: hsl(222 22% 7%); color: hsl(210 20% 96%); font-weight: 500; font-size: 0.875rem; padding: 8px 16px; border-radius: 6px; border: 1px solid hsl(222 15% 18%); transition: background 150ms ease-out; } .ds-btn-outline:hover { background: hsl(222 15% 17%); }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "The system's only elevation cue: one lightness step above the page background plus a hairline border, never a shadow.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-card-title\">Extract anything</div><div class=\"ds-card-body\">PDF, DOCX, XLSX, PPTX, CSV and plain text are converted to clean markdown with a layout map.</div></div>",
+      "css": ".ds-card { background: hsl(222 20% 10%); color: hsl(210 20% 96%); border: 1px solid hsl(222 15% 18%); border-radius: 8px; padding: 24px; } .ds-card-title { font-weight: 600; margin-bottom: 6px; } .ds-card-body { color: hsl(215 12% 62%); font-size: 0.875rem; line-height: 1.5; }"
+    },
+    {
+      "name": "Badge",
+      "kind": "chip",
+      "refersTo": "badge-outline",
+      "description": "Fully rounded, no fill — text color alone carries meaning (muted/neutral, emerald/done, primary/active).",
+      "html": "<span class=\"ds-badge\">2 findings</span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; border: 1px solid hsl(222 15% 18%); border-radius: 9999px; padding: 2px 10px; font-size: 0.75rem; color: hsl(215 12% 62%); background: transparent; }"
+    },
+    {
+      "name": "Pipeline Stage Pill",
+      "kind": "custom",
+      "description": "Signature component: a monospace, square-cornered pill whose border color encodes pipeline state (pending/active/done). The mono font is itself the signal that this text is a machine-produced token, not prose.",
+      "html": "<div class=\"ds-stage-row\"><span class=\"ds-stage ds-stage--done\">extract</span><span class=\"ds-stage ds-stage--active\">ner</span><span class=\"ds-stage\">pii</span><span class=\"ds-stage\">redact</span></div>",
+      "css": ".ds-stage-row { display: flex; gap: 6px; } .ds-stage { font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace; font-size: 0.6875rem; padding: 2px 8px; border-radius: 6px; border: 1px solid hsl(222 15% 18%); color: hsl(215 12% 62%); } .ds-stage--active { border-color: hsl(28 92% 54%); color: hsl(28 92% 54%); } .ds-stage--done { border-color: hsla(162 72% 46% / 0.4); color: oklch(69.6% 0.17 162.48); }"
+    },
+    {
+      "name": "Tab Bar",
+      "kind": "nav",
+      "description": "Underline-free segmented control. Inactive tabs sit in a muted pill; the active tab lifts to the page background with foreground text — the lift itself is the only active signal.",
+      "html": "<div class=\"ds-tabs\"><button class=\"ds-tab ds-tab--active\">Redacted</button><button class=\"ds-tab\">Source</button><button class=\"ds-tab\">Findings</button></div>",
+      "css": ".ds-tabs { display: inline-flex; gap: 2px; background: hsl(222 15% 14%); border-radius: 8px; padding: 3px; } .ds-tab { font-size: 0.875rem; padding: 5px 12px; border-radius: 6px; border: none; background: transparent; color: hsl(215 12% 62%); } .ds-tab--active { background: hsl(222 22% 7%); color: hsl(210 20% 96%); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Locked Terminal",
+    "overview": "Hacienda Studio looks like a piece of trusted infrastructure, not a marketing surface — closer to a well-built ops console or a security appliance's admin panel than a SaaS dashboard. The palette is a single near-black charcoal-navy with one warm, unapologetic accent: a terracotta orange that reads as \"trust this, act on this,\" never decorative. Everything else sits in a narrow band of desaturated cool grays that never compete with that accent.\n\nThe interface earns its calm by being honest about what's happening: pipeline stages render as literal monospace tokens, findings show real confidence percentages, and the audit tab prints raw hash values rather than a friendly checkmark. This is a tool for people who need to trust it, not be charmed by it — but it isn't cold: rounded corners and a warm accent keep it from reading as a bare terminal.",
+    "keyCharacteristics": [
+      "Single accent color, used sparingly — primary actions, active state, and nothing else",
+      "Monospace for anything that is literally a system token",
+      "Flat, bordered surfaces — no shadows, one step of lightness is the only depth cue",
+      "Generous whitespace on Landing, dense and edge-to-edge on tool surfaces"
+    ],
+    "rules": [
+      { "name": "The One Accent Rule", "body": "Terracotta orange appears on buttons/active-states/small icon marks only — never as a background fill, never on more than one element's \"primary\" state at a time.", "section": "colors" },
+      { "name": "The Mono-Means-Machine Rule", "body": "If a value was produced by the pipeline rather than typed by a human, it renders in the mono stack. Prose never does.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "A new surface never gets a shadow to \"lift\" it. If it needs to read as elevated, give it the card background + border combination instead.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep terracotta orange to a single active element per view",
+      "Do render any pipeline-produced value in the mono stack",
+      "Do use the card + hairline-border combination for distinct surfaces, never a shadow",
+      "Do keep tool surfaces dense and edge-to-edge; reserve generous whitespace for Landing"
+    ],
+    "donts": [
+      "Don't add a second saturated accent color",
+      "Don't add shadows, blur, or glassmorphism anywhere",
+      "Don't use the mono font for anything a human wrote",
+      "Don't center tool-surface content in a narrow column the way Landing does"
+    ]
+  }
+}

@@ -16,7 +16,14 @@
     "types": ["vite/client", "node", "wicg-file-system-access"],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      // `tesseract-wasm`'s package.json has an `exports` map with no `types`
+      // condition on it, and a top-level `types` field doesn't count once
+      // `exports` is present under `moduleResolution: "bundler"` — so TS can't
+      // find its declarations via normal resolution. Point straight at them;
+      // this only affects type-checking, Vite/esbuild still resolve the real
+      // `exports` map at runtime.
+      "tesseract-wasm": ["./node_modules/tesseract-wasm/dist/index.d.ts"]
     }
   },
   "include": [

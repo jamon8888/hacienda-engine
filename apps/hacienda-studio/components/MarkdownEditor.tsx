@@ -36,6 +36,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import type { ReactCodeMirrorRef, ViewUpdate } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
+import { oneDark } from "@codemirror/theme-one-dark";
 import type { PiiEntity } from "../lib/pii-engine";
 import { piiHighlightExtension } from "../lib/pii-decorations";
 import {
@@ -73,7 +74,7 @@ export function MarkdownEditor({
   const editorRef = useRef<ReactCodeMirrorRef>(null);
 
   const extensions = useMemo(
-    () => [markdown(), piiHighlightExtension(findings)],
+    () => [markdown(), oneDark, piiHighlightExtension(findings)],
     [findings],
   );
   const handleUpdate = useCallback((update: ViewUpdate) => {
