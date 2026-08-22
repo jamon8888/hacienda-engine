@@ -62,33 +62,43 @@ export function Landing({
           <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground">
             <Lock className="size-3" /> Local-first pipeline · zero uploads
           </span>
-          {/* Asset loading progress on first visit */}
-          {( !assets.xbergWasm || !assets.nerModel || !assets.tessdata) && (
-            <div className="mt-4 space-y-2">
-              {(Object.keys(ASSET_LABELS) as Array<keyof OnboardingState["assets"]>).map((key) => {
-                const ready = assets[key];
-                const isNer = key === "nerModel";
-                const isDownloading = isNer && !ready && !nerModelDegraded && nerModelProgress;
-                const progressPct = isDownloading && nerModelProgress?.totalBytes
-                  ? Math.min(100, Math.round((nerModelProgress.receivedBytes / nerModelProgress.totalBytes) * 100))
-                  : 0;
-                const barWidth = ready ? "100%" : isDownloading && nerModelProgress?.totalBytes ? `${progressPct}%` : "0%";
-                return (
-                  <div key={key} className="rounded-md border border-border bg-card/50 px-3 py-2">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-muted-foreground">{ASSET_LABELS[key]}</span>
-                      <span className="text-muted-foreground">
-                        {ready ? "Prêt" : isNer && nerModelDegraded ? "Dégradé" : isDownloading && nerModelProgress?.totalBytes ? `${progressPct}%` : "Téléchargement…"}
-                      </span>
-                    </div>
-                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full bg-primary transition-[width] duration-300" style={{ width: barWidth }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          {/* Asset loading progress on first visit - single bar */}
+          {(!assets.xbergWasm || !assets.nerModel || !assets.tessdata) && (() => {
+            const allReady = assets.xbergWasm && assets.nerModel && assets.tessdata;
+            let label = "Préparation du workspace";
+            let pct = 0;
+            if (!assets.xbergWasm) {
+              label = "Chargement du runtime…";
+              pct = 0;
+            } else if (!assets.nerModel) {
+              label = nerModelDegraded ? "Modèle neural indisponible — fallback regex" : "Téléchargement du modèle d’entités…";
+              if (nerModelProgress?.totalBytes) {
+                pct = Math.min(100, Math.round((nerModelProgress.receivedBytes / nerModelProgress.totalBytes) * 100));
+              } else if (!nerModelDegraded) {
+                pct = 10; // indeterminate start
+              }
+            } else if (!assets.tessdata) {
+              label = "Téléchargement des données OCR…";
+              pct = 80;
+            } else {
+              label = "Prêt";
+              pct = 100;
+            }
+            return (
+              <div className="mt-4 rounded-md border border-border bg-card/50 px-3 py-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">{label}</span>
+                  <span className="text-muted-foreground">{pct}%</span>
+                </div>
+                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div className="h-full bg-primary transition-[width] duration-300" style={{ width: `${pct}%` }} />
+                </div>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Runtime {assets.xbergWasm ? "✓" : "…"} · Modèle {assets.nerModel ? (nerModelDegraded ? "dégradé" : "✓") : "…"} · OCR {assets.tessdata ? "✓" : "…"}
+                </p>
+              </div>
+            );
+          })()}
           <h1 className="mt-6 text-5xl font-semibold leading-tight tracking-tight">
             Redact sensitive documents without letting them leave your laptop.
           </h1>
