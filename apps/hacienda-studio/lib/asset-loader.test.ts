@@ -151,6 +151,58 @@ describe("fetchAsset with parallel: true", () => {
     const last = onProgress.mock.calls.at(-1)?.[0];
     expect(last).toEqual({ receivedBytes: total, totalBytes: total });
   });
+
+  /**
+   * Regression: a server can pass the single-byte range probe (used only to learn total size
+   * and Range support) yet still fail the real ranged fetches — e.g. a redirect to a presigned
+   * CDN URL whose CORS policy allows a plain GET but not the preflight a `Range` header
+   * triggers. `fetchAssetInRanges` used to let that exception propagate straight out of
+   * `fetchAsset`, so the whole download failed *after* the progress bar had already climbed
+   * toward 100% on the chunks that did succeed — indistinguishable, from the user's side, from
+   * every other download failure, and with no fallback to the plain sequential path that has no
+   * `Range` header and therefore no preflight to fail on.
+   */
+  it("falls back to a plain download when a chunk fails after the probe succeeds", async () => {
+    // 33MB: past RANGED_DOWNLOAD_MIN_BYTES (32MB) so the parallel path engages, but kept small
+    // — a `toEqual` deep-compare on the full buffer is what made the neighboring large-buffer
+    // test above the bottleneck of this file, so this checks length plus sentinel bytes instead.
+    const total = 33 * 1024 * 1024;
+    const weights = new Uint8Array(total);
+    weights[0] = 0x42;
+    weights[total - 1] = 0x99;
+    let sawRangeRequest = false;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const range = (init?.headers as Record<string, string> | undefined)
+          ?.Range;
+        if (range) {
+          sawRangeRequest = true;
+          if (range === "bytes=0-0") {
+            // The probe: report ranges as supported so the parallel path engages.
+            return new Response(weights.slice(0, 1), {
+              status: 206,
+              headers: { "content-range": `bytes 0-0/${total}` },
+            });
+          }
+          // Every real ranged fetch fails — simulates a CORS preflight rejection.
+          throw new TypeError("Failed to fetch");
+        }
+        // No Range header: the plain sequential fallback.
+        return new Response(weights, {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        });
+      }),
+    );
+
+    const bytes = await fetchAsset("/model.safetensors", { parallel: true });
+    expect(bytes.length).toBe(total);
+    expect(bytes[0]).toBe(0x42);
+    expect(bytes[total - 1]).toBe(0x99);
+    expect(sawRangeRequest).toBe(true);
+  });
 });
 
 /**

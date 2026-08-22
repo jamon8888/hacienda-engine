@@ -237,8 +237,13 @@ async function fetchRangeWithRetry(
 /**
  * Downloads `url` as `RANGED_DOWNLOAD_CONCURRENCY` concurrent byte-range requests instead of
  * one stream — see `FetchAssetOptions.parallel` for why. Returns `null` (never throws for
- * "unsupported") when the server doesn't answer ranges or the file is too small for this to be
- * worth it, so the caller can fall back to `fetchAsset`'s plain sequential path.
+ * "unsupported") when the server doesn't answer ranges, the file is too small for this to be
+ * worth it, or a chunk fails outright after retries — e.g. a `Range` header on a cross-origin
+ * redirect target (a presigned CDN URL, most CORS setups only cover simple GETs, not the
+ * preflight a `Range` header requires) can pass the initial single-byte probe below yet still
+ * fail on the real ranged fetches. Every failure mode here must degrade to `fetchAsset`'s plain
+ * sequential path rather than take down the whole download — that path has no `Range` header
+ * and so no preflight to fail on.
  */
 async function fetchAssetInRanges(
   url: string,
@@ -260,18 +265,25 @@ async function fetchAssetInRanges(
     }),
   ).filter(({ start }) => start < totalBytes);
 
-  await Promise.all(
-    ranges.map(({ start, end }) =>
-      fetchRangeWithRetry(url, start, end, stallTimeoutMs, (chunk, offset) => {
-        bytes.set(chunk, offset);
-        receivedBytes += chunk.length;
-        onProgress?.({ receivedBytes, totalBytes });
-      }),
-    ),
-  );
-
-  assertNotHtmlBody(bytes, url);
-  return bytes;
+  try {
+    await Promise.all(
+      ranges.map(({ start, end }) =>
+        fetchRangeWithRetry(url, start, end, stallTimeoutMs, (chunk, offset) => {
+          bytes.set(chunk, offset);
+          receivedBytes += chunk.length;
+          onProgress?.({ receivedBytes, totalBytes });
+        }),
+      ),
+    );
+    assertNotHtmlBody(bytes, url);
+    return bytes;
+  } catch (e) {
+    console.warn(
+      `[asset-loader] Ranged download of ${url} failed after the probe succeeded, falling back to a plain sequential download:`,
+      e,
+    );
+    return null;
+  }
 }
 
 export async function fetchAsset(
