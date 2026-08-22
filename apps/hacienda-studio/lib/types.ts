@@ -108,6 +108,14 @@ export type NerCategory =
 
 export interface AppConfig {
   nerCategories: NerCategory[];
+  /**
+   * Zero-shot labels handed to the NER backend in addition to `nerCategories`, via
+   * `WasmNerConfig.customLabels` — the open-vocabulary escape hatch from the fixed
+   * `NerCategory` union above. Additive, never a replacement (`worker/pipeline.ts`).
+   * Empty by default; populated by opting into a preset like "Comprehensive PII" in
+   * `ConfigPanel.tsx`, mirroring `hacienda-core`'s `VerticalConfig::comprehensive()`.
+   */
+  nerCustomLabels: string[];
   outputFormat: "markdown" | "plain" | "json";
   chunkSize: number;
   enableTranscription: boolean;
@@ -158,6 +166,7 @@ export interface OnboardingState {
 
 export const DEFAULT_CONFIG: AppConfig = {
   nerCategories: ["person", "organization", "location", "email", "phone"],
+  nerCustomLabels: [],
   outputFormat: "markdown",
   chunkSize: 1000,
   enableTranscription: false,

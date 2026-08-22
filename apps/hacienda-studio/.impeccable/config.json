@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "design-system-font-size",
+        "value": "10px",
+        "createdAt": "2026-08-22T16:18:03.551Z",
+        "reason": "matches existing pervasive convention: text-[10px]/text-[11px] used 38x already in DocumentDetail.tsx for the same badge/label micro-type; DocumentOutline.tsx copies that established pattern verbatim, not introducing a new size"
+      }
+    ]
+  }
+}

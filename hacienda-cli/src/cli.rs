@@ -467,6 +467,16 @@ pub enum Mode {
     Pseudonymize,
 }
 
+/// Built-in PII detection verticals selectable from the CLI. Currently just
+/// `comprehensive` ([`hacienda_core::pii::VerticalConfig::comprehensive`]); a
+/// registry of many named verticals is deliberately not modeled here — see
+/// `VerticalConfig`'s own doc comment on why one optional vertical, not a list, is
+/// the shape this takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Vertical {
+    Comprehensive,
+}
+
 #[derive(Debug, Parser)]
 pub struct ExtractArgs {
     /// Files or URIs to extract.
@@ -489,6 +499,12 @@ pub struct ExtractArgs {
     /// Directory holding LoRA adapters.
     #[arg(long, value_name = "DIR")]
     pub lora_dir: Option<PathBuf>,
+
+    /// Request a built-in vertical's extra zero-shot labels alongside the base
+    /// categories (person, organization, location, email, phone). Opt-in — omitting
+    /// this flag leaves detection exactly as it was.
+    #[arg(long, value_enum)]
+    pub vertical: Option<Vertical>,
 
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
@@ -556,6 +572,12 @@ pub struct ScanArgs {
 
     #[arg(long, value_name = "F32")]
     pub threshold: Option<f32>,
+
+    /// Request a built-in vertical's extra zero-shot labels alongside the base
+    /// categories. See `ExtractArgs::vertical` — same flag, same behaviour; `scan`
+    /// already runs full PII detection so a vertical widens what it can find too.
+    #[arg(long, value_enum)]
+    pub vertical: Option<Vertical>,
 
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,

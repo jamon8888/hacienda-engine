@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { CodeLines } from "@/components/CodeLines";
+import { DocumentOutline } from "@/components/DocumentOutline";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { PiiPanel } from "@/components/PiiPanel";
 import { RedactedEditor } from "@/components/RedactedEditor";
@@ -68,6 +69,8 @@ export function DocumentDetail({
 
   const viewerKind = getViewerKind(result.frontmatter.source);
   const hasViewer = !!(viewerKind && previewUrl);
+
+  const leftPanelRef = useRef<HTMLDivElement | null>(null);
 
   const manualUrlRef = useRef<string | null>(null);
   useEffect(() => {
@@ -229,7 +232,10 @@ export function DocumentDetail({
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         {/* LEFT PANEL — document */}
         <div className="flex min-h-[420px] min-w-0 flex-1 flex-col border-b border-border bg-[#0a0e13] lg:border-b-0 lg:border-r">
-          <div className="flex-1 overflow-auto">
+          {activeTab !== "layout" && (
+            <DocumentOutline markdown={result.rawMarkdown} findings={findings} containerRef={leftPanelRef} />
+          )}
+          <div ref={leftPanelRef} className="flex-1 overflow-auto">
             {activeTab === "source" ? (
               hasViewer ? (
                 <div className="h-full min-h-[520px] bg-[#0a0e13] p-2">

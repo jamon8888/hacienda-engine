@@ -683,6 +683,13 @@ async function processFile(
       const nerConfig = WasmNerConfig.default();
       nerConfig.backend = WasmNerBackendKind.Onnx;
       nerConfig.categories = config.nerCategories;
+      // Additive, not a replacement — matches hacienda-core's "extend, don't replace"
+      // vertical behaviour (`ner.rs`'s `categories_with_vertical`). Empty by default,
+      // since `nerCategories`'s closed vocabulary already covers the opt-out cases and
+      // the engine rejects the whole NER result for a category name outside it — see
+      // `ConfigPanel.tsx`'s `ALL_CATEGORIES` comment. `customLabels` is the sanctioned
+      // open-vocabulary path for anything beyond that fixed set.
+      nerConfig.customLabels = config.nerCustomLabels;
       extractConfig.ner = nerConfig;
 
       const engine = new XbergEngine(

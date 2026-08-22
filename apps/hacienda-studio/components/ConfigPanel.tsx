@@ -22,6 +22,48 @@ const GROUPED = ALL_CATEGORIES.reduce<Record<string, typeof ALL_CATEGORIES>>((ac
   return acc;
 }, {});
 
+/**
+ * Mirrors `hacienda-core`'s `VerticalConfig::comprehensive()` (`hacienda-core/src/pii/
+ * config.rs`'s `COMPREHENSIVE_LABELS`) — kept in sync by hand, the same way this file's
+ * `ALL_CATEGORIES` already duplicates the base category list rather than sharing a
+ * source with the Rust side. Sent as `nerCustomLabels`, not `nerCategories` — unlike
+ * `ALL_CATEGORIES`, these aren't in the closed `NerCategory` union and only reach the
+ * model via `WasmNerConfig.customLabels` (`worker/pipeline.ts`), additive to whatever
+ * categories are checked above. Opt-in and off by default: there is no accuracy or
+ * latency data yet for requesting this many zero-shot labels at once.
+ */
+const COMPREHENSIVE_PII_LABELS = [
+  "address",
+  "ssn",
+  "passport",
+  "drivers_license",
+  "eu_vat",
+  "national_id",
+  "tax_id",
+  "credit_card",
+  "iban",
+  "bank_account",
+  "routing_number",
+  "swift_bic",
+  "crypto_wallet",
+  "medical_record_number",
+  "health_plan_number",
+  "diagnosis",
+  "medication",
+  "username",
+  "password",
+  "api_key",
+  "secret_token",
+  "jwt_token",
+  "ip_address",
+  "mac_address",
+  "url",
+  "license_plate",
+  "vehicle_vin",
+  "date_of_birth",
+  "full_name",
+];
+
 const TRANSCRIPTION_MODELS: AppConfig["transcriptionModel"][] = [
   "tiny.en",
   "tiny",
@@ -105,6 +147,18 @@ export function ConfigPanel({
     });
   };
 
+  const comprehensivePiiEnabled = COMPREHENSIVE_PII_LABELS.every((label) =>
+    config.nerCustomLabels.includes(label),
+  );
+  const toggleComprehensivePii = () => {
+    onChange({
+      ...config,
+      nerCustomLabels: comprehensivePiiEnabled
+        ? config.nerCustomLabels.filter((label) => !COMPREHENSIVE_PII_LABELS.includes(label))
+        : [...new Set([...config.nerCustomLabels, ...COMPREHENSIVE_PII_LABELS])],
+    });
+  };
+
   const toggleVertical = (v: AppConfig["enabledVerticals"][number]) => {
     const has = config.enabledVerticals.includes(v);
     onChange({
@@ -149,6 +203,20 @@ export function ConfigPanel({
             </fieldset>
           ))}
         </div>
+        <label className="mt-2 flex cursor-pointer items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/[0.06] p-2 text-sm text-foreground">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={comprehensivePiiEnabled}
+            onChange={toggleComprehensivePii}
+          />
+          <span>
+            Comprehensive PII (SSN, IBAN, passport, API keys, and {COMPREHENSIVE_PII_LABELS.length - 3} more)
+            <span className="block text-xs text-muted-foreground">
+              Requests many more zero-shot labels at once — no accuracy or latency data yet for this document set. Off by default.
+            </span>
+          </span>
+        </label>
       </section>
 
       <section className="mb-6">
