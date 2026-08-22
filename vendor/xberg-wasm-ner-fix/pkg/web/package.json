@@ -1,0 +1,28 @@
+{
+  "name": "xberg-wasm",
+  "type": "module",
+  "description": "High-performance document intelligence library",
+  "version": "1.0.2",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xberg-io/xberg"
+  },
+  "files": [
+    "xberg_wasm_bg.wasm",
+    "xberg_wasm.js",
+    "xberg_wasm.d.ts"
+  ],
+  "main": "xberg_wasm.js",
+  "types": "xberg_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "document",
+    "extraction",
+    "pdf",
+    "ocr",
+    "text"
+  ]
+}

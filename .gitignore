@@ -72,6 +72,16 @@ go.sum
 # parent directory itself was excluded.
 !vendor/candle-core-0.11.0-wasm-fix/
 !vendor/candle-transformers-0.11.0-wasm-fix/
+# Locally-built @xberg-io/xberg-wasm (39MB compiled binary, not source) — built from the
+# same jamon8888/xberg checkout the workspace already pins, with the two patches above
+# applied via a local (uncommitted) edit to that checkout's own Cargo.toml, and ocr-wasm
+# (native WASI Tesseract, requires a WASI SDK this app doesn't use — see the app's own
+# tesseract-wasm bridge instead) dropped to avoid that toolchain dependency. Committed
+# (not just the source patches) so `apps/hacienda-studio`'s `file:../../vendor/
+# xberg-wasm-ner-fix` dependency resolves on a fresh clone without a ~17-minute rebuild.
+# Drop this whole directory (and the package.json dependency pointing at it) once xberg
+# publishes a release with the F16/F32 fix upstream.
+!vendor/xberg-wasm-ner-fix/
 
 # Java
 target/
@@ -152,3 +162,5 @@ CLAUDE.md
 .target-wasm/
 .tmp-cp/
 .tmp-npmcache/
+.vercel
+.env*

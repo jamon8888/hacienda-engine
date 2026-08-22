@@ -123,8 +123,8 @@ importers:
         specifier: ^4.25.11
         version: 4.25.11(@babel/runtime@8.0.0)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.4)(@codemirror/lint@6.9.7)(@codemirror/search@6.7.1)(@codemirror/state@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@codemirror/view@6.43.8)(codemirror@6.0.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@xberg-io/xberg-wasm':
-        specifier: ^1.0.12
-        version: 1.0.12
+        specifier: file:../../vendor/xberg-wasm-ner-fix
+        version: file:../../vendor/xberg-wasm-ner-fix
       border-beam:
         specifier: ^1.3.0
         version: 1.3.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -148,7 +148,7 @@ importers:
         version: 0.21.5
       hacienda-wasm:
         specifier: file:../../crates/hacienda-wasm/pkg
-        version: pkg@file:../../crates/hacienda-wasm/pkg
+        version: file:../../crates/hacienda-wasm/pkg
       idb:
         specifier: ^8.0.0
         version: 8.0.3
@@ -2319,9 +2319,8 @@ packages:
   '@vue/shared@3.5.41':
     resolution: {integrity: sha512-IOnwSCma8j+9xJT6b8H0dEYidC80NsYmNMlZxRsukYcSoGaDBohog5hDxzeUXdFeGWFA++vWvxqOmrr96VlqMA==}
 
-  '@xberg-io/xberg-wasm@1.0.12':
-    resolution: {integrity: sha512-3TUtaWNqCr4FOZJanpAW5FYFwOaF6+vDpj5gFu5WpsEJ+xqzyjzFLcKeU/z3Rddr6yb5bpeigJO9s6OBDIfjRA==}
-    engines: {node: '>= 22'}
+  '@xberg-io/xberg-wasm@file:../../vendor/xberg-wasm-ner-fix':
+    resolution: {directory: ../../vendor/xberg-wasm-ner-fix, type: directory}
 
   acorn-jsx@5.3.2:
     resolution: {integrity: sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==}
@@ -2790,6 +2789,9 @@ packages:
   grad-school@0.0.5:
     resolution: {integrity: sha512-rXunEHF9M9EkMydTBux7+IryYXEZinRk6g8OBOGDBzo/qWJjhTxy86i5q7lQYpCLHN8Sqv1XX3OIOc7ka2gtvQ==}
     engines: {node: '>=8.0.0'}
+
+  hacienda-wasm@file:../../crates/hacienda-wasm/pkg:
+    resolution: {directory: ../../crates/hacienda-wasm/pkg, type: directory}
 
   has-flag@4.0.0:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
@@ -3293,9 +3295,6 @@ packages:
   picomatch@4.0.5:
     resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
     engines: {node: '>=12'}
-
-  pkg@file:../../crates/hacienda-wasm/pkg:
-    resolution: {directory: ../../crates/hacienda-wasm/pkg, type: directory}
 
   playwright-core@1.62.1:
     resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
@@ -5973,7 +5972,7 @@ snapshots:
 
   '@vue/shared@3.5.41': {}
 
-  '@xberg-io/xberg-wasm@1.0.12': {}
+  '@xberg-io/xberg-wasm@file:../../vendor/xberg-wasm-ner-fix': {}
 
   acorn-jsx@5.3.2(acorn@8.18.0):
     dependencies:
@@ -6435,6 +6434,8 @@ snapshots:
   graceful-fs@4.2.11: {}
 
   grad-school@0.0.5: {}
+
+  hacienda-wasm@file:../../crates/hacienda-wasm/pkg: {}
 
   has-flag@4.0.0: {}
 
@@ -7158,8 +7159,6 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.5: {}
-
-  pkg@file:../../crates/hacienda-wasm/pkg: {}
 
   playwright-core@1.62.1: {}
 

@@ -1,0 +1,19 @@
+{
+  "name": "@xberg-io/xberg-wasm",
+  "type": "module",
+  "description": "High-performance document intelligence library — LOCAL BUILD with the candle-transformers F16/F32 dtype-mismatch fix for ner-candle-wasm (GLiNER2 NER). Not published; see docs/superpowers/specs for why this exists.",
+  "version": "1.0.12-hacienda-f16fix.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xberg-io/xberg"
+  },
+  "files": [
+    "pkg/web"
+  ],
+  "main": "pkg/web/xberg_wasm.js",
+  "types": "pkg/web/xberg_wasm.d.ts",
+  "sideEffects": [
+    "./pkg/web/snippets/*"
+  ]
+}
