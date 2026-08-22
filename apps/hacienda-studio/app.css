@@ -182,7 +182,11 @@
 }
 
 @media (prefers-color-scheme: light) {
-  :root {
+  /* Scoped to :not(.dark): main.tsx always applies `.dark` unconditionally (this app has
+     no light mode), so an unscoped :root here overwrote the legacy body tokens back to
+     light values whenever the OS itself was in light mode, regardless of the app's own
+     forced-dark class. */
+  :root:not(.dark) {
     --legacy-bg: #ffffff;
     --legacy-bg-elevated: #f6f8fa;
     --legacy-border: #d0d7de;

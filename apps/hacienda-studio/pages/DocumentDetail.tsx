@@ -115,8 +115,14 @@ export function DocumentDetail({
     let cancelled = false;
     loadDraft(contentHash).then((saved) => {
       if (!cancelled && saved !== undefined) {
-        setDraft((prev) => prev ?? saved);
-        if (saved !== undefined) toast("Restored your last redacted draft for this file");
+        // Toast only when the saved draft is actually adopted (`prev` was still unset).
+        // If the user typed an edit before this resolved, `prev ?? saved` correctly
+        // keeps their edit — but the toast previously fired unconditionally, telling
+        // them a draft was restored even though their own edit was what's shown.
+        setDraft((prev) => {
+          if (prev === undefined) toast("Restored your last redacted draft for this file");
+          return prev ?? saved;
+        });
       }
     });
     return () => {
@@ -149,6 +155,13 @@ export function DocumentDetail({
     const nextResult = applyRedactionMode(findings, next);
     if ("findings" in nextResult) {
       setDraft(renderAnnotatedMarkdown(result.rawMarkdown, result.entities, nextResult.findings, docPath));
+    } else {
+      // e.g. "pseudonymize" without reversible tokens available. Without this, `draft`
+      // keeps the *previous* mode's rendered text, so `redactedBody` below stays defined
+      // and the unavailable-mode message (keyed on `redactedBody === undefined`) never
+      // renders — the pane silently shows mask/hash output while a mode that produced
+      // nothing is the one selected.
+      setDraft(undefined);
     }
   }
 

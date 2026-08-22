@@ -97,4 +97,19 @@ pub enum PiiError {
     /// malformed vertical everywhere that function is not reached.
     #[error("vertical '{id}' is invalid: {reason}")]
     InvalidVertical { id: String, reason: String },
+
+    /// A caller-supplied [`crate::pii::types::ModelEntity`] (the
+    /// `process_with_model_entities`/`scan_with_model_entities` bypass, used when a caller
+    /// has already run NER inference itself — e.g. the entity-glossary pass) failed
+    /// validation. These entities are never re-run through the NER detector, so a
+    /// reversed, out-of-bounds, or non-UTF-8-boundary span would otherwise reach
+    /// `RedactionEngine::redact`, which skips invalid spans silently rather than erroring
+    /// — meaning `redacted_text` could come back with that PII span left unredacted and
+    /// no indication anything was wrong.
+    #[error("invalid model entity at [{start}, {end}): {reason}")]
+    InvalidModelEntity {
+        start: u32,
+        end: u32,
+        reason: String,
+    },
 }

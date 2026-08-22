@@ -4,6 +4,18 @@
 // `initPiiEngine`, where the actual hacienda_wasm_bg.wasm fetch happens.
 
 import type { FileInput, ProcessedFile, ProgressUpdate, AppConfig } from "./types";
+import type { TranscriptionConfig } from "./transcription/types";
+
+/** Payload a pool worker sends on `"transcribe-request"` — whisper can't run inside a
+ * worker (see `worker/transcribe-bridge.ts`), so this is forwarded to the main thread's
+ * `transcribeHandler` for it to actually run and reply through `respond`. */
+export interface TranscribeRequestData {
+  requestId: string;
+  file: string;
+  audioBytes: Uint8Array<ArrayBuffer>;
+  mimeType: string;
+  config: TranscriptionConfig;
+}
 
 export interface WorkerPoolConfig {
   /** Number of workers in the pool (default: conservative 3) */
@@ -65,13 +77,7 @@ export class WorkerPool {
   // exactly once with the result so the reply reaches the *originating* pool worker —
   // there is no single "the worker" anymore now that there are `poolSize` of them.
   private transcribeHandler?: (
-    data: {
-      requestId: string;
-      file: string;
-      audioBytes: Uint8Array<ArrayBuffer>;
-      mimeType: string;
-      config: any;
-    },
+    data: TranscribeRequestData,
     respond: (response: { result?: unknown; error?: string }) => void,
   ) => Promise<void>;
 
@@ -95,13 +101,7 @@ export class WorkerPool {
    */
   async initialize(
     transcribeHandler?: (
-      data: {
-        requestId: string;
-        file: string;
-        audioBytes: Uint8Array<ArrayBuffer>;
-        mimeType: string;
-        config: any;
-      },
+      data: TranscribeRequestData,
       respond: (response: { result?: unknown; error?: string }) => void,
     ) => Promise<void>,
   ): Promise<void> {
@@ -213,7 +213,8 @@ export class WorkerPool {
     );
     
     files.forEach((file, i) => {
-      workerFiles[i % this.workers.length].push(file);
+      const bucket = workerFiles[i % this.workers.length];
+      if (bucket) bucket.push(file);
     });
 
     // Filter out empty assignments
@@ -245,6 +246,7 @@ export class WorkerPool {
     // Start processing on each worker
     tasks.forEach(({ workerIndex, task }) => {
       const instance = this.workers[workerIndex];
+      if (!instance) return;
       instance.busy = true;
       instance.pendingFiles = task.files.length;
       instance.currentTask = task;
@@ -263,10 +265,15 @@ export class WorkerPool {
     // Flatten results preserving order (by file index)
     const fileResults = allResults.flat();
     
-    // Sort by original file order
+    // Sort by original file order. Keyed on frontmatter.source (the input file's own
+    // name), not `.name` — that's the *output* document name (input name with its
+    // extension swapped to `.md`, see worker/pipeline.ts), which never matches an entry
+    // in `fileOrder` and silently turned this into a no-op sort (every comparison fell
+    // through to `?? 0`, so results came back in whatever order workers happened to
+    // finish rather than input order).
     const fileOrder = new Map(files.map((f, i) => [f.name, i]));
-    fileResults.sort((a, b) => 
-      (fileOrder.get(a.name) ?? 0) - (fileOrder.get(b.name) ?? 0)
+    fileResults.sort((a, b) =>
+      (fileOrder.get(a.frontmatter.source) ?? 0) - (fileOrder.get(b.frontmatter.source) ?? 0)
     );
 
     return fileResults;
@@ -319,6 +326,12 @@ export class WorkerPool {
         }
         instance.busy = false;
         instance.pendingFiles = 0;
+        // Only fire once every worker in the pool is idle — App.tsx uses this to leave
+        // the upload view, and firing it per-worker would trigger that transition while
+        // other workers in the same batch are still processing files.
+        if (this.workers.every((w) => !w.busy)) {
+          this.onBatchComplete?.();
+        }
         break;
         
       case "zip-ready":
@@ -330,7 +343,7 @@ export class WorkerPool {
   /**
    * Handle transcription request from worker
    */
-  private async transcribeRequest(instance: WorkerInstance, data: any): Promise<void> {
+  private async transcribeRequest(instance: WorkerInstance, data: TranscribeRequestData): Promise<void> {
     const respond = (response: { result?: unknown; error?: string }) => {
       instance.worker.postMessage({
         type: "transcribe-response",

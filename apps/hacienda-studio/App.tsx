@@ -297,8 +297,17 @@ export function App() {
       });
       pool.setFileCompleteHandler((result) => {
         setResults((prev) => [...prev, result]);
+        // `progress` is keyed by the *input* file name throughout its lifecycle — every
+        // `postProgress` call in worker/pipeline.ts (including its own final "complete"
+        // update) keys on `input.name`. `result.name` is the *output* document name
+        // (input name with its extension swapped to `.md`), so keying on it here created
+        // a second, stale-forever entry instead of updating the real one.
         setProgress((prev) =>
-          new Map(prev).set(result.name, { file: result.name, stage: "complete", percent: 100 })
+          new Map(prev).set(result.frontmatter.source, {
+            file: result.frontmatter.source,
+            stage: "complete",
+            percent: 100,
+          })
         );
         void saveDocument(result);
       });

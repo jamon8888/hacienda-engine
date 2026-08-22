@@ -65,10 +65,25 @@ export function initPiiEngine(): Promise<void> {
   return ready;
 }
 
+/** Replaces every `wasmModule!` non-null assertion below with one real check — every
+ * caller here already awaits `initPiiEngine()` first, so this should never actually
+ * throw, but a scattered `!` silently produces "Cannot read properties of null" from
+ * deep inside a wasm call if that invariant is ever violated (e.g. a future refactor
+ * that calls one of these functions without awaiting init first) instead of a message
+ * that says what actually went wrong. */
+function getWasmModule(): WasmModule {
+  if (!wasmModule) {
+    throw new Error(
+      "[pii-engine] hacienda-wasm module not initialized — call initPiiEngine() first",
+    );
+  }
+  return wasmModule;
+}
+
 /** Detect only — `redacted_text` on the result equals `text`. */
 export async function scanForPii(text: string): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  return (await wasmModule!.scan(text)) as PiiPipelineResult;
+  return (await getWasmModule().scan(text)) as PiiPipelineResult;
 }
 
 /**
@@ -90,7 +105,7 @@ export async function loadPiiNerModel(
   encoderConfig: Uint8Array,
 ): Promise<void> {
   await initPiiEngine();
-  wasmModule!.loadNerModel(weights, tokenizer, encoderConfig);
+  getWasmModule().loadNerModel(weights, tokenizer, encoderConfig);
 }
 
 /**
@@ -103,6 +118,16 @@ export async function loadPiiNerModel(
  * `nerCategoryToPiiCategory` must produce exactly this shape.
  */
 export type PiiCategoryWire = string | { custom: string };
+
+/** The five fields `process_with_model_entities`/`scan_with_model_entities` (and their
+ * JS wrappers below) need per entity — shared instead of repeated inline in both. */
+export interface ModelEntity {
+  category: PiiCategoryWire;
+  text: string;
+  start: number;
+  end: number;
+  confidence: number;
+}
 
 /**
  * Detect and redact using pre-computed model entities (bypasses NER inference).
@@ -130,19 +155,14 @@ export type PiiCategoryWire = string | { custom: string };
  */
 export async function redactPiiWithModelEntities(
   text: string,
-  modelEntities: Array<{
-    category: PiiCategoryWire;
-    text: string;
-    start: number;
-    end: number;
-    confidence: number;
-  }>,
+  modelEntities: ModelEntity[],
 ): Promise<PiiPipelineResult> {
   await initPiiEngine();
   const mod = wasmModule as unknown as Record<string, unknown>;
+  let result: PiiPipelineResult;
   if (typeof mod.process_with_model_entities === "function") {
     try {
-      return (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+      result = (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
         text,
         modelEntities,
       )) as PiiPipelineResult;
@@ -151,9 +171,17 @@ export async function redactPiiWithModelEntities(
         "[pii-engine] process_with_model_entities exists but isn't callable (stale/mismatched wasm build?) — falling back to process():",
         err,
       );
+      result = (await getWasmModule().process(text)) as PiiPipelineResult;
     }
+  } else {
+    result = (await getWasmModule().process(text)) as PiiPipelineResult;
   }
-  return (await wasmModule!.process(text)) as PiiPipelineResult;
+  // Same audit-chain invariant `redactPii` documents above — this path was missing it
+  // entirely, so every model-entity redaction (the entity-glossary reuse path, which is
+  // the common case now per Tier 1.1) silently never reached the audit trail.
+  const handle = await getAuditHandle();
+  await handle.recordResult(result);
+  return result;
 }
 
 /**
@@ -163,13 +191,7 @@ export async function redactPiiWithModelEntities(
  */
 export async function scanForPiiWithModelEntities(
   text: string,
-  modelEntities: Array<{
-    category: PiiCategoryWire;
-    text: string;
-    start: number;
-    end: number;
-    confidence: number;
-  }>,
+  modelEntities: ModelEntity[],
 ): Promise<PiiPipelineResult> {
   await initPiiEngine();
   const mod = wasmModule as unknown as Record<string, unknown>;
@@ -186,7 +208,7 @@ export async function scanForPiiWithModelEntities(
       );
     }
   }
-  return (await wasmModule!.scan(text)) as PiiPipelineResult;
+  return (await getWasmModule().scan(text)) as PiiPipelineResult;
 }
 
 // One IndexedDB database per browser profile — Studio has no concept of multiple
@@ -203,7 +225,7 @@ let auditHandle: Promise<AuditHandle> | null = null;
 /** Opens (or resumes, across a reload) the audit chain. Idempotent, like `initPiiEngine`. */
 function getAuditHandle(): Promise<AuditHandle> {
   if (!auditHandle) {
-    auditHandle = wasmModule!.AuditHandle.open(
+    auditHandle = getWasmModule().AuditHandle.open(
       AUDIT_DB_NAME,
       AUDIT_NODE_ID,
       AUDIT_CONFIG_HASH,
@@ -226,7 +248,7 @@ function getAuditHandle(): Promise<AuditHandle> {
  */
 export async function redactPii(text: string): Promise<PiiPipelineResult> {
   await initPiiEngine();
-  const result = (await wasmModule!.process(text)) as PiiPipelineResult;
+  const result = (await getWasmModule().process(text)) as PiiPipelineResult;
   const handle = await getAuditHandle();
   await handle.recordResult(result);
   return result;

@@ -92,14 +92,53 @@ export async function clearLibrary(): Promise<void> {
   await tx.done;
 }
 
+/** A record written by an earlier build can be missing a field a newer `ProcessedFile`
+ * shape added — `pages/DocumentDetail.tsx` reads `result.rawMarkdown`/`result.entities`
+ * directly off whatever `listDocuments` returns and throws on `undefined`. Not full
+ * schema validation (that's a bigger lift for a browser-only, single-writer store): just
+ * the fields this app's own code actually dereferences without a guard. */
+function isCompletePersistedDocument(value: unknown): value is PersistedDocument {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const result = v.result as Record<string, unknown> | undefined;
+  return (
+    typeof v.processedAt === "number" &&
+    typeof result === "object" &&
+    result !== null &&
+    typeof result.name === "string" &&
+    typeof result.markdown === "string" &&
+    typeof result.rawMarkdown === "string" &&
+    Array.isArray(result.entities) &&
+    Array.isArray(result.piiFindings) &&
+    typeof result.frontmatter === "object" &&
+    result.frontmatter !== null
+  );
+}
+
 export async function listDocuments(): Promise<PersistedDocument[]> {
   const db = await getDB();
-  return db.getAll(DOCUMENTS_STORE);
+  const all = await db.getAll(DOCUMENTS_STORE);
+  return all.filter((doc) => {
+    if (isCompletePersistedDocument(doc)) return true;
+    console.warn("[persistence] Skipping malformed persisted document (written by an older build?):", doc);
+    return false;
+  });
 }
 
 export async function listEditedFindings(): Promise<Map<string, PiiEntity[]>> {
   const db = await getDB();
-  const keys = await db.getAllKeys(EDITED_FINDINGS_STORE);
-  const values = await db.getAll(EDITED_FINDINGS_STORE);
-  return new Map(keys.map((key, i) => [key, values[i]] as const));
+  // A single read-only transaction, not separate `getAllKeys`/`getAll` calls (each of
+  // which opened its own transaction) — a `saveEditedFindings`/`deleteDocument` landing
+  // between those two calls could change the store's length or order, so the old code
+  // could zip a key from one snapshot with a value from another and attach one
+  // document's PII edits to a different document's name.
+  const tx = db.transaction(EDITED_FINDINGS_STORE, "readonly");
+  const entries = new Map<string, PiiEntity[]>();
+  let cursor = await tx.store.openCursor();
+  while (cursor) {
+    entries.set(cursor.key, cursor.value);
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return entries;
 }

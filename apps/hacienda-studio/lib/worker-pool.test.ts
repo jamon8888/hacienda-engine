@@ -48,7 +48,16 @@ class MockWorker {
     if (data.type === "process") {
       queueMicrotask(() => {
         for (const file of data.files) {
-          this.dispatch({ type: "file-complete", name: file.name, entities: [], piiFindings: [] });
+          this.dispatch({
+            type: "file-complete",
+            name: file.name,
+            entities: [],
+            piiFindings: [],
+            // `WorkerPool.processFiles` sorts results back into input order keyed on
+            // `frontmatter.source` (the *input* file name — `.name` above is the
+            // *output* document name), so the mock needs it too.
+            frontmatter: { source: file.name },
+          });
         }
         this.dispatch({ type: "batch-complete" });
       });

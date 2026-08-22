@@ -16,6 +16,32 @@ const DEFAULT_CACHE_CONFIG: CacheConfig = {
   maxAgeMs: 30 * 24 * 60 * 60 * 1000, // 30 days
 };
 
+interface CachedWasmRecord {
+  url: string;
+  data: ArrayBuffer;
+  contentType: string;
+  cachedAt: number;
+  maxAge: number;
+}
+
+/** IndexedDB holds whatever an older build wrote there — a record from before a field
+ * was added or renamed comes back missing it, cast to today's shape by nothing more
+ * than a type assertion. Treated as a cache miss (same as "not found") rather than
+ * fed straight into `new Response(...)`: a malformed `data`/`contentType` there would
+ * otherwise surface as a broken wasm fetch far from this file, with no indication the
+ * cached entry itself was the problem. */
+function isValidCachedWasmRecord(value: unknown): value is CachedWasmRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return (
+    typeof r.url === "string" &&
+    r.data instanceof ArrayBuffer &&
+    typeof r.contentType === "string" &&
+    typeof r.cachedAt === "number" &&
+    typeof r.maxAge === "number"
+  );
+}
+
 /**
  * Cache a Wasm module response using the Cache API
  * Falls back to IndexedDB if Cache API unavailable
@@ -70,16 +96,19 @@ async function cacheWasmModuleIDB(
   
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(dbName, 1);
-    
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
+
+    // Read `.result` off the `request` we already hold rather than casting
+    // `event.target` — this *is* the IDBOpenDBRequest these handlers fire on, so the
+    // cast was asserting something already known, not narrowing anything.
+    request.onupgradeneeded = () => {
+      const db = request.result;
       if (!db.objectStoreNames.contains(storeName)) {
         db.createObjectStore(storeName, { keyPath: "url" });
       }
     };
-    
-    request.onsuccess = async (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
+
+    request.onsuccess = async () => {
+      const db = request.result;
       try {
         const blob = await response.blob();
         const arrayBuffer = await blob.arrayBuffer();
@@ -162,34 +191,39 @@ async function getCachedWasmModuleIDB(
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(dbName, 1);
     
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
+    request.onupgradeneeded = () => {
+      const db = request.result;
       if (!db.objectStoreNames.contains(storeName)) {
         db.createObjectStore(storeName, { keyPath: "url" });
       }
     };
-    
-    request.onsuccess = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
+
+    request.onsuccess = () => {
+      const db = request.result;
       const transaction = db.transaction(storeName, "readonly");
       const store = transaction.objectStore(storeName);
       const getRequest = store.get(url);
       
       getRequest.onsuccess = () => {
         db.close();
-        const entry = getRequest.result;
-        
+        const entry: unknown = getRequest.result;
+
         if (!entry) {
           resolve(null);
           return;
         }
-        
+        if (!isValidCachedWasmRecord(entry)) {
+          console.warn(`[WasmCache] Malformed IndexedDB record for ${url}, treating as a cache miss`);
+          resolve(null);
+          return;
+        }
+
         // Check expiration
         if (Date.now() - entry.cachedAt >= entry.maxAge) {
           // Expired - delete and return null
           const deleteDb = indexedDB.open(dbName, 1);
-          deleteDb.onsuccess = (e) => {
-            const delDb = (e.target as IDBOpenDBRequest).result;
+          deleteDb.onsuccess = () => {
+            const delDb = deleteDb.result;
             const delTx = delDb.transaction(storeName, "readwrite");
             delTx.objectStore(storeName).delete(url);
             delTx.oncomplete = () => delDb.close();
