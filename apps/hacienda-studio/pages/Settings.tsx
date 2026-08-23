@@ -23,6 +23,7 @@ const ALL_CATEGORIES: Array<{ key: NerCategory; label: string; group: string }> 
   { key: "phone", label: "Téléphone", group: "Contact" },
   { key: "url", label: "URL", group: "Contact" },
   { key: "date", label: "Date", group: "Temporel" },
+  { key: "time", label: "Heure", group: "Temporel" },
   { key: "money", label: "Montant", group: "Financier" },
   { key: "percent", label: "Pourcentage", group: "Financier" },
 ];
@@ -345,7 +346,7 @@ export function Settings({ config, onChange }: Props) {
               </select>
             </div>
             <div className={fieldLabel}>
-              <label htmlFor="chunk-size">Taille des segments (tokens)</label>
+              <label htmlFor="chunk-size">Taille des segments (caractères)</label>
               <input
                 id="chunk-size"
                 type="number"
@@ -354,7 +355,11 @@ export function Settings({ config, onChange }: Props) {
                 max={8000}
                 step={100}
                 value={config.chunkSize}
-                onChange={(e) => onChange({ ...config, chunkSize: Number(e.target.value) })}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (!e.target.value || Number.isNaN(n)) return;
+                  onChange({ ...config, chunkSize: Math.min(8000, Math.max(100, n)) });
+                }}
               />
             </div>
           </div>
