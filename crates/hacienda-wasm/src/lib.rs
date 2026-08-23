@@ -176,9 +176,12 @@ fn current_ner_detector() -> Option<hacienda_core::pii::NerDetector> {
 #[cfg(target_arch = "wasm32")]
 mod audit_handle {
     use super::to_js_err;
-    use hacienda_core::audit::{AuditEntryInput, AuditStore, IndexedDbAuditStore, NodeId};
+    use hacienda_core::audit::{
+        AuditEntryInput, AuditStore, EntitySource, IndexedDbAuditStore, NodeId, RedactionAction,
+    };
     use hacienda_core::pii::PipelineResult;
     use hacienda_core::tenancy::TenantId;
+    use std::str::FromStr;
     use wasm_bindgen::prelude::*;
 
     /// Recorded on every entry this handle mints, mirroring
@@ -262,6 +265,62 @@ mod audit_handle {
                 .tip(&TenantId::default_tenant())
                 .await
                 .map_err(to_js_err)
+        }
+
+        /// Record that `revealed_text` was shown to the user in plaintext — the wasm
+        /// counterpart of `RedactionAction::Reveal` (see that variant's doc: an audit
+        /// chain that omits "who accessed the unredacted span text" is not credible for a
+        /// compliance product). Only the blake3 digest of `revealed_text` is ever hashed
+        /// into the chain — the plaintext itself is never stored, matching
+        /// `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
+        ///
+        /// `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+        #[wasm_bindgen(js_name = recordReveal)]
+        pub async fn record_reveal(
+            &self,
+            revealed_text: String,
+            category: String,
+            source: String,
+        ) -> Result<String, JsValue> {
+            let source = EntitySource::from_str(&source).map_err(to_js_err)?;
+            let span_hash = blake3::hash(revealed_text.as_bytes()).to_hex().to_string();
+            let input = AuditEntryInput {
+                id: uuid::Uuid::new_v4().to_string(),
+                category,
+                action: RedactionAction::Reveal,
+                span_hash,
+                span_length: revealed_text.len() as u32,
+                confidence: None,
+                source,
+                pipeline_version: PIPELINE_VERSION.to_string(),
+                config_hash: String::new(),
+                principal: None,
+                vertical: None,
+            };
+
+            self.store
+                .append(&TenantId::default_tenant(), vec![input])
+                .await
+                .map_err(to_js_err)?;
+
+            self.store
+                .tip(&TenantId::default_tenant())
+                .await
+                .map_err(to_js_err)
+        }
+
+        /// Every entry recorded so far for the default tenant, oldest first — backs
+        /// `DocumentDetail.tsx`'s Audit tab entry list. `AuditStore::entries` already
+        /// exists on the native side (used by the CLI/API's own audit views); this just
+        /// exposes it to JS rather than adding a second listing mechanism.
+        #[wasm_bindgen(js_name = listEntries)]
+        pub async fn list_entries(&self) -> Result<JsValue, JsValue> {
+            let entries = self
+                .store
+                .entries(&TenantId::default_tenant())
+                .await
+                .map_err(to_js_err)?;
+            serde_wasm_bindgen::to_value(&entries).map_err(to_js_err)
         }
 
         /// The chain's current head — a client that records this alongside a result can

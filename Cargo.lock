@@ -2920,6 +2920,7 @@ dependencies = [
 name = "hacienda-wasm"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "getrandom 0.4.3",
  "hacienda-core",

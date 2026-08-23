@@ -27,6 +27,10 @@ hacienda-core = { path = "../../hacienda-core", default-features = false }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+# `AuditHandle::record_reveal` hashes revealed plaintext before it ever enters the audit
+# chain — same blake3 convention `RedactionEngine::redact` uses for `span_hash`
+# (`hacienda-core/src/redaction/engine.rs`), not a second hashing scheme.
+blake3 = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Tier 3.1 prep only, behind the `atomics` feature above — a wasm32-only threading

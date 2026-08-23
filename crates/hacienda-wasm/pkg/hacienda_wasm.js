@@ -21,6 +21,17 @@ export class AuditHandle {
         wasm.__wbg_audithandle_free(ptr, 0);
     }
     /**
+     * Every entry recorded so far for the default tenant, oldest first — backs
+     * `DocumentDetail.tsx`'s Audit tab entry list. `AuditStore::entries` already
+     * exists on the native side (used by the CLI/API's own audit views); this just
+     * exposes it to JS rather than adding a second listing mechanism.
+     * @returns {Promise<any>}
+     */
+    listEntries() {
+        const ret = wasm.audithandle_listEntries(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * Open (or resume, across a reload — Track L5's check) the IndexedDB database
      * named `db_name`, scoped to `node_id` and `config_hash`.
      *
@@ -59,6 +70,30 @@ export class AuditHandle {
      */
     recordResult(result) {
         const ret = wasm.audithandle_recordResult(this.__wbg_ptr, result);
+        return ret;
+    }
+    /**
+     * Record that `revealed_text` was shown to the user in plaintext — the wasm
+     * counterpart of `RedactionAction::Reveal` (see that variant's doc: an audit
+     * chain that omits "who accessed the unredacted span text" is not credible for a
+     * compliance product). Only the blake3 digest of `revealed_text` is ever hashed
+     * into the chain — the plaintext itself is never stored, matching
+     * `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
+     *
+     * `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+     * @param {string} revealed_text
+     * @param {string} category
+     * @param {string} source
+     * @returns {Promise<string>}
+     */
+    recordReveal(revealed_text, category, source) {
+        const ptr0 = passStringToWasm0(revealed_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(category, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.audithandle_recordReveal(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
         return ret;
     }
     /**
@@ -651,12 +686,12 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1606, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1615, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___wasm_bindgen_bf7b0d491ce864c2___JsValue__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 1568, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 1577, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___web_sys_c2086d39a3c4ab29___features__gen_Event__Event______true_);
             return ret;
         },
@@ -666,7 +701,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1570, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1579, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke_______true_);
             return ret;
         },

@@ -9,6 +9,13 @@ export class AuditHandle {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Every entry recorded so far for the default tenant, oldest first — backs
+     * `DocumentDetail.tsx`'s Audit tab entry list. `AuditStore::entries` already
+     * exists on the native side (used by the CLI/API's own audit views); this just
+     * exposes it to JS rather than adding a second listing mechanism.
+     */
+    listEntries(): Promise<any>;
+    /**
      * Open (or resume, across a reload — Track L5's check) the IndexedDB database
      * named `db_name`, scoped to `node_id` and `config_hash`.
      *
@@ -31,6 +38,17 @@ export class AuditHandle {
      * store rejects the batch (e.g. the chain was closed).
      */
     recordResult(result: any): Promise<string>;
+    /**
+     * Record that `revealed_text` was shown to the user in plaintext — the wasm
+     * counterpart of `RedactionAction::Reveal` (see that variant's doc: an audit
+     * chain that omits "who accessed the unredacted span text" is not credible for a
+     * compliance product). Only the blake3 digest of `revealed_text` is ever hashed
+     * into the chain — the plaintext itself is never stored, matching
+     * `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
+     *
+     * `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+     */
+    recordReveal(revealed_text: string, category: string, source: string): Promise<string>;
     /**
      * The chain's current head — a client that records this alongside a result can
      * later prove which chain state produced it.
@@ -99,8 +117,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_audithandle_free: (a: number, b: number) => void;
+    readonly audithandle_listEntries: (a: number) => any;
     readonly audithandle_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly audithandle_recordResult: (a: number, b: any) => any;
+    readonly audithandle_recordReveal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly audithandle_tip: (a: number) => any;
     readonly audithandle_verify: (a: number) => any;
     readonly isNerModelLoaded: () => number;

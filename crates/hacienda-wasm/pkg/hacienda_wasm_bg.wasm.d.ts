@@ -2,8 +2,10 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_audithandle_free: (a: number, b: number) => void;
+export const audithandle_listEntries: (a: number) => any;
 export const audithandle_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const audithandle_recordResult: (a: number, b: any) => any;
+export const audithandle_recordReveal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const audithandle_tip: (a: number) => any;
 export const audithandle_verify: (a: number) => any;
 export const isNerModelLoaded: () => number;
