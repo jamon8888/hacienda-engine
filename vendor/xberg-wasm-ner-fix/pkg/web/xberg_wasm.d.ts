@@ -7208,6 +7208,7 @@ export interface InitOutput {
     readonly decompress: (a: any, b: number, c: number, d: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__hc53a447a5735fa3a: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h2fc03d71408c92bf: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h93700a3b505b0d05: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hff3dd44bad76f477: (a: number, b: number) => void;
     readonly __wbindgen_malloc_command_export: (a: number, b: number) => number;
     readonly __wbindgen_realloc_command_export: (a: number, b: number, c: number, d: number) => number;
