@@ -12,6 +12,12 @@ import { WorkerPool } from "./worker-pool";
  */
 class MockWorker {
   static instances: MockWorker[] = [];
+  // Regression fixture: makes a newly constructed worker never answer "init",
+  // so `sendInit`'s 120s timeout is the only thing that ever settles it —
+  // exercises the same timeout path a real slow/stuck wasm compile would hit,
+  // without the test actually waiting 120 real seconds (see the fake-timer
+  // test below).
+  static hangOnInit = false;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: { message: string }) => void) | null = null;
   terminated = false;
@@ -42,6 +48,7 @@ class MockWorker {
 
   postMessage(data: any): void {
     if (data.type === "init") {
+      if (MockWorker.hangOnInit) return;
       queueMicrotask(() => this.dispatch({ type: "ready" }));
       return;
     }
@@ -76,6 +83,7 @@ function fileInput(name: string): FileInput {
 describe("WorkerPool", () => {
   beforeEach(() => {
     MockWorker.instances = [];
+    MockWorker.hangOnInit = false;
     vi.stubGlobal("Worker", MockWorker);
   });
 
@@ -128,5 +136,40 @@ describe("WorkerPool", () => {
 
     expect(MockWorker.instances).toHaveLength(3);
     expect(results).toHaveLength(10);
+  });
+
+  /**
+   * Regression: `growPool`'s `this.growing` was never reset after a failed
+   * attempt — a `sendInit` timeout left it a permanently rejected promise, so
+   * every later `processFiles()` call re-awaited that same stale rejection and
+   * failed instantly, wedging the pool for the rest of the session with no
+   * self-heal short of a page reload. The failed worker was also never
+   * `.terminate()`'d, leaking it. Uses fake timers to exercise the real 120s
+   * `sendInit` timeout without the test actually waiting 120 real seconds.
+   */
+  it("recovers after a worker init timeout instead of permanently wedging the pool", async () => {
+    vi.useFakeTimers();
+    try {
+      const pool = new WorkerPool({ poolSize: 1 });
+      await pool.initialize();
+
+      MockWorker.hangOnInit = true;
+      const failingBatch = pool.processFiles([fileInput("a.pdf")], DEFAULT_CONFIG);
+      const assertion = expect(failingBatch).rejects.toThrow("Worker init timeout");
+      await vi.advanceTimersByTimeAsync(120_000);
+      await assertion;
+
+      expect(MockWorker.instances).toHaveLength(1);
+      expect(MockWorker.instances[0].terminated).toBe(true);
+
+      // The real assertion: a later attempt must succeed rather than
+      // immediately re-throwing the first attempt's stale rejection.
+      MockWorker.hangOnInit = false;
+      const results = await pool.processFiles([fileInput("b.pdf")], DEFAULT_CONFIG);
+      expect(results.map((r) => r.name)).toEqual(["b.pdf"]);
+      expect(MockWorker.instances).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

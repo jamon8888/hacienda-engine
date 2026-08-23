@@ -118,12 +118,19 @@ export class WorkerPool {
    * model, not `poolSize` of them.
    */
   private async growPool(target: number): Promise<void> {
-    if (this.growing) await this.growing;
+    // A previous growth attempt's rejection (e.g. a `sendInit` timeout) must not
+    // permanently wedge every later call — that attempt is over, whether it
+    // succeeded or failed, so its outcome shouldn't gate whether this call even
+    // gets a chance to try again. Without the `.catch()` here, `this.growing`
+    // stayed a rejected promise forever (it was never reset), so every
+    // subsequent upload re-awaited that same stale rejection and failed
+    // instantly, with no self-heal short of reloading the page.
+    if (this.growing) await this.growing.catch(() => {});
 
     const capped = Math.min(target, this.config.poolSize);
     if (this.workers.length >= capped) return;
 
-    this.growing = (async () => {
+    const attempt = (async () => {
       const start = this.workers.length;
       const toSpawn = capped - start;
       console.log(`[WorkerPool] Growing pool from ${start} to ${capped} workers...`);
@@ -158,7 +165,17 @@ export class WorkerPool {
         };
 
         // Initialize the worker
-        await this.sendInit(worker);
+        try {
+          await this.sendInit(worker);
+        } catch (e) {
+          // A worker whose init handshake never completed (e.g. the 120s
+          // timeout) never gets pushed to `this.workers` below, so nothing
+          // else will ever call `terminate()` on it — without this it just
+          // keeps running in the background, still holding whatever it
+          // managed to compile/allocate before the timeout fired.
+          worker.terminate();
+          throw e;
+        }
 
         this.workers.push(instance);
         console.log(`[WorkerPool] Worker ${i} ready`);
@@ -168,7 +185,16 @@ export class WorkerPool {
       console.log(`[WorkerPool] Pool now has ${this.workers.length} workers`);
     })();
 
-    return this.growing;
+    this.growing = attempt;
+    try {
+      await attempt;
+    } finally {
+      // Guard rather than assume: the `.catch()` guard above serializes
+      // attempts in practice, but if `this.growing` were ever reassigned
+      // while this one was in flight, clearing it unconditionally here would
+      // wipe out that newer attempt's tracking instead of this one's.
+      if (this.growing === attempt) this.growing = null;
+    }
   }
 
   /**
