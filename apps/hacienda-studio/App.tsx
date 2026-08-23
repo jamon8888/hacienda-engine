@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, Suspense, lazy } from "react";
 import { toast } from "sonner";
 import { Toaster } from "./components/ui/sonner";
-import { ConfigPanel } from "./components/ConfigPanel";
 import { Landing } from "./pages/Landing";
 import { Assets } from "./pages/Assets";
 import { Studio } from "./pages/Studio";

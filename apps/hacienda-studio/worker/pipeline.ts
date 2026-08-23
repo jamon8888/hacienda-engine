@@ -728,8 +728,13 @@ async function processFile(
       { ner: { ner: selectNerBridge(nerRuntime) } },
     );
 
+    // `NerModel.detect`/`XbergEngine.ner`'s `opts.categories` is a single array where
+    // unknown names become zero-shot custom labels — unlike `WasmNerConfig` (the
+    // `engine.extract()` path above), there's no separate `customLabels` field here, so
+    // `nerCustomLabels` must be merged in rather than dropped for this pass to detect
+    // Comprehensive PII labels too.
     nerResults = await nerEngine.ner(markdown, {
-      categories: config.nerCategories,
+      categories: [...config.nerCategories, ...config.nerCustomLabels],
     });
     console.log(
       "[Worker] Engine NER results:",
