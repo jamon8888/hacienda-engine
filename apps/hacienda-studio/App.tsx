@@ -25,6 +25,7 @@ import {
   loadTessdata,
   validateFile,
   checkPdfPageSafety,
+  InsufficientStorageError,
 } from "./lib/asset-loader";
 import { WorkerPool, createWorkerPool } from "./lib/worker-pool";
 import { detectDeviceTier, poolSizeForTier } from "./lib/device-tier";
@@ -236,7 +237,11 @@ export function App() {
       } catch (e) {
         console.warn("[App] NER model download failed, using fallback:", e);
         setNerModelDegraded(true);
-        setError("Neural PII backend unavailable — falling back to regex-only detection.");
+        setError(
+          e instanceof InsufficientStorageError
+            ? e.message
+            : "Neural PII backend unavailable — falling back to regex-only detection.",
+        );
         setAssets((a) => ({ ...a, nerModel: true }));
         setNerModelProgress(null);
       }

@@ -269,6 +269,27 @@ export function Settings({ config, onChange }: Props) {
             </button>
           </div>
 
+          {/* `redactPiiInOutput` gates every redaction mode above (worker/pipeline.ts) —
+           * without this toggle on, "Mode de rédaction" only counts PII, it never touches
+           * the markdown, which is why mask/hash/pseudonymize/remove all looked like they
+           * "did nothing." This control existed in the now-deleted ConfigPanel.tsx but was
+           * dropped when its fields were ported into this file (be501cc) — restoring it. */}
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-sm">Rédiger les PII dans la sortie</span>
+            <button
+              onClick={() => onChange({ ...config, redactPiiInOutput: !config.redactPiiInOutput })}
+              className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.redactPiiInOutput ? "bg-primary" : "bg-muted"}`}
+            >
+              <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${config.redactPiiInOutput ? "translate-x-5" : ""}`} />
+            </button>
+          </div>
+          {!config.redactPiiInOutput && (
+            <p className="mt-1 text-xs text-amber-600">
+              Désactivé : les PII détectées sont comptées mais laissées telles quelles dans
+              le document exporté.
+            </p>
+          )}
+
           <div className="mt-3 flex items-center justify-between">
             <span className="text-sm">Reconnaissance optique</span>
             <button
