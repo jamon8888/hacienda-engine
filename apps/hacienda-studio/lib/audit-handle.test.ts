@@ -110,4 +110,30 @@ describe("AuditHandle (Track C3)", () => {
     // The plaintext itself is never in the chain — only its digest.
     expect(JSON.stringify(entries)).not.toContain("FR7630006000011234567890189");
   });
+
+  it("records whatever action is in the given result's audit_log, not just mask — the basis for recordPiiAudit's correction", async () => {
+    // `AuditHandle.recordResult` (crates/hacienda-wasm/src/lib.rs) trusts the `action` on
+    // each `audit_log` entry it's handed — it has no way to know pseudonymize/hash/remove
+    // happened client-side, since `process()`'s own `audit_log` always says "mask" (it
+    // always runs under `PipelineConfig::default()`). `lib/pii-engine.ts`'s
+    // `recordPiiAudit` relies on exactly this: it overrides `action` on the raw wasm
+    // result before calling `recordResult`, so this confirms the override actually lands
+    // in the persisted chain rather than being ignored or overwritten server-side.
+    const handle = await AuditHandle.open(
+      "audit-handle-test-db-6",
+      "test-node",
+      "test-config",
+    );
+
+    const result = await wasmProcess("Email: person@example.com.");
+    const audit_log = (result as { audit_log: Array<{ action: string }> }).audit_log;
+    expect(audit_log[0].action).toBe("mask");
+    const corrected = { ...result, audit_log: audit_log.map((e) => ({ ...e, action: "pseudonymize" })) };
+
+    await handle.recordResult(corrected);
+
+    const entries = await handle.listEntries();
+    expect(entries.length).toBe(1);
+    expect(entries[0].action).toBe("pseudonymize");
+  });
 });

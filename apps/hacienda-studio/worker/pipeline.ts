@@ -38,8 +38,10 @@ import {
   scanForPii,
   redactPiiWithModelEntities,
   scanForPiiWithModelEntities,
+  recordPiiAudit,
   type PiiEntity,
   type PiiCategoryWire,
+  type PiiPipelineResult,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
 import { hashSpanForProcessing } from "../lib/redaction-modes";
@@ -798,6 +800,12 @@ async function processFile(
   // running inference a second time. Convert xberg BridgeEntity[] to PII model entities.
   let piiEntitiesFound = 0;
   let piiFindings: PiiEntity[] = [];
+  // Set alongside `piiResult` below, only when `config.redactPiiInOutput` actually ran a
+  // redaction — `recordPiiAudit` is called with this once the mode-dispatch switch below
+  // has decided which mode was *actually* applied (not merely configured; pseudonymize
+  // falls back to mask when no key was derived). `null` means "nothing to record" (PII
+  // detection is off, this call was scan-only, or detection failed).
+  let piiResult: PiiPipelineResult | null = null;
   if (config.enablePiiDetection) {
     console.log(`[Worker] Running PII detection on ${input.name}...`);
     postProgress({ file: input.name, stage: "pii", percent: 82 });
@@ -817,13 +825,14 @@ async function processFile(
           confidence: 1.0, // xberg entities don't always have confidence, default to 1.0
         }));
 
-      const piiResult = config.redactPiiInOutput
+      const result = config.redactPiiInOutput
         ? await redactPiiWithModelEntities(markdown, modelEntities)
         : await scanForPiiWithModelEntities(markdown, modelEntities);
+      if (config.redactPiiInOutput) piiResult = result;
 
       const piiMs = performance.now() - piiStart;
       console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
-      piiFindings = piiResult.entities;
+      piiFindings = result.entities;
       piiEntitiesFound = piiFindings.length;
       console.log(`[Worker] Found ${piiEntitiesFound} PII entities in ${input.name}`);
     } catch (piiError) {
@@ -854,6 +863,12 @@ async function processFile(
     // JS string indices (Track F4) — consistent with the rest of this pipeline's offset
     // handling, not a new assumption introduced here.
     if (config.redactPiiInOutput) {
+      // What actually happened to each span, as opposed to what `config.redactionMode`
+      // merely asked for — the two diverge exactly when pseudonymize falls back to mask
+      // below. This is what gets recorded into the audit chain, not the requested mode:
+      // an audit trail that reports what was configured rather than what was applied
+      // isn't trustworthy for the one mode where the two can disagree.
+      let appliedMode: "mask" | "hash" | "pseudonymize" | "remove" = "mask";
       switch (config.redactionMode) {
         case "pseudonymize":
           // `pseudonymKeyHex` is `null` whenever no passphrase was given — falls back to
@@ -872,6 +887,7 @@ async function processFile(
                 ),
               })),
             );
+            appliedMode = "pseudonymize";
           }
           break;
         case "hash":
@@ -884,13 +900,23 @@ async function processFile(
               ),
             })),
           );
+          appliedMode = "hash";
           break;
         case "remove":
           piiFindings = piiFindings.map((f) => ({ ...f, redact_template: "" }));
+          appliedMode = "remove";
           break;
         case "mask":
         default:
           break;
+      }
+
+      // Records the batch of redactions `redactPiiWithModelEntities` produced above —
+      // deferred until here (rather than happening inside that call, as it used to)
+      // because only now is `appliedMode` known. See `recordPiiAudit`'s doc for why the
+      // wasm call's own `audit_log` cannot be trusted for anything but mask.
+      if (piiResult) {
+        await recordPiiAudit(piiResult, appliedMode);
       }
     }
   }
