@@ -40,6 +40,20 @@ function fingerprint(input: string): string {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+/**
+ * SHA-256 digest for Hash mode when it's applied at processing time (`worker/
+ * pipeline.ts`) rather than in this file's instant in-memory viewer toggle. Unlike
+ * `fingerprint` above, this output gets baked into exported markdown, so it needs to be a
+ * real cryptographic digest, not a fast display-only one — `crypto.subtle` is available
+ * in the worker with no new dependency, the same way `lib/pseudonymize.ts` already uses it.
+ */
+export async function hashSpanForProcessing(category: string, text: string): Promise<string> {
+  const bytes = new TextEncoder().encode(`${category}:${text}`);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  return `#${category}:${hex.slice(0, 16)}`;
+}
+
 export type ModeResult = { findings: PiiEntity[] } | { unavailable: true; reason: string };
 
 export function applyRedactionMode(

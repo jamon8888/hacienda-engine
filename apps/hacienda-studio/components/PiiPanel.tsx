@@ -27,7 +27,9 @@
  * that scope note in `App.tsx`'s re-export handler).
  */
 import { useState } from "react";
+import { recordPiiReveal } from "../lib/pii-engine";
 import type { PiiEntity } from "../lib/pii-engine";
+import { listKnownKeys, recordKeyUsage } from "../lib/pseudonym-keys";
 import { deriveKeyHex, revealToken } from "../lib/pseudonymize";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -83,6 +85,9 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
   const [revealed, setRevealed] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Read once per mount (the popover is remounted each time it opens, so this still picks
+  // up keys recorded since the panel last rendered) rather than on every keystroke.
+  const [knownKeys] = useState(() => listKnownKeys());
 
   async function onReveal() {
     setBusy(true);
@@ -93,7 +98,13 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
       if (value === null) {
         setError("Wrong passphrase, wrong key id, or this document used mask mode.");
       } else {
+        // Recorded before the plaintext is shown, matching `redactPii`'s "a failed audit
+        // write fails the call" philosophy (`lib/pii-engine.ts`) — an audit trail for a
+        // compliance feature that can silently miss a reveal is worse than a visible
+        // failure here.
+        await recordPiiReveal(value, finding.category, finding.source);
         setRevealed(value);
+        recordKeyUsage(keyId);
       }
     } catch {
       setError("Wrong passphrase, wrong key id, or this document used mask mode.");
@@ -130,7 +141,15 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
               value={keyId}
               onChange={(e) => setKeyId(e.target.value)}
               placeholder="Key id (default: session)"
+              list="pii-panel-known-keys"
             />
+            <datalist id="pii-panel-known-keys">
+              {knownKeys.map((k) => (
+                <option key={k.keyId} value={k.keyId}>
+                  {k.label}
+                </option>
+              ))}
+            </datalist>
             <Input
               type="password"
               value={passphrase}

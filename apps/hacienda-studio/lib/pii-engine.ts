@@ -276,3 +276,47 @@ export async function verifyAuditChain(): Promise<void> {
   const handle = await getAuditHandle();
   await handle.verify();
 }
+
+/**
+ * Records that `revealedText` was shown to the user in plaintext — the wasm-side
+ * `RedactionAction::Reveal` entry (`hacienda-core/src/audit/entry.rs`), appended by
+ * `AuditHandle::recordReveal`. Only `revealedText`'s blake3 digest is ever hashed into
+ * the chain; the plaintext itself is never sent anywhere but back to the caller's own
+ * `setRevealed` state (`components/PiiPanel.tsx`).
+ *
+ * `source` matches `PiiEntity.source` ("regex" or "model"). Returns the chain's new tip.
+ */
+export async function recordPiiReveal(
+  revealedText: string,
+  category: string,
+  source: string,
+): Promise<string> {
+  await initPiiEngine();
+  const handle = await getAuditHandle();
+  return handle.recordReveal(revealedText, category, source);
+}
+
+/** One row of `hacienda-core`'s `AuditEntry` (`hacienda-core/src/audit/entry.rs`),
+ * serialized as-is — same no-rename convention `PiiEntity` above documents. */
+export interface AuditEntryRow {
+  id: string;
+  timestamp: string;
+  category: string;
+  action: "mask" | "hash" | "pseudonymize" | "remove" | "reveal" | { custom: string };
+  span_hash: string;
+  span_length: number;
+  confidence: number | null;
+  source: string;
+  pipeline_version: string;
+  config_hash: string;
+  principal: string | null;
+  vertical: string | null;
+  chain_hash: string;
+}
+
+/** Every entry recorded so far, oldest first — backs `DocumentDetail.tsx`'s Audit tab. */
+export async function listAuditEntries(): Promise<AuditEntryRow[]> {
+  await initPiiEngine();
+  const handle = await getAuditHandle();
+  return (await handle.listEntries()) as AuditEntryRow[];
+}

@@ -1,5 +1,14 @@
+import { useState } from "react";
 import type { AppConfig, NerCategory } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  listKnownKeys,
+  recordKeyUsage,
+  removeKnownKey,
+  renameKnownKey,
+  type KnownPseudonymKey,
+} from "@/lib/pseudonym-keys";
 
 type Props = {
   config: AppConfig;
@@ -8,7 +17,9 @@ type Props = {
 
 const REDACTION_MODES = [
   { value: "mask", label: "Masquer" },
+  { value: "hash", label: "Hacher" },
   { value: "pseudonymize", label: "Pseudonymiser" },
+  { value: "remove", label: "Supprimer" },
 ] as const;
 
 // Only categories the engine's vocabulary accepts and the worker's NER bridge actually
@@ -125,6 +136,9 @@ const control =
 export function Settings({ config, onChange }: Props) {
   const storageUsed = 168; // mock
   const storageTotal = 10_000; // MB
+  // Read once on mount — reopening Settings is enough to pick up a key used elsewhere
+  // (e.g. a reveal in `PiiPanel.tsx`) since last render.
+  const [knownKeys] = useState(() => listKnownKeys());
 
   const toggleCategory = (key: NerCategory) => {
     const has = config.nerCategories.includes(key);
@@ -162,7 +176,7 @@ export function Settings({ config, onChange }: Props) {
               {REDACTION_MODES.map((m) => (
                 <button
                   key={m.value}
-                  onClick={() => onChange({ ...config, redactionMode: m.value as any })}
+                  onClick={() => onChange({ ...config, redactionMode: m.value })}
                   className={`rounded border px-3 py-1 text-sm ${
                     config.redactionMode === m.value
                       ? "border-primary bg-primary/10"
@@ -175,7 +189,23 @@ export function Settings({ config, onChange }: Props) {
             </div>
             {config.redactionMode === "pseudonymize" && (
               <div className={fieldLabel + " mt-3 max-w-sm"}>
-                <label htmlFor="pseudonym-passphrase">
+                <label htmlFor="pseudonym-key-id">Identifiant de clé</label>
+                <input
+                  id="pseudonym-key-id"
+                  className={control}
+                  list="known-pseudonym-keys"
+                  value={config.pseudonymKeyId}
+                  onChange={(e) => onChange({ ...config, pseudonymKeyId: e.target.value })}
+                  placeholder="session"
+                />
+                <datalist id="known-pseudonym-keys">
+                  {knownKeys.map((k) => (
+                    <option key={k.keyId} value={k.keyId}>
+                      {k.label}
+                    </option>
+                  ))}
+                </datalist>
+                <label htmlFor="pseudonym-passphrase" className="mt-2">
                   Phrase secrète (ne quitte jamais votre navigateur)
                 </label>
                 <input
@@ -184,6 +214,12 @@ export function Settings({ config, onChange }: Props) {
                   className={control}
                   value={config.pseudonymPassphrase}
                   onChange={(e) => onChange({ ...config, pseudonymPassphrase: e.target.value })}
+                  // Records the key id as "known" once the user has actually committed to
+                  // using it (a non-empty passphrase), not on every keystroke — this is the
+                  // point processing will derive against `config.pseudonymKeyId`.
+                  onBlur={() => {
+                    if (config.pseudonymPassphrase) recordKeyUsage(config.pseudonymKeyId);
+                  }}
                   placeholder="Utilisée pour dériver la clé de rédaction — mémorisez-la"
                 />
                 {!config.pseudonymPassphrase && (
@@ -365,6 +401,8 @@ export function Settings({ config, onChange }: Props) {
           </div>
         </section>
 
+        <PseudonymKeyVault />
+
         <section className="mt-6 rounded-lg border border-border bg-card p-6">
           <h2 className="mb-2 text-sm font-medium">Stockage local</h2>
           <p className="mb-3 text-xs text-muted-foreground">168 Ko utilisés sur 10,00 Go disponibles</p>
@@ -376,5 +414,73 @@ export function Settings({ config, onChange }: Props) {
           </div>
         </section>
       </main>
+  );
+}
+
+/**
+ * Lists the pseudonymization key ids `Settings.tsx`'s own passphrase field and
+ * `PiiPanel.tsx` have recorded a successful mint or reveal against
+ * (`lib/pseudonym-keys.ts`) — never the passphrase itself, which is never stored
+ * anywhere. Renaming only changes a local label; removing only forgets that label.
+ * Neither can revoke or rotate the underlying key material, since no key material is
+ * stored here to begin with — see that module's doc comment.
+ */
+function PseudonymKeyVault() {
+  const [keys, setKeys] = useState<KnownPseudonymKey[]>(() => listKnownKeys());
+  const [editingLabel, setEditingLabel] = useState<Record<string, string>>({});
+
+  function commitRename(keyId: string) {
+    const label = editingLabel[keyId];
+    if (label !== undefined) renameKnownKey(keyId, label);
+    setKeys(listKnownKeys());
+    setEditingLabel((prev) => {
+      const next = { ...prev };
+      delete next[keyId];
+      return next;
+    });
+  }
+
+  return (
+    <section className="mt-6 rounded-lg border border-border bg-card p-6">
+      <h2 className="mb-1 text-sm font-medium">Clés de pseudonymisation connues</h2>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Identifiants de clé utilisés sur cet appareil — jamais la phrase secrète elle-même,
+        qui n'est jamais enregistrée.
+      </p>
+      {keys.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Aucune clé utilisée pour l'instant.</p>
+      ) : (
+        <ul className="space-y-2">
+          {keys.map((k) => (
+            <li key={k.keyId} className="flex items-center gap-2 text-sm">
+              <span className="w-32 shrink-0 truncate font-mono text-xs text-muted-foreground">
+                {k.keyId}
+              </span>
+              <Input
+                className="h-8"
+                value={editingLabel[k.keyId] ?? k.label}
+                onChange={(e) =>
+                  setEditingLabel((prev) => ({ ...prev, [k.keyId]: e.target.value }))
+                }
+                onBlur={() => commitRename(k.keyId)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                }}
+              />
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => {
+                  removeKnownKey(k.keyId);
+                  setKeys(listKnownKeys());
+                }}
+              >
+                Oublier
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

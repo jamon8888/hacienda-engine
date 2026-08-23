@@ -42,6 +42,7 @@ import {
   type PiiCategoryWire,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
+import { hashSpanForProcessing } from "../lib/redaction-modes";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -839,33 +840,58 @@ async function processFile(
       throw piiError;
     }
 
-    // Track F1/F2: `redactionMode: "pseudonymize"` replaces each finding's
+    // Track F1/F2 (extended to all 4 modes): each `redactionMode` replaces the finding's
     // `redact_template` — the string `renderAnnotatedMarkdown` splices into the body — with
-    // a reversible token instead of the format-preserving mask. `pseudonymKeyHex` is `null`
-    // whenever pseudonymization doesn't apply (mode is "mask", or no passphrase was given),
-    // so this is a no-op in the default configuration. Every finding shares one key: minting
-    // is per-entity, but the key derivation happened once for the whole batch in
-    // `processFiles`, not per file or per finding.
+    // something other than the wasm engine's default mask-shaped output. Mask needs no
+    // branch here: `process()`/`process_with_model_entities` already produced a mask-shaped
+    // `redact_template`, so there is nothing to overwrite.
     //
-    // `f.text` is *not* what gets pseudonymized: `MergedEntity.text` (hacienda-core's
+    // `f.text` is *not* what gets hashed/pseudonymized: `MergedEntity.text` (hacienda-core's
     // `pii/merge.rs`) is documented "Empty for regex detections, which carry offsets only"
     // — regex is the only detector active in Studio's default config, so `f.text` is empty
     // for essentially every real finding. `markdown.slice(f.start, f.end)` recovers the
     // actual matched text from the same offsets `renderAnnotatedMarkdown` already treats as
     // JS string indices (Track F4) — consistent with the rest of this pipeline's offset
     // handling, not a new assumption introduced here.
-    if (config.redactPiiInOutput && pseudonymKeyHex) {
-      piiFindings = await Promise.all(
-        piiFindings.map(async (f) => ({
-          ...f,
-          redact_template: await mintToken(
-            f.category,
-            markdown.slice(f.start, f.end),
-            config.pseudonymKeyId,
-            pseudonymKeyHex,
-          ),
-        })),
-      );
+    if (config.redactPiiInOutput) {
+      switch (config.redactionMode) {
+        case "pseudonymize":
+          // `pseudonymKeyHex` is `null` whenever no passphrase was given — falls back to
+          // the mask-shaped template already on each finding, same as before this mode
+          // existed. Every finding shares one key: minting is per-entity, but the key
+          // derivation happened once for the whole batch in `processFiles`.
+          if (pseudonymKeyHex) {
+            piiFindings = await Promise.all(
+              piiFindings.map(async (f) => ({
+                ...f,
+                redact_template: await mintToken(
+                  f.category,
+                  markdown.slice(f.start, f.end),
+                  config.pseudonymKeyId,
+                  pseudonymKeyHex,
+                ),
+              })),
+            );
+          }
+          break;
+        case "hash":
+          piiFindings = await Promise.all(
+            piiFindings.map(async (f) => ({
+              ...f,
+              redact_template: await hashSpanForProcessing(
+                f.category,
+                markdown.slice(f.start, f.end),
+              ),
+            })),
+          );
+          break;
+        case "remove":
+          piiFindings = piiFindings.map((f) => ({ ...f, redact_template: "" }));
+          break;
+        case "mask":
+        default:
+          break;
+      }
     }
   }
 

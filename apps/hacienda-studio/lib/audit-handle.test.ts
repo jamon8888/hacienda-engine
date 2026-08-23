@@ -75,4 +75,39 @@ describe("AuditHandle (Track C3)", () => {
     expect(await reopened.tip()).toBe(tipBefore);
     await expect(reopened.verify()).resolves.not.toThrow();
   });
+
+  it("records a reveal event and advances the chain", async () => {
+    const handle = await AuditHandle.open(
+      "audit-handle-test-db-4",
+      "test-node",
+      "test-config",
+    );
+    const tipBefore = await handle.tip();
+
+    const tipAfter = await handle.recordReveal("alice@example.com", "email", "regex");
+
+    expect(tipAfter).not.toBe(tipBefore);
+    expect(await handle.tip()).toBe(tipAfter);
+    await expect(handle.verify()).resolves.not.toThrow();
+  });
+
+  it("lists every recorded entry, including a reveal, oldest first", async () => {
+    const handle = await AuditHandle.open(
+      "audit-handle-test-db-5",
+      "test-node",
+      "test-config",
+    );
+
+    const result = await wasmProcess("IBAN FR7630006000011234567890189.");
+    await handle.recordResult(result);
+    await handle.recordReveal("FR7630006000011234567890189", "iban", "regex");
+
+    const entries = await handle.listEntries();
+    expect(entries.length).toBe(2);
+    // `process()` uses the default pipeline config, which redacts under mask mode.
+    expect(entries[0].action).toBe("mask");
+    expect(entries[1].action).toBe("reveal");
+    // The plaintext itself is never in the chain — only its digest.
+    expect(JSON.stringify(entries)).not.toContain("FR7630006000011234567890189");
+  });
 });

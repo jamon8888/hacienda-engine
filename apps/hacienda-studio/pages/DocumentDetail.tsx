@@ -24,7 +24,7 @@ import { renderAnnotatedMarkdown } from "@/lib/annotate";
 import { getViewerKind } from "@/lib/viewer-kind";
 import { computeContentHash } from "@/lib/content-hash";
 import { loadDraft, saveDraft } from "@/lib/redaction-store";
-import { getAuditChainTip, verifyAuditChain } from "@/lib/pii-engine";
+import { getAuditChainTip, listAuditEntries, verifyAuditChain, type AuditEntryRow } from "@/lib/pii-engine";
 import {
   REDACTION_MODES,
   applyRedactionMode,
@@ -655,14 +655,28 @@ function PiiAnnotatedView({ text, findings }: { text: string; findings: PiiEntit
   );
 }
 
+/** `AuditEntryRow.action` renders as its variant name, or `"custom:<template>"` for the
+ * one non-unit variant — matching `RedactionAction`'s own `Display` impl on the Rust side
+ * (`hacienda-core/src/audit/entry.rs`) rather than inventing a second label scheme. */
+function actionLabel(action: AuditEntryRow["action"]): string {
+  return typeof action === "string" ? action : `custom:${action.custom}`;
+}
+
 function AuditTab() {
   const [tip, setTip] = useState<string | null>(null);
+  const [entries, setEntries] = useState<AuditEntryRow[] | null>(null);
   const [status, setStatus] = useState<"idle" | "checking" | "ok" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
 
-  async function loadTip() {
+  async function load() {
     try {
-      setTip(await getAuditChainTip());
+      const [chainTip, chainEntries] = await Promise.all([
+        getAuditChainTip(),
+        listAuditEntries(),
+      ]);
+      setTip(chainTip);
+      // Newest first — matches the order a reader scanning "what just happened" expects.
+      setEntries([...chainEntries].reverse());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Audit chain unavailable");
     }
@@ -684,12 +698,11 @@ function AuditTab() {
   }
 
   useEffect(() => {
-    loadTip();
+    load();
   }, []);
 
   return (
     <div className="flex flex-col">
-      {/* Verify chain header — matches screenshot */}
       <div className="flex items-center gap-2 border-b border-border bg-[#0f1419] px-3 py-2.5">
         <ShieldCheck className="size-3.5 text-muted-foreground" />
         <span className="text-xs font-medium">Verify chain</span>
@@ -704,27 +717,44 @@ function AuditTab() {
       </div>
 
       <div className="space-y-0 divide-y divide-border">
-        <div className="px-3 py-3">
-          <p className="font-mono text-[11px] leading-relaxed">
-            <span className="font-medium text-amber-400">process.completed</span>{" "}
-            <span className="text-muted-foreground">15:05:16</span>
-          </p>
-          <p className="font-mono text-[11px] text-muted-foreground">2 findings</p>
-          <p className="mt-0.5 break-all font-mono text-[11px] text-muted-foreground/70">
-            {tip ?? "5dd22ec2286398806a0737ce25830f6"}
-          </p>
-          {status === "ok" && <p className="mt-1 text-xs font-medium text-emerald-400">Chain verified — no tampering detected.</p>}
-          {status === "error" && error && <p className="mt-1 text-xs text-destructive">{error}</p>}
-        </div>
+        {entries === null ? (
+          <div className="px-3 py-3">
+            <p className="text-xs text-muted-foreground">
+              {error ? "Audit chain unavailable." : "Loading…"}
+            </p>
+          </div>
+        ) : entries.length === 0 ? (
+          <div className="px-3 py-3">
+            <p className="text-xs text-muted-foreground">
+              No entries recorded on this device yet.
+            </p>
+          </div>
+        ) : (
+          entries.map((entry) => (
+            <div key={entry.id} className="px-3 py-3">
+              <p className="font-mono text-[11px] leading-relaxed">
+                <span className="font-medium text-amber-400">
+                  {actionLabel(entry.action)}.{entry.category}
+                </span>{" "}
+                <span className="text-muted-foreground">
+                  {new Date(entry.timestamp).toLocaleTimeString()}
+                </span>
+              </p>
+              <p className="mt-0.5 break-all font-mono text-[11px] text-muted-foreground/70">
+                {entry.chain_hash}
+              </p>
+            </div>
+          ))
+        )}
 
-        <div className="px-3 py-3">
-          <p className="font-mono text-[11px] leading-relaxed">
-            <span className="font-medium text-amber-400">export.file</span>{" "}
-            <span className="text-muted-foreground">15:05:39</span>
+        {status === "ok" && (
+          <p className="px-3 py-2 text-xs font-medium text-emerald-400">
+            Chain verified — no tampering detected.
           </p>
-          <p className="font-mono text-[11px] text-muted-foreground">README-redacted.md</p>
-          <p className="mt-0.5 break-all font-mono text-[11px] text-muted-foreground/70">58e8173c80f1199578f05a6a9962d474</p>
-        </div>
+        )}
+        {status === "error" && error && (
+          <p className="px-3 py-2 text-xs text-destructive">{error}</p>
+        )}
 
         <div className="px-3 py-4">
           <div className="rounded-lg border border-border bg-card p-3">
@@ -733,9 +763,6 @@ function AuditTab() {
               {tip ?? (error ? "unavailable" : "loading…")}
             </p>
           </div>
-          {error && status === "idle" && (
-            <p className="mt-2 text-xs text-muted-foreground">{error}</p>
-          )}
         </div>
       </div>
     </div>
