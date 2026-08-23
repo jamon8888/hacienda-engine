@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, Suspense, lazy } from "react";
 import {
   ArrowLeft,
   Download,
@@ -16,9 +16,21 @@ import { DocumentOutline } from "@/components/DocumentOutline";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { PiiPanel } from "@/components/PiiPanel";
 import { RedactedEditor } from "@/components/RedactedEditor";
-import { DocxViewerPreview } from "@/components/extend/docx-viewer";
-import { XlsxViewerPreview } from "@/components/extend/xlsx-viewer";
-import { PptxViewerPreview } from "@/components/extend/pptx-viewer";
+// Lazy, not a static import: `@extend-ai/react-{docx,pptx,xlsx}` each ship their own
+// import-workers and CJS/UMD dependencies (utif, pako, regl — see vite.config.ts's
+// optimizeDeps comment) that a bad interaction with Vite's dep optimizer can throw on at
+// module-evaluation time. A static import here means that failure crashes the *whole*
+// app on first load (any document, not just docx/xlsx/pptx ones) — same reasoning as
+// App.tsx's own lazy `Documents` import.
+const DocxViewerPreview = lazy(() =>
+  import("@/components/extend/docx-viewer").then((m) => ({ default: m.DocxViewerPreview })),
+);
+const XlsxViewerPreview = lazy(() =>
+  import("@/components/extend/xlsx-viewer").then((m) => ({ default: m.XlsxViewerPreview })),
+);
+const PptxViewerPreview = lazy(() =>
+  import("@/components/extend/pptx-viewer").then((m) => ({ default: m.PptxViewerPreview })),
+);
 import { PDFViewer } from "@/components/extend/pdf-viewer";
 import { renderAnnotatedMarkdown } from "@/lib/annotate";
 import { getViewerKind } from "@/lib/viewer-kind";
@@ -253,27 +265,29 @@ export function DocumentDetail({
               hasViewer ? (
                 <div className="h-full min-h-[520px] bg-[#0a0e13] p-2">
                   <div className="h-full overflow-hidden rounded-lg border border-border bg-background">
-                    {(viewerKind === "docx" || viewerKind === "doc") && (
-                      <DocxViewerPreview
-                        src={previewUrl}
-                        fileName={result.frontmatter.source}
-                        isDark
-                        showUpload={false}
-                        onIsDarkChange={() => {}}
-                      />
-                    )}
-                    {(viewerKind === "xlsx" || viewerKind === "xls") && (
-                      <XlsxViewerPreview
-                        src={previewUrl}
-                        fileName={result.frontmatter.source}
-                        isDark
-                        showUpload={false}
-                        onIsDarkChange={() => {}}
-                      />
-                    )}
-                    {(viewerKind === "pptx" || viewerKind === "ppt") && (
-                      <PptxViewerPreview src={previewUrl} fileName={result.frontmatter.source} showUpload={false} />
-                    )}
+                    <Suspense fallback={<ViewerLoadingFallback />}>
+                      {(viewerKind === "docx" || viewerKind === "doc") && (
+                        <DocxViewerPreview
+                          src={previewUrl}
+                          fileName={result.frontmatter.source}
+                          isDark
+                          showUpload={false}
+                          onIsDarkChange={() => {}}
+                        />
+                      )}
+                      {(viewerKind === "xlsx" || viewerKind === "xls") && (
+                        <XlsxViewerPreview
+                          src={previewUrl}
+                          fileName={result.frontmatter.source}
+                          isDark
+                          showUpload={false}
+                          onIsDarkChange={() => {}}
+                        />
+                      )}
+                      {(viewerKind === "pptx" || viewerKind === "ppt") && (
+                        <PptxViewerPreview src={previewUrl} fileName={result.frontmatter.source} showUpload={false} />
+                      )}
+                    </Suspense>
                     {viewerKind === "pdf" && (
                       <PDFViewer src={previewUrl} fileName={result.frontmatter.source} showUpload={false} />
                     )}
@@ -531,6 +545,15 @@ export function DocumentDetail({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Shown while a docx/xlsx/pptx viewer's lazy chunk loads. */
+function ViewerLoadingFallback() {
+  return (
+    <div className="flex h-full min-h-[400px] items-center justify-center text-sm text-muted-foreground">
+      Loading viewer…
     </div>
   );
 }
