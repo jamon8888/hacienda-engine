@@ -58,6 +58,26 @@ export class AuditHandle {
      * `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
      *
      * `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+     *
+     * # `principal: None`, not a caller-supplied identity
+     *
+     * `AuditEntry::principal` exists precisely to answer "who did this" (see its own
+     * doc comment), and a reveal is the one action here where that question matters
+     * most. It is `None` below anyway, consistently with `record_result` above and
+     * with every entry this module ever writes: Studio has no account system to
+     * authenticate against at all — "Pas de compte, pas de stockage serveur" is the
+     * product's own stated design, not an omission (`App.tsx`'s landing copy).
+     *
+     * Accepting an unauthenticated, UI-supplied string here (a name typed into a
+     * field, say) would not close that gap — it would launder it: the chain would
+     * *look* attributed while recording whatever the same browser tab that revealed
+     * the plaintext also chose to claim, which reduces to no attribution at all
+     * wearing a costume. Real attribution needs a session-authenticated `Caller`
+     * (`hacienda-core`'s auth module already has that concept server-side) threaded
+     * through from an identity Studio does not currently have. That is a product
+     * decision — whether Studio grows accounts — not a wasm-binding fix, so it is
+     * left as `None` deliberately rather than filled with something that only looks
+     * like an answer.
      */
     recordReveal(revealed_text: string, category: string, source: string): Promise<string>;
     /**
