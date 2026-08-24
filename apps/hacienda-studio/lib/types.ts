@@ -126,6 +126,29 @@ export interface AppConfig {
   translateToEnglish: boolean;
   enablePiiDetection: boolean;
   redactPiiInOutput: boolean;
+  /**
+   * The values here are taxonomy file stems under `lib/verticals/` —
+   * `loadVerticalTaxonomy` throws `Unknown vertical taxonomy: <name>` for anything else,
+   * so this union is not decorative. `"shared"` is cross-cutting: it belongs *alongside*
+   * a real vertical rather than instead of one, which is why the default holds all three
+   * and why `Settings.tsx`'s single-choice picker appends it to whatever is chosen.
+   * An empty array is valid and means "consult no taxonomy" (`worker/pipeline.ts`).
+   *
+   * There is deliberately no `sensitivity` field next to this one. `Settings.tsx` used to
+   * render a "Sensibilité" (low/balanced/high) select that wrote one via an `as any` cast
+   * — nothing declared it here and nothing ever read it, so it was a dead control in the
+   * same family as the `redactPiiInOutput` toggle restored in 50a509a. Unlike that one it
+   * could not simply be re-hooked: `hacienda-core`'s only detection-threshold knob,
+   * `PipelineConfig::model_threshold_default`, is consumed exclusively by `load_detector`
+   * (`hacienda-core/src/pii/pipeline.rs`), which is `#[cfg(not(target_arch = "wasm32"))]`
+   * and therefore absent from the build Studio runs; the wasm bridge hardcodes
+   * `PipelineConfig::default()` at every entry point and accepts no config argument
+   * (`crates/hacienda-wasm/src/lib.rs`); and Studio's actual path,
+   * `scan_with_model_entities`/`process_with_model_entities`, resolves to
+   * `detect_with_model_entities`, which merges caller-supplied spans without consulting
+   * any threshold at all. Surfacing sensitivity means adding confidence filtering on the
+   * Rust side and widening those wasm signatures first — a pipeline change, not a UI one.
+   */
   enabledVerticals: ("m&a" | "financial_services" | "shared")[];
   /**
    * Track F1/F2: `"mask"` is the existing format-preserving `[EMAIL]`-style redaction.

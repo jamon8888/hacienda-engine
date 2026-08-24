@@ -22,6 +22,37 @@ const REDACTION_MODES = [
   { value: "remove", label: "Supprimer" },
 ] as const;
 
+/**
+ * What each option of the "Vertical" select writes into `enabledVerticals`.
+ *
+ * Two things this encodes that the old `enabledVerticals: [e.target.value]` got wrong:
+ *
+ * 1. `"general"` maps to `[]`, not `["general"]`. There is no `general.yaml` — the
+ *    taxonomies that exist are `m&a`, `financial_services`, `shared` and `business_law`
+ *    (`lib/verticals/`) — so `["general"]` made `loadVerticalTaxonomy` throw
+ *    `Unknown vertical taxonomy: general`, which `worker/pipeline.ts` only survived by
+ *    catching it into an empty `VerticalDictionary`. That reached the right end state
+ *    (no taxonomy consulted) through a thrown error and a `console.error` on every
+ *    batch. An empty selection is an explicitly supported non-error case there, so say
+ *    so directly.
+ * 2. `"shared"` rides along with every real vertical. It is the cross-cutting taxonomy,
+ *    not an alternative to the others — `DEFAULT_CONFIG` enables it next to both real
+ *    verticals. Because this select is single-choice and overwrote the whole array,
+ *    touching it at all used to silently drop `shared` for the rest of the session.
+ */
+const VERTICAL_CHOICES: Record<string, AppConfig["enabledVerticals"]> = {
+  general: [],
+  "m&a": ["m&a", "shared"],
+  financial_services: ["financial_services", "shared"],
+};
+
+/** Which option to show for a given `enabledVerticals`. `shared` is skipped because it
+ * is never the user's choice — it accompanies one (see `VERTICAL_CHOICES`) — so a
+ * selection that is empty, or holds nothing but `shared`, displays as "général". */
+function selectedVertical(enabled: AppConfig["enabledVerticals"] | undefined): string {
+  return enabled?.find((v) => v !== "shared") ?? "general";
+}
+
 // Only categories the engine's vocabulary accepts and the worker's NER bridge actually
 // produces. Offering anything else (full_name, company, address, …) makes the engine
 // reject the entire NER result, which the app surfaces as an opaque "Unknown error"
@@ -232,31 +263,22 @@ export function Settings({ config, onChange }: Props) {
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="mb-1 block text-sm">Vertical</label>
-              <select
-                value={config.enabledVerticals?.[0] || "general"}
-                onChange={(e) => onChange({ ...config, enabledVerticals: [e.target.value] })}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                <option value="general">général</option>
-                <option value="m&a">m&a</option>
-                <option value="financial_services">services financiers</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm">Sensibilité</label>
-              <select
-                value={config.sensitivity || "balanced"}
-                onChange={(e) => onChange({ ...config, sensitivity: e.target.value as any })}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                <option value="low">Faible</option>
-                <option value="balanced">Équilibrée</option>
-                <option value="high">Élevée</option>
-              </select>
-            </div>
+          {/* Previously a two-column grid; the "Sensibilité" select that sat beside this
+            * one is gone — see VERTICAL_CHOICES' note and the removal rationale in
+            * `lib/types.ts`. */}
+          <div>
+            <label className="mb-1 block text-sm">Vertical</label>
+            <select
+              value={selectedVertical(config.enabledVerticals)}
+              onChange={(e) =>
+                onChange({ ...config, enabledVerticals: VERTICAL_CHOICES[e.target.value] ?? [] })
+              }
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="general">général</option>
+              <option value="m&a">m&a</option>
+              <option value="financial_services">services financiers</option>
+            </select>
           </div>
 
           <div className="mt-4 flex items-center justify-between">
