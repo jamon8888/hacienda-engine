@@ -683,24 +683,55 @@ Named explicitly so no task quietly grows into them:
 
 ## Verification Before Merge
 
-- [ ] `cd apps/hacienda-studio && npx vitest run` — at least 224 passing (Task 0's count), 0 failing.
+**Status as of Task 6's completion (2026-08-25): all six implementation tasks committed
+(`ea62fda`, `96a0c9e`, `19b2657`, `02561b8` — Tasks 1/2 share `ea62fda`, Task 4 is `96a0c9e`,
+Task 5 is `19b2657`, Task 6 is `02561b8`). Everything checkable *without* a running dev server
+and model is checked and green, repeatedly, after every task. Everything that genuinely needs
+that (e2e, a real reference-bundle re-export, live-agent verification) is still blocked exactly
+as Task 0 found — that has not changed, and re-attempting it wasn't in scope for Tasks 1–6.**
+
+- [x] `cd apps/hacienda-studio && npx vitest run` — at least 224 passing (Task 0's count), 0 failing.
       **Not `npm run test:unit`**, which cannot run here (Task 0.2).
-- [ ] `npx tsc --noEmit` — no *new* errors beyond Task 0's 9. The baseline is not zero; compare
+      → **310/310 passing**, 27 test files (up from the 224 baseline through 234 → 247 → 272 → 294 →
+      310 across Tasks 1–6). Confirmed run *scoped to `apps/hacienda-studio`* specifically — running
+      from the monorepo root sweeps in unrelated packages (`integrations/node/langchain`,
+      `sdks/typescript`) with their own pre-existing failures unrelated to this plan; caught mid-Task-6
+      and worth restating here so it isn't rediscovered at merge time.
+- [x] `npx tsc --noEmit` — no *new* errors beyond Task 0's 9. The baseline is not zero; compare
       against the enumerated list, not against a clean run.
-- [ ] `cargo test -p hacienda-core --lib compliance::` green (Task 2) — and confirm it selects a
+      → Re-verified after every task: still exactly the same **7** pre-existing lines each time (Task 0
+      recorded 9; 2 of those — the `Settings.tsx` `sensitivity`/vertical-union errors — were fixed by
+      the separately-spawned chip task during this work, hence 7 not 9 from Task 1 onward). No task
+      introduced a new error at any point.
+- [x] `cargo test -p hacienda-core --lib compliance::` green (Task 2) — and confirm it selects a
       non-zero number of tests, since the obvious filter spelling silently matches none.
+      → **8 passed, 0 failed**, confirmed non-zero selection (the original `… compliance` spelling's
+      0-selected silent pass was the exact defect Task 0 caught and Task 2's corrected command avoids).
 - [ ] e2e: **not a gate.** Blocked by Task 0.2's wasm build failure. If that gets fixed, run
       `npm run test:e2e` and record it; do not claim e2e coverage until then.
+      → **Still blocked, unchanged from Task 0.** Not attempted again during Tasks 1–6 — the wasm/
+      sccache build issue is environmental, not something any of these six tasks' code changes could
+      fix, and re-diagnosing it was out of scope.
 - [ ] Re-export a reference batch in all four redaction modes and explain every difference.
       **Requires Task 0's outstanding item** — a working dev server and the ~614 MB model. If still
       blocked at merge time, say so explicitly in the PR rather than implying this was checked.
-- [ ] **The disclosure test is the gate:** for a pseudonymize-mode bundle, no zip member — content or filename — contains a surface name from the fixture.
+      → **Still blocked, unchanged from Task 0.** Where a real bundle diff was called for (Tasks 3 and
+      6), a unit-level substitute was used instead and explicitly flagged as weaker in each task's own
+      notes — see Task 3.3's last item and Task 6's size-delta measurement.
+- [x] **The disclosure test is the gate:** for a pseudonymize-mode bundle, no zip member — content or filename — contains a surface name from the fixture.
+      → Confirmed at unit scope across three tasks, not just once: Task 3.3's whole-bundle scan
+      (entity names, filenames, glossary, registry, entity-file content), extended by Task 6's
+      dossier-specific scan (quoted context, co-occurring entities). Not confirmed against a real
+      exported zip — see the still-blocked item above — but confirmed against every code path that
+      writes bundle content, at the level this environment can actually run.
 - [ ] Open the resulting bundle in Claude Desktop and in a Codex-family agent and confirm both pick up
       their instruction file and can answer a cross-document question without reading every file in
       `documents/`. That is the actual acceptance criterion for the whole plan, and no unit test
       substitutes for it.
 
-      ⚠️ **This criterion is currently unreachable.** It needs a real exported bundle, which needs the
-      dev server and model that Task 0.2 blocks. Every task below Task 2 can be *implemented* and
-      unit-tested without it, but the plan cannot be **accepted** until the wasm build is fixed. Treat
-      unblocking Task 0.2 as a prerequisite for merge, not for starting work.
+      ⚠️ **Still unreachable, unchanged from Task 0.** It needs a real exported bundle, which needs the
+      dev server and model that Task 0.2 blocks. All six implementation tasks are done and unit-tested;
+      this criterion — the only one that actually proves the plan's premise — remains the sole blocker
+      to calling the plan **accepted** rather than merely **implemented**. Unblocking Task 0.2 (or
+      running this verification on a different host where the wasm build succeeds) is the one
+      remaining step.
