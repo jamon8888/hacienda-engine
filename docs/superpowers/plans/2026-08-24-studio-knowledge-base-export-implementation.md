@@ -417,12 +417,82 @@ entities do become PII findings, and `filterExportableEntities(…, true)` retai
 
 ## Task 4 — Stable identity (spec §8 step 4)
 
-- [ ] Replace `ent-NNN` (`lib/registry.ts:81`) with a content-derived id — `hash(type|canonical_name|vertical)` via `lib/content-hash.ts`. Under Task 3's pseudonym mode, derive from the token instead, so identity stays stable without being reversible.
-- [ ] Do the same for `doc-NNN` (`worker/pipeline.ts:1111`); document ids have the identical instability and feed `document_entities` in the registry JSON.
-- [ ] Populate `aliases` (`registry.ts:91`), which nothing writes today: merge on normalised form with legal-suffix stripping (`SAS`, `S.A.S.`, `SARL`, `SA`, `Ltd`, `GmbH`, `Inc`). Longest surface form wins `display_name`; every merged variant lands in `aliases`.
-- [ ] Entity filenames follow the merged canonical form, so "Acme", "Acme SAS" and "ACME S.A.S." resolve to one file.
-- [ ] Test: re-registering the same corpus in a different document order yields identical ids and identical filenames.
-- [ ] Test: alias merging does **not** merge genuinely distinct entities — include a near-miss pair in the fixture.
+**Status: COMPLETE — implemented and verified 2026-08-24.**
+
+- [x] Replace `ent-NNN` (`lib/registry.ts:81`) with a content-derived id — `hash(type|canonical_name|vertical)` via `lib/content-hash.ts`. Under Task 3's pseudonym mode, derive from the token instead, so identity stays stable without being reversible.
+      → confirmed, with one deliberate deviation from the literal wording: hashed
+      `type|dedupKey|vertical` where `dedupKey` is the **normalized** form
+      (`normalizeForDedup`), not raw `canonical_name`. Hashing the raw, as-first-seen
+      surface form would NOT be reorder-stable — if two documents spell an entity
+      differently ("Acme" vs "Acme SAS") and processing order varies between runs, the
+      *first-seen* spelling varies too, so a hash of the unnormalized name would still
+      drift across re-exports even though the entity dedupes to the same registry row
+      either way. Hashing the shared normalized key is what actually delivers the
+      stability this task exists for. Task 3's pseudonym continuity holds with zero
+      special-casing: by the time `addEntity` runs, `filterExportableEntities` has
+      already overwritten a pseudonymized entity's `name` with its token, so
+      `dedupKey`/`id` are automatically token-derived, not the real name.
+- [x] Do the same for `doc-NNN` (`worker/pipeline.ts:1111`); document ids have the identical instability and feed `document_entities` in the registry JSON.
+      → confirmed, hashing `file.bytes` (matching `lib/content-hash.ts`'s own existing
+      precedent for autosave: "keys drafts by the original file's bytes, not its name").
+      One addition beyond the literal instruction: `docId` doubles as a `docPaths` `Map`
+      key, so two byte-identical uploads in one batch would otherwise collide and one
+      file's backlinks would silently overwrite the other's. `assignDocId` (new, exported
+      from `worker/pipeline.ts`) guards against this with a numeric suffix
+      (`doc-<hash>-2`, `-3`, ...), checked against a per-batch `Set` populated *before*
+      `processFile` runs for the file in question — `docPaths` itself isn't populated
+      until `processFile` returns, too late to guard the in-flight file.
+- [x] Populate `aliases` (`registry.ts:91`), which nothing writes today: merge on normalised form with legal-suffix stripping (`SAS`, `S.A.S.`, `SARL`, `SA`, `Ltd`, `GmbH`, `Inc`). Longest surface form wins `display_name`; every merged variant lands in `aliases`.
+      → confirmed: `LEGAL_SUFFIX_PATTERN` strips a trailing legal-form word (dotted or
+      undotted: `SAS`/`S.A.S.`, `SARL`, `SA`, `Ltd`, `GmbH`, `Inc`), scoped to
+      `type === "organization"` only — deliberately not applied to other types, since
+      stripping "Sa" from a person's surname would be actively wrong, not just
+      over-eager. Guarded against stripping to an empty string (an org literally named
+      "SA" keeps its suffix rather than dedup-keying on `""`). The existing-entity merge
+      branch now pushes every distinct incoming spelling into `aliases` and promotes
+      `display_name` to whichever variant is longest, symmetric regardless of arrival
+      order (verified by hand-tracing both orderings, not just the one the test exercises).
+- [x] Entity filenames follow the merged canonical form, so "Acme", "Acme SAS" and "ACME S.A.S." resolve to one file.
+      → confirmed, and by construction rather than by tracking spelling: since `slug` is
+      now `hash(type|dedupKey|vertical)` and all three spellings share the same
+      `dedupKey`, they share the same slug/filename automatically — no separate
+      "filename follows canonical form" logic was needed once the id scheme above was
+      hash-based. One correctness requirement this surfaced and fixed: the worker-local
+      per-document `Entity.slug` (set at NER time via `slugify(e.text)`, consumed by
+      `renderAnnotatedMarkdown`/`buildGlossary` for in-document links) had to be
+      overwritten with the registry's returned `slug` before those functions run —
+      otherwise a document's own inline links would point at a different filename than
+      `entities/*.md` actually uses. `worker/pipeline.ts`'s enrichment loop now captures
+      `registry.addEntity(...)`'s return value and copies `.slug` back onto the
+      worker-local entity for exactly this reason.
+- [x] Test: re-registering the same corpus in a different document order yields identical ids and identical filenames.
+      → confirmed: `lib/registry.test.ts`, "gives the same entity the same id and slug
+      regardless of which document order it was registered in" — two registries, same
+      two entities, opposite document order, asserts identical `id`/`slug`.
+- [x] Test: alias merging does **not** merge genuinely distinct entities — include a near-miss pair in the fixture.
+      → confirmed: "does not merge a genuinely distinct organisation whose name happens to
+      share a prefix" — "Acme SAS" vs "Acme Global SAS" stay two entities. Two tests
+      beyond the plan's literal requirement: the three-variant merge itself ("Acme" /
+      "Acme SAS" / "ACME S.A.S." → one entity, `display_name` = the longest, `aliases` =
+      the other two), and legal-suffix scoping ("Jean Sa" / "Marie Sa" — person type —
+      must NOT merge via suffix-stripping, since "Sa" is a real name fragment, not a
+      legal form, for a person).
+
+**Ripple beyond the plan's literal scope, both necessary:** `BatchEntityRegistry.addEntity`
+had to become `async` (it awaits `computeContentHash`), which surfaced a genuine ordering
+hazard in every call site that registers the *same* entity twice without awaiting between
+calls — `registerInDocument` (which `inferRelationships` depends on) now only runs after an
+internal `await` on a new entity's first registration, so an un-awaited call followed by a
+synchronous `inferRelationships` would silently see an empty `docEntityMap`. Found by
+`tsc`'s type errors pointing at the affected call sites in `registry.test.ts` and Task 3's
+tests in `pipeline.test.ts`; fixed by awaiting every call and marking every affected `it(...)`
+callback `async`, not just satisfying the type checker locally.
+
+**Verification:** `npx vitest run` → **247/247 passing** (was 234 after Task 3; +13: 4 new
+in `registry.test.ts`, 6 pre-existing Task 3 tests updated for the new `async`
+`addEntity`, 3 new `assignDocId` tests in `pipeline.test.ts`, plus 2 pre-existing tests
+there updated the same way). `npx tsc --noEmit`: still exactly the 7 pre-existing baseline
+errors (Task 0), none new — confirmed line-by-line, not just by count.
 
 ---
 

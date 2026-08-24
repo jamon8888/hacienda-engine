@@ -45,6 +45,7 @@ import {
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
 import { hashSpanForProcessing, looksLikePseudonymToken } from "../lib/redaction-modes";
+import { computeContentHash } from "../lib/content-hash";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -331,6 +332,35 @@ function tokenSlug(token: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Task 4 (spec §8 step 4): content-derived document id, replacing assignment-ordinal
+ * `doc-001`/`doc-002` — those renumbered on any re-export whose upload order changed,
+ * breaking `document_entities` in `entities-registry.json` and any external reference
+ * into it. `usedIds` is this batch's already-assigned ids, checked *before* calling
+ * `processFile` for the file about to receive one (not `docPaths`, which is only
+ * populated once `processFile` returns, too late for the file currently in flight).
+ *
+ * Genuinely duplicate uploads (byte-identical files) hash to the same base id; a
+ * disambiguating numeric suffix is appended rather than silently colliding, because
+ * `docId` doubles as a `Map` key for `docPaths` — an undetected collision there would
+ * silently overwrite one file's backlinks with the other's, corrupting both.
+ */
+export async function assignDocId(
+  bytes: ArrayBuffer,
+  usedIds: Set<string>,
+): Promise<string> {
+  const hash = await computeContentHash(bytes);
+  const base = `doc-${hash.slice(0, 12)}`;
+  let docId = base;
+  let suffix = 2;
+  while (usedIds.has(docId)) {
+    docId = `${base}-${suffix}`;
+    suffix++;
+  }
+  usedIds.add(docId);
+  return docId;
 }
 
 /** The one shape the NER-result loop below actually reads from an entity. */
@@ -1021,10 +1051,9 @@ async function processFile(
       sector: verticalMeta.sector,
       roles: verticalMeta.roles || [],
     };
-    enrichedEntities.push(enrichedEntity);
 
     // Register entity in batch registry
-    registry.addEntity(
+    const registered = await registry.addEntity(
       {
         name: enrichedEntity.name,
         type: enrichedEntity.type,
@@ -1039,6 +1068,15 @@ async function processFile(
       },
       docId,
     );
+    // Task 4 (spec §8 step 4): the registry derives a stable, content-hashed slug —
+    // shared by every spelling variant of the same entity — instead of trusting the
+    // NER-time `slugify(e.text)` this entity was created with above. Copying it back
+    // here keeps this document's own links (`renderAnnotatedMarkdown`/`buildGlossary`
+    // below, both reading `deduped`'s `.slug` via `relativeEntityLink`) pointing at the
+    // exact filename `entities/*.md` actually uses; without this, a link computed from
+    // the pre-hash slug would point at a file the registry never writes.
+    enrichedEntity.slug = registered.slug;
+    enrichedEntities.push(enrichedEntity);
   }
 
   const deduped = deduplicateEntities(enrichedEntities);
@@ -1183,13 +1221,15 @@ async function processFiles(
     });
   }
 
-  let docCounter = 0;
   const results: ProcessedFile[] = [];
   // Track I2's backlinks: `RegistryEntity.source_documents` only holds
   // docIds, not the zip-relative path a link needs to point at. Populated
   // alongside `results` below, from the same `processed.name` the zip
   // entries themselves use, so the two can never disagree.
   const docPaths = new Map<string, string>();
+  // Task 4: `assignDocId` checked against here, not `docPaths` — `docPaths` is only
+  // populated once `processFile` returns, too late to guard the file currently in flight.
+  const usedDocIds = new Set<string>();
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -1201,7 +1241,7 @@ async function processFiles(
         file.bytes.byteLength,
         "bytes",
       );
-      const docId = `doc-${String(++docCounter).padStart(3, "0")}`;
+      const docId = await assignDocId(file.bytes, usedDocIds);
       const startTime = performance.now();
       const processed = await processFile(
         file,

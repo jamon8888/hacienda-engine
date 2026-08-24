@@ -14,6 +14,7 @@ let selectNerBridge: typeof import("./pipeline").selectNerBridge;
 let relativeEntityLink: typeof import("./pipeline").relativeEntityLink;
 let buildEntityFile: typeof import("./pipeline").buildEntityFile;
 let buildGlossaryIndex: typeof import("./pipeline").buildGlossaryIndex;
+let assignDocId: typeof import("./pipeline").assignDocId;
 
 beforeAll(async () => {
   (globalThis as { self?: unknown }).self = globalThis;
@@ -24,6 +25,7 @@ beforeAll(async () => {
     relativeEntityLink,
     buildEntityFile,
     buildGlossaryIndex,
+    assignDocId,
   } = await import("./pipeline"));
 });
 
@@ -343,7 +345,7 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
     expect(result).toEqual([]);
   });
 
-  it("never writes a surface name into a pseudonymized bundle: entity file, glossary, and registry all key on the token", () => {
+  it("never writes a surface name into a pseudonymized bundle: entity file, glossary, and registry all key on the token", async () => {
     const jean = entity({
       name: "Jean Dupont",
       type: "person",
@@ -373,11 +375,17 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
 
     const results = filterExportableEntities([jean, acme], findings, true);
     const registry = new BatchEntityRegistry();
-    const registered = results.map((r) =>
-      registry.addEntity(
-        { name: r.name, type: r.type, slug: r.slug, count: r.count, spans: r.spans },
-        { vertical: "shared" },
-        "doc-001",
+    // `Promise.all`, not a plain `.map` (each entity is distinct — jean/acme never share
+    // a dedup key — so there's no merge race here, but `buildGlossaryIndex` below reads
+    // `registry.getEntities()`, which is empty until every `addEntity` call has actually
+    // resolved and reached `this.entities.set(...)`).
+    const registered = await Promise.all(
+      results.map((r) =>
+        registry.addEntity(
+          { name: r.name, type: r.type, slug: r.slug, count: r.count, spans: r.spans },
+          { vertical: "shared" },
+          "doc-001",
+        ),
       ),
     );
     const glossary = buildGlossaryIndex(registry.getEntities());
@@ -443,12 +451,18 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
     expect(resultDoc1.slug).toBe(resultDoc2.slug);
 
     const registry = new BatchEntityRegistry();
-    registry.addEntity(
+    // Awaited sequentially, not fired concurrently: both calls share the same dedup key
+    // (asserted above), and `addEntity` only records a new entity's id in `entityKeyMap`
+    // after an internal `await` — two un-awaited calls for the same entity would both see
+    // no existing entry and both create one, silently losing the merge this test exists to
+    // prove (the second `.set()` would overwrite the first's `source_documents`, not add
+    // to it).
+    await registry.addEntity(
       { name: resultDoc1.name, type: resultDoc1.type, slug: resultDoc1.slug, count: 1, spans: resultDoc1.spans },
       { vertical: "shared" },
       "doc-001",
     );
-    const merged = registry.addEntity(
+    const merged = await registry.addEntity(
       { name: resultDoc2.name, type: resultDoc2.type, slug: resultDoc2.slug, count: 1, spans: resultDoc2.spans },
       { vertical: "shared" },
       "doc-002",
@@ -615,5 +629,45 @@ describe("selectNerBridge (Track B1/B2)", () => {
     });
     expect(result.map((e) => e.text)).toEqual(["Jean Dupont", "Acme SAS"]);
     expect(result.map((e) => e.category)).toEqual(["person", "organization"]);
+  });
+});
+
+describe("assignDocId (Task 4, spec §8 step 4)", () => {
+  function bytesOf(text: string): ArrayBuffer {
+    return new TextEncoder().encode(text).buffer;
+  }
+
+  it("gives the same file bytes the same id across independent batches", async () => {
+    const bytes = bytesOf("the quick brown fox");
+    const idA = await assignDocId(bytes, new Set());
+    const idB = await assignDocId(bytesOf("the quick brown fox"), new Set());
+
+    expect(idA).toBe(idB);
+    expect(idA).toMatch(/^doc-[0-9a-f]{12}$/);
+  });
+
+  it("gives different file bytes different ids", async () => {
+    const idA = await assignDocId(bytesOf("file one"), new Set());
+    const idB = await assignDocId(bytesOf("file two"), new Set());
+
+    expect(idA).not.toBe(idB);
+  });
+
+  it("disambiguates two byte-identical files in the same batch rather than colliding", async () => {
+    // `docId` doubles as a `docPaths` Map key — a silent collision here would let the
+    // second duplicate's export path overwrite the first's, corrupting both files'
+    // backlinks. `usedIds` is the same Set across both calls, simulating two duplicate
+    // uploads in one `processFiles` batch.
+    const usedIds = new Set<string>();
+    const bytes = bytesOf("duplicate upload");
+
+    const first = await assignDocId(bytes, usedIds);
+    const second = await assignDocId(bytes, usedIds);
+
+    expect(first).not.toBe(second);
+    expect(second).toBe(`${first}-2`);
+
+    const third = await assignDocId(bytes, usedIds);
+    expect(third).toBe(`${first}-3`);
   });
 });
