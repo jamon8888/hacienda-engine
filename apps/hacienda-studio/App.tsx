@@ -25,7 +25,6 @@ import {
   loadTessdata,
   validateFile,
   checkPdfPageSafety,
-  InsufficientStorageError,
 } from "./lib/asset-loader";
 import { WorkerPool, createWorkerPool } from "./lib/worker-pool";
 import { detectDeviceTier, poolSizeForTier } from "./lib/device-tier";
@@ -232,17 +231,21 @@ export function App() {
         return;
       }
       try {
-        await loadNerModel((p) => setNerModelProgress(p));
+        const load = await loadNerModel((p) => setNerModelProgress(p));
+        if (!load.ok) {
+          // Expected, not a fault: a private/incognito window simply cannot hold the
+          // model. Regex-only detection still works, so this degrades rather than fails.
+          console.warn("[App] NER model not loadable:", load.reason, load.message);
+          setNerModelDegraded(true);
+          setError(load.message);
+        }
         setAssets((a) => ({ ...a, nerModel: true }));
         setNerModelProgress(null);
       } catch (e) {
+        // Genuinely unexpected — a dead network, a corrupt archive.
         console.warn("[App] NER model download failed, using fallback:", e);
         setNerModelDegraded(true);
-        setError(
-          e instanceof InsufficientStorageError
-            ? e.message
-            : "Neural PII backend unavailable — falling back to regex-only detection.",
-        );
+        setError("Neural PII backend unavailable — falling back to regex-only detection.");
         setAssets((a) => ({ ...a, nerModel: true }));
         setNerModelProgress(null);
       }

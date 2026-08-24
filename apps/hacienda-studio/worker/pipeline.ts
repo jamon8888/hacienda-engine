@@ -145,7 +145,16 @@ let nerRuntime: NerRuntime | null = null;
 
 async function initNerBackend(): Promise<void> {
   try {
-    const { model, tokenizer, encoderConfig } = await loadNerModel();
+    const load = await loadNerModel();
+    if (!load.ok) {
+      // `selectNerBridge` falls back to compromise.js when `nerRuntime` stays null. The
+      // main thread already surfaced the reason to the user in `App.tsx`; repeating it
+      // from the worker would only duplicate the banner.
+      console.warn("[Worker] Neural NER unavailable:", load.reason, load.message);
+      nerRuntime = null;
+      return;
+    }
+    const { model, tokenizer, encoderConfig } = load.assets;
     nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
     console.log("[Worker] Neural NER backend loaded");
 
@@ -1126,8 +1135,11 @@ async function processFiles(
         `entities:${processed.entities.length}`,
         `pii:${processed.piiFindings.length}`,
       );
-      // Infer relationships for this document
-      registry.inferRelationships(docId);
+      // Infer relationships for this document. `rawMarkdown` — not `markdown` — is what the
+      // registry's stored spans are offsets into (`processFile` returns `rawMarkdown: markdown`,
+      // the text NER ran on, before link/redaction splicing shifts every position). Passing the
+      // spliced `markdown` would misclassify proximity silently.
+      registry.inferRelationships(docId, processed.rawMarkdown);
       docPaths.set(docId, "documents/" + processed.name);
       results.push(processed);
       self.postMessage({ type: "file-complete", ...processed });

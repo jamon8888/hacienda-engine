@@ -89,6 +89,45 @@ describe("AuditHandle (Track C3)", () => {
     expect(tipAfter).not.toBe(tipBefore);
     expect(await handle.tip()).toBe(tipAfter);
     await expect(handle.verify()).resolves.not.toThrow();
+
+    // Field-level, not just "an entry appeared": the whole value of a reveal record is
+    // that it says *what* was revealed, by which detector, and how long it was — an entry
+    // with the right action but a wrong category or a zero length is still a broken audit
+    // trail.
+    const [entry] = await handle.listEntries();
+    expect(entry.action).toBe("reveal");
+    expect(entry.category).toBe("email");
+    expect(entry.source).toBe("regex");
+    expect(entry.span_length).toBe("alice@example.com".length);
+    // BLAKE3 of the revealed plaintext, computed independently (see this file's header)
+    // rather than read back from our own implementation — a hardcoded value copied out of
+    // the code under test would still pass if the digest algorithm or the framing of the
+    // hashed input silently changed.
+    expect(entry.span_hash).toBe(
+      "b0592e381d5b6b5b8e14a53e089e693779525183161310286e48597d54a062b9",
+    );
+    // Never the plaintext itself, only its digest.
+    expect(JSON.stringify(entry)).not.toContain("alice@example.com");
+  });
+
+  it("rejects an unknown source without advancing the chain", async () => {
+    const handle = await AuditHandle.open(
+      "audit-handle-test-db-6",
+      "test-node",
+      "test-config",
+    );
+    const tipBefore = await handle.tip();
+
+    // `EntitySource` only parses "regex" and "model" (hacienda-core/src/audit/entry.rs).
+    // A rejected call must leave the chain exactly where it was — a partially-applied
+    // append would be worse than the rejection.
+    await expect(
+      handle.recordReveal("alice@example.com", "email", "not-a-source"),
+    ).rejects.toBeDefined();
+
+    expect(await handle.tip()).toBe(tipBefore);
+    expect(await handle.listEntries()).toHaveLength(0);
+    await expect(handle.verify()).resolves.not.toThrow();
   });
 
   it("lists every recorded entry, including a reveal, oldest first", async () => {
@@ -107,6 +146,10 @@ describe("AuditHandle (Track C3)", () => {
     // `process()` uses the default pipeline config, which redacts under mask mode.
     expect(entries[0].action).toBe("mask");
     expect(entries[1].action).toBe("reveal");
+    expect(entries[1].category).toBe("iban");
+    expect(entries[1].span_hash).toBe(
+      "b0da177a27736d3b2edc10d9295867ed16d09102f7d91a55437f13125f1d1953",
+    );
     // The plaintext itself is never in the chain — only its digest.
     expect(JSON.stringify(entries)).not.toContain("FR7630006000011234567890189");
   });

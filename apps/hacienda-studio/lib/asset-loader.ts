@@ -381,24 +381,50 @@ async function clearStaleModelCache(): Promise<void> {
   } catch {}
 }
 
+/** The three model buffers `createNerBackend` needs, on the success path. */
+export interface NerModelAssets {
+  model: Uint8Array;
+  tokenizer: Uint8Array;
+  encoderConfig: Uint8Array;
+}
+
 /**
- * Thrown instead of a generic write error when the model's ~620MB combined payload
- * clearly won't fit in this origin's storage quota — most commonly a private/incognito
- * window, which browsers cap far below normal-browsing quotas (and some, e.g. Safari
- * Private Browsing, refuse to persist IndexedDB across a reload at all). Callers should
- * show this distinctly from a network failure: no retry here will fix it, redownloading
- * every reload in that mode is expected until the user leaves private browsing.
+ * `loadNerModel`'s result.
+ *
+ * Insufficient storage is a *routine* browser condition, not a fault: a private/incognito
+ * window caps quota far below normal browsing (and some, e.g. Safari Private Browsing,
+ * refuse to persist IndexedDB across a reload at all), and `App` already treats it as a
+ * normal fallback to regex-only detection. Modelling it as a variant rather than a thrown
+ * error keeps that path in the type system, so a caller cannot forget to handle it — and
+ * follows this codebase's rule that expected errors belong in discriminated unions and
+ * `throw` is reserved for the unexpected.
+ *
+ * Genuinely unexpected failures (a dead network, a corrupt archive) still throw.
  */
-export class InsufficientStorageError extends Error {
-  constructor(quotaBytes: number, neededBytes: number) {
-    super(
-      `Only ~${Math.round(quotaBytes / 1024 / 1024)}MB of storage is available to this ` +
-        `page, but the neural PII model needs ~${Math.round(neededBytes / 1024 / 1024)}MB. ` +
-        `This is typical of private/incognito browsing, where browsers cap storage well ` +
-        `below normal — the model will need to redownload every visit in that mode.`,
-    );
-    this.name = "InsufficientStorageError";
-  }
+export type NerModelLoad =
+  | { ok: true; assets: NerModelAssets }
+  | {
+      ok: false;
+      reason: "insufficient-storage";
+      /** Bytes the browser reports as still available, or 0 when only the write failed. */
+      availableBytes: number;
+      neededBytes: number;
+      /** Ready to show; no retry will change the outcome until the user leaves that mode. */
+      message: string;
+    };
+
+function insufficientStorage(availableBytes: number, neededBytes: number): NerModelLoad {
+  return {
+    ok: false,
+    reason: "insufficient-storage",
+    availableBytes,
+    neededBytes,
+    message:
+      `Only ~${Math.round(availableBytes / 1024 / 1024)}MB of storage is available to this ` +
+      `page, but the neural PII model needs ~${Math.round(neededBytes / 1024 / 1024)}MB. ` +
+      `This is typical of private/incognito browsing, where browsers cap storage well ` +
+      `below normal — the model will need to redownload every visit in that mode.`,
+  };
 }
 
 // Model (~600MB) + tokenizer (~16MB) + config, rounded up — the threshold
@@ -413,30 +439,26 @@ const MODEL_STORAGE_BYTES_NEEDED = 620 * 1024 * 1024;
  * available in every browser (notably older Safari) — silently skip the check there
  * rather than block loading on a heuristic that can't run.
  */
-async function checkStorageQuota(): Promise<void> {
-  if (!navigator.storage?.estimate) return;
+async function checkStorageQuota(): Promise<NerModelLoad | null> {
+  if (!navigator.storage?.estimate) return null;
   try {
     const { quota, usage } = await navigator.storage.estimate();
-    if (quota === undefined || usage === undefined) return;
+    if (quota === undefined || usage === undefined) return null;
     const available = quota - usage;
     if (available < MODEL_STORAGE_BYTES_NEEDED) {
-      throw new InsufficientStorageError(available, MODEL_STORAGE_BYTES_NEEDED);
+      return insufficientStorage(available, MODEL_STORAGE_BYTES_NEEDED);
     }
-  } catch (e) {
-    if (e instanceof InsufficientStorageError) throw e;
+  } catch {
     // `estimate()` itself failing (rare, some private-mode implementations) is not
     // grounds to block loading — fall through and let the real download/write attempt
     // surface whatever the actual failure is.
   }
+  return null;
 }
 
 export async function loadNerModel(
   onProgress?: (progress: DownloadProgress) => void,
-): Promise<{
-  model: Uint8Array;
-  tokenizer: Uint8Array;
-  encoderConfig: Uint8Array;
-}> {
+): Promise<NerModelLoad> {
   const db = await getDB();
 
   // Check cache first
@@ -447,7 +469,7 @@ export async function loadNerModel(
   ]);
 
   if (model && tokenizer && config) {
-    return { model, tokenizer, encoderConfig: config };
+    return { ok: true, assets: { model, tokenizer, encoderConfig: config } };
   }
 
   // Quota is checked *after* the cache lookup, never before: the check exists to avoid
@@ -455,7 +477,8 @@ export async function loadNerModel(
   // actually writes. Running it first rejected users whose model was already cached and
   // usable — nothing needs writing in that case, and free space is irrelevant to serving
   // it from IndexedDB.
-  await checkStorageQuota();
+  const quotaFailure = await checkStorageQuota();
+  if (quotaFailure) return quotaFailure;
 
   // Only the model's own progress is reported — it dwarfs the tokenizer (~16MB) and config
   // (<1KB), so tracking all three separately would add complexity without changing what the
@@ -490,9 +513,12 @@ export async function loadNerModel(
       ]);
 
       return {
-        model: modelData,
-        tokenizer: tokenizerData,
-        encoderConfig: configData,
+        ok: true,
+        assets: {
+          model: modelData,
+          tokenizer: tokenizerData,
+          encoderConfig: configData,
+        },
       };
     } catch (e) {
       // A quota failure surfacing only now (the preflight check above passed, or
@@ -501,7 +527,7 @@ export async function loadNerModel(
       // of a bare `QuotaExceededError` name, but don't retry: nothing about a second
       // attempt changes how much quota exists.
       if (e instanceof DOMException && e.name === "QuotaExceededError") {
-        throw new InsufficientStorageError(0, MODEL_STORAGE_BYTES_NEEDED);
+        return insufficientStorage(0, MODEL_STORAGE_BYTES_NEEDED);
       }
       const msg = e instanceof Error ? e.message : String(e);
       const isRetriable = msg.includes("405") || msg.includes("does not resolve") || msg.includes("HTML");
