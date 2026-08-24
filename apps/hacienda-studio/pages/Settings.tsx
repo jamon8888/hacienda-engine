@@ -187,7 +187,11 @@ export function Settings({ config, onChange }: Props) {
                 </button>
               ))}
             </div>
-            {config.redactionMode === "pseudonymize" && (
+            {/* Hash needs the passphrase for the same reason pseudonymize does: its digest
+              * is an HMAC, because an unsalted hash of a name or a 9-digit SSN is
+              * recovered by enumeration and would not be a redaction at all. See
+              * `lib/redaction-modes.ts`'s `hashSpanForProcessing`. */}
+            {(config.redactionMode === "pseudonymize" || config.redactionMode === "hash") && (
               <div className={fieldLabel + " mt-3 max-w-sm"}>
                 <label htmlFor="pseudonym-key-id">Identifiant de clé</label>
                 <input
@@ -224,8 +228,9 @@ export function Settings({ config, onChange }: Props) {
                 />
                 {!config.pseudonymPassphrase && (
                   <p className="text-xs text-amber-600">
-                    Sans phrase secrète, les résultats sont masqués au lieu d'être
-                    pseudonymisés — aucune clé à dériver.
+                    {config.redactionMode === "hash"
+                      ? "Sans phrase secrète, les résultats sont masqués au lieu d'être hachés — un hachage sans clé serait réversible par force brute."
+                      : "Sans phrase secrète, les résultats sont masqués au lieu d'être pseudonymisés — aucune clé à dériver."}
                   </p>
                 )}
               </div>

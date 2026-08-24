@@ -41,17 +41,59 @@ function fingerprint(input: string): string {
 }
 
 /**
- * SHA-256 digest for Hash mode when it's applied at processing time (`worker/
- * pipeline.ts`) rather than in this file's instant in-memory viewer toggle. Unlike
- * `fingerprint` above, this output gets baked into exported markdown, so it needs to be a
- * real cryptographic digest, not a fast display-only one — `crypto.subtle` is available
- * in the worker with no new dependency, the same way `lib/pseudonymize.ts` already uses it.
+ * Keyed digest for Hash mode when it's applied at processing time (`worker/pipeline.ts`)
+ * rather than in this file's instant in-memory viewer toggle. This output is baked into
+ * exported markdown, so it has to survive an attacker who has the export.
+ *
+ * **HMAC-SHA256, not a bare SHA-256.** An unsalted digest is not a confidentiality
+ * boundary for PII: the inputs here are low-entropy by nature (a name, a phone number, a
+ * 9-digit SSN), so every plausible value can simply be hashed and compared. A bare
+ * `SHA-256("ssn:123-45-6789")` is recovered by enumerating 10^9 candidates — seconds of
+ * work. Keying it with a secret the attacker does not have is what makes the digest
+ * irreversible in practice, not the choice of hash function.
+ *
+ * A *fixed* salt would not help (it ships in the bundle, so the attacker has it), and a
+ * *random per-document* salt would destroy the one property Hash mode exists to provide —
+ * the same value hashing to the same token, so an analyst can follow one person through a
+ * corpus without learning who they are. The key must therefore be secret and stable across
+ * the corpus, which is exactly what `deriveKeyHex`'s passphrase-derived key already is.
+ * That is why Hash mode now requires a passphrase, the same way Pseudonymize does, and
+ * falls back to mask without one rather than emitting a reversible "redaction".
  */
-export async function hashSpanForProcessing(category: string, text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(`${category}:${text}`);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+export async function hashSpanForProcessing(
+  category: string,
+  text: string,
+  keyHex: string,
+): Promise<string> {
+  const keyBytes = hexToBytes(keyHex);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    // `.slice()` so the view handed to WebCrypto is a standalone ArrayBuffer, matching
+    // how `lib/pseudonymize.ts` feeds `importKey` — see its `fresh()` helper for why a
+    // subarray view is not accepted by every runtime's `BufferSource` handling.
+    keyBytes.slice().buffer,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`${category}:${text}`),
+  );
+  const hex = Array.from(new Uint8Array(mac), (b) => b.toString(16).padStart(2, "0")).join("");
+  // Truncated to 16 hex chars (64 bits) for readability in the redacted document. That is
+  // a collision bound, not a secrecy one — secrecy rests entirely on the key above — and
+  // 64 bits keeps collisions negligible for any realistic corpus.
   return `#${category}:${hex.slice(0, 16)}`;
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
 }
 
 export type ModeResult = { findings: PiiEntity[] } | { unavailable: true; reason: string };

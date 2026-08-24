@@ -875,15 +875,22 @@ async function processFile(
           }
           break;
         case "hash":
-          piiFindings = await Promise.all(
-            piiFindings.map(async (f) => ({
-              ...f,
-              redact_template: await hashSpanForProcessing(
-                f.category,
-                markdown.slice(f.start, f.end),
-              ),
-            })),
-          );
+          // Keyless hashing is not a redaction (see `hashSpanForProcessing`), so with no
+          // derived key this falls through to the mask-shaped template the engine already
+          // produced — the same fallback pseudonymize takes, and warned about once per
+          // batch in `processFiles`.
+          if (pseudonymKeyHex) {
+            piiFindings = await Promise.all(
+              piiFindings.map(async (f) => ({
+                ...f,
+                redact_template: await hashSpanForProcessing(
+                  f.category,
+                  markdown.slice(f.start, f.end),
+                  pseudonymKeyHex,
+                ),
+              })),
+            );
+          }
           break;
         case "remove":
           piiFindings = piiFindings.map((f) => ({ ...f, redact_template: "" }));
@@ -1044,7 +1051,11 @@ async function processFiles(
   if (
     config.enablePiiDetection &&
     config.redactPiiInOutput &&
-    config.redactionMode === "pseudonymize" &&
+    // Hash needs the key too, not just pseudonymize: `hashSpanForProcessing` is an HMAC,
+    // because an unsalted digest of a low-entropy value (a name, a 9-digit SSN) is
+    // recovered by enumeration and so is not a redaction at all. See that function's doc
+    // for why a fixed or per-document salt cannot substitute for a secret key here.
+    (config.redactionMode === "pseudonymize" || config.redactionMode === "hash") &&
     config.pseudonymPassphrase
   ) {
     try {
@@ -1061,6 +1072,22 @@ async function processFiles(
         message: "Pseudonymization key derivation failed — this batch will use mask mode instead of reversible tokens.",
       });
     }
+  }
+
+  // Hash mode with no passphrase would otherwise fall through to the mask-shaped template
+  // the engine already produced, silently — the user asked for hashed output and got
+  // masked output with nothing said. Same contract as the pseudonymize fallback above.
+  if (
+    config.enablePiiDetection &&
+    config.redactPiiInOutput &&
+    config.redactionMode === "hash" &&
+    !pseudonymKeyHex
+  ) {
+    self.postMessage({
+      type: "warning",
+      message:
+        "Hash mode needs a passphrase to key its digest — without one the hashes would be reversible by brute force. This batch will use mask mode instead.",
+    });
   }
 
   let docCounter = 0;
