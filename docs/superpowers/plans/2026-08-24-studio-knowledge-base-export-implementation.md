@@ -66,7 +66,7 @@ Every row read from source on 2026-08-24.
 
 | Assumption | How to confirm | Task |
 |---|---|---|
-| Every PII finding overlapping a person/org entity carries a pseudonym token in `redact_template` when the key exists | Assert in a unit test that mask-shaped templates never reach the token path | 3 |
+| Every PII finding overlapping a person/org entity carries a pseudonym token in `redact_template` when the key exists | Assert in a unit test that mask-shaped templates never reach the token path. **Still assumed after Task 0** — the gate probe confirmed person/org findings are *produced*, but supplied synthetic `redact_template` values, so the minting path itself is unverified | 3 |
 | No downstream consumer parses `works_for` out of `kg-export/` today | grep the repo + ask before merging; the format is user-facing output | 1 |
 | IDF weighting over a real batch produces a useful `## Related documents` list rather than everything-links-to-everything | Measure on a ≥20-file fixture batch before fixing the threshold | 5 |
 | Bundles already exported with `works_for` edges exist in users' hands | Unknowable from here — hence the manifest generation marker in Task 1.4 | 1 |
@@ -237,7 +237,12 @@ entities do become PII findings, and `filterExportableEntities(…, true)` retai
 - [ ] `should_still_drop_entities_when_pseudonymize_has_no_key` — the degradation case from 3.1.
 - [ ] `should_never_write_a_surface_name_into_a_pseudonymized_bundle`: build a bundle from a fixture containing a distinctive name, then assert that name appears in **no** zip member — filenames included. This is the regression test that matters most.
 - [ ] `should_give_one_entity_the_same_token_across_documents`.
-- [ ] Confirm `mask`/`hash`/`remove` behaviour is byte-identical to Task 0's reference bundle. This task must not change them.
+- [ ] Confirm `mask`/`hash`/`remove` behaviour is unchanged. **Task 0 could not produce the reference
+      bundles this was meant to diff against** (Task 0.1, last item). Substitute: assert at the
+      `filterExportableEntities` level that all three modes return the identical entity set before and
+      after this task's change — a unit-level equivalent that needs no browser. If the reference
+      bundles become available, do the byte-level diff as originally written; the unit assertion is
+      weaker and does not cover filename or glossary changes.
 
 ---
 
@@ -283,7 +288,9 @@ entities do become PII findings, and `filterExportableEntities(…, true)` retai
 - [ ] Extend `buildEntityFile` (`lib/zip-export.ts:32-55`) with per-mention quoted context (±120 chars), taken from the **redacted** document body.
 - [ ] Add ranked co-occurring entities and observed date range.
 - [ ] Test: for a pseudonymized bundle, no quoted context contains a surface name — reuse Task 3.3's whole-bundle scan.
-- [ ] Watch bundle size: quoted context is the first thing here that scales with mention count, not entity count. Record the size delta on Task 0's reference batch.
+- [ ] Watch bundle size: quoted context is the first thing here that scales with mention count, not
+      entity count. Task 0's reference batch does not exist — measure the delta on whatever fixture
+      batch this task's tests use, and state the fixture's size so the number is interpretable.
 
 ---
 
@@ -300,8 +307,24 @@ Named explicitly so no task quietly grows into them:
 
 ## Verification Before Merge
 
-- [ ] `npm run test:unit` and `npm run test:e2e` at least as green as Task 0.
-- [ ] `cargo test -p hacienda-core compliance` green (Task 2).
-- [ ] Re-export Task 0's reference batch in all four redaction modes; diff each against its baseline and explain every difference.
+- [ ] `cd apps/hacienda-studio && npx vitest run` — at least 224 passing (Task 0's count), 0 failing.
+      **Not `npm run test:unit`**, which cannot run here (Task 0.2).
+- [ ] `npx tsc --noEmit` — no *new* errors beyond Task 0's 9. The baseline is not zero; compare
+      against the enumerated list, not against a clean run.
+- [ ] `cargo test -p hacienda-core --lib compliance::` green (Task 2) — and confirm it selects a
+      non-zero number of tests, since the obvious filter spelling silently matches none.
+- [ ] e2e: **not a gate.** Blocked by Task 0.2's wasm build failure. If that gets fixed, run
+      `npm run test:e2e` and record it; do not claim e2e coverage until then.
+- [ ] Re-export a reference batch in all four redaction modes and explain every difference.
+      **Requires Task 0's outstanding item** — a working dev server and the ~614 MB model. If still
+      blocked at merge time, say so explicitly in the PR rather than implying this was checked.
 - [ ] **The disclosure test is the gate:** for a pseudonymize-mode bundle, no zip member — content or filename — contains a surface name from the fixture.
-- [ ] Open the resulting bundle in Claude Desktop and in a Codex-family agent and confirm both pick up their instruction file and can answer a cross-document question without reading every file in `documents/`. That is the actual acceptance criterion for the whole plan, and no unit test substitutes for it.
+- [ ] Open the resulting bundle in Claude Desktop and in a Codex-family agent and confirm both pick up
+      their instruction file and can answer a cross-document question without reading every file in
+      `documents/`. That is the actual acceptance criterion for the whole plan, and no unit test
+      substitutes for it.
+
+      ⚠️ **This criterion is currently unreachable.** It needs a real exported bundle, which needs the
+      dev server and model that Task 0.2 blocks. Every task below Task 2 can be *implemented* and
+      unit-tested without it, but the plan cannot be **accepted** until the wasm build is fixed. Treat
+      unblocking Task 0.2 as a prerequisite for merge, not for starting work.

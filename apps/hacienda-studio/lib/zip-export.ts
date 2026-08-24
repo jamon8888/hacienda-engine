@@ -125,8 +125,24 @@ ${documents} and ${entityCount} distinct ${entities} across them.
   here, not three.
 - **\`kg-export/\`** — the same registry as a knowledge graph, in three
   formats: \`neo4j.cypher\` (importable into Neo4j), \`networkx.json\`
-  (Python's NetworkX), and \`rdf.ttl\` (RDF/Turtle). Prefer these over
-  re-deriving relationships from the prose.
+  (Python's NetworkX), and \`rdf.ttl\` (RDF/Turtle).
+
+## What the graph edges mean
+
+Every edge is \`co_occurs_with\`, and it means exactly one thing: **the two
+entities were named close together in the same document** — same sentence
+(\`confidence: 0.6\`) or same paragraph (\`confidence: 0.3\`). \`confidence\` is
+a proximity strength, not a probability.
+
+Co-occurrence is **not** a relationship. If a person and a company are named
+in the same sentence, this bundle records that they were named together and
+nothing more — not that the person works there, owns it, or has ever heard of
+it. Any such conclusion has to come from reading the passage, which is what
+the edge is for: it tells you *where to look*, not what you will find.
+
+Pairs farther apart than a paragraph get no edge. That both entities appear
+somewhere in the same document is already in \`document_entities\` in
+\`entities-registry.json\`; it is not repeated here as a relationship.
 
 ## Reading this bundle
 
@@ -163,6 +179,15 @@ export async function assembleZip(
       entityCount: r.entities.length,
     })),
     generated: new Date().toISOString(),
+    // Task 1 (spec §8 step 2): before this, every relationship in `entities-registry.json`
+    // and `kg-export/` could be a fabricated `works_for`/`partner_of`/`contact_email` claim
+    // asserted from bare co-occurrence. From this version on, every relationship type is
+    // `co_occurs_with`, scored by proximity, and asserts nothing beyond "named near each
+    // other". A reader (human or agent) diffing two bundles needs this to tell which
+    // semantics produced a given `entities-registry.json` without inspecting every edge —
+    // silently treating an old bundle's `works_for` edges as this version's weaker claim
+    // would be as wrong as the bug this field exists to flag.
+    relationshipSemanticsVersion: 2,
   };
   zip.file("_manifest.json", JSON.stringify(manifest, null, 2));
 
