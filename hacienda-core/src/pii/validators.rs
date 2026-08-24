@@ -144,11 +144,12 @@ pub fn validate_vin(text: &str) -> Option<bool> {
         sum += v * WEIGHTS[i];
     }
     let remainder = sum % 11;
-    let expected = if remainder == 10 {
-        'X'
-    } else {
-        char::from_digit(remainder, 10).unwrap()
-    };
+    // `remainder` is 0..=10: 10 is the ISO 3779 'X' case, and `char::from_digit` always
+    // succeeds for 0..=9. `unwrap_or('X')` reaches its fallback only on 10, so it is
+    // equivalent to the explicit branch it replaces — not a masked failure — while
+    // keeping this a no-panic path per this crate's "no unwrap/expect in library code"
+    // rule, in case `WEIGHTS` or the modulus ever changes shape.
+    let expected = char::from_digit(remainder, 10).unwrap_or('X');
     let north_american = matches!(chars[0], '1'..='5');
     if chars[8] == expected {
         Some(true)
