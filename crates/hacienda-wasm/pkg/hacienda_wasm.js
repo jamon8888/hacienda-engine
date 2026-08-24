@@ -22,9 +22,20 @@ export class AuditHandle {
     }
     /**
      * Every entry recorded so far for the default tenant, oldest first — backs
-     * `DocumentDetail.tsx`'s Audit tab entry list. `AuditStore::entries` already
-     * exists on the native side (used by the CLI/API's own audit views); this just
-     * exposes it to JS rather than adding a second listing mechanism.
+     * `DocumentDetail.tsx`'s Audit tab entry list.
+     *
+     * Pages through [`AuditStore::history`], **not** `AuditStore::entries`. The two
+     * are not interchangeable: `entries` reports only the currently-open segment, so
+     * once a rotation has happened it answers "what was recorded since the last
+     * rotation" while looking like it answers "what was recorded". `history`'s own
+     * doc comment names the consequence — an auditor concluding that events which
+     * exist never happened — and that is exactly what an Audit tab built on `entries`
+     * would show.
+     *
+     * Paged to exhaustion here rather than exposing a cursor to JS: the caller is one
+     * browser-local tab rendering its own chain, and `IndexedDbAuditStore` already
+     * holds the segment in memory, so there is no page the UI could usefully defer.
+     * A JS-side cursor API is the right shape if this ever backs a server-side chain.
      * @returns {Promise<any>}
      */
     listEntries() {
@@ -686,12 +697,12 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1616, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1623, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___wasm_bindgen_bf7b0d491ce864c2___JsValue__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 1578, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 1585, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___web_sys_c2086d39a3c4ab29___features__gen_Event__Event______true_);
             return ret;
         },
@@ -701,7 +712,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1580, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1587, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke_______true_);
             return ret;
         },

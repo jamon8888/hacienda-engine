@@ -10,9 +10,20 @@ export class AuditHandle {
     [Symbol.dispose](): void;
     /**
      * Every entry recorded so far for the default tenant, oldest first — backs
-     * `DocumentDetail.tsx`'s Audit tab entry list. `AuditStore::entries` already
-     * exists on the native side (used by the CLI/API's own audit views); this just
-     * exposes it to JS rather than adding a second listing mechanism.
+     * `DocumentDetail.tsx`'s Audit tab entry list.
+     *
+     * Pages through [`AuditStore::history`], **not** `AuditStore::entries`. The two
+     * are not interchangeable: `entries` reports only the currently-open segment, so
+     * once a rotation has happened it answers "what was recorded since the last
+     * rotation" while looking like it answers "what was recorded". `history`'s own
+     * doc comment names the consequence — an auditor concluding that events which
+     * exist never happened — and that is exactly what an Audit tab built on `entries`
+     * would show.
+     *
+     * Paged to exhaustion here rather than exposing a cursor to JS: the caller is one
+     * browser-local tab rendering its own chain, and `IndexedDbAuditStore` already
+     * holds the segment in memory, so there is no page the UI could usefully defer.
+     * A JS-side cursor API is the right shape if this ever backs a server-side chain.
      */
     listEntries(): Promise<any>;
     /**

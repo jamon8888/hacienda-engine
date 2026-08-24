@@ -189,6 +189,10 @@ mod audit_handle {
     /// that made it.
     const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+    /// Page size [`AuditHandle::list_entries`] pulls `AuditStore::history` in. Only a
+    /// round-trip granularity, not a cap: `list_entries` pages to exhaustion.
+    const HISTORY_PAGE_SIZE: usize = 512;
+
     /// One open [`IndexedDbAuditStore`] connection, exposed to JS.
     #[wasm_bindgen]
     pub struct AuditHandle {
@@ -310,17 +314,48 @@ mod audit_handle {
         }
 
         /// Every entry recorded so far for the default tenant, oldest first — backs
-        /// `DocumentDetail.tsx`'s Audit tab entry list. `AuditStore::entries` already
-        /// exists on the native side (used by the CLI/API's own audit views); this just
-        /// exposes it to JS rather than adding a second listing mechanism.
+        /// `DocumentDetail.tsx`'s Audit tab entry list.
+        ///
+        /// Pages through [`AuditStore::history`], **not** `AuditStore::entries`. The two
+        /// are not interchangeable: `entries` reports only the currently-open segment, so
+        /// once a rotation has happened it answers "what was recorded since the last
+        /// rotation" while looking like it answers "what was recorded". `history`'s own
+        /// doc comment names the consequence — an auditor concluding that events which
+        /// exist never happened — and that is exactly what an Audit tab built on `entries`
+        /// would show.
+        ///
+        /// Paged to exhaustion here rather than exposing a cursor to JS: the caller is one
+        /// browser-local tab rendering its own chain, and `IndexedDbAuditStore` already
+        /// holds the segment in memory, so there is no page the UI could usefully defer.
+        /// A JS-side cursor API is the right shape if this ever backs a server-side chain.
         #[wasm_bindgen(js_name = listEntries)]
         pub async fn list_entries(&self) -> Result<JsValue, JsValue> {
-            let entries = self
-                .store
-                .entries(&TenantId::default_tenant())
-                .await
-                .map_err(to_js_err)?;
-            serde_wasm_bindgen::to_value(&entries).map_err(to_js_err)
+            let tenant = TenantId::default_tenant();
+            let mut all: Vec<hacienda_core::audit::AuditEntry> = Vec::new();
+            let mut cursor: Option<hacienda_core::audit::AuditCursor> = None;
+
+            loop {
+                let page = self
+                    .store
+                    .history(&tenant, cursor.as_ref(), HISTORY_PAGE_SIZE)
+                    .await
+                    .map_err(to_js_err)?;
+                // `history` never reports "finished" — a non-empty page always yields a
+                // cursor (see `AuditPage::next`), so an empty page is the only stop
+                // condition, and `next: None` on a non-empty page would be a store bug
+                // rather than the end of the chain. Break on either instead of looping
+                // forever if one ever occurs.
+                if page.entries.is_empty() {
+                    break;
+                }
+                all.extend(page.entries);
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+
+            serde_wasm_bindgen::to_value(&all).map_err(to_js_err)
         }
 
         /// The chain's current head — a client that records this alongside a result can
