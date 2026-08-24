@@ -89,29 +89,54 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
   // up keys recorded since the panel last rendered) rather than on every keystroke.
   const [knownKeys] = useState(() => listKnownKeys());
 
+  const CREDENTIAL_ERROR =
+    "Wrong passphrase, wrong key id, or this document used mask mode.";
+
   async function onReveal() {
     setBusy(true);
     setError(null);
+    let value: string | null;
     try {
       const keyHex = await deriveKeyHex(passphrase, keyId);
-      const value = await revealToken(finding.redact_template, keyId, keyHex);
-      if (value === null) {
-        setError("Wrong passphrase, wrong key id, or this document used mask mode.");
-      } else {
-        // Recorded before the plaintext is shown, matching `redactPii`'s "a failed audit
-        // write fails the call" philosophy (`lib/pii-engine.ts`) — an audit trail for a
-        // compliance feature that can silently miss a reveal is worse than a visible
-        // failure here.
-        await recordPiiReveal(value, finding.category, finding.source);
-        setRevealed(value);
-        recordKeyUsage(keyId);
-      }
+      value = await revealToken(finding.redact_template, keyId, keyHex);
     } catch {
-      setError("Wrong passphrase, wrong key id, or this document used mask mode.");
-    } finally {
+      setError(CREDENTIAL_ERROR);
       setBusy(false);
       setPassphrase("");
+      return;
     }
+
+    if (value === null) {
+      setError(CREDENTIAL_ERROR);
+      setBusy(false);
+      setPassphrase("");
+      return;
+    }
+
+    // The audit write is deliberately *not* inside the credential try block above. It runs
+    // only after the token has already been successfully revealed, so a failure here says
+    // nothing about the passphrase — reporting it as "wrong passphrase" told the user their
+    // credentials were bad when they were correct and only the audit store was unavailable,
+    // leaving them retyping a passphrase that was never the problem.
+    //
+    // Plaintext still stays hidden on an audit failure, matching `redactPii`'s "a failed
+    // audit write fails the call" philosophy (`lib/pii-engine.ts`): a compliance feature
+    // that can silently reveal PII without recording it is worse than one that refuses.
+    try {
+      await recordPiiReveal(value, finding.category, finding.source);
+    } catch {
+      setError(
+        "Your passphrase was correct, but the reveal could not be written to the audit chain, so the value is not shown. Try again — revealing PII without an audit record is not permitted.",
+      );
+      setBusy(false);
+      setPassphrase("");
+      return;
+    }
+
+    setRevealed(value);
+    recordKeyUsage(keyId);
+    setBusy(false);
+    setPassphrase("");
   }
 
   return (

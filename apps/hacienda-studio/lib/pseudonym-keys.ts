@@ -17,6 +17,7 @@
  * a passphrase the user re-enters each time (see `lib/pseudonymize.ts`'s `deriveKeyHex`).
  * Removing an entry here only forgets a label; it cannot make a key unreadable.
  */
+import { isValidKeyId } from "./pseudonymize";
 
 const STORAGE_KEY = "hacienda-studio:pseudonym-keys";
 
@@ -27,13 +28,36 @@ export interface KnownPseudonymKey {
   lastUsedAt: string;
 }
 
+/**
+ * `localStorage` is shared with every other script on the origin and survives across app
+ * versions, so its contents are untrusted input, not our own data structure. An
+ * `Array.isArray` check alone let a stored `[1, null, {}]` through as
+ * `KnownPseudonymKey[]`, and the first `k.keyId.trim()` in the picker would then throw
+ * inside a render. Validate each record and drop the ones that do not conform, rather
+ * than trusting the array's element type or failing the whole read.
+ */
+function isKnownPseudonymKey(value: unknown): value is KnownPseudonymKey {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.keyId === "string" &&
+    isValidKeyId(candidate.keyId) &&
+    typeof candidate.label === "string" &&
+    typeof candidate.lastUsedAt === "string" &&
+    !Number.isNaN(Date.parse(candidate.lastUsedAt))
+  );
+}
+
 function readAll(): KnownPseudonymKey[] {
   if (typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    // Per-element filter, not an all-or-nothing reject: one malformed record written by an
+    // older version should not discard every key id the user still needs to reveal with.
+    return parsed.filter(isKnownPseudonymKey);
   } catch {
     // Corrupt or foreign localStorage content is not this module's problem to diagnose —
     // treat it the same as "no keys known yet" rather than throwing out of every caller.
@@ -58,7 +82,9 @@ export function listKnownKeys(): KnownPseudonymKey[] {
  */
 export function recordKeyUsage(keyId: string): void {
   const trimmed = keyId.trim();
-  if (!trimmed) return;
+  // Same rule `readAll` filters on and `mintToken` enforces — recording an id the
+  // pseudonymiser would reject only puts an unusable entry in the picker.
+  if (!isValidKeyId(trimmed)) return;
   const keys = readAll();
   const existing = keys.find((k) => k.keyId === trimmed);
   const now = new Date().toISOString();

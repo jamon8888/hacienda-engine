@@ -437,7 +437,6 @@ export async function loadNerModel(
   tokenizer: Uint8Array;
   encoderConfig: Uint8Array;
 }> {
-  await checkStorageQuota();
   const db = await getDB();
 
   // Check cache first
@@ -450,6 +449,13 @@ export async function loadNerModel(
   if (model && tokenizer && config) {
     return { model, tokenizer, encoderConfig: config };
   }
+
+  // Quota is checked *after* the cache lookup, never before: the check exists to avoid
+  // downloading ~620MB we then cannot persist, so it is only meaningful on the path that
+  // actually writes. Running it first rejected users whose model was already cached and
+  // usable — nothing needs writing in that case, and free space is irrelevant to serving
+  // it from IndexedDB.
+  await checkStorageQuota();
 
   // Only the model's own progress is reported — it dwarfs the tokenizer (~16MB) and config
   // (<1KB), so tracking all three separately would add complexity without changing what the

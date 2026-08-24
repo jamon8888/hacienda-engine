@@ -15,6 +15,7 @@ import { CodeLines } from "@/components/CodeLines";
 import { DocumentOutline } from "@/components/DocumentOutline";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { PiiPanel } from "@/components/PiiPanel";
+import { ViewerErrorBoundary } from "@/components/ViewerErrorBoundary";
 import { RedactedEditor } from "@/components/RedactedEditor";
 // Lazy, not a static import: `@extend-ai/react-{docx,pptx,xlsx}` each ship their own
 // import-workers and CJS/UMD dependencies (utif, pako, regl — see vite.config.ts's
@@ -265,6 +266,7 @@ export function DocumentDetail({
               hasViewer ? (
                 <div className="h-full min-h-[520px] bg-[#0a0e13] p-2">
                   <div className="h-full overflow-hidden rounded-lg border border-border bg-background">
+                    <ViewerErrorBoundary fileName={result.frontmatter.source}>
                     <Suspense fallback={<ViewerLoadingFallback />}>
                       {(viewerKind === "docx" || viewerKind === "doc") && (
                         <DocxViewerPreview
@@ -288,6 +290,7 @@ export function DocumentDetail({
                         <PptxViewerPreview src={previewUrl} fileName={result.frontmatter.source} showUpload={false} />
                       )}
                     </Suspense>
+                    </ViewerErrorBoundary>
                     {viewerKind === "pdf" && (
                       <PDFViewer src={previewUrl} fileName={result.frontmatter.source} showUpload={false} />
                     )}

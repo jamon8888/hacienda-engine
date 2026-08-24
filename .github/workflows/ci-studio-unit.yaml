@@ -47,7 +47,17 @@ jobs:
       run:
         working-directory: apps/hacienda-studio
     steps:
+      # `persist-credentials: false` matches ci-rust.yaml/ci-wasm-freshness.yaml: this job
+      # only reads the tree, so leaving a usable token in .git/config for every later step
+      # (including `npm install`'s lifecycle scripts) buys nothing.
+      #
+      # Actions are left on `@v4` tags rather than pinned to SHAs deliberately: every one
+      # of the repo's 24 workflow checkouts uses a tag today, and pinning this file alone
+      # would leave a single outlier that silently stops receiving upstream patches while
+      # the rest keep floating. Pinning is worth doing — repo-wide, in its own change.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:

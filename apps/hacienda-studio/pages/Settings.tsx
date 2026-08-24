@@ -4,11 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   listKnownKeys,
-  recordKeyUsage,
   removeKnownKey,
   renameKnownKey,
   type KnownPseudonymKey,
 } from "@/lib/pseudonym-keys";
+import { isValidKeyId } from "@/lib/pseudonymize";
 
 type Props = {
   config: AppConfig;
@@ -139,6 +139,9 @@ export function Settings({ config, onChange }: Props) {
   // Read once on mount — reopening Settings is enough to pick up a key used elsewhere
   // (e.g. a reveal in `PiiPanel.tsx`) since last render.
   const [knownKeys] = useState(() => listKnownKeys());
+  // Mirrors `mintToken`'s own precondition so an id it would reject is caught here, in the
+  // field the user can fix, rather than mid-batch inside the worker.
+  const keyIdValid = isValidKeyId(config.pseudonymKeyId.trim());
 
   const toggleCategory = (key: NerCategory) => {
     const has = config.nerCategories.includes(key);
@@ -200,6 +203,8 @@ export function Settings({ config, onChange }: Props) {
                   list="known-pseudonym-keys"
                   value={config.pseudonymKeyId}
                   onChange={(e) => onChange({ ...config, pseudonymKeyId: e.target.value })}
+                  aria-invalid={!keyIdValid}
+                  aria-describedby={keyIdValid ? undefined : "pseudonym-key-id-error"}
                   placeholder="session"
                 />
                 <datalist id="known-pseudonym-keys">
@@ -209,6 +214,15 @@ export function Settings({ config, onChange }: Props) {
                     </option>
                   ))}
                 </datalist>
+                {/* `mintToken` rejects an id outside this rule and fails the whole file
+                  * mid-batch, so surface it here rather than letting processing die on it
+                  * (`lib/pseudonymize.ts`'s `isValidKeyId`). */}
+                {!keyIdValid && (
+                  <p id="pseudonym-key-id-error" className="text-xs text-destructive">
+                    Identifiant invalide : 1 à 16 caractères, uniquement des minuscules,
+                    chiffres et « _ ».
+                  </p>
+                )}
                 <label htmlFor="pseudonym-passphrase" className="mt-2">
                   Phrase secrète (ne quitte jamais votre navigateur)
                 </label>
@@ -218,12 +232,6 @@ export function Settings({ config, onChange }: Props) {
                   className={control}
                   value={config.pseudonymPassphrase}
                   onChange={(e) => onChange({ ...config, pseudonymPassphrase: e.target.value })}
-                  // Records the key id as "known" once the user has actually committed to
-                  // using it (a non-empty passphrase), not on every keystroke — this is the
-                  // point processing will derive against `config.pseudonymKeyId`.
-                  onBlur={() => {
-                    if (config.pseudonymPassphrase) recordKeyUsage(config.pseudonymKeyId);
-                  }}
                   placeholder="Utilisée pour dériver la clé de rédaction — mémorisez-la"
                 />
                 {!config.pseudonymPassphrase && (
@@ -237,36 +245,28 @@ export function Settings({ config, onChange }: Props) {
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="mb-1 block text-sm">Vertical</label>
-              <select
-                value={config.enabledVerticals?.[0] || "general"}
-                onChange={(e) => onChange({ ...config, enabledVerticals: [e.target.value] })}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                <option value="general">général</option>
-                <option value="m&a">m&a</option>
-                <option value="financial_services">services financiers</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm">Sensibilité</label>
-              <select
-                value={config.sensitivity || "balanced"}
-                onChange={(e) => onChange({ ...config, sensitivity: e.target.value as any })}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                <option value="low">Faible</option>
-                <option value="balanced">Équilibrée</option>
-                <option value="high">Élevée</option>
-              </select>
-            </div>
+          <div>
+            <label className="mb-1 block text-sm">Vertical</label>
+            <select
+              value={config.enabledVerticals?.[0] || "m&a"}
+              onChange={(e) =>
+                onChange({ ...config, enabledVerticals: [e.target.value as AppConfig["enabledVerticals"][number]] })
+              }
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="m&a">m&a</option>
+              <option value="financial_services">services financiers</option>
+              <option value="shared">partagé</option>
+            </select>
           </div>
 
           <div className="mt-4 flex items-center justify-between">
-            <span className="text-sm">Reconnaissance d'entités</span>
+            <span className="text-sm" id="toggle-pii-detection-label">Reconnaissance d'entités</span>
             <button
+              type="button"
+              role="switch"
+              aria-checked={config.enablePiiDetection}
+              aria-labelledby="toggle-pii-detection-label"
               onClick={() => onChange({ ...config, enablePiiDetection: !config.enablePiiDetection })}
               className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.enablePiiDetection ? "bg-primary" : "bg-muted"}`}
             >
@@ -280,8 +280,12 @@ export function Settings({ config, onChange }: Props) {
            * "did nothing." This control existed in the now-deleted ConfigPanel.tsx but was
            * dropped when its fields were ported into this file (be501cc) — restoring it. */}
           <div className="mt-3 flex items-center justify-between">
-            <span className="text-sm">Rédiger les PII dans la sortie</span>
+            <span className="text-sm" id="toggle-redact-output-label">Rédiger les PII dans la sortie</span>
             <button
+              type="button"
+              role="switch"
+              aria-checked={config.redactPiiInOutput}
+              aria-labelledby="toggle-redact-output-label"
               onClick={() => onChange({ ...config, redactPiiInOutput: !config.redactPiiInOutput })}
               className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.redactPiiInOutput ? "bg-primary" : "bg-muted"}`}
             >
@@ -296,8 +300,12 @@ export function Settings({ config, onChange }: Props) {
           )}
 
           <div className="mt-3 flex items-center justify-between">
-            <span className="text-sm">Reconnaissance optique</span>
+            <span className="text-sm" id="toggle-transcription-label">Reconnaissance optique</span>
             <button
+              type="button"
+              role="switch"
+              aria-checked={config.enableTranscription}
+              aria-labelledby="toggle-transcription-label"
               onClick={() => onChange({ ...config, enableTranscription: !config.enableTranscription })}
               className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.enableTranscription ? "bg-primary" : "bg-muted"}`}
             >
@@ -479,11 +487,17 @@ function PseudonymKeyVault() {
         <ul className="space-y-2">
           {keys.map((k) => (
             <li key={k.keyId} className="flex items-center gap-2 text-sm">
-              <span className="w-32 shrink-0 truncate font-mono text-xs text-muted-foreground">
+              <span
+                id={`key-vault-id-${k.keyId}`}
+                className="w-32 shrink-0 truncate font-mono text-xs text-muted-foreground"
+              >
                 {k.keyId}
               </span>
               <Input
                 className="h-8"
+                // Named against the key id beside it, so a screen reader announces which
+                // key this free-text label belongs to instead of an unlabelled textbox.
+                aria-label={`Libellé de la clé ${k.keyId}`}
                 value={editingLabel[k.keyId] ?? k.label}
                 onChange={(e) =>
                   setEditingLabel((prev) => ({ ...prev, [k.keyId]: e.target.value }))
@@ -496,6 +510,7 @@ function PseudonymKeyVault() {
               <Button
                 variant="destructive"
                 size="sm"
+                aria-label={`Oublier la clé ${k.keyId}`}
                 onClick={() => {
                   removeKnownKey(k.keyId);
                   setKeys(listKnownKeys());

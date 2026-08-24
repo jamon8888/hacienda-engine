@@ -314,9 +314,52 @@ export interface AuditEntryRow {
   chain_hash: string;
 }
 
+/**
+ * Narrows one `serde`-serialized `AuditEntry` crossing the wasm boundary.
+ *
+ * `listEntries` returns `any` (wasm-bindgen has no richer type for a `JsValue`), so a
+ * blind `as AuditEntryRow[]` is an assertion, not a check — a field renamed on the Rust
+ * side would surface as `undefined` rendered into the Audit tab rather than as an error,
+ * which for an audit view is the wrong failure. Only the fields the UI actually reads are
+ * required; `action` is checked against both shapes `RedactionAction` serializes to (a
+ * bare string for unit variants, `{ custom: "..." }` for the one tuple variant).
+ */
+function isAuditEntryRow(value: unknown): value is AuditEntryRow {
+  if (typeof value !== "object" || value === null) return false;
+  const e = value as Record<string, unknown>;
+  const actionOk =
+    typeof e.action === "string" ||
+    (typeof e.action === "object" &&
+      e.action !== null &&
+      typeof (e.action as Record<string, unknown>).custom === "string");
+  return (
+    typeof e.id === "string" &&
+    typeof e.timestamp === "string" &&
+    typeof e.category === "string" &&
+    typeof e.chain_hash === "string" &&
+    actionOk
+  );
+}
+
 /** Every entry recorded so far, oldest first — backs `DocumentDetail.tsx`'s Audit tab. */
 export async function listAuditEntries(): Promise<AuditEntryRow[]> {
   await initPiiEngine();
   const handle = await getAuditHandle();
-  return (await handle.listEntries()) as AuditEntryRow[];
+  const raw: unknown = await handle.listEntries();
+  if (!Array.isArray(raw)) {
+    throw new Error(
+      "[pii-engine] listEntries did not return an array — the wasm audit payload changed shape",
+    );
+  }
+  // Throws rather than filtering: a malformed entry means this build's view of the chain
+  // disagrees with the chain itself, and quietly dropping the rows we cannot parse would
+  // show a shorter, plausible-looking history — the same "events that exist never
+  // happened" failure the open-segment-vs-history distinction exists to prevent.
+  const bad = raw.findIndex((entry) => !isAuditEntryRow(entry));
+  if (bad !== -1) {
+    throw new Error(
+      `[pii-engine] audit entry at index ${bad} does not match the expected shape — refusing to render a partial chain`,
+    );
+  }
+  return raw as AuditEntryRow[];
 }
