@@ -44,7 +44,7 @@ import {
   type PiiPipelineResult,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
-import { hashSpanForProcessing } from "../lib/redaction-modes";
+import { hashSpanForProcessing, looksLikePseudonymToken } from "../lib/redaction-modes";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -314,6 +314,25 @@ function slugify(text: string): string {
     .substring(0, 64);
 }
 
+/**
+ * Task 3 (spec §8 step 3): `slugify` above derives a filename from an entity's real
+ * surface form — exactly what a pseudonym-keyed entity must never expose. This is the
+ * pseudonymize-mode equivalent: a short, deterministic, filesystem-safe slug derived
+ * from the *token* instead, so `entities/person-<slug>.md` carries no trace of the real
+ * name. FNV-1a, same construction as `lib/redaction-modes.ts`'s Hash-mode `fingerprint`
+ * — not a security boundary (the token itself is already the non-identifying value;
+ * this only needs to avoid collisions across one batch's entity count, not resist
+ * attack), so a fast non-cryptographic hash is the right tool, not `crypto.subtle`.
+ */
+function tokenSlug(token: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < token.length; i++) {
+    hash ^= token.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 /** The one shape the NER-result loop below actually reads from an entity. */
 interface RawNerEntity {
   category: string;
@@ -455,9 +474,30 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
  * entities-registry.json, or the KG export — exporting a redacted document beside
  * a knowledge graph naming every entity would defeat the point of redacting.
  * Only filters when output is actually being rewritten; scan-only mode doesn't
- * touch the markdown, so there's nothing to defeat. Drops the whole entity if
- * *any* of its mentions overlaps a PII finding, not just the overlapping span —
- * under-including is the safe direction here.
+ * touch the markdown, so there's nothing to defeat.
+ *
+ * Task 3 (spec §8 step 3): dropping the whole entity is still correct for mask, hash,
+ * and remove — none of those leave anything reversible behind, so the entity's real
+ * name has nowhere safe to live in the export. Pseudonymize with a real key is
+ * different: `[PERSON:session:a41f]` is a stable, non-identifying, reversible-only-
+ * with-the-key handle. Dropping the entity there throws away exactly the
+ * cross-document structure pseudonymization exists to preserve — see the spec's §3.2.
+ * An entity whose *every* overlapping finding carries a real pseudonym token
+ * (`looksLikePseudonymToken`) survives, rekeyed on that token: `name` and `slug`
+ * become the token and `tokenSlug(token)` respectively, so nothing downstream
+ * (registry, entity files, glossary, frontmatter, KG export) ever sees the real
+ * surface form again. An entity with even one overlapping finding that is *not* a
+ * real token — mask, hash, remove, or pseudonymize silently degraded to a mask
+ * template because no passphrase was given (`AppConfig.redactionMode`'s doc comment)
+ * — is dropped exactly as before: under-including is still the safe direction when
+ * there is no token to key it on.
+ *
+ * Deliberately keyed on each finding's `redact_template` shape rather than a
+ * `redactionMode` parameter: mask templates (`[EMAIL]`), hash fingerprints
+ * (`#email:1a2b…`), and empty remove templates all fail
+ * `looksLikePseudonymToken`'s stricter three-part pattern on their own, so this
+ * cannot be told the batch is pseudonymized while the findings it actually receives
+ * say otherwise — the caller has one fewer parameter to get out of sync.
  */
 export function filterExportableEntities(
   entities: Entity[],
@@ -465,9 +505,26 @@ export function filterExportableEntities(
   redactPiiInOutput: boolean,
 ): Entity[] {
   if (!redactPiiInOutput) return entities;
-  const overlapsPiiFinding = (span: { start: number; end: number }) =>
-    piiFindings.some((p) => span.start < p.end && p.start < span.end);
-  return entities.filter((e) => !e.spans.some(overlapsPiiFinding));
+  const overlappingFindings = (span: { start: number; end: number }) =>
+    piiFindings.filter((p) => span.start < p.end && p.start < span.end);
+
+  const result: Entity[] = [];
+  for (const e of entities) {
+    const overlaps = e.spans.flatMap(overlappingFindings);
+    if (overlaps.length === 0) {
+      result.push(e);
+      continue;
+    }
+    if (!overlaps.every((f) => looksLikePseudonymToken(f.redact_template))) {
+      continue; // dropped: at least one overlapping finding has no reversible token
+    }
+    // AES-SIV is deterministic (`lib/pseudonymize.ts`'s `mintToken`), so every mention
+    // of the same real name in this document already minted the identical token —
+    // any overlapping finding's template is as good as another to key on.
+    const token = overlaps[0].redact_template;
+    result.push({ ...e, name: token, slug: tokenSlug(token) });
+  }
+  return result;
 }
 
 function buildFrontmatter(

@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeAll } from "vitest";
 import type { Entity } from "../lib/types";
 import type { PiiEntity } from "../lib/pii-engine";
 import type { BridgeEntity } from "../lib/ner-bridge";
-import type { RegistryEntity } from "../lib/registry";
+import { BatchEntityRegistry, type RegistryEntity } from "../lib/registry";
 
 // `pipeline.ts` assigns `self.onmessage` at module scope (it's a worker entry
 // point). Stub `self` before importing it dynamically so that assignment has
@@ -264,6 +264,219 @@ describe("filterExportableEntities (Track A2)", () => {
     );
 
     expect(result).toEqual([misclassifiedPhone]);
+  });
+});
+
+describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", () => {
+  it("retains an entity whose overlapping finding carries a real pseudonym token, rekeyed on it", () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const finding = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: "[PERSON:session:MFRGG2LTMVRXEZLU]",
+    });
+
+    const [result] = filterExportableEntities([jean], [finding], true);
+
+    expect(result).toBeDefined();
+    expect(result.name).toBe("[PERSON:session:MFRGG2LTMVRXEZLU]");
+    // The slug must not be derivable back to "Jean Dupont" — it's a hash of the token,
+    // not of the real name, which is the whole point of this task.
+    expect(result.slug).not.toBe("jean-dupont");
+    expect(result.slug).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it("still drops the entity when pseudonymize has no key (mask-shaped fallback template)", () => {
+    // `worker/pipeline.ts`'s pseudonymize branch leaves `redact_template` at whatever
+    // `process()`/`process_with_model_entities` already produced when `pseudonymKeyHex`
+    // is null — a mask-shaped template, not a token. This is the degradation case
+    // `AppConfig.redactionMode`'s doc comment describes.
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const finding = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: "[PERSON]",
+    });
+
+    const result = filterExportableEntities([jean], [finding], true);
+
+    expect(result).toEqual([]);
+  });
+
+  it("drops the entity if any one of several overlapping findings lacks a real token", () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [
+        { start: 0, end: 11 },
+        { start: 50, end: 61 },
+      ],
+    });
+    const tokenFinding = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: "[PERSON:session:MFRGG2LTMVRXEZLU]",
+    });
+    const maskFinding = piiEntity({
+      category: "person",
+      start: 50,
+      end: 61,
+      redact_template: "[PERSON]",
+    });
+
+    const result = filterExportableEntities([jean], [tokenFinding, maskFinding], true);
+
+    expect(result).toEqual([]);
+  });
+
+  it("never writes a surface name into a pseudonymized bundle: entity file, glossary, and registry all key on the token", () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const acme = entity({
+      name: "Acme SAS",
+      type: "organization",
+      slug: "acme-sas",
+      spans: [{ start: 21, end: 29 }],
+    });
+    const findings = [
+      piiEntity({
+        category: "person",
+        start: 0,
+        end: 11,
+        redact_template: "[PERSON:session:MFRGG2LTMVRXEZLU]",
+      }),
+      piiEntity({
+        category: "organization",
+        start: 21,
+        end: 29,
+        redact_template: "[ORGANIZATION:session:NBSWY3DPEB3W64TM]",
+      }),
+    ];
+
+    const results = filterExportableEntities([jean, acme], findings, true);
+    const registry = new BatchEntityRegistry();
+    const registered = results.map((r) =>
+      registry.addEntity(
+        { name: r.name, type: r.type, slug: r.slug, count: r.count, spans: r.spans },
+        { vertical: "shared" },
+        "doc-001",
+      ),
+    );
+    const glossary = buildGlossaryIndex(registry.getEntities());
+    const entityFiles = registered.map((r) =>
+      buildEntityFile(r, [registry.getBatchId() + "/doc"]),
+    );
+
+    for (const surfaceName of ["Jean Dupont", "Acme SAS"]) {
+      for (const result of results) {
+        expect(result.name).not.toContain(surfaceName);
+        expect(result.slug).not.toContain(surfaceName.toLowerCase().replace(/\s+/g, "-"));
+      }
+      expect(glossary).not.toContain(surfaceName);
+      for (const file of entityFiles) {
+        expect(file).not.toContain(surfaceName);
+      }
+    }
+  });
+
+  it("gives the same real-world entity the same token across two documents, so cross-document dedup keys on it for free", async () => {
+    const { deriveKeyHex, mintToken } = await import("../lib/pseudonymize");
+    const keyHex = await deriveKeyHex("correct horse battery staple", "session");
+
+    // Simulates `worker/pipeline.ts`'s `processFiles`: one key derived once for the whole
+    // batch, `mintToken` called independently per document against the same real text.
+    const tokenInDoc1 = await mintToken("person", "Jean Dupont", "session", keyHex);
+    const tokenInDoc2 = await mintToken("person", "Jean Dupont", "session", keyHex);
+    expect(tokenInDoc1).toBe(tokenInDoc2); // the SIV determinism this task's fix relies on
+
+    const jeanInDoc1 = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const jeanInDoc2 = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 30, end: 41 }],
+    });
+    const findingInDoc1 = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: tokenInDoc1,
+    });
+    const findingInDoc2 = piiEntity({
+      category: "person",
+      start: 30,
+      end: 41,
+      redact_template: tokenInDoc2,
+    });
+
+    const [resultDoc1] = filterExportableEntities([jeanInDoc1], [findingInDoc1], true);
+    const [resultDoc2] = filterExportableEntities([jeanInDoc2], [findingInDoc2], true);
+
+    // Same name -> same token -> same name/slug on the exported entity -> the registry's
+    // existing `${normalizedName}|${type}|${vertical}` dedup key merges them into one
+    // entity with both documents in `source_documents`, with no code change to the
+    // registry itself required.
+    expect(resultDoc1.name).toBe(resultDoc2.name);
+    expect(resultDoc1.slug).toBe(resultDoc2.slug);
+
+    const registry = new BatchEntityRegistry();
+    registry.addEntity(
+      { name: resultDoc1.name, type: resultDoc1.type, slug: resultDoc1.slug, count: 1, spans: resultDoc1.spans },
+      { vertical: "shared" },
+      "doc-001",
+    );
+    const merged = registry.addEntity(
+      { name: resultDoc2.name, type: resultDoc2.type, slug: resultDoc2.slug, count: 1, spans: resultDoc2.spans },
+      { vertical: "shared" },
+      "doc-002",
+    );
+    expect(merged.source_documents).toEqual(["doc-001", "doc-002"]);
+  });
+
+  it("leaves mask, hash, and remove entity sets unaffected by this task's change", () => {
+    // Unit-level substitute for a byte-level bundle diff — Task 0 could not produce
+    // reference bundles on this host (no dev server / model available). This asserts the
+    // narrower but still meaningful property: for every mode except pseudonymize-with-a-
+    // key, `filterExportableEntities`'s decision per entity is identical to what it was
+    // before this task (drop on any overlap, keep otherwise) — `redact_template` shapes
+    // from mask (`[EMAIL]`), hash (`#email:1a2b…`), and remove (`""`) all fail
+    // `looksLikePseudonymToken`, so the new "retain and rekey" branch is never taken.
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const templates = ["[PERSON]", "#person:1a2b3c4d5e6f7890", ""];
+
+    for (const redact_template of templates) {
+      const finding = piiEntity({ category: "person", start: 0, end: 11, redact_template });
+      const result = filterExportableEntities([jean], [finding], true);
+      expect(result).toEqual([]);
+    }
   });
 });
 

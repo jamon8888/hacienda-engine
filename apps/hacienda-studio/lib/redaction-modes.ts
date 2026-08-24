@@ -23,9 +23,19 @@ export const REDACTION_MODES: { value: RedactionMode; label: string }[] = [
   { value: "remove", label: "Remove" },
 ];
 
-/** Matches the `[CATEGORY:key_id:...]` shape `AppConfig.redactionMode`'s doc comment
- * describes — the one shape a plain mask (`"[EMAIL]"`) never takes. */
-function looksLikePseudonymToken(template: string): boolean {
+/**
+ * Matches the `[CATEGORY:key_id:...]` shape `AppConfig.redactionMode`'s doc comment
+ * describes — the one shape a plain mask (`"[EMAIL]"`), a Hash-mode fingerprint
+ * (`"#email:1a2b…"`), or a Remove-mode empty string never takes.
+ *
+ * Exported (Task 3, spec §8 step 3) for `worker/pipeline.ts`'s `filterExportableEntities`,
+ * which uses this exact shape check to decide whether a PII finding overlapping an entity
+ * carries a real, reversible pseudonym token — safe to key an exported entity on — or a
+ * mask/hash/remove template, which is not. Reusing this predicate rather than duplicating
+ * the regex is what keeps the two call sites from silently disagreeing on what counts as
+ * "a real token" if this shape ever changes.
+ */
+export function looksLikePseudonymToken(template: string): boolean {
   return /^\[[A-Z_]+:[^:\]]+:[^\]]+\]$/.test(template);
 }
 
