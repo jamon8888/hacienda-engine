@@ -613,14 +613,60 @@ none new.
 
 ## Task 6 — Entity dossiers (spec §8 step 6)
 
+**Status: COMPLETE — implemented and verified 2026-08-25.**
+
 **Depends on Task 3** — quoted context must come from post-redaction markdown, or a pseudonymized bundle leaks through its own entity files.
 
-- [ ] Extend `buildEntityFile` (`lib/zip-export.ts:32-55`) with per-mention quoted context (±120 chars), taken from the **redacted** document body.
-- [ ] Add ranked co-occurring entities and observed date range.
-- [ ] Test: for a pseudonymized bundle, no quoted context contains a surface name — reuse Task 3.3's whole-bundle scan.
-- [ ] Watch bundle size: quoted context is the first thing here that scales with mention count, not
+- [x] Extend `buildEntityFile` (`lib/zip-export.ts:32-55`) with per-mention quoted context (±120 chars), taken from the **redacted** document body.
+      → confirmed: new `extractQuotedContext` (in new `lib/entity-dossier.ts`) searches `result.markdown`
+      — the exported, already-redacted document, never `rawMarkdown` — for literal occurrences of the
+      entity's `display_name`. This is what makes it safe under Task 3 with zero special-casing: a
+      pseudonymized entity's `display_name` is already its token by the time this runs
+      (`filterExportableEntities` rewrote it), and the real surface form was spliced out of the exported
+      string before this module ever sees it — searching `rawMarkdown` instead would have defeated Task 3
+      entirely. Deliberately does **not** consult `overrides` (K2's redaction-edit zip entries), matching
+      `assembleZip`'s own pre-existing documented rule that only the `documents/*.md` entry itself
+      reflects an override.
+- [x] Add ranked co-occurring entities and observed date range.
+      → confirmed: `rankCoOccurringEntities` reuses Task 1's `co_occurs_with` edges (no new inference),
+      deduped by other-entity id keeping the highest-confidence occurrence — the same pair can co-occur
+      across multiple documents, each producing its own edge, and listing the same entity three times
+      would be noise. `computeObservedDateRange` reuses the identical edges filtered to `type === "date"`,
+      scoped to strict ISO dates only — the same honest scoping `buildTimelineIndex` (Task 5.3) already
+      uses, for the identical reason (bilingual corpus, full date parsing out of scope). Degrades safely
+      for a pseudonymized date entity with no special-casing: a date's token never matches the ISO
+      pattern, so it's silently excluded rather than needing detection.
+- [x] Test: for a pseudonymized bundle, no quoted context contains a surface name — reuse Task 3.3's whole-bundle scan.
+      → confirmed: `lib/entity-dossier.test.ts`'s disclosure-safety block, two tests — one confirming a
+      pseudonym-keyed entity's quoted context contains only its token, one confirming co-occurring
+      entities in a pseudonymized dossier are themselves already-safe (sourced entirely through
+      `registry.getEntities()`, which by Task 3's design never contains an unsafe raw name in that mode).
+- [x] Watch bundle size: quoted context is the first thing here that scales with mention count, not
       entity count. Task 0's reference batch does not exist — measure the delta on whatever fixture
       batch this task's tests use, and state the fixture's size so the number is interpretable.
+      → confirmed and measured, stated exactly (not estimated): fixture is one entity mentioned 8 times
+      across 3 documents, ~600 characters of filler prose per document. **before=229 bytes,
+      after=1771 bytes, delta=1542 bytes (~1.5 KB), ~514 bytes per document** at 2 snippets/document
+      (`DOSSIER_MAX_SNIPPETS_PER_DOC=3` — this fixture's filler only has 2 real occurrences per
+      document). Extrapolated, not separately measured, to a corpus-wide entity spanning ~50 documents:
+      roughly 25 KB added to that one entity file. Flagged honestly as a real, not-fully-resolved risk:
+      the per-document cap bounds growth *per document*, not in aggregate across however many documents
+      an entity spans — a future revision may need a cross-document total cap if a real large,
+      high-overlap corpus shows this to matter; this fixture doesn't have enough documents to prove it
+      either way.
+
+**Backward compatibility, verified not just assumed:** `buildEntityFile`'s new third parameter
+(`extras: EntityDossierExtras`) defaults to empty/none, so every pre-Task-6 2-arg call site (three of
+them, across `pipeline.test.ts` and `zip-export.ts`'s own `assembleZip`) renders byte-identical output
+to before — confirmed by running the existing `.toContain(...)`-style tests unchanged, not by
+inspection alone.
+
+**Verification:** `npx vitest run`, run from `apps/hacienda-studio` specifically (running from the
+monorepo root sweeps in unrelated packages — `integrations/node/langchain`, `sdks/typescript` — with
+their own pre-existing, unrelated failures; caught and corrected during this task, noted here so it
+isn't rediscovered) → **310/310 passing** (was 294 after Task 5; +16, all in new
+`entity-dossier.test.ts`). `npx tsc --noEmit`, same scoping: still exactly the 7 pre-existing baseline
+errors, none new.
 
 ---
 

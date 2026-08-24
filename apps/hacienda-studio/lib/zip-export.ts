@@ -17,6 +17,13 @@ import type { ProcessedFile, AppConfig } from "./types";
 import type { BatchEntityRegistry, RegistryEntity } from "./registry";
 import { KGExporter } from "./kg-export";
 import { entityFileName, relativeDocLink } from "./annotate";
+import {
+  extractQuotedContext,
+  rankCoOccurringEntities,
+  computeObservedDateRange,
+  type CoOccurringEntity,
+  type ObservedDateRange,
+} from "./entity-dossier";
 import { looksLikePseudonymToken } from "./redaction-modes";
 
 export interface ZipBatch {
@@ -27,13 +34,46 @@ export interface ZipBatch {
 }
 
 /**
+ * Task 6 (spec §8 step 6, plan's "watch bundle size" note): quoted context is the first
+ * dossier field that scales with *mention count*, not entity count — an entity mentioned
+ * 40 times in one document could otherwise pull 40 snippets into one file. Capped per
+ * document (not globally) so a heavily-mentioned entity still gets *some* representation
+ * from every document it appears in, not just its single most-mentioned one.
+ *
+ * `3`/`5`, measured against `entity-dossier.test.ts`'s fixture (see that file for the
+ * exact corpus and the measured per-file size delta) rather than assumed.
+ */
+const DOSSIER_MAX_SNIPPETS_PER_DOC = 3;
+const DOSSIER_MAX_CO_OCCURRING = 5;
+
+/** Task 6 additions to `buildEntityFile`, bundled so the common (Track I2-only) 2-arg call sites elsewhere are unaffected — see that function's default value below. */
+export interface EntityDossierExtras {
+  /** `documents/...` path -> quoted snippets from that document's *exported* markdown. */
+  quotedContextByPath: Map<string, string[]>;
+  coOccurring: CoOccurringEntity[];
+  dateRange: ObservedDateRange | null;
+}
+
+const NO_DOSSIER_EXTRAS: EntityDossierExtras = {
+  quotedContextByPath: new Map(),
+  coOccurring: [],
+  dateRange: null,
+};
+
+/**
  * Track I2: "one file per entity, with backlinks." `docLinks` are already
  * `documents/...` paths (see `processFiles`'s `docPaths` map) — sorted by
  * the caller so file output is deterministic across runs.
+ *
+ * Task 6 (spec §8 step 6): `extras` turns this from an index card ("where does this
+ * entity appear") into a dossier ("what does this corpus say about it") — quoted context
+ * per document, ranked co-occurring entities, and an observed date range. Defaults to
+ * empty/none so every pre-Task-6 2-arg call site renders byte-identical output to before.
  */
 export function buildEntityFile(
   entity: RegistryEntity,
   docLinks: string[],
+  extras: EntityDossierExtras = NO_DOSSIER_EXTRAS,
 ): string {
   const typeLabel = entity.type.charAt(0).toUpperCase() + entity.type.slice(1);
   const lines = [`# ${entity.display_name}`, "", `- **Type:** ${typeLabel}`];
@@ -45,9 +85,30 @@ export function buildEntityFile(
   lines.push(
     `- **Mentions:** ${entity.mention_count} across ${docLinks.length} document${docLinks.length === 1 ? "" : "s"}`,
   );
+  if (extras.dateRange) {
+    lines.push(
+      extras.dateRange.earliest === extras.dateRange.latest
+        ? `- **Observed date:** ${extras.dateRange.earliest}`
+        : `- **Observed date range:** ${extras.dateRange.earliest} to ${extras.dateRange.latest}`,
+    );
+  }
+
+  if (extras.coOccurring.length > 0) {
+    lines.push("", "## Co-occurring entities", "");
+    for (const c of extras.coOccurring) {
+      const cTypeLabel = c.entity.type.charAt(0).toUpperCase() + c.entity.type.slice(1);
+      // Bare filename, not `relativeDocLink`/`relativeEntityLink`: both entity files are
+      // siblings in the same `entities/` directory, so no relative-path computation applies.
+      lines.push(`- [${c.entity.display_name}](${entityFileName(c.entity)}) \`${cTypeLabel}\` — ${c.context}`);
+    }
+  }
+
   lines.push("", "## Appears in", "");
   for (const docPath of docLinks) {
     lines.push(`- [${docPath.replace(/^documents\//, "")}](${relativeDocLink(docPath)})`);
+    for (const snippet of extras.quotedContextByPath.get(docPath) ?? []) {
+      lines.push(`  - "${snippet}"`);
+    }
   }
   return lines.join("\n") + "\n";
 }
@@ -454,15 +515,46 @@ export async function assembleZip(
   zip.file("CLAUDE.md", agentInstructions);
   zip.file("AGENTS.md", agentInstructions);
 
+  // Task 6 (spec §8 step 6): quoted context comes from `r.markdown` — the exported,
+  // already-redacted document — never `r.rawMarkdown`. This is the property that makes
+  // dossier context safe under Task 3's pseudonymize retention: a redacted span's real
+  // surface form was spliced out of `markdown` before this function ever runs, so
+  // searching it can only ever surface what the batch already decided was safe to
+  // export. `overrides` (K2's redaction-edit zip entries) is deliberately not consulted
+  // here either, matching `assembleZip`'s own documented rule that only the
+  // `documents/*.md` entry itself reflects an override — every other zip member is
+  // derived from processing-time state.
+  const markdownByPath = new Map(results.map((r) => ["documents/" + r.name, r.markdown]));
+  const allEntities = registry.getEntities();
+  const allRelationships = registry.getRelationships();
+
   const entitiesFolder = zip.folder("entities");
-  for (const entity of registry.getEntities()) {
+  for (const entity of allEntities) {
     const docLinks = entity.source_documents
       .map((docId) => docPaths.get(docId))
       .filter((p): p is string => !!p)
       .sort();
+
+    const quotedContextByPath = new Map<string, string[]>();
+    for (const docPath of docLinks) {
+      const markdown = markdownByPath.get(docPath);
+      if (!markdown) continue;
+      const snippets = extractQuotedContext(markdown, entity.display_name, DOSSIER_MAX_SNIPPETS_PER_DOC);
+      if (snippets.length > 0) quotedContextByPath.set(docPath, snippets);
+    }
+
     entitiesFolder?.file(
       entityFileName(entity),
-      buildEntityFile(entity, docLinks),
+      buildEntityFile(entity, docLinks, {
+        quotedContextByPath,
+        coOccurring: rankCoOccurringEntities(
+          entity.id,
+          allEntities,
+          allRelationships,
+          DOSSIER_MAX_CO_OCCURRING,
+        ),
+        dateRange: computeObservedDateRange(entity.id, allEntities, allRelationships),
+      }),
     );
   }
   zip.file("GLOSSARY.md", buildGlossaryIndex(registry.getEntities()));
