@@ -88,5 +88,6 @@ sur = "sur"
 appareil = "appareil"
 espace = "espace"
 convertis = "convertis"
+invalide = "invalide"
 
 [default.extend-identifiers]
