@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeAll } from "vitest";
-import type { Entity } from "../lib/types";
+import type { Entity, FileInput } from "../lib/types";
 import type { PiiEntity } from "../lib/pii-engine";
 import type { BridgeEntity } from "../lib/ner-bridge";
 import { BatchEntityRegistry, type RegistryEntity } from "../lib/registry";
@@ -15,6 +15,7 @@ let relativeEntityLink: typeof import("./pipeline").relativeEntityLink;
 let buildEntityFile: typeof import("./pipeline").buildEntityFile;
 let buildGlossaryIndex: typeof import("./pipeline").buildGlossaryIndex;
 let assignDocId: typeof import("./pipeline").assignDocId;
+let buildFrontmatter: typeof import("./pipeline").buildFrontmatter;
 
 beforeAll(async () => {
   (globalThis as { self?: unknown }).self = globalThis;
@@ -26,6 +27,7 @@ beforeAll(async () => {
     buildEntityFile,
     buildGlossaryIndex,
     assignDocId,
+    buildFrontmatter,
   } = await import("./pipeline"));
 });
 
@@ -494,6 +496,63 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
   });
 });
 
+describe("buildFrontmatter (Task 5.3, spec §8 step 5)", () => {
+  function fileInput(overrides: Partial<FileInput> = {}): FileInput {
+    return { name: "doc.pdf", bytes: new ArrayBuffer(0), type: "application/pdf", ...overrides };
+  }
+
+  it("emits a multi-line YAML entities list, not a single-line JSON blob", () => {
+    const jean = entity({ name: "Jean Dupont", type: "person", slug: "a41f7c2b9e3d", vertical: "shared" });
+    const frontmatter = buildFrontmatter(fileInput(), [jean], 1, "shared");
+
+    expect(frontmatter).not.toContain("[{");
+    expect(frontmatter).toContain("entities:\n  - name: \"Jean Dupont\"");
+    expect(frontmatter).toContain('    type: Person');
+    expect(frontmatter).toContain('    slug: "a41f7c2b9e3d"');
+    expect(frontmatter).toContain('    vertical: "shared"');
+  });
+
+  it("includes doc_type from the classified vertical, labelled as derived (not a real classification)", () => {
+    const frontmatter = buildFrontmatter(fileInput(), [], 0, "m&a");
+    expect(frontmatter).toContain('doc_type: "m&a"');
+  });
+
+  it("reconstructs entity_ids from each entity's (Task 4 hash-derived) slug", () => {
+    const jean = entity({ name: "Jean Dupont", type: "person", slug: "a41f7c2b9e3d" });
+    const acme = entity({ name: "Acme SAS", type: "organization", slug: "7c2b09d4e1a5" });
+    const frontmatter = buildFrontmatter(fileInput(), [jean, acme], 0, "shared");
+
+    expect(frontmatter).toContain('entity_ids: ["ent-a41f7c2b9e3d", "ent-7c2b09d4e1a5"]');
+  });
+
+  it("emits entities: [] when there are no entities, not an empty multi-line block", () => {
+    const frontmatter = buildFrontmatter(fileInput(), [], 0, "shared");
+    expect(frontmatter).toContain("entities: []");
+    expect(frontmatter).toContain("entity_ids: []");
+  });
+
+  it("escapes a quote and a colon in an entity name so the YAML stays parseable", () => {
+    // Real document text is arbitrary — an entity name containing `:` or `"` would
+    // corrupt an unquoted or naively-quoted YAML scalar.
+    const tricky = entity({ name: 'Acme "Global" Holdings: EMEA', type: "organization", slug: "x" });
+    const frontmatter = buildFrontmatter(fileInput(), [tricky], 0, "shared");
+
+    expect(frontmatter).toContain('name: "Acme \\"Global\\" Holdings: EMEA"');
+  });
+
+  it("quotes the source filename, which is arbitrary user input", () => {
+    const frontmatter = buildFrontmatter(fileInput({ name: 'weird: "file".pdf' }), [], 0, "shared");
+    expect(frontmatter).toContain('source: "weird: \\"file\\".pdf"');
+  });
+
+  it("still starts and ends with the --- delimiter export-resolve.ts's regex depends on", () => {
+    const frontmatter = buildFrontmatter(fileInput(), [], 0, "shared");
+    expect(frontmatter.startsWith("---\n")).toBe(true);
+    expect(frontmatter.endsWith("\n---")).toBe(true);
+    expect(frontmatter.match(/^---\n[\s\S]*?\n---/)?.[0]).toBe(frontmatter);
+  });
+});
+
 describe("relativeEntityLink (Track I2)", () => {
   const acme = { type: "organization", slug: "acme-sas" };
 
@@ -547,34 +606,41 @@ describe("buildEntityFile (Track I2)", () => {
   });
 });
 
-describe("buildGlossaryIndex (Track I2)", () => {
-  it("groups entities by type, alphabetically, with a link into entities/", () => {
-    const md = buildGlossaryIndex([
-      registryEntity({
-        display_name: "Beta SARL",
-        type: "organization",
-        vertical: "m&a",
-        mention_count: 1,
-        source_documents: ["doc-001"],
-        slug: "beta-sarl",
-      }),
-      registryEntity({
-        display_name: "Jean Dupont",
-        type: "person",
-        mention_count: 3,
-        source_documents: ["doc-001", "doc-002"],
-        slug: "jean-dupont",
-      }),
-    ]);
+describe("buildGlossaryIndex (Track I2, re-shaped by Task 5.3's top-N gating)", () => {
+  it("lists entities by mention count with an inline type tag and a link into entities/", () => {
+    // Task 5.3 (spec §8 step 5): replaced the old "grouped by type under a ## heading,
+    // every entity, unbounded" shape with a flat top-N-by-mention-count list — the
+    // per-type grouping moved to indexes/by-type/<type>.md (`buildByTypeIndex`), which
+    // has its own dedicated tests in lib/zip-export.test.ts.
+    const md = buildGlossaryIndex(
+      [
+        registryEntity({
+          display_name: "Beta SARL",
+          type: "organization",
+          vertical: "m&a",
+          mention_count: 1,
+          source_documents: ["doc-001"],
+          slug: "beta-sarl",
+        }),
+        registryEntity({
+          display_name: "Jean Dupont",
+          type: "person",
+          mention_count: 3,
+          source_documents: ["doc-001", "doc-002"],
+          slug: "jean-dupont",
+        }),
+      ],
+      5,
+    );
 
     expect(md).toContain("# Glossary");
-    // "Organization" sorts before "Person" alphabetically.
-    expect(md.indexOf("## Organization")).toBeLessThan(md.indexOf("## Person"));
+    // Higher mention_count sorts first: Jean Dupont (3) before Beta SARL (1).
+    expect(md.indexOf("Jean Dupont")).toBeLessThan(md.indexOf("Beta SARL"));
     expect(md).toContain(
-      "[Beta SARL](entities/organization-beta-sarl.md) — m&a, mentioned 1 time across 1 document",
+      "[Jean Dupont](entities/person-jean-dupont.md) `Person`, mentioned 3 times across 2 documents",
     );
     expect(md).toContain(
-      "[Jean Dupont](entities/person-jean-dupont.md), mentioned 3 times across 2 documents",
+      "[Beta SARL](entities/organization-beta-sarl.md) `Organization` — m&a, mentioned 1 time across 1 document",
     );
   });
 

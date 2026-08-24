@@ -498,25 +498,116 @@ errors (Task 0), none new — confirmed line-by-line, not just by count.
 
 ## Task 5 — The structural layer (spec §8 step 5)
 
+**Status: COMPLETE — implemented and verified 2026-08-25.**
+
 ### 5.1 Agent instruction files
 
-- [ ] Add `buildAgentInstructions()` to `lib/zip-export.ts` returning **one** string; write it to both `CLAUDE.md` and `AGENTS.md`. Byte-identical, one source — the spec's §4 reasoning is that a bundle explaining the pseudonym contract to one runtime and not the other is worse than one that explains it to neither.
-- [ ] Content: the routing table (spec §5.1.1) and the redaction contract. The contract must reflect the **actual** mode of this batch, not a hardcoded paragraph — a mask-mode bundle must not claim tokens are stable identities.
-- [ ] Test: both members exist, are byte-identical, and the redaction paragraph varies with mode.
+- [x] Add `buildAgentInstructions()` to `lib/zip-export.ts` returning **one** string; write it to both `CLAUDE.md` and `AGENTS.md`. Byte-identical, one source — the spec's §4 reasoning is that a bundle explaining the pseudonym contract to one runtime and not the other is worse than one that explains it to neither.
+      → confirmed: single function, written to both filenames from the same string in `assembleZip`.
+- [x] Content: the routing table (spec §5.1.1) and the redaction contract. The contract must reflect the **actual** mode of this batch, not a hardcoded paragraph — a mask-mode bundle must not claim tokens are stable identities.
+      → confirmed, with one deliberate widening beyond "reflects `config.redactionMode`": pseudonymize
+      silently degrades to mask-shaped output when no passphrase is given
+      (`AppConfig.pseudonymPassphrase`'s doc comment), so `config` alone cannot distinguish
+      "configured pseudonymize, took effect" from "configured pseudonymize, silently didn't". The
+      contract checks `registry.getEntities().some(e => looksLikePseudonymToken(e.display_name))` —
+      whether a real token is actually present — before claiming token stability, and emits a
+      distinct, honest "did not take effect" paragraph otherwise.
+- [x] Test: both members exist, are byte-identical, and the redaction paragraph varies with mode.
+      → confirmed: `lib/zip-export.test.ts`, 7 tests, going through the real `assembleZip` +
+      `JSZip.loadAsync` round trip (not a hand-rolled stand-in) — byte-identical check, and one test
+      per mode (mask/hash/remove/scan-only/pseudonymize-confirmed/pseudonymize-degraded).
 
 ### 5.2 Document→document edges
 
-- [ ] Compute shared-entity similarity from `docEntityMap`, IDF-weighted so an entity present in nearly every document contributes ~nothing.
-- [ ] Emit `## Related documents` with the **reason** attached (which entities are shared), not a bare link list.
-- [ ] Measure on a ≥20-document batch before fixing the cutoff — the assumption that this yields a useful list rather than a fully-connected graph is untested. Record the measurement in this plan.
+- [x] Compute shared-entity similarity from `docEntityMap`, IDF-weighted so an entity present in nearly every document contributes ~nothing.
+      → confirmed in the new `lib/related-documents.ts`. One real bug caught by the corpus's own
+      test, not by inspection: an entity with `idf === 0` (present in every document) was still
+      landing in `sharedEntityNames` — the `score > 0` gate filtered which *pairs* qualified but not
+      which *entities* got listed as the reason, so the ubiquitous entity would have appeared in
+      every "why are these related" line despite contributing nothing to the score. Fixed by gating
+      the per-entity push on `info.idf > 0`, not just the pair's total score.
+- [x] Emit `## Related documents` with the **reason** attached (which entities are shared), not a bare link list.
+      → confirmed: `buildRelatedDocumentsSection`, each line names the shared entities, ranked by
+      their own idf (most specific first). Required a real relative-path function
+      (`lib/annotate.ts`'s new `relativeDocumentLink`) rather than `relativeEntityLink`'s simpler
+      "always N levels up to a fixed depth" scheme — folder uploads preserve nested structure
+      (`lib/folder-picker.ts`'s `webkitRelativePath`), so two documents can sit at different
+      subdirectory depths from each other, unlike every document's fixed distance to `entities/`.
+      Appended to each document's markdown in a **post-loop pass** in `worker/pipeline.ts` (batch-wide
+      relatedness needs every document's entities registered, impossible per-document mid-loop) —
+      spliced *after* the existing `## Entities` glossary specifically so
+      `lib/export-resolve.ts`'s slicing needed zero changes (see 5.3's last item).
+- [x] Measure on a ≥20-document batch before fixing the cutoff — the assumption that this yields a useful list rather than a fully-connected graph is untested. Record the measurement in this plan.
+      → confirmed and recorded: `lib/related-documents.test.ts`'s 24-document synthetic corpus (6
+      non-overlapping entity clusters of size 2–4, one corpus-wide entity, 7 documents sharing
+      nothing). Measured unbounded per-document related-counts: **max 3, median 2, no long tail** —
+      `DEFAULT_MAX_RESULTS = 5` never truncates anything on this corpus shape. Documented honestly as
+      a lower bound, not proof of sufficiency: this corpus's clusters don't overlap by construction,
+      so it doesn't exercise the actual long-tail risk (a moderately common entity — present in,
+      say, a third of the batch — contributing small-but-nonzero score to many pairs at once). `5` is
+      a safety margin for that untested case, flagged for revisit once an overlapping-cluster corpus
+      is measured.
 
 ### 5.3 Frontmatter, indexes, jsonl
 
-- [ ] Replace the single-line JSON `entities:` blob (`worker/pipeline.ts:482`) with multi-line YAML; add `entity_ids`, `related`, `doc_type` (derived, and labelled as derived — no classifier head exists, spec §2.2).
-- [ ] Gate `GLOSSARY.md` to top-N by mention count with links out to `indexes/by-type/<type>.md`. Measure N against a real corpus rather than adopting the spec's placeholder 50 unexamined (spec §9 Q4).
-- [ ] Add `_index/entities.jsonl` and `_index/documents.jsonl` — one record per line, so a grep returns a parseable record.
-- [ ] Add `indexes/timeline.md` from date entities.
-- [ ] **Check the `resolveExportContent` interaction:** `lib/export-resolve.ts:24-38` reconstructs exported markdown by slicing frontmatter with `/^---\n[\s\S]*?\n---/` and the glossary with `lastIndexOf("\n## Entities\n\n")`. Changing frontmatter shape or appending new trailing sections can silently break the K2/I4 edit-override path. Test the override paths explicitly after this change.
+- [x] Replace the single-line JSON `entities:` blob (`worker/pipeline.ts:482`) with multi-line YAML; add `entity_ids`, `related`, `doc_type` (derived, and labelled as derived — no classifier head exists, spec §2.2).
+      → confirmed for `entities:`, `entity_ids`, and `doc_type`, with two deliberate deviations:
+      (1) frontmatter `related:` was **dropped** in favour of the "## Related documents" markdown
+      section alone (5.2) — splicing `related:` into an already-serialized frontmatter block after
+      the fact needs either a YAML library (no existing dependency) or fragile string-patching, and
+      the section already carries the same information in a form both a human and an agent read
+      directly; duplicating it into frontmatter for machine consumption was judged not worth that
+      complexity for this task. (2) `doc_type` is `classifyDocumentVertical`'s existing coarse
+      classification (`m&a` / `financial_services` / `shared`), not a richer "contract vs invoice"
+      category — there is no classifier head on the reachable path (spec §2.2) and Tier 1 is out of
+      this plan's scope, so a more specific-sounding value would overclaim what was actually
+      derived. All string scalars are always double-quoted (`yamlString`), not selectively — entity
+      names and filenames are arbitrary document/user text that could contain `:`, `"`, or start
+      with `-`, and quoting unconditionally means nothing here has to reason about which values are
+      "safe enough" to leave bare.
+- [x] Gate `GLOSSARY.md` to top-N by mention count with links out to `indexes/by-type/<type>.md`. Measure N against a real corpus rather than adopting the spec's placeholder 50 unexamined (spec §9 Q4).
+      → confirmed and measured (no real corpus available — Task 0.2's wasm build blocker still
+      stands — so measured against a 300-entity synthetic corpus with a deliberately
+      slow-decaying Zipfian mention-count distribution, harder to cover than a steep power law).
+      **N=50 → 3.8 KB / 53 lines, 71.6% of total mentions captured; N=100 → 7.5 KB / 103 lines,
+      82.4%; N=25 → 1.9 KB / 28 lines, only 60.6%.** No sharp knee in this shape — it's a genuine
+      size/coverage tradeoff, not a threshold discovery. Kept the spec's placeholder value (50)
+      because the measurement supports it as a reasonable point on that tradeoff (cheap to read in
+      full, most of what a reader wants), not because it was assumed — the number is now backed by
+      a rerunnable measurement instead of being unexamined.
+- [x] Add `_index/entities.jsonl` and `_index/documents.jsonl` — one record per line, so a grep returns a parseable record.
+      → confirmed: `buildEntitiesJsonl`/`buildDocumentsJsonl`, one `JSON.stringify(...)` per line, no
+      pretty-printing (which is exactly what makes `entities-registry.json` grep-hostile today).
+- [x] Add `indexes/timeline.md` from date entities.
+      → confirmed, deliberately scoped: strict ISO `YYYY-MM-DD` only sorted chronologically (correct
+      as plain string sort, no date-math needed), with every other date format — this corpus is
+      bilingual and `lib/ner-bridge.ts`'s `DATE_PATTERN` detects French and English, numeric and
+      spelled-out dates — routed to an explicitly-labelled "unparsed, alphabetical" section rather
+      than silently mis-sorted against a format it can't actually compare. Full bilingual date
+      parsing is out of scope here; flagged as a real, separate follow-up.
+- [x] **Check the `resolveExportContent` interaction:** `lib/export-resolve.ts:24-38` reconstructs exported markdown by slicing frontmatter with `/^---\n[\s\S]*?\n---/` and the glossary with `lastIndexOf("\n## Entities\n\n")`. Changing frontmatter shape or appending new trailing sections can silently break the K2/I4 edit-override path. Test the override paths explicitly after this change.
+      → confirmed via new `lib/export-resolve.test.ts` (no test file existed for this module before):
+      the multi-line YAML frontmatter still isolates correctly (the regex is non-greedy to the first
+      `\n---`, and no YAML value here is ever a bare `---` line); the "## Related documents" section,
+      appended *after* "## Entities" by design (5.2), is swept into the same "carried over unchanged"
+      tail the existing `lastIndexOf`+`.slice` already treats "## Entities" as — proven by a
+      redaction-edit re-export test that reconstructs the body against edited findings and confirms
+      the trailing block survives byte-for-byte. All three `resolveExportContent` paths (plain,
+      `editedFindings`, `redactedDrafts`) explicitly tested for whether they carry the section, with
+      K2's free-text-override path confirmed to correctly **not** carry it (pre-existing, documented
+      behavior, unaffected by this task).
+
+**One pre-existing test broken by design, found and fixed, not silently left red:**
+`worker/pipeline.test.ts`'s `buildGlossaryIndex` test asserted the old per-type `## Heading`
+grouping this task intentionally replaced with a flat top-N-by-mention-count list. Updated to match
+the new shape (the per-type grouping's own coverage moved to `lib/zip-export.test.ts`'s
+`buildByTypeIndex` tests) rather than deleted or loosened.
+
+**Verification:** `npx vitest run` → **294/294 passing** (was 247 after Task 4; +47 across 4 new
+test files — `zip-export.test.ts`, `related-documents.test.ts`, `export-resolve.test.ts`, plus
+additions to `annotate.test.ts` and `pipeline.test.ts` — and 1 pre-existing test updated for an
+intentional shape change). `npx tsc --noEmit`: still exactly the 7 pre-existing baseline errors,
+none new.
 
 ---
 

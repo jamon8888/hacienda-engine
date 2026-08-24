@@ -65,6 +65,11 @@ import {
   buildGlossaryIndex,
   type ZipBatch,
 } from "../lib/zip-export";
+import {
+  computeRelatedDocuments,
+  topRelatedDocuments,
+  buildRelatedDocumentsSection,
+} from "../lib/related-documents";
 
 // Track I4: re-exported unchanged so nothing importing these from "./pipeline" (the
 // vitest suite included) needs to know they now live in lib/annotate.ts — see that
@@ -557,27 +562,73 @@ export function filterExportableEntities(
   return result;
 }
 
-function buildFrontmatter(
+/**
+ * Always-quote YAML scalar: correctness over minimalism. Entity names, filenames, and
+ * roles are arbitrary text from an uploaded document — a name containing `:`, starting
+ * with `-`, or looking like a YAML flow character would silently corrupt an unquoted
+ * plain scalar. A double-quoted scalar with `\`/`"`/newline escaped is unambiguous for
+ * every input, so nothing here needs to reason about which values are "safe enough" to
+ * leave bare.
+ */
+function yamlString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+}
+
+/**
+ * Task 5.3 (spec §8 step 5, §5.1.6): replaces the single-line `entities: [{...}]` JSON
+ * blob with a real multi-line YAML list — the JSON form put every entity's full metadata
+ * on one line, which a filesystem-MCP reader's `grep` returns as one unparseable
+ * fragment rather than a readable record (spec §4's whole argument for why this bundle's
+ * shape matters to an agent reading it, not just a human).
+ *
+ * `doc_type` is `classifyDocumentVertical`'s own coarse, keyword-matched classification
+ * (`m&a` / `financial_services` / `shared`), surfaced at the document level for the
+ * first time — previously computed but only ever used as a per-entity vertical
+ * *fallback*, never written to frontmatter itself. Deliberately not a richer
+ * "contract vs invoice vs board-minutes" classification: no classifier head exists on
+ * the reachable GLiNER2 path (spec §2.2), and Tier 1 semantic labels are out of this
+ * plan's scope — inventing a more specific-sounding field from the same regex signal
+ * would overclaim what was actually derived.
+ *
+ * `entity_ids` reconstructs each `ent-<slug>` from `Entity.slug` rather than carrying a
+ * separate `id` field on the worker-local `Entity` type: post-Task-4, `slug` already *is*
+ * the id's hash suffix (`registry.ts`'s `identityFor`: `id = "ent-" + slug`), so
+ * widening `Entity` for a value already fully recoverable from a field it already has
+ * would be duplication, not a new capability.
+ */
+export function buildFrontmatter(
   input: FileInput,
   entities: Entity[],
   piiEntitiesFound: number,
+  docType: string,
 ): string {
-  const entityMeta = entities.map((e) => ({
-    name: e.name,
-    type: e.type.charAt(0).toUpperCase() + e.type.slice(1),
-    slug: e.slug,
-    ...(e.vertical && { vertical: e.vertical }),
-    ...(e.sector && { sector: e.sector }),
-    ...(e.roles && e.roles.length && { roles: e.roles }),
-  }));
-
   const type = input.type.split("/")[1] || "unknown";
+  const entityIds = entities.map((e) => `"ent-${e.slug}"`).join(", ");
+
+  const entityLines = entities.map((e) => {
+    const lines = [
+      `  - name: ${yamlString(e.name)}`,
+      `    type: ${e.type.charAt(0).toUpperCase() + e.type.slice(1)}`,
+      `    slug: ${yamlString(e.slug)}`,
+    ];
+    if (e.vertical) lines.push(`    vertical: ${yamlString(e.vertical)}`);
+    if (e.sector) lines.push(`    sector: ${yamlString(e.sector)}`);
+    if (e.roles && e.roles.length) {
+      lines.push(`    roles: [${e.roles.map(yamlString).join(", ")}]`);
+    }
+    return lines.join("\n");
+  });
+  const entitiesBlock =
+    entities.length === 0 ? "entities: []" : `entities:\n${entityLines.join("\n")}`;
+
   return `---
-source: ${input.name}
+source: ${yamlString(input.name)}
 type: ${type}
 processed: ${new Date().toISOString()}
 pii_entities_found: ${piiEntitiesFound}
-entities: ${JSON.stringify(entityMeta)}
+doc_type: ${yamlString(docType)}
+entity_ids: [${entityIds}]
+${entitiesBlock}
 ---`;
 }
 
@@ -1088,7 +1139,7 @@ async function processFile(
     docPath,
   );
 
-  const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound);
+  const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound, documentVertical);
   const glossary = buildGlossary(deduped, docPath);
 
   const finalMarkdown = frontmatter + "\n" + linkedMarkdown + glossary;
@@ -1295,6 +1346,31 @@ async function processFiles(
     }
   }
   console.log("[Worker] All files processed");
+
+  // Task 5.2 (spec §8 step 5): document-to-document relatedness needs every file's
+  // entities registered, which is only true once the whole loop above has finished —
+  // this cannot run per-document inside it. `docPaths.keys()`, not a separately-tracked
+  // id list: a failed file's docId (if `assignDocId` ran before it failed) never reaches
+  // `docPaths.set`, correctly excluding it from relatedness the same way it's already
+  // excluded from the registry. Spliced onto `result.markdown` *after* `buildGlossary`'s
+  // "## Entities" section is already baked in — see `buildRelatedDocumentsSection`'s doc
+  // comment for why that ordering, not this one, is what keeps `export-resolve.ts`'s
+  // redaction-edit re-export working with zero changes there.
+  const allDocIds = Array.from(docPaths.keys());
+  const related = computeRelatedDocuments(registry.getEntities(), allDocIds);
+  const docIdByPath = new Map(
+    Array.from(docPaths.entries()).map(([docId, path]) => [path, docId]),
+  );
+  for (const result of results) {
+    const ownPath = "documents/" + result.name;
+    const docId = docIdByPath.get(ownPath);
+    if (!docId) continue;
+    const topRelated = topRelatedDocuments(related.get(docId) ?? []);
+    if (topRelated.length > 0) {
+      result.markdown += buildRelatedDocumentsSection(topRelated, ownPath, docPaths);
+    }
+  }
+
   // Track K/Phase 2: the zip is no longer built here — retained so a later on-demand
   // "build-zip" message (see self.onmessage below) can call assembleZip() without
   // re-deriving the registry/docPaths/config that only this function's scope has.
