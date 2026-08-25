@@ -49,6 +49,33 @@ export function relativeDocLink(docPath: string): string {
 }
 
 /**
+ * Task 5.2 (spec §8 step 5): a real relative path from one `documents/...` file to
+ * another, not `relativeEntityLink`'s simpler "count segments, go up N times" scheme —
+ * that scheme only works because every entity file lives at the *same* fixed depth
+ * (`entities/`, one directory below the zip root). Two documents can live at *different*
+ * depths from each other: `lib/folder-picker.ts` preserves a folder upload's nested
+ * structure via `webkitRelativePath`, so `documents/2024/msa.md` and
+ * `documents/minutes/board.md` are both real, valid paths in the same batch. Both
+ * arguments are `documents/...`-prefixed paths (matching every other function in this
+ * file), not bare filenames.
+ */
+export function relativeDocumentLink(fromDocPath: string, toDocPath: string): string {
+  const fromDir = fromDocPath.split("/").slice(0, -1);
+  const toParts = toDocPath.split("/");
+  let common = 0;
+  while (
+    common < fromDir.length &&
+    common < toParts.length - 1 &&
+    fromDir[common] === toParts[common]
+  ) {
+    common++;
+  }
+  const ups = "../".repeat(fromDir.length - common);
+  const downs = toParts.slice(common).join("/");
+  return ups + downs;
+}
+
+/**
  * Entity-link spans and PII-redaction spans, both computed against the same
  * unmodified `markdown`, merged into a single splice pass (Track F4/L7). PII wins
  * on overlap: an entity-link span whose range overlaps a redaction span is dropped

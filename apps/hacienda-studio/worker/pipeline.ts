@@ -44,7 +44,8 @@ import {
   type PiiPipelineResult,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
-import { hashSpanForProcessing } from "../lib/redaction-modes";
+import { hashSpanForProcessing, looksLikePseudonymToken } from "../lib/redaction-modes";
+import { computeContentHash } from "../lib/content-hash";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -64,6 +65,11 @@ import {
   buildGlossaryIndex,
   type ZipBatch,
 } from "../lib/zip-export";
+import {
+  computeRelatedDocuments,
+  topRelatedDocuments,
+  buildRelatedDocumentsSection,
+} from "../lib/related-documents";
 
 // Track I4: re-exported unchanged so nothing importing these from "./pipeline" (the
 // vitest suite included) needs to know they now live in lib/annotate.ts — see that
@@ -314,6 +320,62 @@ function slugify(text: string): string {
     .substring(0, 64);
 }
 
+/**
+ * Task 3 (spec §8 step 3): `slugify` above derives a filename from an entity's real
+ * surface form — exactly what a pseudonym-keyed entity must never expose. This is the
+ * pseudonymize-mode equivalent: a short, deterministic, filesystem-safe slug derived
+ * from the *token* instead, so `entities/person-<slug>.md` carries no trace of the real
+ * name. FNV-1a, same construction as `lib/redaction-modes.ts`'s Hash-mode `fingerprint`
+ * — not a security boundary (the token itself is already the non-identifying value;
+ * this only needs to avoid collisions across one batch's entity count, not resist
+ * attack), so a fast non-cryptographic hash is the right tool, not `crypto.subtle`.
+ */
+/**
+ * SHA-256 via `computeContentHash`, truncated to 12 hex chars (48 bits) — the same
+ * construction `assignDocId` and `lib/registry.ts`'s `identityFor` already use for
+ * document and entity ids, not the FNV-1a 32-bit hash this function used before. A
+ * 32-bit space starts having non-trivial collision odds (birthday bound) around
+ * 65,536 distinct values, which is not obviously unreachable for pseudonym tokens —
+ * SIV ciphertext looks uniformly random to a hash, and two different real people
+ * colliding to the same slug would silently overwrite one's entity file with the
+ * other's, corrupting both dossiers with no error raised. 48 bits pushes that bound
+ * out of any realistic batch's reach, matching the other two id schemes in this
+ * codebase rather than being the one weaker outlier among them.
+ */
+async function tokenSlug(token: string): Promise<string> {
+  const digest = await computeContentHash(new TextEncoder().encode(token).buffer);
+  return digest.slice(0, 12);
+}
+
+/**
+ * Task 4 (spec §8 step 4): content-derived document id, replacing assignment-ordinal
+ * `doc-001`/`doc-002` — those renumbered on any re-export whose upload order changed,
+ * breaking `document_entities` in `entities-registry.json` and any external reference
+ * into it. `usedIds` is this batch's already-assigned ids, checked *before* calling
+ * `processFile` for the file about to receive one (not `docPaths`, which is only
+ * populated once `processFile` returns, too late for the file currently in flight).
+ *
+ * Genuinely duplicate uploads (byte-identical files) hash to the same base id; a
+ * disambiguating numeric suffix is appended rather than silently colliding, because
+ * `docId` doubles as a `Map` key for `docPaths` — an undetected collision there would
+ * silently overwrite one file's backlinks with the other's, corrupting both.
+ */
+export async function assignDocId(
+  bytes: ArrayBuffer,
+  usedIds: Set<string>,
+): Promise<string> {
+  const hash = await computeContentHash(bytes);
+  const base = `doc-${hash.slice(0, 12)}`;
+  let docId = base;
+  let suffix = 2;
+  while (usedIds.has(docId)) {
+    docId = `${base}-${suffix}`;
+    suffix++;
+  }
+  usedIds.add(docId);
+  return docId;
+}
+
 /** The one shape the NER-result loop below actually reads from an entity. */
 interface RawNerEntity {
   category: string;
@@ -455,42 +517,126 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
  * entities-registry.json, or the KG export — exporting a redacted document beside
  * a knowledge graph naming every entity would defeat the point of redacting.
  * Only filters when output is actually being rewritten; scan-only mode doesn't
- * touch the markdown, so there's nothing to defeat. Drops the whole entity if
- * *any* of its mentions overlaps a PII finding, not just the overlapping span —
- * under-including is the safe direction here.
+ * touch the markdown, so there's nothing to defeat.
+ *
+ * Task 3 (spec §8 step 3): dropping the whole entity is still correct for mask, hash,
+ * and remove — none of those leave anything reversible behind, so the entity's real
+ * name has nowhere safe to live in the export. Pseudonymize with a real key is
+ * different: `[PERSON:session:a41f]` is a stable, non-identifying, reversible-only-
+ * with-the-key handle. Dropping the entity there throws away exactly the
+ * cross-document structure pseudonymization exists to preserve — see the spec's §3.2.
+ * An entity whose *every* overlapping finding carries a real pseudonym token
+ * (`looksLikePseudonymToken`) survives, rekeyed on that token: `name` and `slug`
+ * become the token and `tokenSlug(token)` respectively, so nothing downstream
+ * (registry, entity files, glossary, frontmatter, KG export) ever sees the real
+ * surface form again. An entity with even one overlapping finding that is *not* a
+ * real token — mask, hash, remove, or pseudonymize silently degraded to a mask
+ * template because no passphrase was given (`AppConfig.redactionMode`'s doc comment)
+ * — is dropped exactly as before: under-including is still the safe direction when
+ * there is no token to key it on.
+ *
+ * Deliberately keyed on each finding's `redact_template` shape rather than a
+ * `redactionMode` parameter: mask templates (`[EMAIL]`), hash fingerprints
+ * (`#email:1a2b…`), and empty remove templates all fail
+ * `looksLikePseudonymToken`'s stricter three-part pattern on their own, so this
+ * cannot be told the batch is pseudonymized while the findings it actually receives
+ * say otherwise — the caller has one fewer parameter to get out of sync.
  */
-export function filterExportableEntities(
+export async function filterExportableEntities(
   entities: Entity[],
   piiFindings: PiiEntity[],
   redactPiiInOutput: boolean,
-): Entity[] {
+): Promise<Entity[]> {
   if (!redactPiiInOutput) return entities;
-  const overlapsPiiFinding = (span: { start: number; end: number }) =>
-    piiFindings.some((p) => span.start < p.end && p.start < span.end);
-  return entities.filter((e) => !e.spans.some(overlapsPiiFinding));
+  const overlappingFindings = (span: { start: number; end: number }) =>
+    piiFindings.filter((p) => span.start < p.end && p.start < span.end);
+
+  const result: Entity[] = [];
+  for (const e of entities) {
+    const overlaps = e.spans.flatMap(overlappingFindings);
+    if (overlaps.length === 0) {
+      result.push(e);
+      continue;
+    }
+    if (!overlaps.every((f) => looksLikePseudonymToken(f.redact_template))) {
+      continue; // dropped: at least one overlapping finding has no reversible token
+    }
+    // AES-SIV is deterministic (`lib/pseudonymize.ts`'s `mintToken`), so every mention
+    // of the same real name in this document already minted the identical token —
+    // any overlapping finding's template is as good as another to key on.
+    const token = overlaps[0].redact_template;
+    result.push({ ...e, name: token, slug: await tokenSlug(token) });
+  }
+  return result;
 }
 
-function buildFrontmatter(
+/**
+ * Always-quote YAML scalar: correctness over minimalism. Entity names, filenames, and
+ * roles are arbitrary text from an uploaded document — a name containing `:`, starting
+ * with `-`, or looking like a YAML flow character would silently corrupt an unquoted
+ * plain scalar. A double-quoted scalar with `\`/`"`/newline escaped is unambiguous for
+ * every input, so nothing here needs to reason about which values are "safe enough" to
+ * leave bare.
+ */
+function yamlString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+}
+
+/**
+ * Task 5.3 (spec §8 step 5, §5.1.6): replaces the single-line `entities: [{...}]` JSON
+ * blob with a real multi-line YAML list — the JSON form put every entity's full metadata
+ * on one line, which a filesystem-MCP reader's `grep` returns as one unparseable
+ * fragment rather than a readable record (spec §4's whole argument for why this bundle's
+ * shape matters to an agent reading it, not just a human).
+ *
+ * `doc_type` is `classifyDocumentVertical`'s own coarse, keyword-matched classification
+ * (`m&a` / `financial_services` / `shared`), surfaced at the document level for the
+ * first time — previously computed but only ever used as a per-entity vertical
+ * *fallback*, never written to frontmatter itself. Deliberately not a richer
+ * "contract vs invoice vs board-minutes" classification: no classifier head exists on
+ * the reachable GLiNER2 path (spec §2.2), and Tier 1 semantic labels are out of this
+ * plan's scope — inventing a more specific-sounding field from the same regex signal
+ * would overclaim what was actually derived.
+ *
+ * `entity_ids` reconstructs each `ent-<slug>` from `Entity.slug` rather than carrying a
+ * separate `id` field on the worker-local `Entity` type: post-Task-4, `slug` already *is*
+ * the id's hash suffix (`registry.ts`'s `identityFor`: `id = "ent-" + slug`), so
+ * widening `Entity` for a value already fully recoverable from a field it already has
+ * would be duplication, not a new capability.
+ */
+export function buildFrontmatter(
   input: FileInput,
   entities: Entity[],
   piiEntitiesFound: number,
+  docType: string,
 ): string {
-  const entityMeta = entities.map((e) => ({
-    name: e.name,
-    type: e.type.charAt(0).toUpperCase() + e.type.slice(1),
-    slug: e.slug,
-    ...(e.vertical && { vertical: e.vertical }),
-    ...(e.sector && { sector: e.sector }),
-    ...(e.roles && e.roles.length && { roles: e.roles }),
-  }));
-
   const type = input.type.split("/")[1] || "unknown";
+  const entityIds = entities.map((e) => `"ent-${e.slug}"`).join(", ");
+
+  const entityLines = entities.map((e) => {
+    const lines = [
+      `  - name: ${yamlString(e.name)}`,
+      `    type: ${e.type.charAt(0).toUpperCase() + e.type.slice(1)}`,
+      `    slug: ${yamlString(e.slug)}`,
+    ];
+    if (e.vertical) lines.push(`    vertical: ${yamlString(e.vertical)}`);
+    if (e.sector) lines.push(`    sector: ${yamlString(e.sector)}`);
+    if (e.roles && e.roles.length) {
+      lines.push(`    roles: [${e.roles.map(yamlString).join(", ")}]`);
+    }
+    return lines.join("\n");
+  });
+  const entitiesBlock =
+    entities.length === 0 ? "entities: []" : `entities:\n${entityLines.join("\n")}`;
+
   return `---
-source: ${input.name}
+source: ${yamlString(input.name)}
 type: ${type}
 processed: ${new Date().toISOString()}
 pii_entities_found: ${piiEntitiesFound}
-entities: ${JSON.stringify(entityMeta)}
+doc_type: ${yamlString(docType)}
+entity_ids: [${entityIds}]
+${entitiesBlock}
 ---`;
 }
 
@@ -938,7 +1084,7 @@ async function processFile(
     }
   }
 
-  const exportableEntities = filterExportableEntities(
+  const exportableEntities = await filterExportableEntities(
     entities,
     piiFindings,
     config.redactPiiInOutput,
@@ -964,10 +1110,9 @@ async function processFile(
       sector: verticalMeta.sector,
       roles: verticalMeta.roles || [],
     };
-    enrichedEntities.push(enrichedEntity);
 
     // Register entity in batch registry
-    registry.addEntity(
+    const registered = await registry.addEntity(
       {
         name: enrichedEntity.name,
         type: enrichedEntity.type,
@@ -982,6 +1127,15 @@ async function processFile(
       },
       docId,
     );
+    // Task 4 (spec §8 step 4): the registry derives a stable, content-hashed slug —
+    // shared by every spelling variant of the same entity — instead of trusting the
+    // NER-time `slugify(e.text)` this entity was created with above. Copying it back
+    // here keeps this document's own links (`renderAnnotatedMarkdown`/`buildGlossary`
+    // below, both reading `deduped`'s `.slug` via `relativeEntityLink`) pointing at the
+    // exact filename `entities/*.md` actually uses; without this, a link computed from
+    // the pre-hash slug would point at a file the registry never writes.
+    enrichedEntity.slug = registered.slug;
+    enrichedEntities.push(enrichedEntity);
   }
 
   const deduped = deduplicateEntities(enrichedEntities);
@@ -993,7 +1147,7 @@ async function processFile(
     docPath,
   );
 
-  const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound);
+  const frontmatter = buildFrontmatter(input, deduped, piiEntitiesFound, documentVertical);
   const glossary = buildGlossary(deduped, docPath);
 
   const finalMarkdown = frontmatter + "\n" + linkedMarkdown + glossary;
@@ -1126,13 +1280,15 @@ async function processFiles(
     });
   }
 
-  let docCounter = 0;
   const results: ProcessedFile[] = [];
   // Track I2's backlinks: `RegistryEntity.source_documents` only holds
   // docIds, not the zip-relative path a link needs to point at. Populated
   // alongside `results` below, from the same `processed.name` the zip
   // entries themselves use, so the two can never disagree.
   const docPaths = new Map<string, string>();
+  // Task 4: `assignDocId` checked against here, not `docPaths` — `docPaths` is only
+  // populated once `processFile` returns, too late to guard the file currently in flight.
+  const usedDocIds = new Set<string>();
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -1144,7 +1300,7 @@ async function processFiles(
         file.bytes.byteLength,
         "bytes",
       );
-      const docId = `doc-${String(++docCounter).padStart(3, "0")}`;
+      const docId = await assignDocId(file.bytes, usedDocIds);
       const startTime = performance.now();
       const processed = await processFile(
         file,
@@ -1198,6 +1354,31 @@ async function processFiles(
     }
   }
   console.log("[Worker] All files processed");
+
+  // Task 5.2 (spec §8 step 5): document-to-document relatedness needs every file's
+  // entities registered, which is only true once the whole loop above has finished —
+  // this cannot run per-document inside it. `docPaths.keys()`, not a separately-tracked
+  // id list: a failed file's docId (if `assignDocId` ran before it failed) never reaches
+  // `docPaths.set`, correctly excluding it from relatedness the same way it's already
+  // excluded from the registry. Spliced onto `result.markdown` *after* `buildGlossary`'s
+  // "## Entities" section is already baked in — see `buildRelatedDocumentsSection`'s doc
+  // comment for why that ordering, not this one, is what keeps `export-resolve.ts`'s
+  // redaction-edit re-export working with zero changes there.
+  const allDocIds = Array.from(docPaths.keys());
+  const related = computeRelatedDocuments(registry.getEntities(), allDocIds);
+  const docIdByPath = new Map(
+    Array.from(docPaths.entries()).map(([docId, path]) => [path, docId]),
+  );
+  for (const result of results) {
+    const ownPath = "documents/" + result.name;
+    const docId = docIdByPath.get(ownPath);
+    if (!docId) continue;
+    const topRelated = topRelatedDocuments(related.get(docId) ?? []);
+    if (topRelated.length > 0) {
+      result.markdown += buildRelatedDocumentsSection(topRelated, ownPath, docPaths);
+    }
+  }
+
   // Track K/Phase 2: the zip is no longer built here — retained so a later on-demand
   // "build-zip" message (see self.onmessage below) can call assembleZip() without
   // re-deriving the registry/docPaths/config that only this function's scope has.

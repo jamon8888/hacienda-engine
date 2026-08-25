@@ -89,7 +89,7 @@ pub fn generate_model_card(model_name: &str) -> ModelCard {
                 "Annotated public datasets (de-identified)".to_string(),
                 "Domain-specific document collections".to_string(),
             ],
-            preprocessing: "Tokenization via DeBERTa tokenizer with MAX_WIDTH=8 token window limitation. Entities truncated at 8 subword tokens. Negative sampling for false-positive reduction.".to_string(),
+            preprocessing: "Tokenization via DeBERTa tokenizer with MAX_WIDTH=8 word window limitation. Entities truncated at 8 words. Negative sampling for false-positive reduction.".to_string(),
             pii_categories: 42,
             languages: vec![
                 "English".to_string(),
@@ -113,7 +113,7 @@ pub fn generate_model_card(model_name: &str) -> ModelCard {
                 "Document redaction accuracy test suite".to_string(),
             ],
             limitations: vec![
-                "MAX_WIDTH=8 token limitation may miss very long entity spans (e.g., full addresses in non-standard formats)".to_string(),
+                "MAX_WIDTH=8 word limitation may miss very long entity spans (e.g., full addresses in non-standard formats)".to_string(),
                 "Lower accuracy on handwritten text or low-resolution scans".to_string(),
                 "Reduced performance on code-mixed text (multiple languages in one document)".to_string(),
                 "Not designed for PII detection in audio or video streams".to_string(),

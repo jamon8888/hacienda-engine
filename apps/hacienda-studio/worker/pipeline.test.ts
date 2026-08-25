@@ -1,8 +1,8 @@
 import { describe, expect, it, vi, beforeAll } from "vitest";
-import type { Entity } from "../lib/types";
+import type { Entity, FileInput } from "../lib/types";
 import type { PiiEntity } from "../lib/pii-engine";
 import type { BridgeEntity } from "../lib/ner-bridge";
-import type { RegistryEntity } from "../lib/registry";
+import { BatchEntityRegistry, type RegistryEntity } from "../lib/registry";
 
 // `pipeline.ts` assigns `self.onmessage` at module scope (it's a worker entry
 // point). Stub `self` before importing it dynamically so that assignment has
@@ -14,6 +14,8 @@ let selectNerBridge: typeof import("./pipeline").selectNerBridge;
 let relativeEntityLink: typeof import("./pipeline").relativeEntityLink;
 let buildEntityFile: typeof import("./pipeline").buildEntityFile;
 let buildGlossaryIndex: typeof import("./pipeline").buildGlossaryIndex;
+let assignDocId: typeof import("./pipeline").assignDocId;
+let buildFrontmatter: typeof import("./pipeline").buildFrontmatter;
 
 beforeAll(async () => {
   (globalThis as { self?: unknown }).self = globalThis;
@@ -24,6 +26,8 @@ beforeAll(async () => {
     relativeEntityLink,
     buildEntityFile,
     buildGlossaryIndex,
+    assignDocId,
+    buildFrontmatter,
   } = await import("./pipeline"));
 });
 
@@ -198,7 +202,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
 });
 
 describe("filterExportableEntities (Track A2)", () => {
-  it("drops an entity whose span overlaps a PII finding when output is being redacted", () => {
+  it("drops an entity whose span overlaps a PII finding when output is being redacted", async () => {
     const misclassifiedPhone = entity({
       name: "4111111111111111",
       type: "phone",
@@ -207,7 +211,7 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities(
+    const result = await filterExportableEntities(
       [misclassifiedPhone],
       [card],
       true,
@@ -216,7 +220,7 @@ describe("filterExportableEntities (Track A2)", () => {
     expect(result).toEqual([]);
   });
 
-  it("keeps a non-overlapping entity when output is being redacted", () => {
+  it("keeps a non-overlapping entity when output is being redacted", async () => {
     const jean = entity({
       name: "Jean Dupont",
       type: "person",
@@ -225,12 +229,12 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 30, end: 46, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities([jean], [card], true);
+    const result = await filterExportableEntities([jean], [card], true);
 
     expect(result).toEqual([jean]);
   });
 
-  it("drops the whole entity if any one of several mentions overlaps, not just that span", () => {
+  it("drops the whole entity if any one of several mentions overlaps, not just that span", async () => {
     const jean = entity({
       name: "Jean Dupont",
       type: "person",
@@ -243,12 +247,12 @@ describe("filterExportableEntities (Track A2)", () => {
     // Overlaps only the second mention.
     const finding = piiEntity({ start: 55, end: 58, redact_template: "[X:*]" });
 
-    const result = filterExportableEntities([jean], [finding], true);
+    const result = await filterExportableEntities([jean], [finding], true);
 
     expect(result).toEqual([]);
   });
 
-  it("keeps everything untouched in scan-only mode, even with overlapping findings", () => {
+  it("keeps everything untouched in scan-only mode, even with overlapping findings", async () => {
     const misclassifiedPhone = entity({
       name: "4111111111111111",
       type: "phone",
@@ -257,13 +261,297 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities(
+    const result = await filterExportableEntities(
       [misclassifiedPhone],
       [card],
       false,
     );
 
     expect(result).toEqual([misclassifiedPhone]);
+  });
+});
+
+describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", () => {
+  it("retains an entity whose overlapping finding carries a real pseudonym token, rekeyed on it", async () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const finding = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: "[PERSON:session:MFRGG2LTMVRXEZLU]",
+    });
+
+    const [result] = await filterExportableEntities([jean], [finding], true);
+
+    expect(result).toBeDefined();
+    expect(result.name).toBe("[PERSON:session:MFRGG2LTMVRXEZLU]");
+    // The slug must not be derivable back to "Jean Dupont" — it's a hash of the token,
+    // not of the real name, which is the whole point of this task.
+    expect(result.slug).not.toBe("jean-dupont");
+    // 12 hex chars (48 bits) since `tokenSlug` moved from FNV-1a to SHA-256 — matches
+    // `assignDocId`/`identityFor`'s id-generation precedent, not the old 8-char format.
+    expect(result.slug).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it("still drops the entity when pseudonymize has no key (mask-shaped fallback template)", async () => {
+    // `worker/pipeline.ts`'s pseudonymize branch leaves `redact_template` at whatever
+    // `process()`/`process_with_model_entities` already produced when `pseudonymKeyHex`
+    // is null — a mask-shaped template, not a token. This is the degradation case
+    // `AppConfig.redactionMode`'s doc comment describes.
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const finding = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: "[PERSON]",
+    });
+
+    const result = await filterExportableEntities([jean], [finding], true);
+
+    expect(result).toEqual([]);
+  });
+
+  it("drops the entity if any one of several overlapping findings lacks a real token", async () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [
+        { start: 0, end: 11 },
+        { start: 50, end: 61 },
+      ],
+    });
+    const tokenFinding = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: "[PERSON:session:MFRGG2LTMVRXEZLU]",
+    });
+    const maskFinding = piiEntity({
+      category: "person",
+      start: 50,
+      end: 61,
+      redact_template: "[PERSON]",
+    });
+
+    const result = await filterExportableEntities([jean], [tokenFinding, maskFinding], true);
+
+    expect(result).toEqual([]);
+  });
+
+  it("never writes a surface name into a pseudonymized bundle: entity file, glossary, and registry all key on the token", async () => {
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const acme = entity({
+      name: "Acme SAS",
+      type: "organization",
+      slug: "acme-sas",
+      spans: [{ start: 21, end: 29 }],
+    });
+    const findings = [
+      piiEntity({
+        category: "person",
+        start: 0,
+        end: 11,
+        redact_template: "[PERSON:session:MFRGG2LTMVRXEZLU]",
+      }),
+      piiEntity({
+        category: "organization",
+        start: 21,
+        end: 29,
+        redact_template: "[ORGANIZATION:session:NBSWY3DPEB3W64TM]",
+      }),
+    ];
+
+    const results = await filterExportableEntities([jean, acme], findings, true);
+    const registry = new BatchEntityRegistry();
+    // `Promise.all`, not a plain `.map` (each entity is distinct — jean/acme never share
+    // a dedup key — so there's no merge race here, but `buildGlossaryIndex` below reads
+    // `registry.getEntities()`, which is empty until every `addEntity` call has actually
+    // resolved and reached `this.entities.set(...)`).
+    const registered = await Promise.all(
+      results.map((r) =>
+        registry.addEntity(
+          { name: r.name, type: r.type, slug: r.slug, count: r.count, spans: r.spans },
+          { vertical: "shared" },
+          "doc-001",
+        ),
+      ),
+    );
+    const glossary = buildGlossaryIndex(registry.getEntities());
+    const entityFiles = registered.map((r) =>
+      buildEntityFile(r, [registry.getBatchId() + "/doc"]),
+    );
+
+    for (const surfaceName of ["Jean Dupont", "Acme SAS"]) {
+      for (const result of results) {
+        expect(result.name).not.toContain(surfaceName);
+        expect(result.slug).not.toContain(surfaceName.toLowerCase().replace(/\s+/g, "-"));
+      }
+      expect(glossary).not.toContain(surfaceName);
+      for (const file of entityFiles) {
+        expect(file).not.toContain(surfaceName);
+      }
+    }
+  });
+
+  it("gives the same real-world entity the same token across two documents, so cross-document dedup keys on it for free", async () => {
+    const { deriveKeyHex, mintToken } = await import("../lib/pseudonymize");
+    const keyHex = await deriveKeyHex("correct horse battery staple", "session");
+
+    // Simulates `worker/pipeline.ts`'s `processFiles`: one key derived once for the whole
+    // batch, `mintToken` called independently per document against the same real text.
+    const tokenInDoc1 = await mintToken("person", "Jean Dupont", "session", keyHex);
+    const tokenInDoc2 = await mintToken("person", "Jean Dupont", "session", keyHex);
+    expect(tokenInDoc1).toBe(tokenInDoc2); // the SIV determinism this task's fix relies on
+
+    const jeanInDoc1 = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const jeanInDoc2 = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 30, end: 41 }],
+    });
+    const findingInDoc1 = piiEntity({
+      category: "person",
+      start: 0,
+      end: 11,
+      redact_template: tokenInDoc1,
+    });
+    const findingInDoc2 = piiEntity({
+      category: "person",
+      start: 30,
+      end: 41,
+      redact_template: tokenInDoc2,
+    });
+
+    const [resultDoc1] = await filterExportableEntities([jeanInDoc1], [findingInDoc1], true);
+    const [resultDoc2] = await filterExportableEntities([jeanInDoc2], [findingInDoc2], true);
+
+    // Same name -> same token -> same name/slug on the exported entity -> the registry's
+    // existing `${normalizedName}|${type}|${vertical}` dedup key merges them into one
+    // entity with both documents in `source_documents`, with no code change to the
+    // registry itself required.
+    expect(resultDoc1.name).toBe(resultDoc2.name);
+    expect(resultDoc1.slug).toBe(resultDoc2.slug);
+
+    const registry = new BatchEntityRegistry();
+    // Awaited sequentially, not fired concurrently: both calls share the same dedup key
+    // (asserted above), and `addEntity` only records a new entity's id in `entityKeyMap`
+    // after an internal `await` — two un-awaited calls for the same entity would both see
+    // no existing entry and both create one, silently losing the merge this test exists to
+    // prove (the second `.set()` would overwrite the first's `source_documents`, not add
+    // to it).
+    await registry.addEntity(
+      { name: resultDoc1.name, type: resultDoc1.type, slug: resultDoc1.slug, count: 1, spans: resultDoc1.spans },
+      { vertical: "shared" },
+      "doc-001",
+    );
+    const merged = await registry.addEntity(
+      { name: resultDoc2.name, type: resultDoc2.type, slug: resultDoc2.slug, count: 1, spans: resultDoc2.spans },
+      { vertical: "shared" },
+      "doc-002",
+    );
+    expect(merged.source_documents).toEqual(["doc-001", "doc-002"]);
+  });
+
+  it("leaves mask, hash, and remove entity sets unaffected by this task's change", async () => {
+    // Unit-level substitute for a byte-level bundle diff — Task 0 could not produce
+    // reference bundles on this host (no dev server / model available). This asserts the
+    // narrower but still meaningful property: for every mode except pseudonymize-with-a-
+    // key, `filterExportableEntities`'s decision per entity is identical to what it was
+    // before this task (drop on any overlap, keep otherwise) — `redact_template` shapes
+    // from mask (`[EMAIL]`), hash (`#email:1a2b…`), and remove (`""`) all fail
+    // `looksLikePseudonymToken`, so the new "retain and rekey" branch is never taken.
+    const jean = entity({
+      name: "Jean Dupont",
+      type: "person",
+      slug: "jean-dupont",
+      spans: [{ start: 0, end: 11 }],
+    });
+    const templates = ["[PERSON]", "#person:1a2b3c4d5e6f7890", ""];
+
+    for (const redact_template of templates) {
+      const finding = piiEntity({ category: "person", start: 0, end: 11, redact_template });
+      const result = await filterExportableEntities([jean], [finding], true);
+      expect(result).toEqual([]);
+    }
+  });
+});
+
+describe("buildFrontmatter (Task 5.3, spec §8 step 5)", () => {
+  function fileInput(overrides: Partial<FileInput> = {}): FileInput {
+    return { name: "doc.pdf", bytes: new ArrayBuffer(0), type: "application/pdf", ...overrides };
+  }
+
+  it("emits a multi-line YAML entities list, not a single-line JSON blob", () => {
+    const jean = entity({ name: "Jean Dupont", type: "person", slug: "a41f7c2b9e3d", vertical: "shared" });
+    const frontmatter = buildFrontmatter(fileInput(), [jean], 1, "shared");
+
+    expect(frontmatter).not.toContain("[{");
+    expect(frontmatter).toContain("entities:\n  - name: \"Jean Dupont\"");
+    expect(frontmatter).toContain('    type: Person');
+    expect(frontmatter).toContain('    slug: "a41f7c2b9e3d"');
+    expect(frontmatter).toContain('    vertical: "shared"');
+  });
+
+  it("includes doc_type from the classified vertical, labelled as derived (not a real classification)", () => {
+    const frontmatter = buildFrontmatter(fileInput(), [], 0, "m&a");
+    expect(frontmatter).toContain('doc_type: "m&a"');
+  });
+
+  it("reconstructs entity_ids from each entity's (Task 4 hash-derived) slug", () => {
+    const jean = entity({ name: "Jean Dupont", type: "person", slug: "a41f7c2b9e3d" });
+    const acme = entity({ name: "Acme SAS", type: "organization", slug: "7c2b09d4e1a5" });
+    const frontmatter = buildFrontmatter(fileInput(), [jean, acme], 0, "shared");
+
+    expect(frontmatter).toContain('entity_ids: ["ent-a41f7c2b9e3d", "ent-7c2b09d4e1a5"]');
+  });
+
+  it("emits entities: [] when there are no entities, not an empty multi-line block", () => {
+    const frontmatter = buildFrontmatter(fileInput(), [], 0, "shared");
+    expect(frontmatter).toContain("entities: []");
+    expect(frontmatter).toContain("entity_ids: []");
+  });
+
+  it("escapes a quote and a colon in an entity name so the YAML stays parseable", () => {
+    // Real document text is arbitrary — an entity name containing `:` or `"` would
+    // corrupt an unquoted or naively-quoted YAML scalar.
+    const tricky = entity({ name: 'Acme "Global" Holdings: EMEA', type: "organization", slug: "x" });
+    const frontmatter = buildFrontmatter(fileInput(), [tricky], 0, "shared");
+
+    expect(frontmatter).toContain('name: "Acme \\"Global\\" Holdings: EMEA"');
+  });
+
+  it("quotes the source filename, which is arbitrary user input", () => {
+    const frontmatter = buildFrontmatter(fileInput({ name: 'weird: "file".pdf' }), [], 0, "shared");
+    expect(frontmatter).toContain('source: "weird: \\"file\\".pdf"');
+  });
+
+  it("still starts and ends with the --- delimiter export-resolve.ts's regex depends on", () => {
+    const frontmatter = buildFrontmatter(fileInput(), [], 0, "shared");
+    expect(frontmatter.startsWith("---\n")).toBe(true);
+    expect(frontmatter.endsWith("\n---")).toBe(true);
+    expect(frontmatter.match(/^---\n[\s\S]*?\n---/)?.[0]).toBe(frontmatter);
   });
 });
 
@@ -320,34 +608,41 @@ describe("buildEntityFile (Track I2)", () => {
   });
 });
 
-describe("buildGlossaryIndex (Track I2)", () => {
-  it("groups entities by type, alphabetically, with a link into entities/", () => {
-    const md = buildGlossaryIndex([
-      registryEntity({
-        display_name: "Beta SARL",
-        type: "organization",
-        vertical: "m&a",
-        mention_count: 1,
-        source_documents: ["doc-001"],
-        slug: "beta-sarl",
-      }),
-      registryEntity({
-        display_name: "Jean Dupont",
-        type: "person",
-        mention_count: 3,
-        source_documents: ["doc-001", "doc-002"],
-        slug: "jean-dupont",
-      }),
-    ]);
+describe("buildGlossaryIndex (Track I2, re-shaped by Task 5.3's top-N gating)", () => {
+  it("lists entities by mention count with an inline type tag and a link into entities/", () => {
+    // Task 5.3 (spec §8 step 5): replaced the old "grouped by type under a ## heading,
+    // every entity, unbounded" shape with a flat top-N-by-mention-count list — the
+    // per-type grouping moved to indexes/by-type/<type>.md (`buildByTypeIndex`), which
+    // has its own dedicated tests in lib/zip-export.test.ts.
+    const md = buildGlossaryIndex(
+      [
+        registryEntity({
+          display_name: "Beta SARL",
+          type: "organization",
+          vertical: "m&a",
+          mention_count: 1,
+          source_documents: ["doc-001"],
+          slug: "beta-sarl",
+        }),
+        registryEntity({
+          display_name: "Jean Dupont",
+          type: "person",
+          mention_count: 3,
+          source_documents: ["doc-001", "doc-002"],
+          slug: "jean-dupont",
+        }),
+      ],
+      5,
+    );
 
     expect(md).toContain("# Glossary");
-    // "Organization" sorts before "Person" alphabetically.
-    expect(md.indexOf("## Organization")).toBeLessThan(md.indexOf("## Person"));
+    // Higher mention_count sorts first: Jean Dupont (3) before Beta SARL (1).
+    expect(md.indexOf("Jean Dupont")).toBeLessThan(md.indexOf("Beta SARL"));
     expect(md).toContain(
-      "[Beta SARL](entities/organization-beta-sarl.md) — m&a, mentioned 1 time across 1 document",
+      "[Jean Dupont](entities/person-jean-dupont.md) `Person`, mentioned 3 times across 2 documents",
     );
     expect(md).toContain(
-      "[Jean Dupont](entities/person-jean-dupont.md), mentioned 3 times across 2 documents",
+      "[Beta SARL](entities/organization-beta-sarl.md) `Organization` — m&a, mentioned 1 time across 1 document",
     );
   });
 
@@ -402,5 +697,45 @@ describe("selectNerBridge (Track B1/B2)", () => {
     });
     expect(result.map((e) => e.text)).toEqual(["Jean Dupont", "Acme SAS"]);
     expect(result.map((e) => e.category)).toEqual(["person", "organization"]);
+  });
+});
+
+describe("assignDocId (Task 4, spec §8 step 4)", () => {
+  function bytesOf(text: string): ArrayBuffer {
+    return new TextEncoder().encode(text).buffer;
+  }
+
+  it("gives the same file bytes the same id across independent batches", async () => {
+    const bytes = bytesOf("the quick brown fox");
+    const idA = await assignDocId(bytes, new Set());
+    const idB = await assignDocId(bytesOf("the quick brown fox"), new Set());
+
+    expect(idA).toBe(idB);
+    expect(idA).toMatch(/^doc-[0-9a-f]{12}$/);
+  });
+
+  it("gives different file bytes different ids", async () => {
+    const idA = await assignDocId(bytesOf("file one"), new Set());
+    const idB = await assignDocId(bytesOf("file two"), new Set());
+
+    expect(idA).not.toBe(idB);
+  });
+
+  it("disambiguates two byte-identical files in the same batch rather than colliding", async () => {
+    // `docId` doubles as a `docPaths` Map key — a silent collision here would let the
+    // second duplicate's export path overwrite the first's, corrupting both files'
+    // backlinks. `usedIds` is the same Set across both calls, simulating two duplicate
+    // uploads in one `processFiles` batch.
+    const usedIds = new Set<string>();
+    const bytes = bytesOf("duplicate upload");
+
+    const first = await assignDocId(bytes, usedIds);
+    const second = await assignDocId(bytes, usedIds);
+
+    expect(first).not.toBe(second);
+    expect(second).toBe(`${first}-2`);
+
+    const third = await assignDocId(bytes, usedIds);
+    expect(third).toBe(`${first}-3`);
   });
 });
