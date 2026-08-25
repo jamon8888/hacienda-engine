@@ -107,6 +107,7 @@
     "eslint-plugin-react-hooks": "^5.1.0",
     "fake-indexeddb": "^6.2.5",
     "globals": "^15.9.0",
+    "impeccable": "github:pbakaus/impeccable",
     "postcss": "^8.4.39",
     "prettier": "^3.3.0",
     "tailwindcss": "^4.3.3",
