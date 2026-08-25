@@ -17,10 +17,10 @@ import type { PiiEntity } from "./pii-engine";
 export type RedactionMode = "mask" | "hash" | "pseudonymize" | "remove";
 
 export const REDACTION_MODES: { value: RedactionMode; label: string }[] = [
-  { value: "mask", label: "Mask" },
-  { value: "hash", label: "Hash" },
-  { value: "pseudonymize", label: "Pseudonymize" },
-  { value: "remove", label: "Remove" },
+  { value: "mask", label: "Masquer" },
+  { value: "hash", label: "Hacher" },
+  { value: "pseudonymize", label: "Pseudonymiser" },
+  { value: "remove", label: "Supprimer" },
 ];
 
 /** Matches the `[CATEGORY:key_id:...]` shape `AppConfig.redactionMode`'s doc comment
@@ -108,7 +108,7 @@ export function applyRedactionMode(
       return {
         unavailable: true,
         reason:
-          "This document wasn't processed with pseudonymize mode enabled, so no reversible tokens exist for it. Re-process the file with pseudonymize turned on in the pipeline config to use this mode.",
+          "Ce document n'a pas été traité avec le mode pseudonymisation activé, donc aucun jeton réversible n'existe pour lui. Re-traitez le fichier avec la pseudonymisation activée dans la configuration du pipeline pour utiliser ce mode.",
       };
     }
     return { findings };
