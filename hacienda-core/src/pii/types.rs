@@ -66,6 +66,13 @@ pub struct RegexEntity {
     pub confidence: f32,
     pub format_preserving: bool,
     pub redact_template: String,
+    /// Copied from the originating [`PatternMeta::context_words`] at match time, so
+    /// [`crate::pii::context::enhance`] can look up this span's context words without
+    /// needing the pattern set that produced it back in scope. `#[serde(skip)]`: a
+    /// `&'static` slice cannot round-trip through serde, and (as with
+    /// [`PatternMeta::validator`]) nothing actually (de)serializes `RegexEntity` today.
+    #[serde(skip)]
+    pub context_words: &'static [&'static str],
 }
 
 impl RegexEntity {
@@ -78,6 +85,7 @@ impl RegexEntity {
             confidence: 1.0,
             format_preserving: false,
             redact_template,
+            context_words: &[],
         }
     }
 }
@@ -89,6 +97,75 @@ pub struct PatternMeta {
     pub pattern: String,
     pub format_preserving: bool,
     pub redact_template: String,
+    /// Confidence a match gets when [`validator`](Self::validator) is absent, or returns
+    /// `None` (no opinion). Defaults to `1.0` via [`PatternMeta::new`] so every pre-existing
+    /// pattern keeps today's behavior; only patterns with a real checksum
+    /// ([`crate::pii::validators`]) set this lower, since an unvalidated match in those
+    /// categories is genuinely less certain than a plain regex hit.
+    #[serde(default = "default_base_confidence")]
+    pub base_confidence: f32,
+    /// Checksum/structural validator run against the matched text
+    /// ([`crate::pii::validators`]'s `Option<bool>` contract: `Some(true)` promotes
+    /// confidence to `1.0`, `Some(false)` discards the match, `None` keeps
+    /// `base_confidence`). `#[serde(skip)]`: a function pointer cannot round-trip through
+    /// serde, and nothing in this codebase actually (de)serializes `PatternMeta` today —
+    /// this only guards against a future config-file/API surface silently losing it.
+    #[serde(skip)]
+    pub validator: Option<fn(&str) -> Option<bool>>,
+    /// Words that, found near a match, boost its confidence toward `1.0`
+    /// ([`crate::pii::context`]). Empty for patterns with no calibrated context word list.
+    #[serde(skip)]
+    pub context_words: &'static [&'static str],
+}
+
+fn default_base_confidence() -> f32 {
+    1.0
+}
+
+impl PatternMeta {
+    /// A plain pattern with no validator or context words, at full confidence — the shape
+    /// every pattern had before checksum validation and context boosting existed.
+    /// [`builtin_patterns`](super::patterns::builtin_patterns) constructs every pattern
+    /// through this (or the `with_*` builders below) rather than a struct literal, so
+    /// adding a field here never breaks an existing pattern definition.
+    pub fn new(
+        category: PiiCategory,
+        pattern: impl Into<String>,
+        format_preserving: bool,
+        redact_template: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            pattern: pattern.into(),
+            format_preserving,
+            redact_template: redact_template.into(),
+            base_confidence: 1.0,
+            validator: None,
+            context_words: &[],
+        }
+    }
+
+    /// Starting confidence for a match this pattern produces, before
+    /// [`validator`](Self::validator) or [`crate::pii::context`] boosting run. Only
+    /// patterns with a real checksum should lower this — see the field's own doc.
+    pub fn with_base_confidence(mut self, base_confidence: f32) -> Self {
+        self.base_confidence = base_confidence;
+        self
+    }
+
+    /// Attach a checksum/structural validator — see the field's own doc for the
+    /// `Option<bool>` contract.
+    pub fn with_validator(mut self, validator: fn(&str) -> Option<bool>) -> Self {
+        self.validator = Some(validator);
+        self
+    }
+
+    /// Attach the context words that boost this category's confidence when found near a
+    /// match — see [`crate::pii::context`].
+    pub fn with_context(mut self, context_words: &'static [&'static str]) -> Self {
+        self.context_words = context_words;
+        self
+    }
 }
 
 /// A span produced by a statistical (NER model) backend.
