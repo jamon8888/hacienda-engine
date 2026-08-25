@@ -438,7 +438,33 @@ entities do become PII findings, and `filterExportableEntities(…, true)` retai
 
 ## Task 4 — Stable identity (spec §8 step 4)
 
-**Status: COMPLETE — implemented and verified 2026-08-24.**
+**Status: COMPLETE — implemented and verified 2026-08-24, reconciled with independent upstream work 2026-08-25.**
+
+**Reconciliation note (2026-08-25).** This branch's base (`feat/pseudonymization-ui-audit-reveal`)
+gained an independently-written commit (`a48b92b`) that reimplemented Task 1's co-occurrence fix
+*and* went further than this plan's original Task 4: it added French/English honorific-stripping
+and subset-match alias merging for **persons** (`personNameTokens`/`isSubsetMatch`/
+`findPersonAliasMatch`) — a feature this plan never built — plus organisation legal-suffix
+stripping via a suffix-*set* loop (`stripLegalSuffixes`), which correctly handles cascading
+suffixes ("Acme Holdings Ltd Inc") that this plan's single-regex `LEGAL_SUFFIX_PATTERN` did not.
+Its id scheme stayed synchronous (FNV-1a `hashString`), where this plan's Task 4 made `addEntity`
+async specifically to use SHA-256 (`identityFor`/`computeContentHash`) — a real, considered
+divergence in approach, not an oversight on either side (see Task 4's first confirmed item below
+for why SHA-256 was chosen over a lighter hash).
+
+Reconciled by rebase, not by discarding either side: kept `a48b92b`'s full alias-matching engine
+(person **and** organisation — a strict improvement over this plan's org-only version) and
+`stripLegalSuffixes` (dropping this plan's redundant, less-capable `normalizeForDedup`/
+`LEGAL_SUFFIX_PATTERN`), while keeping this plan's async SHA-256 `identityFor` for the actual id
+computation, since Tasks 5 and 6's structural work depends on `addEntity` being async. The
+reconciliation surfaced and fixed one real bug in the process: the merged `recordAlias`'s
+"which name is fuller" comparator inherited `personNameTokens(...).length` (word count) from the
+person-only original, which cannot distinguish "Acme SAS" from "ACME S.A.S." (both 2 tokens) —
+promotion silently froze after the first multi-word organisation variant. Fixed by switching the
+comparator to character length (commit `b7f0f60`), which is correct for both the person and
+organisation cases; caught by `registry.test.ts`'s own merge test failing, not by inspection.
+Full verification re-run after reconciliation: **317/317 vitest passing**, `tsc --noEmit` still
+exactly 7 pre-existing baseline errors, `cargo test -p hacienda-core --lib compliance::` 8/8.
 
 - [x] Replace `ent-NNN` (`lib/registry.ts:81`) with a content-derived id — `hash(type|canonical_name|vertical)` via `lib/content-hash.ts`. Under Task 3's pseudonym mode, derive from the token instead, so identity stays stable without being reversible.
       → confirmed, with one deliberate deviation from the literal wording: hashed
