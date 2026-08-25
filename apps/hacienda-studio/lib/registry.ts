@@ -368,6 +368,15 @@ export class BatchEntityRegistry {
    * that used to be there becomes the alias instead. Either way the registry always shows the
    * most complete surface form seen so far, with the rest recorded, not discarded.
    *
+   * "Fuller" is character length, not `personNameTokens(...).length` (word count) as an
+   * earlier, person-only version of this function used — reconciled to character length
+   * (Task 4 §8 step 4) because this function now also promotes organisation aliases, and
+   * word count cannot distinguish "Acme SAS" from "ACME S.A.S." (both 2 tokens), silently
+   * freezing promotion after the first multi-word variant — caught by
+   * `registry.test.ts`'s "merges 'Acme', 'Acme SAS', and 'ACME S.A.S.'" test, which
+   * expects the longest to win. Character length gives the correct answer for both the
+   * person and organisation cases already covered by this suite.
+   *
    * Deliberately does **not** touch `existing.slug`/`existing.id` on promotion (a deviation
    * from this function's pre-reconciliation form, which called `slugify(surfaceForm)` here):
    * both are content-hashed at creation time from the entity's *dedup key*, specifically so
@@ -378,9 +387,7 @@ export class BatchEntityRegistry {
    */
   private recordAlias(existing: RegistryEntity, rawName: string) {
     const surfaceForm = rawName.trim();
-    if (
-      personNameTokens(rawName).length > personNameTokens(existing.canonical_name).length
-    ) {
+    if (surfaceForm.length > existing.canonical_name.length) {
       if (
         existing.display_name !== surfaceForm &&
         !existing.aliases.includes(existing.display_name)
