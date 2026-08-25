@@ -9,6 +9,24 @@ export class AuditHandle {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Every entry recorded so far for the default tenant, oldest first — backs
+     * `DocumentDetail.tsx`'s Audit tab entry list.
+     *
+     * Pages through [`AuditStore::history`], **not** `AuditStore::entries`. The two
+     * are not interchangeable: `entries` reports only the currently-open segment, so
+     * once a rotation has happened it answers "what was recorded since the last
+     * rotation" while looking like it answers "what was recorded". `history`'s own
+     * doc comment names the consequence — an auditor concluding that events which
+     * exist never happened — and that is exactly what an Audit tab built on `entries`
+     * would show.
+     *
+     * Paged to exhaustion here rather than exposing a cursor to JS: the caller is one
+     * browser-local tab rendering its own chain, and `IndexedDbAuditStore` already
+     * holds the segment in memory, so there is no page the UI could usefully defer.
+     * A JS-side cursor API is the right shape if this ever backs a server-side chain.
+     */
+    listEntries(): Promise<any>;
+    /**
      * Open (or resume, across a reload — Track L5's check) the IndexedDB database
      * named `db_name`, scoped to `node_id` and `config_hash`.
      *
@@ -31,6 +49,37 @@ export class AuditHandle {
      * store rejects the batch (e.g. the chain was closed).
      */
     recordResult(result: any): Promise<string>;
+    /**
+     * Record that `revealed_text` was shown to the user in plaintext — the wasm
+     * counterpart of `RedactionAction::Reveal` (see that variant's doc: an audit
+     * chain that omits "who accessed the unredacted span text" is not credible for a
+     * compliance product). Only the blake3 digest of `revealed_text` is ever hashed
+     * into the chain — the plaintext itself is never stored, matching
+     * `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
+     *
+     * `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+     *
+     * # `principal: None`, not a caller-supplied identity
+     *
+     * `AuditEntry::principal` exists precisely to answer "who did this" (see its own
+     * doc comment), and a reveal is the one action here where that question matters
+     * most. It is `None` below anyway, consistently with `record_result` above and
+     * with every entry this module ever writes: Studio has no account system to
+     * authenticate against at all — "Pas de compte, pas de stockage serveur" is the
+     * product's own stated design, not an omission (`App.tsx`'s landing copy).
+     *
+     * Accepting an unauthenticated, UI-supplied string here (a name typed into a
+     * field, say) would not close that gap — it would launder it: the chain would
+     * *look* attributed while recording whatever the same browser tab that revealed
+     * the plaintext also chose to claim, which reduces to no attribution at all
+     * wearing a costume. Real attribution needs a session-authenticated `Caller`
+     * (`hacienda-core`'s auth module already has that concept server-side) threaded
+     * through from an identity Studio does not currently have. That is a product
+     * decision — whether Studio grows accounts — not a wasm-binding fix, so it is
+     * left as `None` deliberately rather than filled with something that only looks
+     * like an answer.
+     */
+    recordReveal(revealed_text: string, category: string, source: string): Promise<string>;
     /**
      * The chain's current head — a client that records this alongside a result can
      * later prove which chain state produced it.
@@ -99,8 +148,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_audithandle_free: (a: number, b: number) => void;
+    readonly audithandle_listEntries: (a: number) => any;
     readonly audithandle_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly audithandle_recordResult: (a: number, b: any) => any;
+    readonly audithandle_recordReveal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly audithandle_tip: (a: number) => any;
     readonly audithandle_verify: (a: number) => any;
     readonly isNerModelLoaded: () => number;
@@ -110,11 +161,11 @@ export interface InitOutput {
     readonly redact_empty: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly scan: (a: number, b: number) => any;
     readonly scan_with_model_entities: (a: number, b: number, c: any) => any;
-    readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___wasm_bindgen_bf7b0d491ce864c2___JsValue__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___web_sys_c2086d39a3c4ab29___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_8c5caaf0847c1b83___result__Result_____wasm_bindgen_bf7b0d491ce864c2___JsValue___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___js_sys_f311ed201db48e3e___Function_fn_wasm_bindgen_bf7b0d491ce864c2___JsValue_____wasm_bindgen_bf7b0d491ce864c2___sys__Undefined___js_sys_f311ed201db48e3e___Function_fn_wasm_bindgen_bf7b0d491ce864c2___JsValue_____wasm_bindgen_bf7b0d491ce864c2___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
-    readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke___web_sys_c2086d39a3c4ab29___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_bf7b0d491ce864c2___convert__closures_____invoke_______true_: (a: number, b: number) => void;
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___wasm_bindgen_c6b32ff19ee0a2fc___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_c6b32ff19ee0a2fc___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___web_sys_80e25b5c2239100___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_c6b32ff19ee0a2fc___JsValue___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___js_sys_bde86a248cf46b9___Function_fn_wasm_bindgen_c6b32ff19ee0a2fc___JsValue_____wasm_bindgen_c6b32ff19ee0a2fc___sys__Undefined___js_sys_bde86a248cf46b9___Function_fn_wasm_bindgen_c6b32ff19ee0a2fc___JsValue_____wasm_bindgen_c6b32ff19ee0a2fc___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___web_sys_80e25b5c2239100___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke_______true_: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

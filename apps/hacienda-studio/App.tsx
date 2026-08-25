@@ -37,6 +37,7 @@ import {
   listEditedFindings,
 } from "./lib/persistence";
 import { pruneDrafts } from "./lib/redaction-store";
+import { recordKeyUsage } from "./lib/pseudonym-keys";
 import { folderOf } from "./lib/library";
 import type { LibraryDocument } from "./lib/library";
 import { DEFAULT_CONFIG } from "./lib/types";
@@ -230,10 +231,18 @@ export function App() {
         return;
       }
       try {
-        await loadNerModel((p) => setNerModelProgress(p));
+        const load = await loadNerModel((p) => setNerModelProgress(p));
+        if (!load.ok) {
+          // Expected, not a fault: a private/incognito window simply cannot hold the
+          // model. Regex-only detection still works, so this degrades rather than fails.
+          console.warn("[App] NER model not loadable:", load.reason, load.message);
+          setNerModelDegraded(true);
+          setError(load.message);
+        }
         setAssets((a) => ({ ...a, nerModel: true }));
         setNerModelProgress(null);
       } catch (e) {
+        // Genuinely unexpected — a dead network, a corrupt archive.
         console.warn("[App] NER model download failed, using fallback:", e);
         setNerModelDegraded(true);
         setError("Neural PII backend unavailable — falling back to regex-only detection.");
@@ -575,9 +584,26 @@ export function App() {
     }
 
     try {
-      const results = await pool.processFiles(fileInputs, JSON.parse(JSON.stringify(configRef.current)));
+      const batchConfig = JSON.parse(JSON.stringify(configRef.current)) as AppConfig;
+      const results = await pool.processFiles(fileInputs, batchConfig);
       // Results are handled via callbacks, but we can also use the returned array
       console.log("[App] Worker pool completed:", results.length, "files");
+
+      // Recorded here, not on the Settings passphrase field's blur: blur only proves the
+      // field lost focus, so tabbing through it was enough to put an id in the key vault
+      // that never keyed anything, with a `lastUsedAt` that misrepresents when it was last
+      // actually used. A completed batch is the first point at which the id demonstrably
+      // derived a key and minted tokens — the same "record on success" rule the reveal flow
+      // in `PiiPanel.tsx` already follows.
+      if (
+        batchConfig.enablePiiDetection &&
+        batchConfig.redactPiiInOutput &&
+        batchConfig.pseudonymPassphrase &&
+        (batchConfig.redactionMode === "pseudonymize" || batchConfig.redactionMode === "hash") &&
+        results.length > 0
+      ) {
+        recordKeyUsage(batchConfig.pseudonymKeyId);
+      }
     } catch (error) {
       console.error("[App] Worker pool error:", error);
       const message = error instanceof Error ? error.message : "Worker pool processing failed";

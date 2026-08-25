@@ -1,4 +1,5 @@
 import type { PiiEntity } from "./pii-engine";
+import type { RedactionMode } from "./redaction-modes";
 
 export interface FileInput {
   name: string;
@@ -131,9 +132,13 @@ export interface AppConfig {
    * `"pseudonymize"` replaces each finding with a reversible `lib/pseudonymize.ts` token
    * instead — only takes effect when `redactPiiInOutput` is also set, and only when
    * `pseudonymPassphrase` is non-empty (an empty passphrase silently falls back to mask
-   * rather than producing tokens no one can derive the key to reveal).
+   * rather than producing tokens no one can derive the key to reveal). `"hash"`/`"remove"`
+   * need neither a key nor a passphrase — see `worker/pipeline.ts`'s `applyRedactionMode`
+   * dispatch. Reuses `lib/redaction-modes.ts`'s `RedactionMode` union rather than defining
+   * a second one — that file's viewer toggle and this field now describe the same set of
+   * modes.
    */
-  redactionMode: "mask" | "pseudonymize";
+  redactionMode: RedactionMode;
   /** Session-only. Never persisted, never sent anywhere but this tab's own worker. */
   pseudonymPassphrase: string;
   /** Travels with a token (`[CATEGORY:key_id:...]`) so the same passphrase, entered again

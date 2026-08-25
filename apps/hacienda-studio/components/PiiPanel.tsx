@@ -27,7 +27,9 @@
  * that scope note in `App.tsx`'s re-export handler).
  */
 import { useState } from "react";
+import { recordPiiReveal } from "../lib/pii-engine";
 import type { PiiEntity } from "../lib/pii-engine";
+import { listKnownKeys, recordKeyUsage } from "../lib/pseudonym-keys";
 import { deriveKeyHex, revealToken } from "../lib/pseudonymize";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -83,24 +85,58 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
   const [revealed, setRevealed] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Read once per mount (the popover is remounted each time it opens, so this still picks
+  // up keys recorded since the panel last rendered) rather than on every keystroke.
+  const [knownKeys] = useState(() => listKnownKeys());
+
+  const CREDENTIAL_ERROR =
+    "Wrong passphrase, wrong key id, or this document used mask mode.";
 
   async function onReveal() {
     setBusy(true);
     setError(null);
+    let value: string | null;
     try {
       const keyHex = await deriveKeyHex(passphrase, keyId);
-      const value = await revealToken(finding.redact_template, keyId, keyHex);
-      if (value === null) {
-        setError("Wrong passphrase, wrong key id, or this document used mask mode.");
-      } else {
-        setRevealed(value);
-      }
+      value = await revealToken(finding.redact_template, keyId, keyHex);
     } catch {
-      setError("Wrong passphrase, wrong key id, or this document used mask mode.");
-    } finally {
+      setError(CREDENTIAL_ERROR);
       setBusy(false);
       setPassphrase("");
+      return;
     }
+
+    if (value === null) {
+      setError(CREDENTIAL_ERROR);
+      setBusy(false);
+      setPassphrase("");
+      return;
+    }
+
+    // The audit write is deliberately *not* inside the credential try block above. It runs
+    // only after the token has already been successfully revealed, so a failure here says
+    // nothing about the passphrase — reporting it as "wrong passphrase" told the user their
+    // credentials were bad when they were correct and only the audit store was unavailable,
+    // leaving them retyping a passphrase that was never the problem.
+    //
+    // Plaintext still stays hidden on an audit failure, matching `redactPii`'s "a failed
+    // audit write fails the call" philosophy (`lib/pii-engine.ts`): a compliance feature
+    // that can silently reveal PII without recording it is worse than one that refuses.
+    try {
+      await recordPiiReveal(value, finding.category, finding.source);
+    } catch {
+      setError(
+        "Your passphrase was correct, but the reveal could not be written to the audit chain, so the value is not shown. Try again — revealing PII without an audit record is not permitted.",
+      );
+      setBusy(false);
+      setPassphrase("");
+      return;
+    }
+
+    setRevealed(value);
+    recordKeyUsage(keyId);
+    setBusy(false);
+    setPassphrase("");
   }
 
   return (
@@ -130,7 +166,15 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
               value={keyId}
               onChange={(e) => setKeyId(e.target.value)}
               placeholder="Key id (default: session)"
+              list="pii-panel-known-keys"
             />
+            <datalist id="pii-panel-known-keys">
+              {knownKeys.map((k) => (
+                <option key={k.keyId} value={k.keyId}>
+                  {k.label}
+                </option>
+              ))}
+            </datalist>
             <Input
               type="password"
               value={passphrase}

@@ -176,15 +176,22 @@ fn current_ner_detector() -> Option<hacienda_core::pii::NerDetector> {
 #[cfg(target_arch = "wasm32")]
 mod audit_handle {
     use super::to_js_err;
-    use hacienda_core::audit::{AuditEntryInput, AuditStore, IndexedDbAuditStore, NodeId};
+    use hacienda_core::audit::{
+        AuditEntryInput, AuditStore, EntitySource, IndexedDbAuditStore, NodeId, RedactionAction,
+    };
     use hacienda_core::pii::PipelineResult;
     use hacienda_core::tenancy::TenantId;
+    use std::str::FromStr;
     use wasm_bindgen::prelude::*;
 
     /// Recorded on every entry this handle mints, mirroring
     /// `HaciendaFacade::PIPELINE_VERSION` — ties a browser-produced record to the code
     /// that made it.
     const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    /// Page size [`AuditHandle::list_entries`] pulls `AuditStore::history` in. Only a
+    /// round-trip granularity, not a cap: `list_entries` pages to exhaustion.
+    const HISTORY_PAGE_SIZE: usize = 512;
 
     /// One open [`IndexedDbAuditStore`] connection, exposed to JS.
     #[wasm_bindgen]
@@ -262,6 +269,113 @@ mod audit_handle {
                 .tip(&TenantId::default_tenant())
                 .await
                 .map_err(to_js_err)
+        }
+
+        /// Record that `revealed_text` was shown to the user in plaintext — the wasm
+        /// counterpart of `RedactionAction::Reveal` (see that variant's doc: an audit
+        /// chain that omits "who accessed the unredacted span text" is not credible for a
+        /// compliance product). Only the blake3 digest of `revealed_text` is ever hashed
+        /// into the chain — the plaintext itself is never stored, matching
+        /// `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
+        ///
+        /// `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+        ///
+        /// # `principal: None`, not a caller-supplied identity
+        ///
+        /// `AuditEntry::principal` exists precisely to answer "who did this" (see its own
+        /// doc comment), and a reveal is the one action here where that question matters
+        /// most. It is `None` below anyway, consistently with `record_result` above and
+        /// with every entry this module ever writes: Studio has no account system to
+        /// authenticate against at all — "Pas de compte, pas de stockage serveur" is the
+        /// product's own stated design, not an omission (`App.tsx`'s landing copy).
+        ///
+        /// Accepting an unauthenticated, UI-supplied string here (a name typed into a
+        /// field, say) would not close that gap — it would launder it: the chain would
+        /// *look* attributed while recording whatever the same browser tab that revealed
+        /// the plaintext also chose to claim, which reduces to no attribution at all
+        /// wearing a costume. Real attribution needs a session-authenticated `Caller`
+        /// (`hacienda-core`'s auth module already has that concept server-side) threaded
+        /// through from an identity Studio does not currently have. That is a product
+        /// decision — whether Studio grows accounts — not a wasm-binding fix, so it is
+        /// left as `None` deliberately rather than filled with something that only looks
+        /// like an answer.
+        #[wasm_bindgen(js_name = recordReveal)]
+        pub async fn record_reveal(
+            &self,
+            revealed_text: String,
+            category: String,
+            source: String,
+        ) -> Result<String, JsValue> {
+            let source = EntitySource::from_str(&source).map_err(to_js_err)?;
+            let span_hash = blake3::hash(revealed_text.as_bytes()).to_hex().to_string();
+            let input = AuditEntryInput {
+                id: uuid::Uuid::new_v4().to_string(),
+                category,
+                action: RedactionAction::Reveal,
+                span_hash,
+                span_length: revealed_text.len() as u32,
+                confidence: None,
+                source,
+                pipeline_version: PIPELINE_VERSION.to_string(),
+                config_hash: String::new(),
+                principal: None,
+                vertical: None,
+            };
+
+            self.store
+                .append(&TenantId::default_tenant(), vec![input])
+                .await
+                .map_err(to_js_err)?;
+
+            self.store
+                .tip(&TenantId::default_tenant())
+                .await
+                .map_err(to_js_err)
+        }
+
+        /// Every entry recorded so far for the default tenant, oldest first — backs
+        /// `DocumentDetail.tsx`'s Audit tab entry list.
+        ///
+        /// Pages through [`AuditStore::history`], **not** `AuditStore::entries`. The two
+        /// are not interchangeable: `entries` reports only the currently-open segment, so
+        /// once a rotation has happened it answers "what was recorded since the last
+        /// rotation" while looking like it answers "what was recorded". `history`'s own
+        /// doc comment names the consequence — an auditor concluding that events which
+        /// exist never happened — and that is exactly what an Audit tab built on `entries`
+        /// would show.
+        ///
+        /// Paged to exhaustion here rather than exposing a cursor to JS: the caller is one
+        /// browser-local tab rendering its own chain, and `IndexedDbAuditStore` already
+        /// holds the segment in memory, so there is no page the UI could usefully defer.
+        /// A JS-side cursor API is the right shape if this ever backs a server-side chain.
+        #[wasm_bindgen(js_name = listEntries)]
+        pub async fn list_entries(&self) -> Result<JsValue, JsValue> {
+            let tenant = TenantId::default_tenant();
+            let mut all: Vec<hacienda_core::audit::AuditEntry> = Vec::new();
+            let mut cursor: Option<hacienda_core::audit::AuditCursor> = None;
+
+            loop {
+                let page = self
+                    .store
+                    .history(&tenant, cursor.as_ref(), HISTORY_PAGE_SIZE)
+                    .await
+                    .map_err(to_js_err)?;
+                // `history` never reports "finished" — a non-empty page always yields a
+                // cursor (see `AuditPage::next`), so an empty page is the only stop
+                // condition, and `next: None` on a non-empty page would be a store bug
+                // rather than the end of the chain. Break on either instead of looping
+                // forever if one ever occurs.
+                if page.entries.is_empty() {
+                    break;
+                }
+                all.extend(page.entries);
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+
+            serde_wasm_bindgen::to_value(&all).map_err(to_js_err)
         }
 
         /// The chain's current head — a client that records this alongside a result can

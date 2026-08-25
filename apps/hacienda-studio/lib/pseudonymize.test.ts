@@ -84,13 +84,19 @@ describe("AES-CMAC (RFC 4493 known-answer tests)", () => {
 });
 
 describe("golden vectors captured from a real Pseudonymiser run (Track F2)", () => {
-  // Captured 2026-07-30 via `cargo test -p hacienda-core` against a scratch test
-  // (`hacienda-core/tests/zz_golden_vectors.rs`, not committed) that built a
-  // `Pseudonymiser` from `EnvKeyResolver::with_lookup` returning `"07".repeat(KEY_BYTES)`
-  // for key id `k1` and called `.token()`/`.reveal()` on each case below. If this module's
-  // key-half ordering, S2V, category-label mapping, or normalization diverges from the
-  // Rust side in any way, these are the assertions that catch it — a self-consistency
-  // round-trip test (mint then reveal in the same language) cannot.
+  // Captured 2026-07-30 via `cargo test -p hacienda-core` against a scratch test that
+  // built a `Pseudonymiser` from `EnvKeyResolver::with_lookup` returning
+  // `"07".repeat(KEY_BYTES)` for key id `k1` and called `.token()`/`.reveal()` on each
+  // case below. If this module's key-half ordering, S2V, category-label mapping, or
+  // normalization diverges from the Rust side in any way, these are the assertions that
+  // catch it — a self-consistency round-trip test (mint then reveal in the same language)
+  // cannot.
+  //
+  // That scratch test is now committed as `hacienda-core/tests/pseudonym_vectors.rs`,
+  // asserting these exact four cases against the real `Pseudonymiser`. The two lists are
+  // intentionally independent literals, not one generated from the other — keep them in
+  // sync by hand whenever either changes, so a divergence is a change a reviewer sees on
+  // both sides, not a silently regenerated fixture.
   const cases: Array<[category: string, text: string, token: string, revealed: string]> = [
     [
       "email",

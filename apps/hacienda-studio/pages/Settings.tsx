@@ -1,5 +1,14 @@
+import { useState } from "react";
 import type { AppConfig, NerCategory } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  listKnownKeys,
+  removeKnownKey,
+  renameKnownKey,
+  type KnownPseudonymKey,
+} from "@/lib/pseudonym-keys";
+import { isValidKeyId } from "@/lib/pseudonymize";
 
 type Props = {
   config: AppConfig;
@@ -8,7 +17,9 @@ type Props = {
 
 const REDACTION_MODES = [
   { value: "mask", label: "Masquer" },
+  { value: "hash", label: "Hacher" },
   { value: "pseudonymize", label: "Pseudonymiser" },
+  { value: "remove", label: "Supprimer" },
 ] as const;
 
 // Only categories the engine's vocabulary accepts and the worker's NER bridge actually
@@ -125,6 +136,12 @@ const control =
 export function Settings({ config, onChange }: Props) {
   const storageUsed = 168; // mock
   const storageTotal = 10_000; // MB
+  // Read once on mount — reopening Settings is enough to pick up a key used elsewhere
+  // (e.g. a reveal in `PiiPanel.tsx`) since last render.
+  const [knownKeys] = useState(() => listKnownKeys());
+  // Mirrors `mintToken`'s own precondition so an id it would reject is caught here, in the
+  // field the user can fix, rather than mid-batch inside the worker.
+  const keyIdValid = isValidKeyId(config.pseudonymKeyId.trim());
 
   const toggleCategory = (key: NerCategory) => {
     const has = config.nerCategories.includes(key);
@@ -162,7 +179,7 @@ export function Settings({ config, onChange }: Props) {
               {REDACTION_MODES.map((m) => (
                 <button
                   key={m.value}
-                  onClick={() => onChange({ ...config, redactionMode: m.value as any })}
+                  onClick={() => onChange({ ...config, redactionMode: m.value })}
                   className={`rounded border px-3 py-1 text-sm ${
                     config.redactionMode === m.value
                       ? "border-primary bg-primary/10"
@@ -173,9 +190,40 @@ export function Settings({ config, onChange }: Props) {
                 </button>
               ))}
             </div>
-            {config.redactionMode === "pseudonymize" && (
+            {/* Hash needs the passphrase for the same reason pseudonymize does: its digest
+              * is an HMAC, because an unsalted hash of a name or a 9-digit SSN is
+              * recovered by enumeration and would not be a redaction at all. See
+              * `lib/redaction-modes.ts`'s `hashSpanForProcessing`. */}
+            {(config.redactionMode === "pseudonymize" || config.redactionMode === "hash") && (
               <div className={fieldLabel + " mt-3 max-w-sm"}>
-                <label htmlFor="pseudonym-passphrase">
+                <label htmlFor="pseudonym-key-id">Identifiant de clé</label>
+                <input
+                  id="pseudonym-key-id"
+                  className={control}
+                  list="known-pseudonym-keys"
+                  value={config.pseudonymKeyId}
+                  onChange={(e) => onChange({ ...config, pseudonymKeyId: e.target.value })}
+                  aria-invalid={!keyIdValid}
+                  aria-describedby={keyIdValid ? undefined : "pseudonym-key-id-error"}
+                  placeholder="session"
+                />
+                <datalist id="known-pseudonym-keys">
+                  {knownKeys.map((k) => (
+                    <option key={k.keyId} value={k.keyId}>
+                      {k.label}
+                    </option>
+                  ))}
+                </datalist>
+                {/* `mintToken` rejects an id outside this rule and fails the whole file
+                  * mid-batch, so surface it here rather than letting processing die on it
+                  * (`lib/pseudonymize.ts`'s `isValidKeyId`). */}
+                {!keyIdValid && (
+                  <p id="pseudonym-key-id-error" className="text-xs text-destructive">
+                    Identifiant invalide : 1 à 16 caractères, uniquement des minuscules,
+                    chiffres et « _ ».
+                  </p>
+                )}
+                <label htmlFor="pseudonym-passphrase" className="mt-2">
                   Phrase secrète (ne quitte jamais votre navigateur)
                 </label>
                 <input
@@ -188,44 +236,37 @@ export function Settings({ config, onChange }: Props) {
                 />
                 {!config.pseudonymPassphrase && (
                   <p className="text-xs text-amber-600">
-                    Sans phrase secrète, les résultats sont masqués au lieu d'être
-                    pseudonymisés — aucune clé à dériver.
+                    {config.redactionMode === "hash"
+                      ? "Sans phrase secrète, les résultats sont masqués au lieu d'être hachés — un hachage sans clé serait réversible par force brute."
+                      : "Sans phrase secrète, les résultats sont masqués au lieu d'être pseudonymisés — aucune clé à dériver."}
                   </p>
                 )}
               </div>
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="mb-1 block text-sm">Vertical</label>
-              <select
-                value={config.enabledVerticals?.[0] || "general"}
-                onChange={(e) => onChange({ ...config, enabledVerticals: [e.target.value] })}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                <option value="general">général</option>
-                <option value="m&a">m&a</option>
-                <option value="financial_services">services financiers</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm">Sensibilité</label>
-              <select
-                value={config.sensitivity || "balanced"}
-                onChange={(e) => onChange({ ...config, sensitivity: e.target.value as any })}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                <option value="low">Faible</option>
-                <option value="balanced">Équilibrée</option>
-                <option value="high">Élevée</option>
-              </select>
-            </div>
+          <div>
+            <label className="mb-1 block text-sm">Vertical</label>
+            <select
+              value={config.enabledVerticals?.[0] || "m&a"}
+              onChange={(e) =>
+                onChange({ ...config, enabledVerticals: [e.target.value as AppConfig["enabledVerticals"][number]] })
+              }
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="m&a">m&a</option>
+              <option value="financial_services">services financiers</option>
+              <option value="shared">partagé</option>
+            </select>
           </div>
 
           <div className="mt-4 flex items-center justify-between">
-            <span className="text-sm">Reconnaissance d'entités</span>
+            <span className="text-sm" id="toggle-pii-detection-label">Reconnaissance d'entités</span>
             <button
+              type="button"
+              role="switch"
+              aria-checked={config.enablePiiDetection}
+              aria-labelledby="toggle-pii-detection-label"
               onClick={() => onChange({ ...config, enablePiiDetection: !config.enablePiiDetection })}
               className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.enablePiiDetection ? "bg-primary" : "bg-muted"}`}
             >
@@ -233,9 +274,38 @@ export function Settings({ config, onChange }: Props) {
             </button>
           </div>
 
+          {/* `redactPiiInOutput` gates every redaction mode above (worker/pipeline.ts) —
+           * without this toggle on, "Mode de rédaction" only counts PII, it never touches
+           * the markdown, which is why mask/hash/pseudonymize/remove all looked like they
+           * "did nothing." This control existed in the now-deleted ConfigPanel.tsx but was
+           * dropped when its fields were ported into this file (be501cc) — restoring it. */}
           <div className="mt-3 flex items-center justify-between">
-            <span className="text-sm">Reconnaissance optique</span>
+            <span className="text-sm" id="toggle-redact-output-label">Rédiger les PII dans la sortie</span>
             <button
+              type="button"
+              role="switch"
+              aria-checked={config.redactPiiInOutput}
+              aria-labelledby="toggle-redact-output-label"
+              onClick={() => onChange({ ...config, redactPiiInOutput: !config.redactPiiInOutput })}
+              className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.redactPiiInOutput ? "bg-primary" : "bg-muted"}`}
+            >
+              <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${config.redactPiiInOutput ? "translate-x-5" : ""}`} />
+            </button>
+          </div>
+          {!config.redactPiiInOutput && (
+            <p className="mt-1 text-xs text-amber-600">
+              Désactivé : les PII détectées sont comptées mais laissées telles quelles dans
+              le document exporté.
+            </p>
+          )}
+
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-sm" id="toggle-transcription-label">Reconnaissance optique</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.enableTranscription}
+              aria-labelledby="toggle-transcription-label"
               onClick={() => onChange({ ...config, enableTranscription: !config.enableTranscription })}
               className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.enableTranscription ? "bg-primary" : "bg-muted"}`}
             >
@@ -365,6 +435,8 @@ export function Settings({ config, onChange }: Props) {
           </div>
         </section>
 
+        <PseudonymKeyVault />
+
         <section className="mt-6 rounded-lg border border-border bg-card p-6">
           <h2 className="mb-2 text-sm font-medium">Stockage local</h2>
           <p className="mb-3 text-xs text-muted-foreground">168 Ko utilisés sur 10,00 Go disponibles</p>
@@ -376,5 +448,80 @@ export function Settings({ config, onChange }: Props) {
           </div>
         </section>
       </main>
+  );
+}
+
+/**
+ * Lists the pseudonymization key ids `Settings.tsx`'s own passphrase field and
+ * `PiiPanel.tsx` have recorded a successful mint or reveal against
+ * (`lib/pseudonym-keys.ts`) — never the passphrase itself, which is never stored
+ * anywhere. Renaming only changes a local label; removing only forgets that label.
+ * Neither can revoke or rotate the underlying key material, since no key material is
+ * stored here to begin with — see that module's doc comment.
+ */
+function PseudonymKeyVault() {
+  const [keys, setKeys] = useState<KnownPseudonymKey[]>(() => listKnownKeys());
+  const [editingLabel, setEditingLabel] = useState<Record<string, string>>({});
+
+  function commitRename(keyId: string) {
+    const label = editingLabel[keyId];
+    if (label !== undefined) renameKnownKey(keyId, label);
+    setKeys(listKnownKeys());
+    setEditingLabel((prev) => {
+      const next = { ...prev };
+      delete next[keyId];
+      return next;
+    });
+  }
+
+  return (
+    <section className="mt-6 rounded-lg border border-border bg-card p-6">
+      <h2 className="mb-1 text-sm font-medium">Clés de pseudonymisation connues</h2>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Identifiants de clé utilisés sur cet appareil — jamais la phrase secrète elle-même,
+        qui n'est jamais enregistrée.
+      </p>
+      {keys.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Aucune clé utilisée pour l'instant.</p>
+      ) : (
+        <ul className="space-y-2">
+          {keys.map((k) => (
+            <li key={k.keyId} className="flex items-center gap-2 text-sm">
+              <span
+                id={`key-vault-id-${k.keyId}`}
+                className="w-32 shrink-0 truncate font-mono text-xs text-muted-foreground"
+              >
+                {k.keyId}
+              </span>
+              <Input
+                className="h-8"
+                // Named against the key id beside it, so a screen reader announces which
+                // key this free-text label belongs to instead of an unlabelled textbox.
+                aria-label={`Libellé de la clé ${k.keyId}`}
+                value={editingLabel[k.keyId] ?? k.label}
+                onChange={(e) =>
+                  setEditingLabel((prev) => ({ ...prev, [k.keyId]: e.target.value }))
+                }
+                onBlur={() => commitRename(k.keyId)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                }}
+              />
+              <Button
+                variant="destructive"
+                size="sm"
+                aria-label={`Oublier la clé ${k.keyId}`}
+                onClick={() => {
+                  removeKnownKey(k.keyId);
+                  setKeys(listKnownKeys());
+                }}
+              >
+                Oublier
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

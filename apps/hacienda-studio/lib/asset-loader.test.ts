@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { openDB } from "idb";
-import { fetchAsset, validateFile, loadTessdata } from "./asset-loader";
+import { fetchAsset, validateFile, loadTessdata, loadNerModel } from "./asset-loader";
 
 function file(type: string, size = 1024): File {
   return new File([new Uint8Array(size)], "upload", { type });
@@ -301,5 +301,79 @@ describe("loadTessdata", () => {
     await expect(loadTessdata("eng")).resolves.toEqual(traineddata);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+/**
+ * `loadNerModel`'s storage-quota preflight (Track: CodeRabbit review on PR #98/#99).
+ *
+ * Covers the discriminated-union contract (`{ ok: true, assets }` /
+ * `{ ok: false, reason: "insufficient-storage", ... }`) — expected conditions never throw
+ * here — and the specific ordering bug CodeRabbit caught: the quota check ran before the
+ * cache lookup, so a user whose model was already cached and needed no write at all could
+ * still be rejected for "insufficient storage".
+ */
+describe("loadNerModel storage-quota preflight", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const db = await openDB("xberg-studio-assets", 1);
+    try {
+      await db.clear("models");
+    } finally {
+      db.close();
+    }
+  });
+
+  function stubQuota(quotaBytes: number, usageBytes: number): void {
+    vi.stubGlobal("navigator", {
+      ...globalThis.navigator,
+      storage: {
+        estimate: async () => ({ quota: quotaBytes, usage: usageBytes }),
+      },
+    });
+  }
+
+  it("returns an insufficient-storage result instead of throwing when quota is too low", async () => {
+    stubQuota(100 * 1024 * 1024, 0); // 100MB free, model needs ~620MB
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await loadNerModel();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("insufficient-storage");
+      expect(result.message).toMatch(/storage/i);
+    }
+    // The whole point of a preflight: no ~600MB download was attempted.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("checks the cache before the quota preflight, not after", async () => {
+    // Pre-populate the cache directly, bypassing the network entirely.
+    const db = await openDB("xberg-studio-assets", 1, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains("models")) db.createObjectStore("models");
+      },
+    });
+    await db.put("models", new Uint8Array([1]), "gliner2-guardrails-pii-model");
+    await db.put("models", new Uint8Array([2]), "gliner2-guardrails-pii-tokenizer");
+    await db.put("models", new Uint8Array([3]), "gliner2-guardrails-pii-config");
+    db.close();
+
+    // Quota deliberately reports far too little space — if the preflight ran before the
+    // cache lookup, this alone would fail the call despite nothing needing to be written.
+    stubQuota(1, 0);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await loadNerModel();
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.assets.model).toEqual(new Uint8Array([1]));
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -38,10 +38,13 @@ import {
   scanForPii,
   redactPiiWithModelEntities,
   scanForPiiWithModelEntities,
+  recordPiiAudit,
   type PiiEntity,
   type PiiCategoryWire,
+  type PiiPipelineResult,
 } from "../lib/pii-engine";
 import { deriveKeyHex, mintToken } from "../lib/pseudonymize";
+import { hashSpanForProcessing } from "../lib/redaction-modes";
 import { VerticalDictionary } from "../lib/verticals/dictionary";
 import {
   loadVerticalTaxonomy,
@@ -144,7 +147,16 @@ let nerRuntime: NerRuntime | null = null;
 
 async function initNerBackend(): Promise<void> {
   try {
-    const { model, tokenizer, encoderConfig } = await loadNerModel();
+    const load = await loadNerModel();
+    if (!load.ok) {
+      // `selectNerBridge` falls back to compromise.js when `nerRuntime` stays null. The
+      // main thread already surfaced the reason to the user in `App.tsx`; repeating it
+      // from the worker would only duplicate the banner.
+      console.warn("[Worker] Neural NER unavailable:", load.reason, load.message);
+      nerRuntime = null;
+      return;
+    }
+    const { model, tokenizer, encoderConfig } = load.assets;
     nerRuntime = await createNerBackend(model, tokenizer, encoderConfig);
     console.log("[Worker] Neural NER backend loaded");
 
@@ -797,6 +809,12 @@ async function processFile(
   // running inference a second time. Convert xberg BridgeEntity[] to PII model entities.
   let piiEntitiesFound = 0;
   let piiFindings: PiiEntity[] = [];
+  // Set alongside `piiResult` below, only when `config.redactPiiInOutput` actually ran a
+  // redaction — `recordPiiAudit` is called with this once the mode-dispatch switch below
+  // has decided which mode was *actually* applied (not merely configured; pseudonymize
+  // falls back to mask when no key was derived). `null` means "nothing to record" (PII
+  // detection is off, this call was scan-only, or detection failed).
+  let piiResult: PiiPipelineResult | null = null;
   if (config.enablePiiDetection) {
     console.log(`[Worker] Running PII detection on ${input.name}...`);
     postProgress({ file: input.name, stage: "pii", percent: 82 });
@@ -816,13 +834,14 @@ async function processFile(
           confidence: 1.0, // xberg entities don't always have confidence, default to 1.0
         }));
 
-      const piiResult = config.redactPiiInOutput
+      const result = config.redactPiiInOutput
         ? await redactPiiWithModelEntities(markdown, modelEntities)
         : await scanForPiiWithModelEntities(markdown, modelEntities);
+      if (config.redactPiiInOutput) piiResult = result;
 
       const piiMs = performance.now() - piiStart;
       console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
-      piiFindings = piiResult.entities;
+      piiFindings = result.entities;
       piiEntitiesFound = piiFindings.length;
       console.log(`[Worker] Found ${piiEntitiesFound} PII entities in ${input.name}`);
     } catch (piiError) {
@@ -839,33 +858,83 @@ async function processFile(
       throw piiError;
     }
 
-    // Track F1/F2: `redactionMode: "pseudonymize"` replaces each finding's
+    // Track F1/F2 (extended to all 4 modes): each `redactionMode` replaces the finding's
     // `redact_template` — the string `renderAnnotatedMarkdown` splices into the body — with
-    // a reversible token instead of the format-preserving mask. `pseudonymKeyHex` is `null`
-    // whenever pseudonymization doesn't apply (mode is "mask", or no passphrase was given),
-    // so this is a no-op in the default configuration. Every finding shares one key: minting
-    // is per-entity, but the key derivation happened once for the whole batch in
-    // `processFiles`, not per file or per finding.
+    // something other than the wasm engine's default mask-shaped output. Mask needs no
+    // branch here: `process()`/`process_with_model_entities` already produced a mask-shaped
+    // `redact_template`, so there is nothing to overwrite.
     //
-    // `f.text` is *not* what gets pseudonymized: `MergedEntity.text` (hacienda-core's
+    // `f.text` is *not* what gets hashed/pseudonymized: `MergedEntity.text` (hacienda-core's
     // `pii/merge.rs`) is documented "Empty for regex detections, which carry offsets only"
     // — regex is the only detector active in Studio's default config, so `f.text` is empty
     // for essentially every real finding. `markdown.slice(f.start, f.end)` recovers the
     // actual matched text from the same offsets `renderAnnotatedMarkdown` already treats as
     // JS string indices (Track F4) — consistent with the rest of this pipeline's offset
     // handling, not a new assumption introduced here.
-    if (config.redactPiiInOutput && pseudonymKeyHex) {
-      piiFindings = await Promise.all(
-        piiFindings.map(async (f) => ({
-          ...f,
-          redact_template: await mintToken(
-            f.category,
-            markdown.slice(f.start, f.end),
-            config.pseudonymKeyId,
-            pseudonymKeyHex,
-          ),
-        })),
-      );
+    if (config.redactPiiInOutput) {
+      // What actually happened to each span, as opposed to what `config.redactionMode`
+      // merely asked for — the two diverge exactly when pseudonymize falls back to mask
+      // below. This is what gets recorded into the audit chain, not the requested mode:
+      // an audit trail that reports what was configured rather than what was applied
+      // isn't trustworthy for the one mode where the two can disagree.
+      let appliedMode: "mask" | "hash" | "pseudonymize" | "remove" = "mask";
+      switch (config.redactionMode) {
+        case "pseudonymize":
+          // `pseudonymKeyHex` is `null` whenever no passphrase was given — falls back to
+          // the mask-shaped template already on each finding, same as before this mode
+          // existed. Every finding shares one key: minting is per-entity, but the key
+          // derivation happened once for the whole batch in `processFiles`.
+          if (pseudonymKeyHex) {
+            piiFindings = await Promise.all(
+              piiFindings.map(async (f) => ({
+                ...f,
+                redact_template: await mintToken(
+                  f.category,
+                  markdown.slice(f.start, f.end),
+                  config.pseudonymKeyId,
+                  pseudonymKeyHex,
+                ),
+              })),
+            );
+            appliedMode = "pseudonymize";
+          }
+          break;
+        case "hash":
+          // Keyless hashing is not a redaction (see `hashSpanForProcessing`), so with no
+          // derived key this falls through to the mask-shaped template the engine already
+          // produced — the same fallback pseudonymize takes, and warned about once per
+          // batch in `processFiles`. `appliedMode` stays "mask" in that case, matching what
+          // actually happened, not what was configured — the whole point of this switch.
+          if (pseudonymKeyHex) {
+            piiFindings = await Promise.all(
+              piiFindings.map(async (f) => ({
+                ...f,
+                redact_template: await hashSpanForProcessing(
+                  f.category,
+                  markdown.slice(f.start, f.end),
+                  pseudonymKeyHex,
+                ),
+              })),
+            );
+            appliedMode = "hash";
+          }
+          break;
+        case "remove":
+          piiFindings = piiFindings.map((f) => ({ ...f, redact_template: "" }));
+          appliedMode = "remove";
+          break;
+        case "mask":
+        default:
+          break;
+      }
+
+      // Records the batch of redactions `redactPiiWithModelEntities` produced above —
+      // deferred until here (rather than happening inside that call, as it used to)
+      // because only now is `appliedMode` known. See `recordPiiAudit`'s doc for why the
+      // wasm call's own `audit_log` cannot be trusted for anything but mask.
+      if (piiResult) {
+        await recordPiiAudit(piiResult, appliedMode);
+      }
     }
   }
 
@@ -1018,7 +1087,11 @@ async function processFiles(
   if (
     config.enablePiiDetection &&
     config.redactPiiInOutput &&
-    config.redactionMode === "pseudonymize" &&
+    // Hash needs the key too, not just pseudonymize: `hashSpanForProcessing` is an HMAC,
+    // because an unsalted digest of a low-entropy value (a name, a 9-digit SSN) is
+    // recovered by enumeration and so is not a redaction at all. See that function's doc
+    // for why a fixed or per-document salt cannot substitute for a secret key here.
+    (config.redactionMode === "pseudonymize" || config.redactionMode === "hash") &&
     config.pseudonymPassphrase
   ) {
     try {
@@ -1035,6 +1108,22 @@ async function processFiles(
         message: "Pseudonymization key derivation failed — this batch will use mask mode instead of reversible tokens.",
       });
     }
+  }
+
+  // Hash mode with no passphrase would otherwise fall through to the mask-shaped template
+  // the engine already produced, silently — the user asked for hashed output and got
+  // masked output with nothing said. Same contract as the pseudonymize fallback above.
+  if (
+    config.enablePiiDetection &&
+    config.redactPiiInOutput &&
+    config.redactionMode === "hash" &&
+    !pseudonymKeyHex
+  ) {
+    self.postMessage({
+      type: "warning",
+      message:
+        "Hash mode needs a passphrase to key its digest — without one the hashes would be reversible by brute force. This batch will use mask mode instead.",
+    });
   }
 
   let docCounter = 0;
@@ -1073,8 +1162,11 @@ async function processFiles(
         `entities:${processed.entities.length}`,
         `pii:${processed.piiFindings.length}`,
       );
-      // Infer relationships for this document
-      registry.inferRelationships(docId);
+      // Infer relationships for this document. `rawMarkdown` — not `markdown` — is what the
+      // registry's stored spans are offsets into (`processFile` returns `rawMarkdown: markdown`,
+      // the text NER ran on, before link/redaction splicing shifts every position). Passing the
+      // spliced `markdown` would misclassify proximity silently.
+      registry.inferRelationships(docId, processed.rawMarkdown);
       docPaths.set(docId, "documents/" + processed.name);
       results.push(processed);
       self.postMessage({ type: "file-complete", ...processed });

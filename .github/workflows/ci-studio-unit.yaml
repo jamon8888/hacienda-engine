@@ -1,0 +1,70 @@
+name: CI - Studio Unit Tests
+
+# `apps/hacienda-studio/package.json`'s `test:unit` (vitest) exists but nothing in CI ran
+# it before this workflow — including `lib/pseudonymize.test.ts`'s golden-vector contract
+# against `hacienda-core/tests/pseudonym_vectors.rs` (see that file's doc comment): without
+# this job, a change that broke the TS/Rust pseudonymization contract would only be caught
+# by someone remembering to run `npm run test:unit` by hand.
+#
+# This runs `vitest` directly, scoped to `lib/pseudonymize.test.ts` only, rather than the
+# `test:unit` npm script: that script's `pretest:unit` lifecycle hook rebuilds
+# `hacienda-wasm/pkg` via wasm-pack first (a ~20 minute Rust→wasm build per
+# `scripts/build-wasm-if-needed.sh`'s own comment). `pseudonymize.test.ts` itself needs
+# none of that — it only imports `./pseudonymize`, a pure TS/WebCrypto module with no wasm
+# dependency — so paying that cost here would make this job slow for no reason. Other
+# `lib/*.test.ts` files (e.g. `pii-engine.test.ts`, `audit-handle.test.ts`) do import the
+# wasm package and are deliberately NOT run here; they belong in a separate, path-scoped
+# job that accepts the wasm-build cost, not bundled into this one.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/hacienda-studio/lib/pseudonymize.ts"
+      - "apps/hacienda-studio/lib/pseudonymize.test.ts"
+      - "hacienda-core/src/redaction/pseudonym.rs"
+      - "hacienda-core/tests/pseudonym_vectors.rs"
+      - "apps/hacienda-studio/package.json"
+      - ".github/workflows/ci-studio-unit.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/hacienda-studio/lib/pseudonymize.ts"
+      - "apps/hacienda-studio/lib/pseudonymize.test.ts"
+      - "hacienda-core/src/redaction/pseudonym.rs"
+      - "hacienda-core/tests/pseudonym_vectors.rs"
+      - "apps/hacienda-studio/package.json"
+      - ".github/workflows/ci-studio-unit.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Vitest (lib/)
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: apps/hacienda-studio
+    steps:
+      # `persist-credentials: false` matches ci-rust.yaml/ci-wasm-freshness.yaml: this job
+      # only reads the tree, so leaving a usable token in .git/config for every later step
+      # (including `npm install`'s lifecycle scripts) buys nothing.
+      #
+      # Actions are left on `@v4` tags rather than pinned to SHAs deliberately: every one
+      # of the repo's 24 workflow checkouts uses a tag today, and pinning this file alone
+      # would leave a single outlier that silently stops receiving upstream patches while
+      # the rest keep floating. Pinning is worth doing — repo-wide, in its own change.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run pseudonymization contract test
+        run: npx vitest run lib/pseudonymize.test.ts
