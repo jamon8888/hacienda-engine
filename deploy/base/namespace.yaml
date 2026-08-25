@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hacienda-prod
+  labels:
+    name: hacienda-prod
+    environment: production
+    istio-injection: enabled

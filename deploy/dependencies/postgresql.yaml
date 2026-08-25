@@ -1,0 +1,60 @@
+# PostgreSQL Dependency - Use Cloud SQL / RDS / CloudNativePG
+
+# Option 1: Cloud SQL (GCP) / RDS (AWS) - Managed
+# Configure via Terraform, reference in ExternalSecrets
+
+# Option 2: CloudNativePG Operator (Self-managed on K8s)
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: hacienda-postgres
+  namespace: database
+spec:
+  instances: 3
+  primaryUpdateStrategy: unsupervised
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "2GB"
+      effective_cache_size: "6GB"
+      maintenance_work_mem: "512MB"
+      wal_keep_size: "2GB"
+      max_replication_slots: "10"
+      hot_standby: "on"
+      max_wal_senders: "10"
+  bootstrap:
+    initdb:
+      database: hacienda
+      owner: hacienda
+      secret:
+        name: hacienda-postgres-credentials
+  storage:
+    size: 100Gi
+    storageClass: fast-ssd
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://hacienda-prod-pg-backups/
+      endpointURL: https://s3.example.com
+      s3Credentials:
+        accessKeyId:
+          name: hacienda-s3-backup-credentials
+          key: access_key
+        secretAccessKey:
+          name: hacienda-s3-backup-credentials
+          key: secret_key
+      wal:
+        compression: gzip
+        maxParallel: 4
+    retentionPolicy: 30d
+  monitoring:
+    enablePodMonitor: true
+  affinity:
+    podAntiAffinityType: required
+  resources:
+    requests:
+      memory: 4Gi
+      cpu: 2000m
+    limits:
+      memory: 8Gi
+      cpu: 4000m

@@ -1,0 +1,71 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hacienda-api
+  namespace: hacienda-prod
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: hacienda-api
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hacienda-api
+  namespace: hacienda-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: hacienda-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8787
+    - from:
+        - podSelector:
+            matchLabels:
+              app: hacienda-api
+      ports:
+        - protocol: TCP
+          port: 8787
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: database
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: cache
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53

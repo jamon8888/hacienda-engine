@@ -1,0 +1,51 @@
+# ArgoCD Image Updater Configuration
+# Install ArgoCD Image Updater:
+# kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj-labs/argocd-image-updater/stable/manifests/install.yaml
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-image-updater-config
+  namespace: argocd
+data:
+  # Git credentials for committing updates
+  # Requires a GitHub token with repo scope stored in secret
+  git.credential: secret
+  # Git commit message template
+  git.commit.message: "chore: update hacienda image to {{.Image}}"
+  # Branch to commit to
+  git.branch: main
+  # PR creation (optional)
+  git.pr.create: "true"
+  git.pr.labels: "automerge,dependencies"
+---
+# Secret for GitHub token
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-image-updater-secret
+  namespace: argocd
+type: Opaque
+stringData:
+  # Create a GitHub PAT with repo scope
+  # Store in Vault and sync via ExternalSecrets
+  GITHUB_TOKEN: "REPLACE_WITH_GITHUB_TOKEN"
+---
+# Image Updater annotations for hacienda-staging Application
+# Add to the Application metadata:
+# annotations:
+#   argocd-image-updater.argoproj.io/image-list: hacienda=ghcr.io/jamon8888/hacienda
+#   argocd-image-updater.argoproj.io/hacienda.update-strategy: latest
+#   argocd-image-updater.argoproj.io/hacienda.allow-tags: regexp:^v\d+\.\d+\.\d+$
+#   argocd-image-updater.argoproj.io/write-back-method: git
+---
+# Image Updater annotations for hacienda-production Application
+# annotations:
+#   argocd-image-updater.argoproj.io/image-list: hacienda=ghcr.io/jamon8888/hacienda
+#   argocd-image-updater.argoproj.io/hacienda.update-strategy: semver
+#   argocd-image-updater.argoproj.io/hacienda.allow-tags: regexp:^v\d+\.\d+\.\d+$
+#   argocd-image-updater.argoproj.io/write-back-method: git
+#   # Production: only create PR, don't auto-merge
+#   argocd-image-updater.argoproj.io/git-branch: main
+#   argocd-image-updater.argoproj.io/git-pr-create: "true"

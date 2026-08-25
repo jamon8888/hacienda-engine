@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: hacienda-prod
+
+resources:
+  - ../../base
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: hacienda-api
+        namespace: hacienda-prod
+      spec:
+        replicas: 3
+        template:
+          spec:
+            containers:
+              - name: hacienda-api
+                resources:
+                  requests:
+                    cpu: "2000m"
+                    memory: "4Gi"
+                  limits:
+                    cpu: "4000m"
+                    memory: "8Gi"
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: hacienda-api
+        namespace: hacienda-prod
+      spec:
+        minReplicas: 3
+        maxReplicas: 20
+
+images:
+  - name: ghcr.io/jamon8888/hacienda
+    newTag: "v0.1.0"
+
+commonLabels:
+  environment: production

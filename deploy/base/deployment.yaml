@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hacienda-api
+  namespace: hacienda-prod
+  labels:
+    app: hacienda-api
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hacienda-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: hacienda-api
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8787"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: hacienda-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hacienda-api
+          image: ghcr.io/jamon8888/hacienda:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8787
+              name: http
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,hacienda=debug,hacienda_api=debug"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hacienda-secrets
+                  key: database-url
+            - name: HACIENDA_PSEUDONYM_ACTIVE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hacienda-secrets
+                  key: pseudonym-active-key
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: hacienda-config
+                  key: s3-endpoint
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: hacienda-config
+                  key: s3-bucket
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hacienda-secrets
+                  key: redis-url
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8787
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          terminationGracePeriodSeconds: 60
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 30"]
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - hacienda-api
+                topologyKey: topology.kubernetes.io/zone
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hacienda-api
+  namespace: hacienda-prod
+  labels:
+    app: hacienda-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8787
+      protocol: TCP
+      name: http
+  selector:
+    app: hacienda-api

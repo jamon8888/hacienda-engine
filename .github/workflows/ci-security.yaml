@@ -6,25 +6,15 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Advisories land continuously, independent of code changes — a weekly
-    # run catches a newly-published RUSTSEC entry against an unchanged
-    # Cargo.lock, not just ones introduced by a PR's own dependency bumps.
-    - cron: "17 6 * * 1"
+    - cron: '17 6 * * 1'  # Weekly Monday
 
-# The job only reads the repo and reports check results.
 permissions:
   contents: read
+  security-events: write
 
 jobs:
-  # cargo-deny's `[advisories]` check wraps the same RustSec advisory-db
-  # `cargo audit` does, but resolves it against the actual dependency graph
-  # (features/targets/workspace) rather than every entry recorded in
-  # Cargo.lock — `cargo audit` flags a couple of crates here (`rkyv`, `rsa`)
-  # that are locked but never actually reachable from any build of this
-  # workspace, which would make a plain cargo-audit job noisy from day one.
-  # `[licenses]`/`[bans]`/`[sources]` ride along in the same tool/config
-  # (`deny.toml`) rather than a second install.
   cargo-deny:
+    name: Cargo Deny
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -33,3 +23,110 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  cargo-audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-06
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo-audit
+        run: cargo audit --workspace
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: cargo-audit.sarif
+          category: cargo-audit
+
+  trivy-fs:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+          severity: 'CRITICAL,HIGH'
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  trivy-image:
+    name: Trivy Image Scan
+    runs-on: ubuntu-latest
+    needs: [cargo-audit]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build image
+        run: docker buildx build -f docker/Dockerfile -t hacienda:security-scan --load .
+      - name: Run Trivy on image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'hacienda:security-scan'
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+          severity: 'CRITICAL,HIGH'
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  syft-sbom:
+    name: Syft SBOM Generation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build image
+        run: docker buildx build -f docker/Dockerfile -t hacienda:sbom --load .
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: hacienda:sbom
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+          retention-days: 90
+
+  grype-scan:
+    name: Grype Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: [syft-sbom]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+      - name: Run Grype
+        uses: anchore/grype-action@v0
+        with:
+          sbom-file: sbom.spdx.json
+          fail-build: true
+          severity-cutoff: high

@@ -1,0 +1,96 @@
+name: CI - Contract Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/**"
+      - "hacienda-api/src/**"
+      - ".github/workflows/ci-contract.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/**"
+      - "hacienda-api/src/**"
+      - ".github/workflows/ci-contract.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  openapi-contract:
+    name: OpenAPI Contract Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install schemathesis
+        run: pipx install schemathesis
+      - name: Start test API
+        run: |
+          docker compose -f docker-compose.test.yml up -d
+          sleep 10
+          curl -sf http://localhost:8787/health
+      - name: Run schemathesis
+        run: |
+          schemathesis run --checks=all \
+            --base-url=http://localhost:8787 \
+            --header="Authorization: Bearer test-token" \
+            http://localhost:8787/openapi.json
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-test-results
+          path: schemathesis-results/
+          retention-days: 30
+
+  pact-consumer:
+    name: Pact Consumer Tests (Python SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          cd sdks/python
+          pip install -e .[test]
+          pip install pact-python
+      - name: Run pact tests
+        run: |
+          cd sdks/python
+          pytest tests/contract/ -v
+      - name: Publish pacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          cd sdks/python
+          pact-broker publish pacts/ \
+            --broker-base-url=${{ secrets.PACT_BROKER_URL }} \
+            --broker-token=${{ secrets.PACT_BROKER_TOKEN }} \
+            --consumer-app-version=${{ github.sha }}
+
+  pact-provider:
+    name: Pact Provider Verification
+    runs-on: ubuntu-latest
+    needs: [pact-consumer]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Start test API
+        run: |
+          docker compose -f docker-compose.test.yml up -d
+          sleep 10
+      - name: Verify pacts
+        run: |
+          pact-broker verify \
+            --broker-base-url=${{ secrets.PACT_BROKER_URL }} \
+            --broker-token=${{ secrets.PACT_BROKER_TOKEN }} \
+            --provider-base-url=http://localhost:8787 \
+            --provider-state-setup-url=http://localhost:8787/_pact/setup
