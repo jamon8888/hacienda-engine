@@ -15,8 +15,22 @@
 **Baseline:** Task 0 is **complete** (2026-08-24) with one item outstanding — reference bundles were
 not producible on this host. See Task 0 for what that blocks.
 
-**Known-good commands on this host** (Task 0 established the obvious ones are wrong — use these, not
-the `package.json` script names):
+**Update, 2026-08-25 — Task 0.2's wasm build blocker is resolved.** Root-caused, not just retried
+into working: `wasm-pack build`'s package.json-generation step needs a `LICENSE` file colocated with
+the crate; `crates/hacienda-wasm` inherits `license.workspace = true` but had no `LICENSE` of its
+own (only the workspace root, two directories up). `wasm-pack` 0.15.0 (the exact version
+`ci-wasm-freshness.yaml` pins) warns about this and **silently skips writing `pkg/package.json`**
+rather than failing — invisible until now because `package.json`'s content never needed to change,
+so a stale-but-present committed copy was never provably wrong. Fixed by
+`fix(wasm): give hacienda-wasm its own LICENSE file so wasm-pack packages it` (commit `59d7109`):
+adds `crates/hacienda-wasm/LICENSE` (copied from the workspace root), regenerates and commits the
+four `pkg/hacienda_wasm.*` artifacts (stale since the Task 2 `model_card.rs` fix, never rebuilt
+while the build was unreliable) plus the newly-produced `pkg/LICENSE`. The `candle_nn`/`comrak`
+toolchain-component failures Task 0.2 originally recorded did **not** reproduce on a clean rebuild —
+confirmed transient/environmental on this host, not a defect in the workspace.
+
+**Consequently, the known-good-commands table below is now historical, not current** — kept for the
+record of what Task 0 through Task 6 actually ran against, not as current guidance:
 
 | Purpose | Command | Note |
 |---|---|---|
@@ -24,6 +38,13 @@ the `package.json` script names):
 | Typecheck | `cd apps/hacienda-studio && npx tsc --noEmit` | 9 pre-existing errors — compare against Task 0's list, don't expect zero |
 | Compliance tests | `cargo test -p hacienda-core --lib compliance::` | **Not** `… -p hacienda-core compliance`, which matches 0 tests |
 | e2e | *unavailable* | Blocked by the same wasm build (Task 0.2). Not a gate for this plan. |
+
+**As of 2026-08-25, `npm run test:unit` (the real entry point) works and passes 310/310** — confirmed
+directly, not inferred from the fix. `npm run test:e2e` was attempted and stopped partway through
+(model-cache-state failures — the ~614MB NER model was mid-download, unrelated to any of Tasks 1–6 —
+not completed to a green run in this session; e2e was never a gate for this plan and remains
+genuinely open, not silently declared fixed). The typecheck and compliance-test commands above are
+unaffected by the wasm fix and remain accurate as written.
 
 ---
 
@@ -686,9 +707,16 @@ Named explicitly so no task quietly grows into them:
 **Status as of Task 6's completion (2026-08-25): all six implementation tasks committed
 (`ea62fda`, `96a0c9e`, `19b2657`, `02561b8` — Tasks 1/2 share `ea62fda`, Task 4 is `96a0c9e`,
 Task 5 is `19b2657`, Task 6 is `02561b8`). Everything checkable *without* a running dev server
-and model is checked and green, repeatedly, after every task. Everything that genuinely needs
-that (e2e, a real reference-bundle re-export, live-agent verification) is still blocked exactly
-as Task 0 found — that has not changed, and re-attempting it wasn't in scope for Tasks 1–6.**
+and model is checked and green, repeatedly, after every task.**
+
+**Update, 2026-08-25 (later same day): the wasm build blocker itself is now fixed** (commit
+`59d7109`, see the note near the top of this file). This changes what's true below in one
+specific way — `npm run test:unit`/`npm run dev` no longer fail at the `predev` gate — but does
+**not** mean everything downstream is now verified: e2e was attempted and stopped partway through
+(model-cache state, not a code issue, not completed to green); a real reference-bundle re-export
+and the live-agent verification were not attempted in this pass, since fixing the build was the
+scope of that work, not re-running every previously-blocked item. Each checkbox below states its
+own current status precisely rather than being bulk-updated.
 
 - [x] `cd apps/hacienda-studio && npx vitest run` — at least 224 passing (Task 0's count), 0 failing.
       **Not `npm run test:unit`**, which cannot run here (Task 0.2).
@@ -709,15 +737,25 @@ as Task 0 found — that has not changed, and re-attempting it wasn't in scope f
       0-selected silent pass was the exact defect Task 0 caught and Task 2's corrected command avoids).
 - [ ] e2e: **not a gate.** Blocked by Task 0.2's wasm build failure. If that gets fixed, run
       `npm run test:e2e` and record it; do not claim e2e coverage until then.
-      → **Still blocked, unchanged from Task 0.** Not attempted again during Tasks 1–6 — the wasm/
-      sccache build issue is environmental, not something any of these six tasks' code changes could
-      fix, and re-diagnosing it was out of scope.
+      → **The build blocker is fixed (commit `59d7109`); e2e itself is not green.** Attempted
+      `npm run test:e2e` for real once the build worked — the dev server started and the app loaded
+      correctly (confirmed directly via browser inspection: onboarding renders, no console errors),
+      but the ~614MB NER model was mid-download at the time, and the earliest tests
+      (`basic.spec.ts`, `batch-completion.spec.ts`) wait on `input[type="file"]:not([disabled])`,
+      which the app keeps disabled until the model+worker handshake completes — every early test hit
+      that same disabled-input timeout, consistent with cache state, not a regression. Stopped after
+      8 of 177 tests once the pattern was clear, rather than let a ~614MB cold download run out the
+      clock on an unrelated verification. **Genuinely not completed** — record it as attempted and
+      understood, not as passing.
 - [ ] Re-export a reference batch in all four redaction modes and explain every difference.
       **Requires Task 0's outstanding item** — a working dev server and the ~614 MB model. If still
       blocked at merge time, say so explicitly in the PR rather than implying this was checked.
-      → **Still blocked, unchanged from Task 0.** Where a real bundle diff was called for (Tasks 3 and
-      6), a unit-level substitute was used instead and explicitly flagged as weaker in each task's own
-      notes — see Task 3.3's last item and Task 6's size-delta measurement.
+      → **No longer blocked by the build, but not attempted in this pass either** — same model-cache
+      constraint as the e2e item above, and out of scope for "fix the wasm build" specifically. Where
+      a real bundle diff was called for (Tasks 3 and 6), a unit-level substitute was used instead and
+      explicitly flagged as weaker in each task's own notes — see Task 3.3's last item and Task 6's
+      size-delta measurement. This remains the next concrete step for whoever picks this up with the
+      model already cached.
 - [x] **The disclosure test is the gate:** for a pseudonymize-mode bundle, no zip member — content or filename — contains a surface name from the fixture.
       → Confirmed at unit scope across three tasks, not just once: Task 3.3's whole-bundle scan
       (entity names, filenames, glossary, registry, entity-file content), extended by Task 6's
@@ -729,9 +767,12 @@ as Task 0 found — that has not changed, and re-attempting it wasn't in scope f
       `documents/`. That is the actual acceptance criterion for the whole plan, and no unit test
       substitutes for it.
 
-      ⚠️ **Still unreachable, unchanged from Task 0.** It needs a real exported bundle, which needs the
-      dev server and model that Task 0.2 blocks. All six implementation tasks are done and unit-tested;
-      this criterion — the only one that actually proves the plan's premise — remains the sole blocker
-      to calling the plan **accepted** rather than merely **implemented**. Unblocking Task 0.2 (or
-      running this verification on a different host where the wasm build succeeds) is the one
-      remaining step.
+      ⚠️ **Still not done, but for a narrower reason now.** The wasm build itself no longer blocks
+      this (commit `59d7109`) — the dev server runs and the app loads correctly. What's still
+      missing is a *cached* model: producing a real bundle needs the ~614MB NER model downloaded at
+      least once, which this pass didn't wait out (see the e2e item above). All six implementation
+      tasks are done and unit-tested; this criterion — the only one that actually proves the plan's
+      premise — remains the sole blocker to calling the plan **accepted** rather than merely
+      **implemented**. The remaining step is now purely "run Studio once with the model allowed to
+      finish downloading, export a real bundle, open it" — no build or environment fix required
+      first.
