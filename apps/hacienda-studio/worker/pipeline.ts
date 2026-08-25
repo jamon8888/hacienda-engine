@@ -330,13 +330,21 @@ function slugify(text: string): string {
  * this only needs to avoid collisions across one batch's entity count, not resist
  * attack), so a fast non-cryptographic hash is the right tool, not `crypto.subtle`.
  */
-function tokenSlug(token: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < token.length; i++) {
-    hash ^= token.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+/**
+ * SHA-256 via `computeContentHash`, truncated to 12 hex chars (48 bits) — the same
+ * construction `assignDocId` and `lib/registry.ts`'s `identityFor` already use for
+ * document and entity ids, not the FNV-1a 32-bit hash this function used before. A
+ * 32-bit space starts having non-trivial collision odds (birthday bound) around
+ * 65,536 distinct values, which is not obviously unreachable for pseudonym tokens —
+ * SIV ciphertext looks uniformly random to a hash, and two different real people
+ * colliding to the same slug would silently overwrite one's entity file with the
+ * other's, corrupting both dossiers with no error raised. 48 bits pushes that bound
+ * out of any realistic batch's reach, matching the other two id schemes in this
+ * codebase rather than being the one weaker outlier among them.
+ */
+async function tokenSlug(token: string): Promise<string> {
+  const digest = await computeContentHash(new TextEncoder().encode(token).buffer);
+  return digest.slice(0, 12);
 }
 
 /**
@@ -534,11 +542,11 @@ function deduplicateEntities(entities: Entity[]): Entity[] {
  * cannot be told the batch is pseudonymized while the findings it actually receives
  * say otherwise — the caller has one fewer parameter to get out of sync.
  */
-export function filterExportableEntities(
+export async function filterExportableEntities(
   entities: Entity[],
   piiFindings: PiiEntity[],
   redactPiiInOutput: boolean,
-): Entity[] {
+): Promise<Entity[]> {
   if (!redactPiiInOutput) return entities;
   const overlappingFindings = (span: { start: number; end: number }) =>
     piiFindings.filter((p) => span.start < p.end && p.start < span.end);
@@ -557,7 +565,7 @@ export function filterExportableEntities(
     // of the same real name in this document already minted the identical token —
     // any overlapping finding's template is as good as another to key on.
     const token = overlaps[0].redact_template;
-    result.push({ ...e, name: token, slug: tokenSlug(token) });
+    result.push({ ...e, name: token, slug: await tokenSlug(token) });
   }
   return result;
 }
@@ -1076,7 +1084,7 @@ async function processFile(
     }
   }
 
-  const exportableEntities = filterExportableEntities(
+  const exportableEntities = await filterExportableEntities(
     entities,
     piiFindings,
     config.redactPiiInOutput,

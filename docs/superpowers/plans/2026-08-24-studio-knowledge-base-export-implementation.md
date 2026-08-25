@@ -656,6 +656,18 @@ additions to `annotate.test.ts` and `pipeline.test.ts` — and 1 pre-existing te
 intentional shape change). `npx tsc --noEmit`: still exactly the 7 pre-existing baseline errors,
 none new.
 
+**Known limitation, flagged by CodeRabbit review, deliberately not fixed here:** §5.2's
+`## Related documents` section is spliced into each document's markdown in a post-loop pass, after
+`processFiles`'s per-file `self.postMessage({ type: "file-complete", ... })` has already sent that
+document to the main thread — so the *live in-app document preview* (`App.tsx`/`DocumentDetail.tsx`,
+via `WorkerPool`) never shows the section; only the finished export does, since `lastBatch` is
+captured *after* the splice, which is what `assembleZip` reads from. The exported zip — the actual
+subject of this whole plan — is correct. Fixing the live-preview staleness would mean restructuring
+when/how `file-complete` fires or teaching `WorkerPool`/`App.tsx`/`DocumentDetail.tsx` to re-render
+on a later "results finalized" event — a change to UI plumbing this plan never touches elsewhere,
+out of scope for a KB-export task. Recorded here as a known, scoped-out gap rather than silently
+left for a reviewer to rediscover.
+
 ---
 
 ## Task 6 — Entity dossiers (spec §8 step 6)

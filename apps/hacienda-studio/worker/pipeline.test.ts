@@ -202,7 +202,7 @@ describe("renderAnnotatedMarkdown (Track F4)", () => {
 });
 
 describe("filterExportableEntities (Track A2)", () => {
-  it("drops an entity whose span overlaps a PII finding when output is being redacted", () => {
+  it("drops an entity whose span overlaps a PII finding when output is being redacted", async () => {
     const misclassifiedPhone = entity({
       name: "4111111111111111",
       type: "phone",
@@ -211,7 +211,7 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities(
+    const result = await filterExportableEntities(
       [misclassifiedPhone],
       [card],
       true,
@@ -220,7 +220,7 @@ describe("filterExportableEntities (Track A2)", () => {
     expect(result).toEqual([]);
   });
 
-  it("keeps a non-overlapping entity when output is being redacted", () => {
+  it("keeps a non-overlapping entity when output is being redacted", async () => {
     const jean = entity({
       name: "Jean Dupont",
       type: "person",
@@ -229,12 +229,12 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 30, end: 46, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities([jean], [card], true);
+    const result = await filterExportableEntities([jean], [card], true);
 
     expect(result).toEqual([jean]);
   });
 
-  it("drops the whole entity if any one of several mentions overlaps, not just that span", () => {
+  it("drops the whole entity if any one of several mentions overlaps, not just that span", async () => {
     const jean = entity({
       name: "Jean Dupont",
       type: "person",
@@ -247,12 +247,12 @@ describe("filterExportableEntities (Track A2)", () => {
     // Overlaps only the second mention.
     const finding = piiEntity({ start: 55, end: 58, redact_template: "[X:*]" });
 
-    const result = filterExportableEntities([jean], [finding], true);
+    const result = await filterExportableEntities([jean], [finding], true);
 
     expect(result).toEqual([]);
   });
 
-  it("keeps everything untouched in scan-only mode, even with overlapping findings", () => {
+  it("keeps everything untouched in scan-only mode, even with overlapping findings", async () => {
     const misclassifiedPhone = entity({
       name: "4111111111111111",
       type: "phone",
@@ -261,7 +261,7 @@ describe("filterExportableEntities (Track A2)", () => {
     });
     const card = piiEntity({ start: 12, end: 28, redact_template: "[CARD:****]" });
 
-    const result = filterExportableEntities(
+    const result = await filterExportableEntities(
       [misclassifiedPhone],
       [card],
       false,
@@ -272,7 +272,7 @@ describe("filterExportableEntities (Track A2)", () => {
 });
 
 describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", () => {
-  it("retains an entity whose overlapping finding carries a real pseudonym token, rekeyed on it", () => {
+  it("retains an entity whose overlapping finding carries a real pseudonym token, rekeyed on it", async () => {
     const jean = entity({
       name: "Jean Dupont",
       type: "person",
@@ -286,17 +286,19 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
       redact_template: "[PERSON:session:MFRGG2LTMVRXEZLU]",
     });
 
-    const [result] = filterExportableEntities([jean], [finding], true);
+    const [result] = await filterExportableEntities([jean], [finding], true);
 
     expect(result).toBeDefined();
     expect(result.name).toBe("[PERSON:session:MFRGG2LTMVRXEZLU]");
     // The slug must not be derivable back to "Jean Dupont" — it's a hash of the token,
     // not of the real name, which is the whole point of this task.
     expect(result.slug).not.toBe("jean-dupont");
-    expect(result.slug).toMatch(/^[0-9a-f]{8}$/);
+    // 12 hex chars (48 bits) since `tokenSlug` moved from FNV-1a to SHA-256 — matches
+    // `assignDocId`/`identityFor`'s id-generation precedent, not the old 8-char format.
+    expect(result.slug).toMatch(/^[0-9a-f]{12}$/);
   });
 
-  it("still drops the entity when pseudonymize has no key (mask-shaped fallback template)", () => {
+  it("still drops the entity when pseudonymize has no key (mask-shaped fallback template)", async () => {
     // `worker/pipeline.ts`'s pseudonymize branch leaves `redact_template` at whatever
     // `process()`/`process_with_model_entities` already produced when `pseudonymKeyHex`
     // is null — a mask-shaped template, not a token. This is the degradation case
@@ -314,12 +316,12 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
       redact_template: "[PERSON]",
     });
 
-    const result = filterExportableEntities([jean], [finding], true);
+    const result = await filterExportableEntities([jean], [finding], true);
 
     expect(result).toEqual([]);
   });
 
-  it("drops the entity if any one of several overlapping findings lacks a real token", () => {
+  it("drops the entity if any one of several overlapping findings lacks a real token", async () => {
     const jean = entity({
       name: "Jean Dupont",
       type: "person",
@@ -342,7 +344,7 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
       redact_template: "[PERSON]",
     });
 
-    const result = filterExportableEntities([jean], [tokenFinding, maskFinding], true);
+    const result = await filterExportableEntities([jean], [tokenFinding, maskFinding], true);
 
     expect(result).toEqual([]);
   });
@@ -375,7 +377,7 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
       }),
     ];
 
-    const results = filterExportableEntities([jean, acme], findings, true);
+    const results = await filterExportableEntities([jean, acme], findings, true);
     const registry = new BatchEntityRegistry();
     // `Promise.all`, not a plain `.map` (each entity is distinct — jean/acme never share
     // a dedup key — so there's no merge race here, but `buildGlossaryIndex` below reads
@@ -442,8 +444,8 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
       redact_template: tokenInDoc2,
     });
 
-    const [resultDoc1] = filterExportableEntities([jeanInDoc1], [findingInDoc1], true);
-    const [resultDoc2] = filterExportableEntities([jeanInDoc2], [findingInDoc2], true);
+    const [resultDoc1] = await filterExportableEntities([jeanInDoc1], [findingInDoc1], true);
+    const [resultDoc2] = await filterExportableEntities([jeanInDoc2], [findingInDoc2], true);
 
     // Same name -> same token -> same name/slug on the exported entity -> the registry's
     // existing `${normalizedName}|${type}|${vertical}` dedup key merges them into one
@@ -472,7 +474,7 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
     expect(merged.source_documents).toEqual(["doc-001", "doc-002"]);
   });
 
-  it("leaves mask, hash, and remove entity sets unaffected by this task's change", () => {
+  it("leaves mask, hash, and remove entity sets unaffected by this task's change", async () => {
     // Unit-level substitute for a byte-level bundle diff — Task 0 could not produce
     // reference bundles on this host (no dev server / model available). This asserts the
     // narrower but still meaningful property: for every mode except pseudonymize-with-a-
@@ -490,7 +492,7 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
 
     for (const redact_template of templates) {
       const finding = piiEntity({ category: "person", start: 0, end: 11, redact_template });
-      const result = filterExportableEntities([jean], [finding], true);
+      const result = await filterExportableEntities([jean], [finding], true);
       expect(result).toEqual([]);
     }
   });
