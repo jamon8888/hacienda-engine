@@ -107,6 +107,140 @@ tasks:
     cmds:
       - poly lint --no-workspace .
 
+  # ============================================
+  # FAST BUILD OPTIMIZER COMMANDS (NEW)
+  # ============================================
+  
+  # Clippy commands
+  clippy:fast:
+    desc: Fast clippy on core crates only (hacienda, hacienda-core) — ~3s vs ~19s for full workspace
+    cmds:
+      - cargo clippy -p hacienda -p hacienda-core --all-targets --features ner-candle -- -D warnings
+
+  clippy:fast:fix:
+    desc: Fast clippy with auto-fix on core crates only
+    cmds:
+      - cargo clippy -p hacienda -p hacienda-core --all-targets --features ner-candle --fix -- -D warnings
+
+  clippy:incremental:
+    desc: Clippy only on crates with changes since HEAD~1 (detects changed crates automatically)
+    cmds:
+      - |
+        CHANGED_CRATES=$(git diff --name-only HEAD~1 | grep -E '^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/' | sed -E 's|^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/.*|\1|' | sort -u | tr '\n' ' ' | sed -E 's|crates/hacienda-rag|hacienda-rag|g; s|crates/hacienda-wasm|hacienda-wasm|g')
+        if [ -z "$CHANGED_CRATES" ]; then
+          CHANGED_CRATES="hacienda hacienda-core"
+        fi
+        echo "Changed crates: $CHANGED_CRATES"
+        for crate in $CHANGED_CRATES; do
+          cargo clippy -p $crate --all-targets --features ner-candle -- -D warnings
+        done
+
+  clippy:incremental:fix:
+    desc: Incremental clippy with auto-fix on changed crates
+    cmds:
+      - |
+        CHANGED_CRATES=$(git diff --name-only HEAD~1 | grep -E '^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/' | sed -E 's|^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/.*|\1|' | sort -u | tr '\n' ' ' | sed -E 's|crates/hacienda-rag|hacienda-rag|g; s|crates/hacienda-wasm|hacienda-wasm|g')
+        if [ -z "$CHANGED_CRATES" ]; then
+          CHANGED_CRATES="hacienda hacienda-core"
+        fi
+        echo "Changed crates: $CHANGED_CRATES"
+        for crate in $CHANGED_CRATES; do
+          cargo clippy -p $crate --all-targets --features ner-candle --fix -- -D warnings
+        done
+
+  clippy:full:
+    desc: Full workspace clippy on all crates with all targets
+    cmds:
+      - cargo clippy --workspace --all-targets --features ner-candle -- -D warnings
+
+  clippy:full:fix:
+    desc: Full workspace clippy with auto-fix
+    cmds:
+      - cargo clippy --workspace --all-targets --features ner-candle --fix -- -D warnings
+
+  # Test commands
+  test:fast:
+    desc: Fast tests on core crates only (hacienda, hacienda-core)
+    cmds:
+      - cargo test -p hacienda -p hacienda-core
+
+  test:incremental:
+    desc: Tests only on crates with changes since HEAD~1
+    cmds:
+      - |
+        CHANGED_CRATES=$(git diff --name-only HEAD~1 | grep -E '^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/' | sed -E 's|^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/.*|\1|' | sort -u | tr '\n' ' ' | sed -E 's|crates/hacienda-rag|hacienda-rag|g; s|crates/hacienda-wasm|hacienda-wasm|g')
+        if [ -z "$CHANGED_CRATES" ]; then
+          CHANGED_CRATES="hacienda hacienda-core"
+        fi
+        echo "Changed crates: $CHANGED_CRATES"
+        for crate in $CHANGED_CRATES; do
+          cargo test -p $crate
+        done
+
+  test:full:
+    desc: Full workspace test suite on all crates
+    cmds:
+      - cargo test --workspace
+
+  # Check commands (type-check only, fastest)
+  check:fast:
+    desc: Fast type-check on core crates only (fastest correctness signal)
+    cmds:
+      - cargo check -p hacienda -p hacienda-core --all-targets
+
+  check:incremental:
+    desc: Type-check only on crates with changes since HEAD~1
+    cmds:
+      - |
+        CHANGED_CRATES=$(git diff --name-only HEAD~1 | grep -E '^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/' | sed -E 's|^(hacienda|hacienda-core|hacienda-api|hacienda-cli|hacienda-mcp|crates/hacienda-rag|crates/hacienda-wasm)/.*|\1|' | sort -u | tr '\n' ' ' | sed -E 's|crates/hacienda-rag|hacienda-rag|g; s|crates/hacienda-wasm|hacienda-wasm|g')
+        if [ -z "$CHANGED_CRATES" ]; then
+          CHANGED_CRATES="hacienda hacienda-core"
+        fi
+        echo "Changed crates: $CHANGED_CRATES"
+        for crate in $CHANGED_CRATES; do
+          cargo check -p $crate --all-targets
+        done
+
+  # Verification pipelines
+  verify:fast:
+    desc: Fast verification pipeline: check + clippy + test on core crates only (~30-60s)
+    cmds:
+      - task check:fast
+      - task clippy:fast
+      - task test:fast
+
+  verify:fast:fix:
+    desc: Fast verification with clippy auto-fix
+    cmds:
+      - task check:fast
+      - task clippy:fast:fix
+      - task test:fast
+
+  verify:incremental:
+    desc: Incremental verification pipeline: check + clippy + test only on changed crates
+    cmds:
+      - task check:incremental
+      - task clippy:incremental
+      - task test:incremental
+
+  verify:incremental:fix:
+    desc: Incremental verification with clippy auto-fix
+    cmds:
+      - task check:incremental
+      - task clippy:incremental:fix
+      - task test:incremental
+
+  # Utility
+  sccache:stats:
+    desc: Show sccache hit/miss statistics for build caching effectiveness
+    cmds:
+      - sccache --show-stats
+
+  build:timings:
+    desc: Show cargo build timing breakdown to identify bottlenecks
+    cmds:
+      - cargo build --timings
+
   fmt:
     desc: Format all code
     cmds:
@@ -196,44 +330,8 @@ tasks:
 
   # Release
   release:
-    desc: Cut a release tag
-    vars:
-      VERSION: "0.1.0"
+    desc: Create a release (requires clean working tree)
     cmds:
-      - git tag -s v{{.VERSION}} -m "Release v{{.VERSION}}"
-      - git push origin v{{.VERSION}}
-      - gh workflow run publish.yaml -f tag=v{{.VERSION}}
-
-  release:dryrun:
-    desc: Dry-run release
-    vars:
-      VERSION: "0.1.0"
-    cmds:
-      - gh workflow run publish.yaml -f tag=v{{.VERSION}} -f dry_run=true
-
-  # Docker
-  docker:build:
-    desc: Build Docker image
-    cmds:
-      - docker build -t hacienda:latest -f docker/Dockerfile .
-
-  docker:run:
-    desc: Run Docker container
-    cmds:
-      - docker run --rm -p 8080:8080 hacienda:latest
-
-  # Helpers
-  clean:
-    desc: Clean build artifacts
-    cmds:
-      - cargo clean -p hacienda -p hacienda-core
-      - rm -rf build/ target/ .alef/
-
-  doctor:
-    desc: Check environment
-    cmds:
-      - rustup show
-      - cargo --version
-      - alef --version
-      - poly --version
-      - cargo --version
+      - git diff --quiet
+      - task verify
+      - cargo release --workspace --execute

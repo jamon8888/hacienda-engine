@@ -1,0 +1,140 @@
+# hacienda-engineer Agent Preset
+# Expert agent for hacienda-engine codebase: GDPR/DORA/AI Act compliant document intelligence
+# Works with: DeepSeek Harness (DSH), Claude Code, OpenCode
+
+preset_id: hacienda-engineer
+version: "1.0.0"
+description: |
+  Expert agent for hacienda-engine - the Rust document intelligence stack with PII detection,
+  redaction, audit, compliance, and 15+ language bindings. Covers the full stack from
+  hacienda-core (PII/redaction/audit/review/glossary) through hacienda-api (REST), hacienda-mcp (MCP),
+  hacienda-cli, and all polyglot bindings via alef.
+
+# Composition extends the host with hacienda-specific capabilities
+composition:
+  # Core services this preset provides
+  services:
+    - id: hacienda-codebase-context
+      type: service
+      description: "Provides hacienda-engine codebase knowledge: crate structure, feature flags, CI patterns, alef bindings"
+      interface: hacienda.CodebaseContext
+
+    - id: hacienda-cargo-workspace
+      type: service
+      description: "Manages Cargo workspace operations: check, test, feature-matrix, build:bindings"
+      interface: hacienda.CargoWorkspace
+
+    - id: hacienda-alef-bindings
+      type: service
+      description: "Manages alef binding generation, verification, sync across 15 languages"
+      interface: hacienda.AlefBindings
+
+    - id: hacienda-ci-triage
+      type: service
+      description: "Analyzes GitHub Actions workflow failures, suggests fixes for ci-rust, ci-lint, ci-e2e"
+      interface: hacienda.CITriage
+
+    - id: hacienda-pr-reviewer
+      type: service
+      description: "Reviews PRs against hacienda conventions: zero-warnings, no unwrap, SAFETY comments, conventional commits"
+      interface: hacienda.PRReviewer
+
+    - id: hacienda-build-optimizer
+      type: service
+      description: "Optimizes build, clippy, and test execution with incremental, parallel, and cached commands"
+      interface: hacienda.BuildOptimizer
+
+  # Events this preset emits/consumes
+  events:
+    - id: hacienda.build.started
+      description: "Emitted when a build/check/test command starts"
+    - id: hacienda.build.completed
+      description: "Emitted when a build/check/test command completes with result"
+    - id: hacienda.test.failed
+      description: "Emitted when tests fail with error details for triage"
+    - id: hacienda.alef.generated
+      description: "Emitted after alef bindings are generated"
+    - id: hacienda.pr.opened
+      description: "Emitted when a PR is opened for review"
+
+  # Tools this preset registers for the model
+  tools:
+    - name: hacienda_check
+      description: "Run hacienda check pipeline (fmt:check + lint:check + test)"
+    - name: hacienda_test
+      description: "Run hacienda tests (Rust + bindings + e2e)"
+    - name: hacienda_alef_generate
+      description: "Regenerate all language bindings via alef"
+    - name: hacienda_alef_verify
+      description: "Verify bindings are up to date"
+    - name: hacienda_feature_matrix
+      description: "Run cargo hack feature matrix check"
+    - name: hacienda_triage_ci
+      description: "Analyze CI failure logs and suggest fixes"
+    - name: hacienda_review_pr
+      description: "Review PR against hacienda conventions"
+    - name: hacienda_clippy_fast
+      description: "Run fast clippy on core crates only (hacienda, hacienda-core) - ~3s vs ~19s"
+    - name: hacienda_clippy_incremental
+      description: "Run clippy only on crates with changes since base ref (default HEAD~1)"
+    - name: hacienda_clippy_full
+      description: "Run full workspace clippy on all crates with all targets"
+    - name: hacienda_test_fast
+      description: "Run fast tests on core crates only (hacienda, hacienda-core)"
+    - name: hacienda_test_incremental
+      description: "Run tests only on crates with changes since base ref"
+    - name: hacienda_test_full
+      description: "Run full workspace test suite on all crates"
+    - name: hacienda_check_fast
+      description: "Run fast type-check on core crates only (fastest correctness signal)"
+    - name: hacienda_check_incremental
+      description: "Run type-check only on crates with changes since base ref"
+    - name: hacienda_verify_fast
+      description: "Fast verification pipeline: check + clippy + test on core crates only (~30-60s)"
+    - name: hacienda_verify_incremental
+      description: "Incremental verification pipeline: check + clippy + test only on changed crates"
+    - name: hacienda_sccache_stats
+      description: "Show sccache hit/miss statistics for build caching effectiveness"
+    - name: hacienda_build_timings
+      description: "Show cargo build timing breakdown to identify bottlenecks"
+
+# Plugin packages included in this preset
+plugins:
+  # Core hacienda-engineer plugin providing all services above
+  - id: hacienda-engineer-core
+    package: hacienda-engineer-core@latest
+    config:
+      workspace_root: "${workspace}"
+      cargo_toml: "${workspace}/Cargo.toml"
+      alef_toml: "${workspace}/alef.toml"
+
+  # Build optimizer plugin for faster clippy/test
+  - id: hacienda-build-optimizer
+    package: hacienda-build-optimizer@latest
+    config:
+      workspace_root: "${workspace}"
+
+  # CI Triage plugin for GitHub Actions analysis
+  - id: hacienda-ci-triage
+    package: hacienda-ci-triage@latest
+    config:
+      workflows_dir: "${workspace}/.github/workflows"
+      cache_dir: "${workspace}/.ci-cache"
+
+  # PR Reviewer plugin for code review automation
+  - id: hacienda-pr-reviewer
+    package: hacienda-pr-reviewer@latest
+    config:
+      coderabbit_config: "${workspace}/.coderabbit.yaml"
+      conventions: "${workspace}/.ai-rulez/config.toml"
+
+# Grant auto-approval for this preset's plugins
+grants:
+  - plugin: hacienda-engineer-core
+    level: full
+  - plugin: hacienda-build-optimizer
+    level: full
+  - plugin: hacienda-ci-triage
+    level: full
+  - plugin: hacienda-pr-reviewer
+    level: full
