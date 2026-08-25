@@ -89,5 +89,9 @@ appareil = "appareil"
 espace = "espace"
 convertis = "convertis"
 invalide = "invalide"
+# apps/hacienda-studio/lib/registry.ts's HONORIFIC_PATTERN: `ma[iî]tre` (French "maître"/"maitre",
+# the honorific in "Maître Dupont") is split by the `[iî]` character class, so the checker sees
+# the bare fragment "tre" rather than the whole word and flags it as a typo for "tree"/"the".
+tre = "tre"
 
 [default.extend-identifiers]
