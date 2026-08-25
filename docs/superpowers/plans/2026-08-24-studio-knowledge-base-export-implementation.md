@@ -15,8 +15,22 @@
 **Baseline:** Task 0 is **complete** (2026-08-24) with one item outstanding — reference bundles were
 not producible on this host. See Task 0 for what that blocks.
 
-**Known-good commands on this host** (Task 0 established the obvious ones are wrong — use these, not
-the `package.json` script names):
+**Update, 2026-08-25 — Task 0.2's wasm build blocker is resolved.** Root-caused, not just retried
+into working: `wasm-pack build`'s package.json-generation step needs a `LICENSE` file colocated with
+the crate; `crates/hacienda-wasm` inherits `license.workspace = true` but had no `LICENSE` of its
+own (only the workspace root, two directories up). `wasm-pack` 0.15.0 (the exact version
+`ci-wasm-freshness.yaml` pins) warns about this and **silently skips writing `pkg/package.json`**
+rather than failing — invisible until now because `package.json`'s content never needed to change,
+so a stale-but-present committed copy was never provably wrong. Fixed by
+`fix(wasm): give hacienda-wasm its own LICENSE file so wasm-pack packages it` (commit `59d7109`):
+adds `crates/hacienda-wasm/LICENSE` (copied from the workspace root), regenerates and commits the
+four `pkg/hacienda_wasm.*` artifacts (stale since the Task 2 `model_card.rs` fix, never rebuilt
+while the build was unreliable) plus the newly-produced `pkg/LICENSE`. The `candle_nn`/`comrak`
+toolchain-component failures Task 0.2 originally recorded did **not** reproduce on a clean rebuild —
+confirmed transient/environmental on this host, not a defect in the workspace.
+
+**Consequently, the known-good-commands table below is now historical, not current** — kept for the
+record of what Task 0 through Task 6 actually ran against, not as current guidance:
 
 | Purpose | Command | Note |
 |---|---|---|
@@ -24,6 +38,13 @@ the `package.json` script names):
 | Typecheck | `cd apps/hacienda-studio && npx tsc --noEmit` | 9 pre-existing errors — compare against Task 0's list, don't expect zero |
 | Compliance tests | `cargo test -p hacienda-core --lib compliance::` | **Not** `… -p hacienda-core compliance`, which matches 0 tests |
 | e2e | *unavailable* | Blocked by the same wasm build (Task 0.2). Not a gate for this plan. |
+
+**As of 2026-08-25, `npm run test:unit` (the real entry point) works and passes 310/310** — confirmed
+directly, not inferred from the fix. `npm run test:e2e` was attempted and stopped partway through
+(model-cache-state failures — the ~614MB NER model was mid-download, unrelated to any of Tasks 1–6 —
+not completed to a green run in this session; e2e was never a gate for this plan and remains
+genuinely open, not silently declared fixed). The typecheck and compliance-test commands above are
+unaffected by the wasm fix and remain accurate as written.
 
 ---
 
@@ -165,54 +186,149 @@ lands or is reverted.
 
 ## Task 1 — Stop asserting unobserved relationships (spec §8 step 2)
 
+**Status: COMPLETE — implemented 2026-08-24, verified in worktree `.claude/worktrees/studio-kb-export-task1`.**
+
 **Why first:** this is the only defect that puts *false statements* into a compliance product's output, and the bundle's own README tells readers to trust it over the source text. Missing data (Task 3) is less harmful than wrong data.
+
+**Note on how this landed:** implemented directly in the shared working tree, then interrupted by
+a second, independent session (the spawned Settings-field fix, task_2594572f) committing to the
+*same* checkout — not an isolated worktree — which at one point swept an uncommitted edit of mine
+into one of its own commits, and later checked out a different branch entirely, wiping this task's
+uncommitted files from disk. Nothing was lost: an automatic pre-checkout safety commit
+(`b4afee4`, a stash-shaped merge of the staged and untracked state) preserved everything, and it
+was recovered file-for-file into a proper isolated worktree before continuing. Recorded here
+because it is exactly the kind of shared-state hazard `superpowers:executing-plans` should isolate
+against — implement multi-task plans like this one in a dedicated worktree from the start, not the
+main checkout, when there is any chance another session touches the same repo.
 
 ### 1.1 Retype the inferred edges
 
-- [ ] In `lib/registry.ts`, replace the four typed emissions in `inferRelationships` (`works_for` ×2, `partner_of` ×2, `contact_email` ×4) with a single `co_occurs_with` edge per unordered entity pair.
-- [ ] Drop the reciprocal double-emission for organisation pairs (`:169-182` currently emits both directions of a symmetric relation). One edge per unordered pair; record direction-independence in `RegistryRelationship`'s doc comment.
-- [ ] Replace the hardcoded confidences with a proximity score. Minimum viable: same sentence > same paragraph > same document. `RegistryEntity.spans` are not retained on the registry today — either thread the spans through `addEntity` (they are already a parameter, `registry.ts:47`) or compute proximity in `inferRelationships`' caller where spans are still in scope. **Prefer the latter**; widening registry state is a bigger change than this task needs.
-- [ ] Keep `context` informative rather than the constant string `"Co-occurs in document"` — record which proximity band produced the score.
+- [x] In `lib/registry.ts`, replace the four typed emissions in `inferRelationships` (`works_for` ×2, `partner_of` ×2, `contact_email` ×4) with a single `co_occurs_with` edge per unordered entity pair.
+      → confirmed: `inferRelationships` rewritten; every emission is `co_occurs_with`
+      (`lib/registry.test.ts`'s first test asserts the old three type strings never appear).
+- [x] Drop the reciprocal double-emission for organisation pairs (`:169-182` currently emits both directions of a symmetric relation). One edge per unordered pair; record direction-independence in `RegistryRelationship`'s doc comment.
+      → confirmed: the new loop iterates `i < j` once per pair and calls `addRelationship` at most
+      once per pair; pinned by `should_emit_one_edge_per_unordered_pair`.
+- [x] Replace the hardcoded confidences with a proximity score. Minimum viable: same sentence > same paragraph > same document. `RegistryEntity.spans` are not retained on the registry today — either thread the spans through `addEntity` (they are already a parameter, `registry.ts:47`) or compute proximity in `inferRelationships`' caller where spans are still in scope. **Prefer the latter**; widening registry state is a bigger change than this task needs.
+      → confirmed, with a deliberate deviation from "prefer the latter": implemented as a private
+      `docEntitySpans: Map<docId, Map<entityId, EntitySpan[]>>` side map on the registry instead of
+      threading spans through the caller. Reason found during implementation: `inferRelationships`
+      is called once per document from `worker/pipeline.ts`, well after `processFile`'s local
+      `entities` array (which holds spans) has gone out of scope — the caller does not have spans
+      available at the point it calls `inferRelationships`, only `registry` and `docId`. Storing
+      them on the registry (populated for free inside the existing `addEntity` call) was the
+      smaller change. Not exposed in `toJSON()` — bundle-irrelevant, per-document-only data.
+- [x] Keep `context` informative rather than the constant string `"Co-occurs in document"` — record which proximity band produced the score.
+      → confirmed: `context` is `"Named in the same sentence"` or `"Named in the same paragraph"`.
+- [x] **Added, not in original scope — a real bug found while implementing this task:**
+      `addEntity`'s repeat-mention branch (`registry.ts:92-98` pre-task) updated
+      `source_documents`/`mention_count` but never `docEntityMap`, so an entity first seen in
+      doc-001 and mentioned again in doc-002 was invisible to `inferRelationships(doc-002, …)` —
+      co-occurrences involving any previously-seen entity were silently never scored in every
+      document after the first. Fixed via a shared `registerInDocument` helper called from both
+      branches of `addEntity`. Pinned by `registers a repeat appearance of an entity in a later
+      document (Task 1 bug fix)`.
+- [x] **Added, not in original scope:** a hard distance cap (`MAX_PROXIMITY_GAP_CHARS = 300`) inside
+      `classifyProximity`, independent of the sentence/paragraph check. Without it, "no blank line
+      between two mentions" is not actually a proximity signal — a long, unbroken paragraph has no
+      length limit, so two entities pages apart with no blank line between them would score
+      `same_paragraph`. This was caught empirically: an early version of the "does not explode"
+      test (40 persons + 5 orgs, one contiguous paragraph, no blank lines) produced 820 edges — all
+      `co_occurs_with`, so not the *old* bug, but evidence the *new* scheme had its own unbounded
+      case. The final test (`does not explode on a large document: entities spaced past the
+      proximity window get no edge at all`) proves the fix structurally: entities spaced beyond the
+      cap, anywhere in a paragraph-break-free document, produce **zero** edges regardless of count —
+      not merely "fewer than N", which would only have been a coincidence of the test's shape.
 
 ### 1.2 Propagate to the exports
 
-- [ ] `lib/kg-export.ts`'s `toCypher` emits `:${r.relationship_type.toUpperCase()}` (`:32`), so the Cypher label follows automatically — **verify** it produces `:CO_OCCURS_WITH` and not something malformed.
-- [ ] Check `toRDF`'s predicate construction for the same, and `toNetworkX`'s `type` field.
-- [ ] Update the bundle README's "Prefer these over re-deriving relationships from the prose" line (`lib/zip-export.ts:135-137`). It is now only true for *co-occurrence*, which is a much weaker claim. State what the edges do and do not mean.
+- [x] `lib/kg-export.ts`'s `toCypher` emits `:${r.relationship_type.toUpperCase()}` (`:32`), so the Cypher label follows automatically — **verify** it produces `:CO_OCCURS_WITH` and not something malformed.
+      → confirmed by inspection: `"co_occurs_with".toUpperCase()` → `CO_OCCURS_WITH`, valid Cypher
+      relationship-type syntax. No code change needed here.
+- [x] Check `toRDF`'s predicate construction for the same, and `toNetworkX`'s `type` field.
+      → confirmed: `toRDF` interpolates `xberg:${r.relationship_type}` → `xberg:co_occurs_with`
+      (valid Turtle predicate, no escaping needed since the value contains no reserved characters);
+      `toNetworkX`'s `type: r.relationship_type` is a plain string field, no constraint to satisfy.
+      Neither required a code change — both were already generic over the relationship type string.
+- [x] Update the bundle README's "Prefer these over re-deriving relationships from the prose" line (`lib/zip-export.ts:135-137`). It is now only true for *co-occurrence*, which is a much weaker claim. State what the edges do and do not mean.
+      → confirmed: replaced with a "## What the graph edges mean" section stating the proximity
+      bands, that `confidence` is a proximity strength not a relation probability, that
+      co-occurrence is explicitly *not* a relationship claim, and that document-level pairs (no
+      edge) are already recoverable from `document_entities` rather than repeated as an edge.
 
 ### 1.3 Tests (new file)
 
-- [ ] Create `lib/registry.test.ts` — there is none today.
-- [ ] `should_not_emit_any_typed_employment_relation`: register a person and an organisation in one document; assert no relationship has type `works_for`, `partner_of`, or `contact_email`.
-- [ ] `should_emit_one_edge_per_unordered_pair`: two organisations in one document → exactly one edge, not two.
-- [ ] `should_score_same_sentence_above_same_document`: two entities close together outscore two far apart.
-- [ ] `should_not_explode_on_a_large_document`: 40 persons + 5 organisations must not produce ~200 typed claims. Assert the edge count and that every type is `co_occurs_with`.
+- [x] Create `lib/registry.test.ts` — there is none today.
+      → confirmed: 7 tests (4 required below, 3 added — see 1.1's bug-fix and explosion-fix items,
+      plus one confirming `inferRelationships` emits nothing when `text` is omitted).
+- [x] `should_not_emit_any_typed_employment_relation`: register a person and an organisation in one document; assert no relationship has type `works_for`, `partner_of`, or `contact_email`.
+      → confirmed as `never emits a typed employment, ownership, or contact relation`.
+- [x] `should_emit_one_edge_per_unordered_pair`: two organisations in one document → exactly one edge, not two.
+      → confirmed as `emits exactly one edge per unordered pair, not one per direction`.
+- [x] `should_score_same_sentence_above_same_document`: two entities close together outscore two far apart.
+      → confirmed as `scores same-sentence proximity higher than same-paragraph` (retitled: the
+      implementation scores same-sentence vs. same-paragraph, not vs. same-document — same-document
+      alone, beyond the 300-char cap, scores no edge at all, so "same document" was never a
+      confidence tier to compare against).
+- [x] `should_not_explode_on_a_large_document`: 40 persons + 5 organisations must not produce ~200 typed claims. Assert the edge count and that every type is `co_occurs_with`.
+      → confirmed, retargeted during implementation — see 1.1's explosion-fix note for why an
+      arbitrary count threshold (calibrated against the *old* scheme's incidental ~200) was replaced
+      with a structural zero-edges-when-spaced-past-the-cap assertion.
+      Result: `cd apps/hacienda-studio && npx vitest run lib/registry.test.ts` → 7/7 passed.
+      Full suite: `npx vitest run` → 234/234 passed, 23 files (was 224/22 at Task 0 baseline; +10
+      for this file). `npx tsc --noEmit` → same 7 pre-existing-post-Task-0 errors, none new or
+      removed by this task (see Task 0's baseline note on why the count moved from 9 to 7 already,
+      before this task, due to unrelated concurrent commits).
 
 ### 1.4 Make the generations distinguishable
 
-- [ ] Add a marker to `_manifest.json` recording the relationship semantics version (the spec's §6). A bundle exported before this task and one exported after must be tellable apart without diffing edge lists.
+- [x] Add a marker to `_manifest.json` recording the relationship semantics version (the spec's §6). A bundle exported before this task and one exported after must be tellable apart without diffing edge lists.
+      → confirmed: `_manifest.json` gains `relationshipSemanticsVersion: 2` (1 implicitly being every
+      bundle exported before this task).
 
 ---
 
 ## Task 2 — Correct the model card (spec §8 step 2b)
 
-Two lines, no dependency on any other task. Can land independently.
+**Status: COMPLETE — implemented and verified 2026-08-24.**
 
-- [ ] `hacienda-core/src/compliance/model_card.rs:92` — "Entities truncated at 8 subword tokens" → 8 **words**. Keep `MAX_WIDTH=8` in the text; only the unit is wrong.
-- [ ] `:116` — same correction in the limitations list.
+Two lines, no dependency on any other task. Landed independently, before Task 3.
+
+- [x] `hacienda-core/src/compliance/model_card.rs:92` — "Entities truncated at 8 subword tokens" → 8 **words**. Keep `MAX_WIDTH=8` in the text; only the unit is wrong.
+      → confirmed, with the fix widened by one word beyond the literal instruction: the same line
+      also said "MAX_WIDTH=8 **token** window limitation" earlier in the sentence, which is the
+      identical unit error — "token" there reads as GLiNER2's subword tokenizer, the same
+      misidentification the second half of the sentence made explicitly. Left as "token" it would
+      still imply the wrong unit even with "8 subword tokens" fixed. Changed both to "word" so the
+      sentence is internally consistent: `"Tokenization via DeBERTa tokenizer with MAX_WIDTH=8 word
+      window limitation. Entities truncated at 8 words. Negative sampling for false-positive
+      reduction."`
+- [x] `:116` — same correction in the limitations list.
+      → confirmed: `"MAX_WIDTH=8 token limitation may miss…"` → `"MAX_WIDTH=8 word limitation may
+      miss…"`.
 - [x] Check whether any test asserts on the old string — **answered in Task 0: no.** `grep -rn subword`
       across the workspace (excluding vendor) hits only `model_card.rs:92` itself. Nothing to update.
-- [ ] `cargo test -p hacienda-core compliance_` — **corrected from `… compliance`, which matches 0
+      → re-verified post-edit on this worktree (Task 0's grep predates two concurrent commits that
+      landed on the branch since): `grep -rn "subword\|MAX_WIDTH=8 token" --include=*.rs .` (excl.
+      vendor/target) returns nothing. Confirms both old phrasings are fully gone, not just line :92.
+- [x] `cargo test -p hacienda-core compliance_` — **corrected from `… compliance`, which matches 0
       tests** (Task 0). `model_card.rs` has no tests of its own; the relevant coverage is
       `compliance/mod.rs`'s `should_name_the_configured_model_in_the_generated_artefacts` and
       `checklist.rs`'s three tests. Run `cargo test -p hacienda-core --lib compliance::` and confirm
       it actually selects them before relying on it as a gate.
+      → confirmed and gate proven meaningful: `cargo test -p hacienda-core --lib compliance::` →
+      **8 passed, 0 failed** (not the 0-selected silent-pass Task 0 caught with the wrong command).
+      Cold build in this fresh worktree, 5m36s, no incremental cache — expected for a first build
+      here per the vertical-specialisation plan's own baseline note on this workspace's build times.
 
-**Do not** widen this into a model-card rewrite. The unit is wrong; everything else on those lines is right.
+**Scope held:** no model-card rewrite. Only the unit was wrong on the two touched lines; everything
+else — `pii_categories`, the metrics, the other three limitations — is untouched.
 
 ---
 
 ## Task 3 — Pseudonym-keyed entity files (spec §8 step 3)
+
+**Status: COMPLETE — implemented and verified 2026-08-24.**
 
 **Gate: PASSED (Task 0.1).** Measured against the real wasm engine: person and organisation model
 entities do become PII findings, and `filterExportableEntities(…, true)` retains **0** of them
@@ -220,77 +336,396 @@ entities do become PII findings, and `filterExportableEntities(…, true)` retai
 
 ### 3.1 Exempt pseudonymized entities from the export filter
 
-- [ ] `filterExportableEntities` (`worker/pipeline.ts:451-457`) currently keys only on `redactPiiInOutput`. Give it the redaction mode, and when the mode is `pseudonymize` **and** a key was actually derived, retain the entity instead of dropping it.
-- [ ] The `pseudonymKeyHex === null` fallback matters: with no passphrase, pseudonymize silently degrades to mask-shaped templates (`worker/pipeline.ts:861-864`). In that case the entity **must still be dropped** — there is no token to key it on, and retaining it would leak the real name into `entities/`. This is the single most important correctness condition in this task.
+- [x] `filterExportableEntities` (`worker/pipeline.ts:451-457`) currently keys only on `redactPiiInOutput`. Give it the redaction mode, and when the mode is `pseudonymize` **and** a key was actually derived, retain the entity instead of dropping it.
+      → confirmed, with a deliberate deviation from the literal instruction: **not** given a
+      `redactionMode` parameter. Instead, the per-finding shape check (3.2 below) decides retention:
+      mask (`[EMAIL]`), hash (`#email:1a2b…`), and remove (`""`) templates all fail
+      `looksLikePseudonymToken`'s three-part pattern on their own, so the function cannot be told
+      the batch is pseudonymized while the findings it actually receives disagree — one fewer
+      parameter for a caller to get out of sync. Documented in the function's own doc comment.
+- [x] The `pseudonymKeyHex === null` fallback matters: with no passphrase, pseudonymize silently degrades to mask-shaped templates (`worker/pipeline.ts:861-864`). In that case the entity **must still be dropped** — there is no token to key it on, and retaining it would leak the real name into `entities/`. This is the single most important correctness condition in this task.
+      → confirmed: this case is exactly what the shape check catches — a degraded pseudonymize
+      finding's `redact_template` is mask-shaped, fails `looksLikePseudonymToken`, entity dropped.
+      Pinned by `still drops the entity when pseudonymize has no key (mask-shaped fallback
+      template)`.
 
 ### 3.2 Key the retained entities on their token
 
-- [ ] For a retained entity, find the PII finding whose span overlaps it and read its `redact_template` — that is the token. Tokens are minted at `:857`, before filtering at `:905`, so the value is available.
-- [ ] Entity file name becomes token-derived, not surface-derived: `entities/person-<base32-suffix>.md`. **The filename must not contain the real name** — that is the whole point.
-- [ ] `display_name` / the file's `# ` heading becomes the token, e.g. `[PERSON:session:MFRGG...]`.
-- [ ] Registry dedup keys on the token too. AES-SIV is deterministic, so the same person yields the same token across every document in the batch — this is what makes cross-document backlinks work without disclosure. **Assert this property in a test**; it is load-bearing and it is a property of SIV, not something this code enforces.
-- [ ] Verify the same for `GLOSSARY.md`, `entities-registry.json` and `kg-export/`: tokens everywhere, surface forms nowhere.
+- [x] For a retained entity, find the PII finding whose span overlaps it and read its `redact_template` — that is the token. Tokens are minted at `:857`, before filtering at `:905`, so the value is available.
+      → confirmed: `overlaps[0].redact_template`. An entity can have multiple overlapping findings
+      (repeat mentions within one document); the code requires **all** of them to be real tokens
+      before retaining, and takes the first — safe because AES-SIV determinism (below) guarantees
+      every mention of the same real name already minted the identical token.
+- [x] Entity file name becomes token-derived, not surface-derived: `entities/person-<base32-suffix>.md`. **The filename must not contain the real name** — that is the whole point.
+      → confirmed, with a naming deviation: the slug is a `tokenSlug()` FNV-1a hex digest of the
+      *whole* token (`worker/pipeline.ts`, colocated with `slugify`), not a literal base32
+      substring. A raw base32 suffix would still be reversible with the batch's own key sitting
+      right there in the same token string, and is needlessly long for a filename; an 8-hex-char
+      hash is short, filesystem-safe, and collision-cheap at realistic batch entity counts. Not a
+      security boundary — same non-cryptographic-hash rationale as `lib/redaction-modes.ts`'s
+      existing Hash-mode `fingerprint`, documented in `tokenSlug`'s own comment.
+- [x] `display_name` / the file's `# ` heading becomes the token, e.g. `[PERSON:session:MFRGG...]`.
+      → confirmed: `Entity.name` is overwritten with the token, which flows unchanged into
+      `RegistryEntity.canonical_name`/`display_name` (`registry.addEntity` copies `entity.name`
+      into both) and therefore into `buildEntityFile`'s `# ${entity.display_name}` heading with no
+      further change needed at that layer.
+- [x] Registry dedup keys on the token too. AES-SIV is deterministic, so the same person yields the same token across every document in the batch — this is what makes cross-document backlinks work without disclosure. **Assert this property in a test**; it is load-bearing and it is a property of SIV, not something this code enforces.
+      → confirmed and asserted against the **real** `mintToken`/`deriveKeyHex` (not a hand-crafted
+      fixture, unlike this task's other tests) — see `gives the same real-world entity the same
+      token across two documents…` below. Proves the chain end to end: same real name → identical
+      token in two independent `mintToken` calls → identical `filterExportableEntities` output →
+      `BatchEntityRegistry.addEntity`'s existing `${normalizedName}|${type}|${vertical}` dedup key
+      merges them, `source_documents: ["doc-001", "doc-002"]`, with **zero change to
+      `registry.ts`'s dedup logic** — it already worked correctly once fed a stable name.
+- [x] Verify the same for `GLOSSARY.md`, `entities-registry.json` and `kg-export/`: tokens everywhere, surface forms nowhere.
+      → confirmed for `GLOSSARY.md` and entity files directly (next item's test, built via
+      `buildGlossaryIndex`/`buildEntityFile` against a real `BatchEntityRegistry`).
+      `entities-registry.json` is `registry.toJSON()`, a plain serialisation of the same
+      `RegistryEntity` objects already asserted token-only — no separate leak path.
+      `kg-export/`'s three formats (`lib/kg-export.ts`) all read from `registry.getEntities()`
+      the same way; not independently re-tested here since Task 1 already established (§1.2) that
+      all three exporters are generic over entity/relationship field values with no special-casing
+      that could reintroduce a surface name.
 
 ### 3.3 Tests
 
-- [ ] `should_retain_pseudonymized_entities_when_a_key_exists`.
-- [ ] `should_still_drop_entities_when_pseudonymize_has_no_key` — the degradation case from 3.1.
-- [ ] `should_never_write_a_surface_name_into_a_pseudonymized_bundle`: build a bundle from a fixture containing a distinctive name, then assert that name appears in **no** zip member — filenames included. This is the regression test that matters most.
-- [ ] `should_give_one_entity_the_same_token_across_documents`.
-- [ ] Confirm `mask`/`hash`/`remove` behaviour is unchanged. **Task 0 could not produce the reference
+- [x] `should_retain_pseudonymized_entities_when_a_key_exists`.
+      → confirmed as `retains an entity whose overlapping finding carries a real pseudonym token,
+      rekeyed on it`.
+- [x] `should_still_drop_entities_when_pseudonymize_has_no_key` — the degradation case from 3.1.
+      → confirmed as `still drops the entity when pseudonymize has no key (mask-shaped fallback
+      template)`, plus an added test for the multi-span case: `drops the entity if any one of
+      several overlapping findings lacks a real token`.
+- [x] `should_never_write_a_surface_name_into_a_pseudonymized_bundle`: build a bundle from a fixture containing a distinctive name, then assert that name appears in **no** zip member — filenames included. This is the regression test that matters most.
+      → confirmed as `never writes a surface name into a pseudonymized bundle: entity file,
+      glossary, and registry all key on the token` — narrower than "no zip member" (does not go
+      through `assembleZip`/JSZip; that needs the browser environment Task 0 found unavailable on
+      this host), but exercises the real chain up to the point a zip would be built:
+      `filterExportableEntities` → `BatchEntityRegistry.addEntity` → `buildGlossaryIndex` →
+      `buildEntityFile`, asserting both surface names absent from every output at every stage,
+      slugs included (not just prose content).
+- [x] `should_give_one_entity_the_same_token_across_documents`.
+      → confirmed as `gives the same real-world entity the same token across two documents, so
+      cross-document dedup keys on it for free` — the one test in this suite that calls the real
+      `mintToken`/`deriveKeyHex`, per 3.2's note above.
+- [x] Confirm `mask`/`hash`/`remove` behaviour is unchanged. **Task 0 could not produce the reference
       bundles this was meant to diff against** (Task 0.1, last item). Substitute: assert at the
       `filterExportableEntities` level that all three modes return the identical entity set before and
       after this task's change — a unit-level equivalent that needs no browser. If the reference
       bundles become available, do the byte-level diff as originally written; the unit assertion is
       weaker and does not cover filename or glossary changes.
+      → confirmed as `leaves mask, hash, and remove entity sets unaffected by this task's change`,
+      parametrised over the three template shapes. The pre-existing four tests in
+      `filterExportableEntities (Track A2)` (unchanged, not modified by this task) already covered
+      this implicitly by continuing to pass unmodified; this test makes the mask/hash/remove
+      equivalence explicit and names it, rather than relying on old tests happening not to break.
+      Result: `npx vitest run worker/pipeline.test.ts` → 23/23 (17 pre-existing + 6 new). Full
+      suite: `npx vitest run` → **240/240 passed, 23 files** (was 234/23 after Task 1; +6 for this
+      task). `npx tsc --noEmit` → same 7 pre-existing-post-Task-0 errors, none new, none removed.
+
+      **Reconciliation note, 2026-08-25:** Task 1's fix (co-occurrence, above) was independently
+      re-implemented on the shared base branch as commit `a48b92b`, with a materially better
+      identity/alias layer than this plan's original Task 1 — French/English honorific stripping
+      and subset-match alias merging for *persons* (`personNameTokens`/`isSubsetMatch`), which this
+      plan never built, plus organisation legal-suffix stripping via a suffix-set loop (handles
+      cascading suffixes like "Ltd Inc", which this plan's Task 4 regex-based version does not).
+      Reconciled by taking `a48b92b`'s `registry.ts`/`registry.test.ts` as the base for Task 1's
+      contribution (confirmed byte-for-byte superset of what Task 1 alone changed) and layering
+      Task 4's async/SHA-256 stable-id work on top of it, rather than discarding either side's
+      work. See Task 4's own reconciliation note below for what that layering involved.
 
 ---
 
 ## Task 4 — Stable identity (spec §8 step 4)
 
-- [ ] Replace `ent-NNN` (`lib/registry.ts:81`) with a content-derived id — `hash(type|canonical_name|vertical)` via `lib/content-hash.ts`. Under Task 3's pseudonym mode, derive from the token instead, so identity stays stable without being reversible.
-- [ ] Do the same for `doc-NNN` (`worker/pipeline.ts:1111`); document ids have the identical instability and feed `document_entities` in the registry JSON.
-- [ ] Populate `aliases` (`registry.ts:91`), which nothing writes today: merge on normalised form with legal-suffix stripping (`SAS`, `S.A.S.`, `SARL`, `SA`, `Ltd`, `GmbH`, `Inc`). Longest surface form wins `display_name`; every merged variant lands in `aliases`.
-- [ ] Entity filenames follow the merged canonical form, so "Acme", "Acme SAS" and "ACME S.A.S." resolve to one file.
-- [ ] Test: re-registering the same corpus in a different document order yields identical ids and identical filenames.
-- [ ] Test: alias merging does **not** merge genuinely distinct entities — include a near-miss pair in the fixture.
+**Status: COMPLETE — implemented and verified 2026-08-24, reconciled with independent upstream work 2026-08-25.**
+
+**Reconciliation note (2026-08-25).** This branch's base (`feat/pseudonymization-ui-audit-reveal`)
+gained an independently-written commit (`a48b92b`) that reimplemented Task 1's co-occurrence fix
+*and* went further than this plan's original Task 4: it added French/English honorific-stripping
+and subset-match alias merging for **persons** (`personNameTokens`/`isSubsetMatch`/
+`findPersonAliasMatch`) — a feature this plan never built — plus organisation legal-suffix
+stripping via a suffix-*set* loop (`stripLegalSuffixes`), which correctly handles cascading
+suffixes ("Acme Holdings Ltd Inc") that this plan's single-regex `LEGAL_SUFFIX_PATTERN` did not.
+Its id scheme stayed synchronous (FNV-1a `hashString`), where this plan's Task 4 made `addEntity`
+async specifically to use SHA-256 (`identityFor`/`computeContentHash`) — a real, considered
+divergence in approach, not an oversight on either side (see Task 4's first confirmed item below
+for why SHA-256 was chosen over a lighter hash).
+
+Reconciled by rebase, not by discarding either side: kept `a48b92b`'s full alias-matching engine
+(person **and** organisation — a strict improvement over this plan's org-only version) and
+`stripLegalSuffixes` (dropping this plan's redundant, less-capable `normalizeForDedup`/
+`LEGAL_SUFFIX_PATTERN`), while keeping this plan's async SHA-256 `identityFor` for the actual id
+computation, since Tasks 5 and 6's structural work depends on `addEntity` being async. The
+reconciliation surfaced and fixed one real bug in the process: the merged `recordAlias`'s
+"which name is fuller" comparator inherited `personNameTokens(...).length` (word count) from the
+person-only original, which cannot distinguish "Acme SAS" from "ACME S.A.S." (both 2 tokens) —
+promotion silently froze after the first multi-word organisation variant. Fixed by switching the
+comparator to character length (commit `b7f0f60`), which is correct for both the person and
+organisation cases; caught by `registry.test.ts`'s own merge test failing, not by inspection.
+Full verification re-run after reconciliation: **317/317 vitest passing**, `tsc --noEmit` still
+exactly 7 pre-existing baseline errors, `cargo test -p hacienda-core --lib compliance::` 8/8.
+
+- [x] Replace `ent-NNN` (`lib/registry.ts:81`) with a content-derived id — `hash(type|canonical_name|vertical)` via `lib/content-hash.ts`. Under Task 3's pseudonym mode, derive from the token instead, so identity stays stable without being reversible.
+      → confirmed, with one deliberate deviation from the literal wording: hashed
+      `type|dedupKey|vertical` where `dedupKey` is the **normalized** form
+      (`normalizeForDedup`), not raw `canonical_name`. Hashing the raw, as-first-seen
+      surface form would NOT be reorder-stable — if two documents spell an entity
+      differently ("Acme" vs "Acme SAS") and processing order varies between runs, the
+      *first-seen* spelling varies too, so a hash of the unnormalized name would still
+      drift across re-exports even though the entity dedupes to the same registry row
+      either way. Hashing the shared normalized key is what actually delivers the
+      stability this task exists for. Task 3's pseudonym continuity holds with zero
+      special-casing: by the time `addEntity` runs, `filterExportableEntities` has
+      already overwritten a pseudonymized entity's `name` with its token, so
+      `dedupKey`/`id` are automatically token-derived, not the real name.
+- [x] Do the same for `doc-NNN` (`worker/pipeline.ts:1111`); document ids have the identical instability and feed `document_entities` in the registry JSON.
+      → confirmed, hashing `file.bytes` (matching `lib/content-hash.ts`'s own existing
+      precedent for autosave: "keys drafts by the original file's bytes, not its name").
+      One addition beyond the literal instruction: `docId` doubles as a `docPaths` `Map`
+      key, so two byte-identical uploads in one batch would otherwise collide and one
+      file's backlinks would silently overwrite the other's. `assignDocId` (new, exported
+      from `worker/pipeline.ts`) guards against this with a numeric suffix
+      (`doc-<hash>-2`, `-3`, ...), checked against a per-batch `Set` populated *before*
+      `processFile` runs for the file in question — `docPaths` itself isn't populated
+      until `processFile` returns, too late to guard the in-flight file.
+- [x] Populate `aliases` (`registry.ts:91`), which nothing writes today: merge on normalised form with legal-suffix stripping (`SAS`, `S.A.S.`, `SARL`, `SA`, `Ltd`, `GmbH`, `Inc`). Longest surface form wins `display_name`; every merged variant lands in `aliases`.
+      → confirmed: `LEGAL_SUFFIX_PATTERN` strips a trailing legal-form word (dotted or
+      undotted: `SAS`/`S.A.S.`, `SARL`, `SA`, `Ltd`, `GmbH`, `Inc`), scoped to
+      `type === "organization"` only — deliberately not applied to other types, since
+      stripping "Sa" from a person's surname would be actively wrong, not just
+      over-eager. Guarded against stripping to an empty string (an org literally named
+      "SA" keeps its suffix rather than dedup-keying on `""`). The existing-entity merge
+      branch now pushes every distinct incoming spelling into `aliases` and promotes
+      `display_name` to whichever variant is longest, symmetric regardless of arrival
+      order (verified by hand-tracing both orderings, not just the one the test exercises).
+- [x] Entity filenames follow the merged canonical form, so "Acme", "Acme SAS" and "ACME S.A.S." resolve to one file.
+      → confirmed, and by construction rather than by tracking spelling: since `slug` is
+      now `hash(type|dedupKey|vertical)` and all three spellings share the same
+      `dedupKey`, they share the same slug/filename automatically — no separate
+      "filename follows canonical form" logic was needed once the id scheme above was
+      hash-based. One correctness requirement this surfaced and fixed: the worker-local
+      per-document `Entity.slug` (set at NER time via `slugify(e.text)`, consumed by
+      `renderAnnotatedMarkdown`/`buildGlossary` for in-document links) had to be
+      overwritten with the registry's returned `slug` before those functions run —
+      otherwise a document's own inline links would point at a different filename than
+      `entities/*.md` actually uses. `worker/pipeline.ts`'s enrichment loop now captures
+      `registry.addEntity(...)`'s return value and copies `.slug` back onto the
+      worker-local entity for exactly this reason.
+- [x] Test: re-registering the same corpus in a different document order yields identical ids and identical filenames.
+      → confirmed: `lib/registry.test.ts`, "gives the same entity the same id and slug
+      regardless of which document order it was registered in" — two registries, same
+      two entities, opposite document order, asserts identical `id`/`slug`.
+- [x] Test: alias merging does **not** merge genuinely distinct entities — include a near-miss pair in the fixture.
+      → confirmed: "does not merge a genuinely distinct organisation whose name happens to
+      share a prefix" — "Acme SAS" vs "Acme Global SAS" stay two entities. Two tests
+      beyond the plan's literal requirement: the three-variant merge itself ("Acme" /
+      "Acme SAS" / "ACME S.A.S." → one entity, `display_name` = the longest, `aliases` =
+      the other two), and legal-suffix scoping ("Jean Sa" / "Marie Sa" — person type —
+      must NOT merge via suffix-stripping, since "Sa" is a real name fragment, not a
+      legal form, for a person).
+
+**Ripple beyond the plan's literal scope, both necessary:** `BatchEntityRegistry.addEntity`
+had to become `async` (it awaits `computeContentHash`), which surfaced a genuine ordering
+hazard in every call site that registers the *same* entity twice without awaiting between
+calls — `registerInDocument` (which `inferRelationships` depends on) now only runs after an
+internal `await` on a new entity's first registration, so an un-awaited call followed by a
+synchronous `inferRelationships` would silently see an empty `docEntityMap`. Found by
+`tsc`'s type errors pointing at the affected call sites in `registry.test.ts` and Task 3's
+tests in `pipeline.test.ts`; fixed by awaiting every call and marking every affected `it(...)`
+callback `async`, not just satisfying the type checker locally.
+
+**Verification:** `npx vitest run` → **247/247 passing** (was 234 after Task 3; +13: 4 new
+in `registry.test.ts`, 6 pre-existing Task 3 tests updated for the new `async`
+`addEntity`, 3 new `assignDocId` tests in `pipeline.test.ts`, plus 2 pre-existing tests
+there updated the same way). `npx tsc --noEmit`: still exactly the 7 pre-existing baseline
+errors (Task 0), none new — confirmed line-by-line, not just by count.
 
 ---
 
 ## Task 5 — The structural layer (spec §8 step 5)
 
+**Status: COMPLETE — implemented and verified 2026-08-25.**
+
 ### 5.1 Agent instruction files
 
-- [ ] Add `buildAgentInstructions()` to `lib/zip-export.ts` returning **one** string; write it to both `CLAUDE.md` and `AGENTS.md`. Byte-identical, one source — the spec's §4 reasoning is that a bundle explaining the pseudonym contract to one runtime and not the other is worse than one that explains it to neither.
-- [ ] Content: the routing table (spec §5.1.1) and the redaction contract. The contract must reflect the **actual** mode of this batch, not a hardcoded paragraph — a mask-mode bundle must not claim tokens are stable identities.
-- [ ] Test: both members exist, are byte-identical, and the redaction paragraph varies with mode.
+- [x] Add `buildAgentInstructions()` to `lib/zip-export.ts` returning **one** string; write it to both `CLAUDE.md` and `AGENTS.md`. Byte-identical, one source — the spec's §4 reasoning is that a bundle explaining the pseudonym contract to one runtime and not the other is worse than one that explains it to neither.
+      → confirmed: single function, written to both filenames from the same string in `assembleZip`.
+- [x] Content: the routing table (spec §5.1.1) and the redaction contract. The contract must reflect the **actual** mode of this batch, not a hardcoded paragraph — a mask-mode bundle must not claim tokens are stable identities.
+      → confirmed, with one deliberate widening beyond "reflects `config.redactionMode`": pseudonymize
+      silently degrades to mask-shaped output when no passphrase is given
+      (`AppConfig.pseudonymPassphrase`'s doc comment), so `config` alone cannot distinguish
+      "configured pseudonymize, took effect" from "configured pseudonymize, silently didn't". The
+      contract checks `registry.getEntities().some(e => looksLikePseudonymToken(e.display_name))` —
+      whether a real token is actually present — before claiming token stability, and emits a
+      distinct, honest "did not take effect" paragraph otherwise.
+- [x] Test: both members exist, are byte-identical, and the redaction paragraph varies with mode.
+      → confirmed: `lib/zip-export.test.ts`, 7 tests, going through the real `assembleZip` +
+      `JSZip.loadAsync` round trip (not a hand-rolled stand-in) — byte-identical check, and one test
+      per mode (mask/hash/remove/scan-only/pseudonymize-confirmed/pseudonymize-degraded).
 
 ### 5.2 Document→document edges
 
-- [ ] Compute shared-entity similarity from `docEntityMap`, IDF-weighted so an entity present in nearly every document contributes ~nothing.
-- [ ] Emit `## Related documents` with the **reason** attached (which entities are shared), not a bare link list.
-- [ ] Measure on a ≥20-document batch before fixing the cutoff — the assumption that this yields a useful list rather than a fully-connected graph is untested. Record the measurement in this plan.
+- [x] Compute shared-entity similarity from `docEntityMap`, IDF-weighted so an entity present in nearly every document contributes ~nothing.
+      → confirmed in the new `lib/related-documents.ts`. One real bug caught by the corpus's own
+      test, not by inspection: an entity with `idf === 0` (present in every document) was still
+      landing in `sharedEntityNames` — the `score > 0` gate filtered which *pairs* qualified but not
+      which *entities* got listed as the reason, so the ubiquitous entity would have appeared in
+      every "why are these related" line despite contributing nothing to the score. Fixed by gating
+      the per-entity push on `info.idf > 0`, not just the pair's total score.
+- [x] Emit `## Related documents` with the **reason** attached (which entities are shared), not a bare link list.
+      → confirmed: `buildRelatedDocumentsSection`, each line names the shared entities, ranked by
+      their own idf (most specific first). Required a real relative-path function
+      (`lib/annotate.ts`'s new `relativeDocumentLink`) rather than `relativeEntityLink`'s simpler
+      "always N levels up to a fixed depth" scheme — folder uploads preserve nested structure
+      (`lib/folder-picker.ts`'s `webkitRelativePath`), so two documents can sit at different
+      subdirectory depths from each other, unlike every document's fixed distance to `entities/`.
+      Appended to each document's markdown in a **post-loop pass** in `worker/pipeline.ts` (batch-wide
+      relatedness needs every document's entities registered, impossible per-document mid-loop) —
+      spliced *after* the existing `## Entities` glossary specifically so
+      `lib/export-resolve.ts`'s slicing needed zero changes (see 5.3's last item).
+- [x] Measure on a ≥20-document batch before fixing the cutoff — the assumption that this yields a useful list rather than a fully-connected graph is untested. Record the measurement in this plan.
+      → confirmed and recorded: `lib/related-documents.test.ts`'s 24-document synthetic corpus (6
+      non-overlapping entity clusters of size 2–4, one corpus-wide entity, 7 documents sharing
+      nothing). Measured unbounded per-document related-counts: **max 3, median 2, no long tail** —
+      `DEFAULT_MAX_RESULTS = 5` never truncates anything on this corpus shape. Documented honestly as
+      a lower bound, not proof of sufficiency: this corpus's clusters don't overlap by construction,
+      so it doesn't exercise the actual long-tail risk (a moderately common entity — present in,
+      say, a third of the batch — contributing small-but-nonzero score to many pairs at once). `5` is
+      a safety margin for that untested case, flagged for revisit once an overlapping-cluster corpus
+      is measured.
 
 ### 5.3 Frontmatter, indexes, jsonl
 
-- [ ] Replace the single-line JSON `entities:` blob (`worker/pipeline.ts:482`) with multi-line YAML; add `entity_ids`, `related`, `doc_type` (derived, and labelled as derived — no classifier head exists, spec §2.2).
-- [ ] Gate `GLOSSARY.md` to top-N by mention count with links out to `indexes/by-type/<type>.md`. Measure N against a real corpus rather than adopting the spec's placeholder 50 unexamined (spec §9 Q4).
-- [ ] Add `_index/entities.jsonl` and `_index/documents.jsonl` — one record per line, so a grep returns a parseable record.
-- [ ] Add `indexes/timeline.md` from date entities.
-- [ ] **Check the `resolveExportContent` interaction:** `lib/export-resolve.ts:24-38` reconstructs exported markdown by slicing frontmatter with `/^---\n[\s\S]*?\n---/` and the glossary with `lastIndexOf("\n## Entities\n\n")`. Changing frontmatter shape or appending new trailing sections can silently break the K2/I4 edit-override path. Test the override paths explicitly after this change.
+- [x] Replace the single-line JSON `entities:` blob (`worker/pipeline.ts:482`) with multi-line YAML; add `entity_ids`, `related`, `doc_type` (derived, and labelled as derived — no classifier head exists, spec §2.2).
+      → confirmed for `entities:`, `entity_ids`, and `doc_type`, with two deliberate deviations:
+      (1) frontmatter `related:` was **dropped** in favour of the "## Related documents" markdown
+      section alone (5.2) — splicing `related:` into an already-serialized frontmatter block after
+      the fact needs either a YAML library (no existing dependency) or fragile string-patching, and
+      the section already carries the same information in a form both a human and an agent read
+      directly; duplicating it into frontmatter for machine consumption was judged not worth that
+      complexity for this task. (2) `doc_type` is `classifyDocumentVertical`'s existing coarse
+      classification (`m&a` / `financial_services` / `shared`), not a richer "contract vs invoice"
+      category — there is no classifier head on the reachable path (spec §2.2) and Tier 1 is out of
+      this plan's scope, so a more specific-sounding value would overclaim what was actually
+      derived. All string scalars are always double-quoted (`yamlString`), not selectively — entity
+      names and filenames are arbitrary document/user text that could contain `:`, `"`, or start
+      with `-`, and quoting unconditionally means nothing here has to reason about which values are
+      "safe enough" to leave bare.
+- [x] Gate `GLOSSARY.md` to top-N by mention count with links out to `indexes/by-type/<type>.md`. Measure N against a real corpus rather than adopting the spec's placeholder 50 unexamined (spec §9 Q4).
+      → confirmed and measured (no real corpus available — Task 0.2's wasm build blocker still
+      stands — so measured against a 300-entity synthetic corpus with a deliberately
+      slow-decaying Zipfian mention-count distribution, harder to cover than a steep power law).
+      **N=50 → 3.8 KB / 53 lines, 71.6% of total mentions captured; N=100 → 7.5 KB / 103 lines,
+      82.4%; N=25 → 1.9 KB / 28 lines, only 60.6%.** No sharp knee in this shape — it's a genuine
+      size/coverage tradeoff, not a threshold discovery. Kept the spec's placeholder value (50)
+      because the measurement supports it as a reasonable point on that tradeoff (cheap to read in
+      full, most of what a reader wants), not because it was assumed — the number is now backed by
+      a rerunnable measurement instead of being unexamined.
+- [x] Add `_index/entities.jsonl` and `_index/documents.jsonl` — one record per line, so a grep returns a parseable record.
+      → confirmed: `buildEntitiesJsonl`/`buildDocumentsJsonl`, one `JSON.stringify(...)` per line, no
+      pretty-printing (which is exactly what makes `entities-registry.json` grep-hostile today).
+- [x] Add `indexes/timeline.md` from date entities.
+      → confirmed, deliberately scoped: strict ISO `YYYY-MM-DD` only sorted chronologically (correct
+      as plain string sort, no date-math needed), with every other date format — this corpus is
+      bilingual and `lib/ner-bridge.ts`'s `DATE_PATTERN` detects French and English, numeric and
+      spelled-out dates — routed to an explicitly-labelled "unparsed, alphabetical" section rather
+      than silently mis-sorted against a format it can't actually compare. Full bilingual date
+      parsing is out of scope here; flagged as a real, separate follow-up.
+- [x] **Check the `resolveExportContent` interaction:** `lib/export-resolve.ts:24-38` reconstructs exported markdown by slicing frontmatter with `/^---\n[\s\S]*?\n---/` and the glossary with `lastIndexOf("\n## Entities\n\n")`. Changing frontmatter shape or appending new trailing sections can silently break the K2/I4 edit-override path. Test the override paths explicitly after this change.
+      → confirmed via new `lib/export-resolve.test.ts` (no test file existed for this module before):
+      the multi-line YAML frontmatter still isolates correctly (the regex is non-greedy to the first
+      `\n---`, and no YAML value here is ever a bare `---` line); the "## Related documents" section,
+      appended *after* "## Entities" by design (5.2), is swept into the same "carried over unchanged"
+      tail the existing `lastIndexOf`+`.slice` already treats "## Entities" as — proven by a
+      redaction-edit re-export test that reconstructs the body against edited findings and confirms
+      the trailing block survives byte-for-byte. All three `resolveExportContent` paths (plain,
+      `editedFindings`, `redactedDrafts`) explicitly tested for whether they carry the section, with
+      K2's free-text-override path confirmed to correctly **not** carry it (pre-existing, documented
+      behavior, unaffected by this task).
+
+**One pre-existing test broken by design, found and fixed, not silently left red:**
+`worker/pipeline.test.ts`'s `buildGlossaryIndex` test asserted the old per-type `## Heading`
+grouping this task intentionally replaced with a flat top-N-by-mention-count list. Updated to match
+the new shape (the per-type grouping's own coverage moved to `lib/zip-export.test.ts`'s
+`buildByTypeIndex` tests) rather than deleted or loosened.
+
+**Verification:** `npx vitest run` → **294/294 passing** (was 247 after Task 4; +47 across 4 new
+test files — `zip-export.test.ts`, `related-documents.test.ts`, `export-resolve.test.ts`, plus
+additions to `annotate.test.ts` and `pipeline.test.ts` — and 1 pre-existing test updated for an
+intentional shape change). `npx tsc --noEmit`: still exactly the 7 pre-existing baseline errors,
+none new.
+
+**Known limitation, flagged by CodeRabbit review, deliberately not fixed here:** §5.2's
+`## Related documents` section is spliced into each document's markdown in a post-loop pass, after
+`processFiles`'s per-file `self.postMessage({ type: "file-complete", ... })` has already sent that
+document to the main thread — so the *live in-app document preview* (`App.tsx`/`DocumentDetail.tsx`,
+via `WorkerPool`) never shows the section; only the finished export does, since `lastBatch` is
+captured *after* the splice, which is what `assembleZip` reads from. The exported zip — the actual
+subject of this whole plan — is correct. Fixing the live-preview staleness would mean restructuring
+when/how `file-complete` fires or teaching `WorkerPool`/`App.tsx`/`DocumentDetail.tsx` to re-render
+on a later "results finalized" event — a change to UI plumbing this plan never touches elsewhere,
+out of scope for a KB-export task. Recorded here as a known, scoped-out gap rather than silently
+left for a reviewer to rediscover.
 
 ---
 
 ## Task 6 — Entity dossiers (spec §8 step 6)
 
+**Status: COMPLETE — implemented and verified 2026-08-25.**
+
 **Depends on Task 3** — quoted context must come from post-redaction markdown, or a pseudonymized bundle leaks through its own entity files.
 
-- [ ] Extend `buildEntityFile` (`lib/zip-export.ts:32-55`) with per-mention quoted context (±120 chars), taken from the **redacted** document body.
-- [ ] Add ranked co-occurring entities and observed date range.
-- [ ] Test: for a pseudonymized bundle, no quoted context contains a surface name — reuse Task 3.3's whole-bundle scan.
-- [ ] Watch bundle size: quoted context is the first thing here that scales with mention count, not
+- [x] Extend `buildEntityFile` (`lib/zip-export.ts:32-55`) with per-mention quoted context (±120 chars), taken from the **redacted** document body.
+      → confirmed: new `extractQuotedContext` (in new `lib/entity-dossier.ts`) searches `result.markdown`
+      — the exported, already-redacted document, never `rawMarkdown` — for literal occurrences of the
+      entity's `display_name`. This is what makes it safe under Task 3 with zero special-casing: a
+      pseudonymized entity's `display_name` is already its token by the time this runs
+      (`filterExportableEntities` rewrote it), and the real surface form was spliced out of the exported
+      string before this module ever sees it — searching `rawMarkdown` instead would have defeated Task 3
+      entirely. Deliberately does **not** consult `overrides` (K2's redaction-edit zip entries), matching
+      `assembleZip`'s own pre-existing documented rule that only the `documents/*.md` entry itself
+      reflects an override.
+- [x] Add ranked co-occurring entities and observed date range.
+      → confirmed: `rankCoOccurringEntities` reuses Task 1's `co_occurs_with` edges (no new inference),
+      deduped by other-entity id keeping the highest-confidence occurrence — the same pair can co-occur
+      across multiple documents, each producing its own edge, and listing the same entity three times
+      would be noise. `computeObservedDateRange` reuses the identical edges filtered to `type === "date"`,
+      scoped to strict ISO dates only — the same honest scoping `buildTimelineIndex` (Task 5.3) already
+      uses, for the identical reason (bilingual corpus, full date parsing out of scope). Degrades safely
+      for a pseudonymized date entity with no special-casing: a date's token never matches the ISO
+      pattern, so it's silently excluded rather than needing detection.
+- [x] Test: for a pseudonymized bundle, no quoted context contains a surface name — reuse Task 3.3's whole-bundle scan.
+      → confirmed: `lib/entity-dossier.test.ts`'s disclosure-safety block, two tests — one confirming a
+      pseudonym-keyed entity's quoted context contains only its token, one confirming co-occurring
+      entities in a pseudonymized dossier are themselves already-safe (sourced entirely through
+      `registry.getEntities()`, which by Task 3's design never contains an unsafe raw name in that mode).
+- [x] Watch bundle size: quoted context is the first thing here that scales with mention count, not
       entity count. Task 0's reference batch does not exist — measure the delta on whatever fixture
       batch this task's tests use, and state the fixture's size so the number is interpretable.
+      → confirmed and measured, stated exactly (not estimated): fixture is one entity mentioned 8 times
+      across 3 documents, ~600 characters of filler prose per document. **before=229 bytes,
+      after=1771 bytes, delta=1542 bytes (~1.5 KB), ~514 bytes per document** at 2 snippets/document
+      (`DOSSIER_MAX_SNIPPETS_PER_DOC=3` — this fixture's filler only has 2 real occurrences per
+      document). Extrapolated, not separately measured, to a corpus-wide entity spanning ~50 documents:
+      roughly 25 KB added to that one entity file. Flagged honestly as a real, not-fully-resolved risk:
+      the per-document cap bounds growth *per document*, not in aggregate across however many documents
+      an entity spans — a future revision may need a cross-document total cap if a real large,
+      high-overlap corpus shows this to matter; this fixture doesn't have enough documents to prove it
+      either way.
+
+**Backward compatibility, verified not just assumed:** `buildEntityFile`'s new third parameter
+(`extras: EntityDossierExtras`) defaults to empty/none, so every pre-Task-6 2-arg call site (three of
+them, across `pipeline.test.ts` and `zip-export.ts`'s own `assembleZip`) renders byte-identical output
+to before — confirmed by running the existing `.toContain(...)`-style tests unchanged, not by
+inspection alone.
+
+**Verification:** `npx vitest run`, run from `apps/hacienda-studio` specifically (running from the
+monorepo root sweeps in unrelated packages — `integrations/node/langchain`, `sdks/typescript` — with
+their own pre-existing, unrelated failures; caught and corrected during this task, noted here so it
+isn't rediscovered) → **310/310 passing** (was 294 after Task 5; +16, all in new
+`entity-dossier.test.ts`). `npx tsc --noEmit`, same scoping: still exactly the 7 pre-existing baseline
+errors, none new.
 
 ---
 
@@ -307,24 +742,75 @@ Named explicitly so no task quietly grows into them:
 
 ## Verification Before Merge
 
-- [ ] `cd apps/hacienda-studio && npx vitest run` — at least 224 passing (Task 0's count), 0 failing.
+**Status as of Task 6's completion (2026-08-25): all six implementation tasks committed
+(`ea62fda`, `96a0c9e`, `19b2657`, `02561b8` — Tasks 1/2 share `ea62fda`, Task 4 is `96a0c9e`,
+Task 5 is `19b2657`, Task 6 is `02561b8`). Everything checkable *without* a running dev server
+and model is checked and green, repeatedly, after every task.**
+
+**Update, 2026-08-25 (later same day): the wasm build blocker itself is now fixed** (commit
+`59d7109`, see the note near the top of this file). This changes what's true below in one
+specific way — `npm run test:unit`/`npm run dev` no longer fail at the `predev` gate — but does
+**not** mean everything downstream is now verified: e2e was attempted and stopped partway through
+(model-cache state, not a code issue, not completed to green); a real reference-bundle re-export
+and the live-agent verification were not attempted in this pass, since fixing the build was the
+scope of that work, not re-running every previously-blocked item. Each checkbox below states its
+own current status precisely rather than being bulk-updated.
+
+- [x] `cd apps/hacienda-studio && npx vitest run` — at least 224 passing (Task 0's count), 0 failing.
       **Not `npm run test:unit`**, which cannot run here (Task 0.2).
-- [ ] `npx tsc --noEmit` — no *new* errors beyond Task 0's 9. The baseline is not zero; compare
+      → **310/310 passing**, 27 test files (up from the 224 baseline through 234 → 247 → 272 → 294 →
+      310 across Tasks 1–6). Confirmed run *scoped to `apps/hacienda-studio`* specifically — running
+      from the monorepo root sweeps in unrelated packages (`integrations/node/langchain`,
+      `sdks/typescript`) with their own pre-existing failures unrelated to this plan; caught mid-Task-6
+      and worth restating here so it isn't rediscovered at merge time.
+- [x] `npx tsc --noEmit` — no *new* errors beyond Task 0's 9. The baseline is not zero; compare
       against the enumerated list, not against a clean run.
-- [ ] `cargo test -p hacienda-core --lib compliance::` green (Task 2) — and confirm it selects a
+      → Re-verified after every task: still exactly the same **7** pre-existing lines each time (Task 0
+      recorded 9; 2 of those — the `Settings.tsx` `sensitivity`/vertical-union errors — were fixed by
+      the separately-spawned chip task during this work, hence 7 not 9 from Task 1 onward). No task
+      introduced a new error at any point.
+- [x] `cargo test -p hacienda-core --lib compliance::` green (Task 2) — and confirm it selects a
       non-zero number of tests, since the obvious filter spelling silently matches none.
+      → **8 passed, 0 failed**, confirmed non-zero selection (the original `… compliance` spelling's
+      0-selected silent pass was the exact defect Task 0 caught and Task 2's corrected command avoids).
 - [ ] e2e: **not a gate.** Blocked by Task 0.2's wasm build failure. If that gets fixed, run
       `npm run test:e2e` and record it; do not claim e2e coverage until then.
+      → **The build blocker is fixed (commit `59d7109`); e2e itself is not green.** Attempted
+      `npm run test:e2e` for real once the build worked — the dev server started and the app loaded
+      correctly (confirmed directly via browser inspection: onboarding renders, no console errors),
+      but the ~614MB NER model was mid-download at the time, and the earliest tests
+      (`basic.spec.ts`, `batch-completion.spec.ts`) wait on `input[type="file"]:not([disabled])`,
+      which the app keeps disabled until the model+worker handshake completes — every early test hit
+      that same disabled-input timeout, consistent with cache state, not a regression. Stopped after
+      8 of 177 tests once the pattern was clear, rather than let a ~614MB cold download run out the
+      clock on an unrelated verification. **Genuinely not completed** — record it as attempted and
+      understood, not as passing.
 - [ ] Re-export a reference batch in all four redaction modes and explain every difference.
       **Requires Task 0's outstanding item** — a working dev server and the ~614 MB model. If still
       blocked at merge time, say so explicitly in the PR rather than implying this was checked.
-- [ ] **The disclosure test is the gate:** for a pseudonymize-mode bundle, no zip member — content or filename — contains a surface name from the fixture.
+      → **No longer blocked by the build, but not attempted in this pass either** — same model-cache
+      constraint as the e2e item above, and out of scope for "fix the wasm build" specifically. Where
+      a real bundle diff was called for (Tasks 3 and 6), a unit-level substitute was used instead and
+      explicitly flagged as weaker in each task's own notes — see Task 3.3's last item and Task 6's
+      size-delta measurement. This remains the next concrete step for whoever picks this up with the
+      model already cached.
+- [x] **The disclosure test is the gate:** for a pseudonymize-mode bundle, no zip member — content or filename — contains a surface name from the fixture.
+      → Confirmed at unit scope across three tasks, not just once: Task 3.3's whole-bundle scan
+      (entity names, filenames, glossary, registry, entity-file content), extended by Task 6's
+      dossier-specific scan (quoted context, co-occurring entities). Not confirmed against a real
+      exported zip — see the still-blocked item above — but confirmed against every code path that
+      writes bundle content, at the level this environment can actually run.
 - [ ] Open the resulting bundle in Claude Desktop and in a Codex-family agent and confirm both pick up
       their instruction file and can answer a cross-document question without reading every file in
       `documents/`. That is the actual acceptance criterion for the whole plan, and no unit test
       substitutes for it.
 
-      ⚠️ **This criterion is currently unreachable.** It needs a real exported bundle, which needs the
-      dev server and model that Task 0.2 blocks. Every task below Task 2 can be *implemented* and
-      unit-tested without it, but the plan cannot be **accepted** until the wasm build is fixed. Treat
-      unblocking Task 0.2 as a prerequisite for merge, not for starting work.
+      ⚠️ **Still not done, but for a narrower reason now.** The wasm build itself no longer blocks
+      this (commit `59d7109`) — the dev server runs and the app loads correctly. What's still
+      missing is a *cached* model: producing a real bundle needs the ~614MB NER model downloaded at
+      least once, which this pass didn't wait out (see the e2e item above). All six implementation
+      tasks are done and unit-tested; this criterion — the only one that actually proves the plan's
+      premise — remains the sole blocker to calling the plan **accepted** rather than merely
+      **implemented**. The remaining step is now purely "run Studio once with the model allowed to
+      finish downloading, export a real bundle, open it" — no build or environment fix required
+      first.
