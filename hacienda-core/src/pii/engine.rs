@@ -47,18 +47,33 @@ impl RegexEngine {
     ///
     /// When two patterns match overlapping spans the earlier-starting match wins;
     /// ties are broken by the pattern order in [`builtin_patterns`].
+    ///
+    /// A pattern with a [`PatternMeta::validator`] has its matched text checked before
+    /// being kept: `Some(false)` drops the match entirely (e.g. a 16-digit run that fails
+    /// Luhn is not a credit card), `Some(true)` promotes its confidence to `1.0`, and
+    /// `None` keeps [`PatternMeta::base_confidence`] as-is. Patterns with no validator are
+    /// unaffected — same `base_confidence` (`1.0` unless calibrated lower) every match.
     pub fn find_all(&self, text: &str) -> Vec<RegexEntity> {
         let mut entities = Vec::new();
 
         for (meta, re) in self.patterns.iter().zip(&self.compiled) {
             for m in re.find_iter(text) {
+                let confidence = match meta.validator {
+                    Some(validate) => match validate(m.as_str()) {
+                        Some(false) => continue,
+                        Some(true) => 1.0,
+                        None => meta.base_confidence,
+                    },
+                    None => meta.base_confidence,
+                };
                 entities.push(RegexEntity {
                     category: meta.category.clone(),
                     start: m.start() as u32,
                     end: m.end() as u32,
-                    confidence: 1.0,
+                    confidence,
                     format_preserving: meta.format_preserving,
                     redact_template: meta.redact_template.clone(),
+                    context_words: meta.context_words,
                 });
             }
         }
@@ -110,6 +125,85 @@ mod tests {
             categories("host 192.168.1.10"),
             vec![PiiCategory::IpAddress]
         );
+    }
+
+    #[test]
+    fn should_detect_a_real_credit_card_number() {
+        assert_eq!(
+            categories("charged to 4111111111111111 today"),
+            vec![PiiCategory::CreditCard]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_luhn_invalid_number_as_a_credit_card() {
+        // Shape-only, this would have matched `CreditCard`'s pattern before checksum
+        // validation existed -- a random 16-digit number (invoice, tracking ID, ...) is
+        // not a credit card, and Luhn confirms it.
+        assert!(categories("invoice number 1234567890123456").is_empty());
+    }
+
+    #[test]
+    fn should_promote_a_validated_credit_card_to_full_confidence() {
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("card 4111111111111111 on file");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn should_detect_a_real_iban() {
+        assert_eq!(
+            categories("transfer to GB82WEST12345698765432"),
+            vec![PiiCategory::Iban]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_an_iban_shaped_string_that_fails_its_checksum() {
+        assert!(categories("reference GB00WEST12345698765432").is_empty());
+    }
+
+    #[test]
+    fn should_detect_a_valid_vin() {
+        assert_eq!(
+            categories("vehicle 1M8GDM9AXKP042788 registered"),
+            vec![PiiCategory::VehicleVin]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_north_american_vin_with_a_bad_check_digit() {
+        assert!(categories("code 12111111111111111 on the form").is_empty());
+    }
+
+    #[test]
+    fn should_detect_a_valid_crypto_wallet_address() {
+        assert_eq!(
+            categories("send to 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2 please"),
+            vec![PiiCategory::CryptoWallet]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_wallet_shaped_string_with_a_bad_checksum() {
+        assert!(categories("id 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN3 unknown").is_empty());
+    }
+
+    #[test]
+    fn should_keep_a_structurally_plausible_ssn_at_medium_confidence_without_context() {
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("reference 123-45-6789 filed");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].confidence, 0.4);
+    }
+
+    #[test]
+    fn should_not_flag_a_structurally_impossible_ssn() {
+        // Area 000 can never be a real SSN.
+        assert!(categories("code 000-45-6789 on file").is_empty());
     }
 
     #[test]
@@ -165,12 +259,12 @@ mod tests {
 
     #[test]
     fn should_reject_a_pattern_that_does_not_compile() {
-        let bad = vec![PatternMeta {
-            category: PiiCategory::Custom("broken".into()),
-            pattern: "(".into(),
-            format_preserving: false,
-            redact_template: "[X]".into(),
-        }];
+        let bad = vec![PatternMeta::new(
+            PiiCategory::Custom("broken".into()),
+            "(",
+            false,
+            "[X]",
+        )];
         assert!(matches!(
             RegexEngine::with_patterns(bad),
             Err(PiiError::Pattern { .. })
