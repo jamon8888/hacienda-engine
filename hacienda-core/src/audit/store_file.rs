@@ -1311,6 +1311,7 @@ mod tests {
             config_hash: CONFIG.into(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 

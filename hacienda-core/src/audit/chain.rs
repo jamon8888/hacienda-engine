@@ -152,6 +152,7 @@ mod tests {
             config_hash: String::new(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 

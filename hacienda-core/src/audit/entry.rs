@@ -147,6 +147,13 @@ pub struct AuditEntry {
     /// hashed as, so older chains still verify.
     #[serde(default)]
     pub vertical: Option<String>,
+    /// The model that produced this entity, or `None` for regex-only entries or
+    /// chains written before this field existed. Recorded as
+    /// `"<model_id>@<digest8>"` — see `VerticalConfig::provenance_id` pattern —
+    /// covered by [`compute_chain_hash`] so it cannot be rewritten without
+    /// breaking verification. `None` hashes as no bytes, so older chains verify.
+    #[serde(default)]
+    pub model: Option<String>,
     /// blake3 over the previous chain hash and this entry's identifying fields.
     pub chain_hash: String,
 }
@@ -167,6 +174,8 @@ pub struct AuditEntryInput {
     pub principal: Option<String>,
     /// See [`AuditEntry::vertical`].
     pub vertical: Option<String>,
+    /// See [`AuditEntry::model`].
+    pub model: Option<String>,
 }
 
 impl AuditEntry {
@@ -186,6 +195,7 @@ impl AuditEntry {
                 config_hash: &input.config_hash,
                 principal: input.principal.as_deref(),
                 vertical: input.vertical.as_deref(),
+                model: input.model.as_deref(),
             },
         );
 
@@ -202,6 +212,7 @@ impl AuditEntry {
             config_hash: input.config_hash,
             principal: input.principal,
             vertical: input.vertical,
+            model: input.model,
             chain_hash,
         }
     }
@@ -216,6 +227,7 @@ impl AuditEntry {
             config_hash: &self.config_hash,
             principal: self.principal.as_deref(),
             vertical: self.vertical.as_deref(),
+            model: self.model.as_deref(),
         }
     }
 }
@@ -244,6 +256,7 @@ pub struct ChainHashFields<'a> {
     pub config_hash: &'a str,
     pub principal: Option<&'a str>,
     pub vertical: Option<&'a str>,
+    pub model: Option<&'a str>,
 }
 
 /// Tag byte prepended to the vertical's length-prefixed bytes when present.
@@ -257,6 +270,7 @@ pub struct ChainHashFields<'a> {
 /// identically, since blake3's streaming `.update()` is equivalent to hashing the
 /// concatenation of everything fed to it.
 const VERTICAL_PRESENT_TAG: u8 = 0xff;
+const MODEL_PRESENT_TAG: u8 = 0xfe;
 
 /// Compute the chain hash linking an entry to its predecessor.
 ///
@@ -286,6 +300,11 @@ pub fn compute_chain_hash(prev_chain_hash: &str, seq: u64, fields: ChainHashFiel
         hasher.update(&(vertical.len() as u64).to_le_bytes());
         hasher.update(vertical.as_bytes());
     }
+    if let Some(model) = fields.model {
+        hasher.update(&[MODEL_PRESENT_TAG]);
+        hasher.update(&(model.len() as u64).to_le_bytes());
+        hasher.update(model.as_bytes());
+    }
     hasher.finalize().to_hex().to_string()
 }
 
@@ -306,6 +325,7 @@ mod tests {
             config_hash: "cfg".into(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 
@@ -359,6 +379,7 @@ mod tests {
             config_hash: "cfg",
             principal: None,
             vertical: None,
+            model: None,
         };
         let empty_string_principal = ChainHashFields {
             principal: Some(""),
@@ -391,6 +412,7 @@ mod tests {
             config_hash: "cfg",
             principal: None,
             vertical: None,
+            model: None,
         };
 
         let mut hasher = blake3::Hasher::new();
@@ -444,6 +466,7 @@ mod tests {
             config_hash: "cfg",
             principal: None,
             vertical: None,
+            model: None,
         };
         let empty_string_vertical = ChainHashFields {
             vertical: Some(""),
