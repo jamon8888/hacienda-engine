@@ -23,7 +23,7 @@
 
   /* Typography */
   --font-lausanne: lausanne, "lausanne Fallback";  /* display */
-  --font-inter: Inter;                             /* text */
+  --font-inter: "Inter";                            /* text */
   --text-display: 64px;                            /* display */
   --text-display--line-height: 1;
   --text-heading-2: 48px;                          /* heading-2 */

@@ -134,9 +134,9 @@ export function Documents({
                   </span>
                   <span className="hidden text-[11px] text-muted-foreground sm:inline">
                     {selected.kind === "folder"
-                      ? `${selectedFolderDocs.length} fichiers`
+                      ? `${selectedFolderDocs.length} fichier${selectedFolderDocs.length === 1 ? "" : "s"}`
                       : selectedFileDoc
-                        ? `${selectedFileDoc.findings.length} détections`
+                        ? `${selectedFileDoc.findings.length} détection${selectedFileDoc.findings.length === 1 ? "" : "s"}`
                         : ""}
                   </span>
                   <span className="h-5 w-px bg-border" aria-hidden />

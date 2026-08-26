@@ -57,7 +57,7 @@ import { createNerBackend, loadNerModel, loadTessdata } from "../lib/asset-loade
 // `toLiteParseOcrEngine` is unused while the LiteParse-OCR stopgap above forces
 // `ocrEngine: null` unconditionally — restore the import alongside that code once
 // upstream fixes the ocr_merge.rs Tokio panic.
-import { extractPdfWithLiteParse } from "../lib/pdf-liteparse";
+import { extractPdfWithLiteParse, checkPdfNeedsOcr } from "../lib/pdf-liteparse";
 import {
   initPiiEngine,
   redactPii,
@@ -264,7 +264,14 @@ async function createOcrBackend() {
   // to bypass its default resolution, which is broken in production (see the import
   // comment above).
   const wasmUrl = supportsFastBuild() ? tesseractCoreWasmUrl : tesseractCoreFallbackWasmUrl;
-  const wasmBinary = await fetch(wasmUrl).then((r) => r.arrayBuffer());
+  const wasmResponse = await fetch(wasmUrl);
+  // `fetch` resolves (doesn't reject) on a 404 — without this check, a broken/missing
+  // asset path hands an HTML error page to `createOCREngine({ wasmBinary })` and fails
+  // with the opaque "expected magic word" error instead of a clear HTTP status + URL.
+  if (!wasmResponse.ok) {
+    throw new Error(`Failed to fetch OCR wasm binary: HTTP ${wasmResponse.status} ${wasmUrl}`);
+  }
+  const wasmBinary = await wasmResponse.arrayBuffer();
   const engine = await createOCREngine({ wasmBinary });
   const tessdata = await loadTessdata("eng");
   engine.loadModel(tessdata);
@@ -776,21 +783,26 @@ async function processFile(
     // flag is off, keep going through the xberg branch unchanged.
     console.log(`[Worker] Extracting PDF via LiteParse for ${input.name}...`);
     try {
-      if (!input.disableOcr) {
-        // OCR is unconditionally withheld from LiteParse right now, not just when
-        // `ocrRuntime` failed to load: wiring a real OCR engine into LiteParse's
-        // `ocrEngine` option makes it exercise `ocr_merge.rs`, and the compiled
-        // @llamaindex/liteparse-wasm@2.13.1 binary panics there ("there is no reactor
-        // running, must be called from the context of a Tokio 1.x runtime") — an
-        // upstream bug in that crate's WASM target, not something fixable from this
-        // repo. Passing `ocrEngine: null` below keeps `needsOcr` false in
-        // `extractPdfWithLiteParse` (lib/pdf-liteparse.ts), which skips that code path
-        // entirely — the same "no crash" behavior LiteParse gets today whenever
-        // `ocrRuntime` itself fails to load, just applied unconditionally until
-        // upstream fixes the crate. Scanned/image PDFs export with no text; other OCR
-        // uses (images, and PDFs on the `xberg` engine below) are unaffected — they go
-        // through a different WASM module (`selectOcrBridge`) that doesn't touch this.
-        console.warn(`[Worker] OCR withheld from LiteParse for ${input.name} (upstream Tokio panic in ocr_merge.rs) — scanned/image content will export with no text.`);
+      // OCR is unconditionally withheld from LiteParse right now, not just when
+      // `ocrRuntime` failed to load: wiring a real OCR engine into LiteParse's
+      // `ocrEngine` option makes it exercise `ocr_merge.rs`, and the compiled
+      // @llamaindex/liteparse-wasm@2.13.1 binary panics there ("there is no reactor
+      // running, must be called from the context of a Tokio 1.x runtime") — an
+      // upstream bug in that crate's WASM target, not something fixable from this
+      // repo. Passing `ocrEngine: null` below keeps `needsOcr` false in
+      // `extractPdfWithLiteParse` (lib/pdf-liteparse.ts), which skips that code path
+      // entirely — the same "no crash" behavior LiteParse gets today whenever
+      // `ocrRuntime` itself fails to load, just applied unconditionally until
+      // upstream fixes the crate. Scanned/image PDFs export with no text; other OCR
+      // uses (images, and PDFs on the `xberg` engine below) are unaffected — they go
+      // through a different WASM module (`selectOcrBridge`) that doesn't touch this.
+      //
+      // The console.warn always fires (diagnostic signal, cheap); the user-facing toast
+      // only fires when `checkPdfNeedsOcr` finds a page that actually needs it — most
+      // PDFs are fully digital text and would otherwise see a spurious "no text
+      // extracted" warning about content that extracted just fine.
+      console.warn(`[Worker] OCR withheld from LiteParse for ${input.name} (upstream Tokio panic in ocr_merge.rs)`);
+      if (!input.disableOcr && (await checkPdfNeedsOcr(new Uint8Array(input.bytes)))) {
         self.postMessage({
           type: "warning",
           file: input.name,

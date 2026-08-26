@@ -33,6 +33,7 @@ function HomePage() {
         assets={state.assets}
         nerModelProgress={state.nerModelProgress}
         nerModelDegraded={state.nerModelDegraded}
+        isProcessing={state.isProcessing}
       />
       <Landing />
     </div>

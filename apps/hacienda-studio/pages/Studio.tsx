@@ -103,6 +103,7 @@ export function Studio({
   assets,
   nerModelProgress,
   nerModelDegraded,
+  isProcessing,
 }: {
   workerReady: boolean;
   folderMode: boolean;
@@ -123,9 +124,9 @@ export function Studio({
   assets: OnboardingState["assets"];
   nerModelProgress: { receivedBytes: number; totalBytes: number | null } | null;
   nerModelDegraded: boolean;
+  isProcessing: boolean;
 }) {
   const resultsByInput = new Map(results.map((r) => [r.frontmatter.source, r] as const));
-  const isProcessing = files.length > 0;
   const processedCount = files.filter((f) => progress.get(effectiveFileName(f))?.stage === "complete").length;
   const totalCount = files.length;
 
@@ -166,7 +167,7 @@ export function Studio({
               label = "Chargement du runtime…";
               pct = 0;
             } else if (!assets.nerModel) {
-              label = nerModelDegraded ? "Modèle neural indisponible — repli sur regex" : "Téléchargement du modèle d'entités…";
+              label = nerModelDegraded ? "Modèle neuronal indisponible — repli sur regex" : "Téléchargement du modèle d'entités…";
               if (nerModelProgress?.totalBytes) {
                 pct = Math.min(100, Math.round((nerModelProgress.receivedBytes / nerModelProgress.totalBytes) * 100));
               } else if (!nerModelDegraded) {
@@ -225,14 +226,17 @@ export function Studio({
             <div className="min-w-0">
               <p className="text-sm font-medium">Rédiger les PII dans la sortie</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                {config.redactPiiInOutput
-                  ? "Les portions détectées sont masquées dans les documents exportés."
-                  : "Les PII détectées sont comptées mais laissées telles quelles dans la sortie."}
+                {!config.enablePiiDetection
+                  ? "Nécessite la reconnaissance d'entités (désactivée dans les Paramètres) — sans elle, aucune PII n'est détectée à rédiger."
+                  : config.redactPiiInOutput
+                    ? "Les portions détectées sont masquées dans les documents exportés."
+                    : "Les PII détectées sont comptées mais laissées telles quelles dans la sortie."}
               </p>
             </div>
             <Switch
               aria-label="Rédiger les PII dans la sortie"
               checked={config.redactPiiInOutput}
+              disabled={!config.enablePiiDetection}
               onCheckedChange={(checked) => onConfigChange({ ...config, redactPiiInOutput: checked })}
             />
           </div>

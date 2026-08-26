@@ -49,8 +49,7 @@ function RootShell() {
   }
 
   const hasDocuments = state.results.length > 0;
-  const isProcessing = state.files.length > 0;
-  const showSidebar = hasDocuments && !isProcessing;
+  const showSidebar = hasDocuments && !state.isProcessing;
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">

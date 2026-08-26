@@ -41,7 +41,10 @@ function downloadZip(blob: Blob): void {
   a.href = url;
   a.download = `xberg-output-${Date.now()}.zip`;
   a.click();
-  URL.revokeObjectURL(url);
+  // Deferred, not immediate: `a` is never attached to the document, so the browser
+  // fetches the blob URL asynchronously after `.click()` returns — revoking
+  // synchronously here can race that fetch and produce an empty download.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function downloadText(fileName: string, content: string): void {
@@ -51,7 +54,7 @@ function downloadText(fileName: string, content: string): void {
   a.href = url;
   a.download = fileName;
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /**
@@ -583,6 +586,17 @@ function useAppStateProvider() {
     return files.find((f) => effectiveFileName(f) === result.frontmatter.source);
   }
 
+  // `files` is append-only (only ever pushed onto, in `handleProcessQueue` above) — a
+  // naive `files.length > 0` stays true forever after the very first batch. Derived
+  // from actual in-flight work instead: a file with no progress entry yet (just
+  // queued) or one whose stage isn't "complete"/"error" is still processing. Shared by
+  // both `Studio.tsx` (whether to show the "Traitement" section) and `routes/__root.tsx`
+  // (whether the sidebar should stay hidden) so they can't disagree.
+  const isProcessing = files.some((f) => {
+    const stage = progress.get(effectiveFileName(f))?.stage;
+    return stage !== "complete" && stage !== "error";
+  });
+
   return {
     assets,
     nerModelProgress,
@@ -590,6 +604,7 @@ function useAppStateProvider() {
     files,
     pendingFiles,
     progress,
+    isProcessing,
     results,
     config,
     setConfig,

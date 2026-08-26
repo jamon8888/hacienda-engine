@@ -781,7 +781,7 @@ function AuditTab() {
 
         {status === "ok" && (
           <p className="px-3 py-2 text-xs font-medium text-emerald-400">
-            Chain verified — no tampering detected.
+            Chaîne vérifiée — aucune falsification détectée.
           </p>
         )}
         {status === "error" && error && (

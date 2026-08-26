@@ -80,7 +80,7 @@
    * unlicensed here) is substituted with Space Grotesk for display/heading sizes —
    * see app.css's font-face imports below and the plan's "Font decision" section. */
   --font-display: "Space Grotesk", "Space Grotesk Fallback", var(--font-sans);
-  --font-sans: "Inter", "Inter Fallback", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: "Inter", "Inter Fallback", -apple-system, "BlinkMacSystemFont", sans-serif;
 }
 
 /*

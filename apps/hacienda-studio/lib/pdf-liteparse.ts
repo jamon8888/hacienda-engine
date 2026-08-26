@@ -91,6 +91,27 @@ export interface LiteParseExtractResult {
  * `parse()` — the same behavior as today's xberg path in that situation, since there's no
  * cheaper way to learn the count first.
  */
+/**
+ * Cheap (`isComplex()`, sub-10ms) probe for whether any page in this PDF needs OCR —
+ * exported standalone so callers can decide whether an "OCR unavailable/withheld"
+ * warning is actually relevant to *this* document, instead of firing it for every PDF
+ * regardless of content. `extractPdfWithLiteParse` no longer runs this probe itself
+ * while OCR is unconditionally withheld from it (see `worker/pipeline.ts`'s
+ * `ocrEngine: null` stopgap for the ocr_merge.rs Tokio panic) — `needsOcr` there
+ * short-circuits to `false` before ever reaching the probe.
+ */
+export async function checkPdfNeedsOcr(bytes: Uint8Array): Promise<boolean> {
+  await initLiteParse();
+  const { LiteParse } = await import("@llamaindex/liteparse-wasm");
+  const probe = new LiteParse({ ocrEnabled: false, quiet: true });
+  try {
+    const pages = await probe.isComplex(bytes);
+    return pages.some((p) => p.needsOcr);
+  } finally {
+    probe.free();
+  }
+}
+
 export async function extractPdfWithLiteParse(
   bytes: Uint8Array,
   opts: { ocrEngine: OcrEngine | null; disableOcr: boolean; pageCount?: number; dpi?: number },
