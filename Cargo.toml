@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hacienda-rag", "crates/hacienda-wasm", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core", "hacienda-mcp"]
+members = ["crates/hacienda-rag", "crates/hacienda-wasm", "crates/hacienda-email", "hacienda", "hacienda-api", "hacienda-cli", "hacienda-core", "hacienda-mcp"]
 exclude = ["packages/*"]
 
 [workspace.package]
@@ -82,6 +82,30 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # NFKC normalisation. Part of the pseudonym token contract: it decides which spellings
 # co-refer, so changing it later re-derives every token ever emitted.
 unicode-normalization = "0.1"
+
+# Pimalaya email ecosystem (himalaya, io-email, io-imap, io-maildir, etc.)
+# I/O-free coroutine-based email libraries for IMAP, JMAP, Gmail, Microsoft Graph, Maildir, SMTP
+# See https://github.com/pimalaya/pimalaya
+io-email = { version = "0.1", default-features = false }
+io-imap = { version = "0.6", default-features = false }
+io-jmap = { version = "0.3", default-features = false }
+io-gmail = { version = "0.3", default-features = false }
+io-msgraph = { version = "0.3", default-features = false }
+io-maildir = { version = "0.3", default-features = false }
+io-m2dir = { version = "0.2", default-features = false }
+io-smtp = { version = "0.3", default-features = false }
+io-sasl = { version = "0.1", default-features = false, features = ["scram"] }
+io-managesieve = { version = "0.1", default-features = false }
+pimalaya-stream = { version = "0.3", default-features = false }
+pimalaya-config = { version = "0.1", default-features = false }
+pimalaya-cli = { version = "0.2", default-features = false }
+
+# Email crate dependencies
+gethostname = "1"
+mime_guess = "2"
+secrecy = "0.10"
+tokio-test = "0.4"
+mock-imap = "0.1"
 # `rusty-s3`'s `Bucket::new` takes a `url::Url` directly and does not re-export the
 # `url` crate itself — needed by `S3Config::endpoint` (Phase 13 Task 4). Already resolved
 # transitively via `reqwest`/`rusty-s3`; version pinned to match.
