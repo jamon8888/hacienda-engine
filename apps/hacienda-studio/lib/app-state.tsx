@@ -415,6 +415,14 @@ function useAppStateProvider() {
     void pruneDrafts(30 * 24 * 60 * 60 * 1000);
   }, []);
 
+  /**
+   * Accepts files from either the plain picker or a folder source. Folder
+   * drag-and-drop is traversed in `Dropzone.tsx` via `traverseDataTransferItems`
+   * and folder picker via `webkitdirectory` — both synthesize `webkitRelativePath`
+   * so this handler only needs to preserve it through `effectiveFileName`.
+   * The `webkitRelativePath -> effectiveFileName -> ProcessedFile.name -> folderOf`
+   * chain keeps the library and zip export folder structure.
+   */
   async function handleFilesAccepted(fileList: FileList | File[]): Promise<void> {
     console.log("[AppState] handleFilesAccepted called with", fileList.length, "files");
     const fileArray = Array.from(fileList);

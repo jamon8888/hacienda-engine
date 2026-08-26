@@ -4,7 +4,11 @@
  * leaves it empty, and `.name` (the basename) is all there is. Everything
  * downstream — the worker's `input.name`, the zip entry path, the progress
  * Map key — must agree on which one it's using, so this is the one place
- * that decides.
+ * that decides. Folder drag-and-drop via `lib/folder-upload.ts`'s
+ * `traverseDataTransferItems` synthesizes the same `webkitRelativePath` so
+ * this function remains the single source of truth for the
+ * `webkitRelativePath -> effectiveFileName -> ProcessedFile.name -> folderOf`
+ * chain.
  */
 export function effectiveFileName(file: {
   name: string;

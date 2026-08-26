@@ -89,9 +89,13 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
           </div>
         </Card>
 
-        {/* Right dropzone */}
+        {/* Right dropzone — folderMode reuses the single input from app-state */}
         <div className="flex flex-1 flex-col">
-          <Dropzone onFiles={handleFiles} />
+          <Dropzone
+            onFiles={handleFiles}
+            folderMode={appState?.folderMode ?? false}
+            onToggleFolderMode={appState?.toggleFolderMode}
+          />
         </div>
       </div>
     </div>
