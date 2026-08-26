@@ -519,10 +519,8 @@ fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
         pipeline_version: row.pipeline_version,
         config_hash: row.config_hash,
         principal: row.principal,
-        // The `audit_entries` table has no `vertical` column yet — the postgres backend
-        // does not persist vertical provenance. Tracked separately from this fix, which
-        // only restores compilation after `AuditEntry` gained the field.
-        vertical: None,
+        vertical: row.vertical,
+        model: row.model,
         chain_hash: row.chain_hash,
     })
 }
@@ -574,6 +572,8 @@ struct AuditEntryRow {
     pipeline_version: String,
     config_hash: String,
     principal: Option<String>,
+    vertical: Option<String>,
+    model: Option<String>,
     chain_hash: String,
     created_at: DateTime<Utc>,
 }
@@ -733,8 +733,8 @@ async fn insert_entry(
         r#"
         INSERT INTO audit_entries (id, segment_id, sequence_num, category, action, span_hash,
                                   span_length, confidence, source, pipeline_version, config_hash,
-                                  principal, chain_hash, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                                  principal, vertical, model, chain_hash, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#,
         entry.id,
         segment_id,
@@ -748,6 +748,8 @@ async fn insert_entry(
         entry.pipeline_version,
         entry.config_hash,
         entry.principal,
+        entry.vertical,
+        entry.model,
         entry.chain_hash,
         DateTime::parse_from_rfc3339(&entry.timestamp)
             .map(|t| t.with_timezone(&Utc))
@@ -768,7 +770,7 @@ impl PostgresAuditStore {
             AuditEntryRow,
             r#"
             SELECT id, category, action, span_hash, span_length, confidence, source,
-                   pipeline_version, config_hash, principal, chain_hash, created_at
+                   pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
             FROM audit_entries
             WHERE segment_id = $1
             ORDER BY sequence_num
@@ -807,7 +809,7 @@ async fn get_segment_entries_tx(
         AuditEntryRow,
         r#"
         SELECT id, category, action, span_hash, span_length, confidence, source,
-               pipeline_version, config_hash, principal, chain_hash, created_at
+               pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
         FROM audit_entries
         WHERE segment_id = $1
         ORDER BY sequence_num

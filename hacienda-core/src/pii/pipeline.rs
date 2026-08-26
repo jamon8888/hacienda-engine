@@ -174,6 +174,15 @@ impl PiiPipeline {
         self.ner_detector.is_some()
     }
 
+    /// Model identifier for audit provenance, if a model is loaded.
+    ///
+    /// The identifier is derived from the configured model directory. It is used as the
+    /// `model` field on [`crate::audit::AuditEntry`]. When no model is configured the
+    /// entry is regex-only and the field stays `None`.
+    pub fn model_identifier(&self) -> Option<String> {
+        self.config.model.model_dir.as_ref().map(|p| p.to_string_lossy().into_owned())
+    }
+
     /// Detect and redact.
     ///
     /// # Errors

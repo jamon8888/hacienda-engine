@@ -1386,10 +1386,11 @@ impl HaciendaFacade {
         // is already built and cached by the caller that detected `entities` in the
         // first place, so this is a cache hit; a failure here must not block recording
         // the reveal itself.
-        let vertical = self
+        let (vertical, model_id) = self
             .pii_pipeline_for(&tenant)
             .ok()
-            .and_then(|p| p.vertical_provenance_id());
+            .map(|p| (p.vertical_provenance_id(), p.model_identifier()))
+            .unwrap_or((None, None));
         let inputs: Vec<AuditEntryInput> = entities
             .iter()
             .map(|entity| {
@@ -1400,6 +1401,11 @@ impl HaciendaFacade {
                 let span = text
                     .get(entity.start as usize..entity.end as usize)
                     .unwrap_or(entity.text.as_str());
+                let model = if matches!(entity.source, crate::pii::types::EntitySource::Model) {
+                    model_id.clone()
+                } else {
+                    None
+                };
                 AuditEntryInput {
                     id: uuid::Uuid::new_v4().to_string(),
                     category: entity.category.to_string(),
@@ -1413,7 +1419,7 @@ impl HaciendaFacade {
                     config_hash: String::new(),
                     principal: principal.clone(),
                     vertical: vertical.clone(),
-                    model: None,
+                    model,
                 }
             })
             .collect();
@@ -1488,28 +1494,36 @@ impl HaciendaFacade {
         // Best-effort, same reasoning as `record_token_reveal`/`record_reveal`: this
         // tenant's pipeline is already built and cached by the caller that produced
         // `audit_log` in the first place.
-        let vertical = self
+        let (vertical, model_id) = self
             .pii_pipeline_for(&tenant)
             .ok()
-            .and_then(|p| p.vertical_provenance_id());
+            .map(|p| (p.vertical_provenance_id(), p.model_identifier()))
+            .unwrap_or((None, None));
         let inputs: Vec<AuditEntryInput> = audit_log
             .iter()
-            .map(|entry| AuditEntryInput {
-                id: uuid::Uuid::new_v4().to_string(),
-                category: entry.category.clone(),
-                action: entry.action.clone(),
-                span_hash: entry.span_hash.clone(),
-                span_length: entry.span_length,
-                confidence: entry.confidence,
-                source: entry.source.into(),
-                pipeline_version: PIPELINE_VERSION.to_string(),
-                // The store owns config_hash — AuditChain::push overwrites this field
-                // with the chain's own value (chain.rs:32). Passing String::new() makes
-                // the ownership explicit and removes the reason to read it first.
-                config_hash: String::new(),
-                principal: principal.clone(),
-                vertical: vertical.clone(),
-                model: None,
+            .map(|entry| {
+                let model = if matches!(entry.source, crate::pii::types::EntitySource::Model) {
+                    model_id.clone()
+                } else {
+                    None
+                };
+                AuditEntryInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    category: entry.category.clone(),
+                    action: entry.action.clone(),
+                    span_hash: entry.span_hash.clone(),
+                    span_length: entry.span_length,
+                    confidence: entry.confidence,
+                    source: entry.source.into(),
+                    pipeline_version: PIPELINE_VERSION.to_string(),
+                    // The store owns config_hash — AuditChain::push overwrites this field
+                    // with the chain's own value (chain.rs:32). Passing String::new() makes
+                    // the ownership explicit and removes the reason to read it first.
+                    config_hash: String::new(),
+                    principal: principal.clone(),
+                    vertical: vertical.clone(),
+                    model,
+                }
             })
             .collect();
 
