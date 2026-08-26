@@ -1,27 +1,17 @@
 import { openDB } from "idb";
 import type { NerModel } from "@xberg-io/xberg-wasm";
+import { MODEL_DIGESTS } from "./model-digests";
 
 const DB_NAME = "xberg-studio-assets";
 const DB_VERSION = 1;
 const MODEL_STORE = "models";
 const TESSDATA_STORE = "tessdata";
 
-/**
- * GLiNER2 weights for the xberg-wasm `NerModel`. These are public model files —
- * no document content is transmitted, only downloaded. huggingface.co serves
- * them with permissive CORS headers, so they are fetched directly rather than
- * through a dev proxy: a proxy that only exists in dev leaves production
- * resolving the same URL against the SPA fallback.
- *
- * Override the base to self-host the weights, e.g. for firms that require all
- * traffic to stay within the EU.
- */
-const RAW_MODEL_BASE =
-  import.meta.env.VITE_MODEL_BASE_URL ??
-  "https://huggingface.co/jamon8888/gliner2-guardrails-pii-f16/resolve/main";
-const MODEL_BASE = import.meta.env.DEV && RAW_MODEL_BASE.startsWith('https://huggingface.co')
-  ? RAW_MODEL_BASE.replace('https://huggingface.co', '/hf-model')
-  : RAW_MODEL_BASE;
+const MODEL_ID = (import.meta.env.VITE_GLINER_MODEL_ID as string | undefined) ?? "jamon8888/gliner2-guardrails-pii-f16";
+const MODEL_BASE_URL = import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingface.co/${MODEL_ID}/resolve/main`;
+const MODEL_BASE = import.meta.env.DEV && MODEL_BASE_URL.startsWith('https://huggingface.co')
+  ? MODEL_BASE_URL.replace('https://huggingface.co', '/hf-model')
+  : MODEL_BASE_URL;
 const MODEL_URL = `${MODEL_BASE}/model.safetensors`;
 const TOKENIZER_URL = `${MODEL_BASE}/tokenizer.json`;
 // The encoder config (mdeberta-v3-base), not the top-level extractor config —
@@ -358,23 +348,26 @@ async function getDB() {
 
 export async function isModelCached(): Promise<boolean> {
   const db = await getDB();
-  const model = await db.get(MODEL_STORE, "gliner2-guardrails-pii-model");
-  const tokenizer = await db.get(
-    MODEL_STORE,
-    "gliner2-guardrails-pii-tokenizer",
-  );
-  const config = await db.get(MODEL_STORE, "gliner2-guardrails-pii-config");
+  const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
+  const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
+  const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+  const model = await db.get(MODEL_STORE, modelKey);
+  const tokenizer = await db.get(MODEL_STORE, tokenizerKey);
+  const config = await db.get(MODEL_STORE, configKey);
   return !!(model && tokenizer && config);
 }
 
 async function clearStaleModelCache(): Promise<void> {
   try {
     const db = await getDB();
+    const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
+    const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
+    const configKey = `config-${MODEL_ID.replace('/', '-')}`;
     const tx = db.transaction(MODEL_STORE, "readwrite");
     await Promise.all([
-      tx.store.delete("gliner2-guardrails-pii-model"),
-      tx.store.delete("gliner2-guardrails-pii-tokenizer"),
-      tx.store.delete("gliner2-guardrails-pii-config"),
+      tx.store.delete(modelKey),
+      tx.store.delete(tokenizerKey),
+      tx.store.delete(configKey),
       tx.done,
     ]);
     console.log("[asset-loader] Cleared stale model cache");
@@ -460,17 +453,46 @@ export async function loadNerModel(
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<NerModelLoad> {
   const db = await getDB();
+  const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
+  const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
+  const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+
+  // One-slot eviction: remove any model entries not for current MODEL_ID
+  const evictOtherModels = async () => {
+    const tx = db.transaction(MODEL_STORE, "readwrite");
+    const keys = await tx.store.getAllKeys();
+    await Promise.all(
+      keys
+        .filter(k => typeof k === "string" && k.startsWith("model-") && !k.startsWith(modelKey))
+        .map(k => tx.store.delete(k))
+    );
+    await Promise.all(
+      keys
+        .filter(k => typeof k === "string" && k.startsWith("tokenizer-") && !k.startsWith(tokenizerKey))
+        .map(k => tx.store.delete(k))
+    );
+    await Promise.all(
+      keys
+        .filter(k => typeof k === "string" && k.startsWith("config-") && !k.startsWith(configKey))
+        .map(k => tx.store.delete(k))
+    );
+    await tx.done;
+  };
 
   // Check cache first
   const [model, tokenizer, config] = await Promise.all([
-    db.get(MODEL_STORE, "gliner2-guardrails-pii-model"),
-    db.get(MODEL_STORE, "gliner2-guardrails-pii-tokenizer"),
-    db.get(MODEL_STORE, "gliner2-guardrails-pii-config"),
+    db.get(MODEL_STORE, modelKey),
+    db.get(MODEL_STORE, tokenizerKey),
+    db.get(MODEL_STORE, configKey),
   ]);
 
   if (model && tokenizer && config) {
+    // Verify digest placeholder - in production compute hash and compare to MODEL_DIGESTS[MODEL_ID]
     return { ok: true, assets: { model, tokenizer, encoderConfig: config } };
   }
+
+  // Evict stale models before download
+  await evictOtherModels();
 
   // Quota is checked *after* the cache lookup, never before: the check exists to avoid
   // downloading ~620MB we then cannot persist, so it is only meaningful on the path that
@@ -503,12 +525,12 @@ export async function loadNerModel(
       const downloadMs = performance.now() - downloadStart;
       console.log(`[PERF] Download: ${downloadMs.toFixed(0)}ms (${(modelData.byteLength / 1024 / 1024).toFixed(1)} MB)`);
 
-      // Cache in IndexedDB
+      // Cache in IndexedDB with model-specific keys
       const tx = db.transaction(MODEL_STORE, "readwrite");
       await Promise.all([
-        tx.store.put(modelData, "gliner2-guardrails-pii-model"),
-        tx.store.put(tokenizerData, "gliner2-guardrails-pii-tokenizer"),
-        tx.store.put(configData, "gliner2-guardrails-pii-config"),
+        tx.store.put(modelData, modelKey),
+        tx.store.put(tokenizerData, tokenizerKey),
+        tx.store.put(configData, configKey),
         tx.done,
       ]);
 
