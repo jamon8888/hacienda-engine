@@ -32,17 +32,22 @@ import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
 // into `dist/`. In dev, `node_modules` is served with real relative paths so it works
 // by accident; in production the request 404s and Vercel's SPA fallback answers with
 // index.html ("expected magic word ... found 54 68 65 20", i.e. the start of "The page
-// could not be found"), which silently disables OCR everywhere it's deployed. Both
-// SIMD and non-SIMD builds are imported so `createOcrBackend` below can pick the right
-// one via `supportsFastBuild()`, exactly mirroring the check tesseract-wasm's own
-// (broken, in production) default path does internally.
-// A relative path into node_modules, not a bare `tesseract-wasm/dist/...` specifier:
-// the package's own `exports` map only lists "." and "./node", so a deep subpath
-// import is blocked by Node/Vite's exports resolution even though the file exists —
-// going in by relative path sidesteps that map entirely while still letting Vite's
-// asset pipeline see and hash the file normally, in both dev and production.
-import tesseractCoreWasmUrl from "../node_modules/tesseract-wasm/dist/tesseract-core.wasm?url";
-import tesseractCoreFallbackWasmUrl from "../node_modules/tesseract-wasm/dist/tesseract-core-fallback.wasm?url";
+// could not be found"), which silently disables OCR everywhere it's deployed.
+//
+// Neither a bare `tesseract-wasm/dist/...?url` specifier (blocked — the package's own
+// `exports` map only lists "." and "./node") nor a relative `../node_modules/...?url`
+// import (resolves locally under pnpm, but Vercel's `npm run build:vercel` lays out
+// node_modules differently and Rollup's worker-bundling context fails to resolve it
+// there — confirmed by a real deploy) survives every environment this app builds in.
+// Copied into `public/tesseract-wasm/` instead, matching `public/models/`'s existing
+// convention for exactly this problem: files Vite serves/copies verbatim at a stable,
+// bundler-independent root path in dev, `vite build`, and any package manager alike.
+// Re-copy from `node_modules/tesseract-wasm/dist/*.wasm` if the tesseract-wasm version
+// in package.json ever changes. Both SIMD and non-SIMD builds are present so
+// `createOcrBackend` below can pick the right one via `supportsFastBuild()`, mirroring
+// the check tesseract-wasm's own (broken, in production) default path does internally.
+const tesseractCoreWasmUrl = "/tesseract-wasm/tesseract-core.wasm";
+const tesseractCoreFallbackWasmUrl = "/tesseract-wasm/tesseract-core-fallback.wasm";
 import {
   extractEntities,
   isBridgeEntityArray,
