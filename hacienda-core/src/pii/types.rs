@@ -43,6 +43,18 @@ pub enum PiiCategory {
     FullName,
     Person,
     Organization,
+    FirstName,
+    MiddleName,
+    LastName,
+    StreetAddress,
+    City,
+    StateOrRegion,
+    PostalCode,
+    Country,
+    GovernmentId,
+    PaymentCard,
+    CardExpiry,
+    CardCvv,
     Custom(String),
 }
 
