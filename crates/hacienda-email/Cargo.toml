@@ -1,0 +1,70 @@
+[package]
+name = "hacienda-email"
+version.workspace = true
+edition.workspace = true
+description = "Email processing plugin for hacienda: archive, NER, RAG, redact"
+license.workspace = true
+categories = ["email", "ai", "nlp", "rag"]
+keywords = ["email", "imap", "maildir", "ner", "rag", "pii", "redaction"]
+
+[features]
+default = ["imap", "maildir", "rustls-ring"]
+# Backend features (match io-email's features)
+imap = ["dep:io-imap", "io-email/imap"]
+jmap = ["dep:io-jmap", "io-email/jmap"]
+maildir = ["dep:io-maildir", "io-email/maildir"]
+m2dir = ["dep:io-m2dir", "io-email/m2dir"]
+smtp = ["dep:io-smtp", "io-email/smtp"]
+# Gmail and Microsoft Graph use separate crates (io-gmail, io-msgraph)
+gmail = ["dep:io-gmail"]
+msgraph = ["dep:io-msgraph"]
+# TLS features (match pimalaya-stream)
+rustls-ring = ["pimalaya-stream/rustls-ring"]
+rustls-aws = ["pimalaya-stream/rustls-aws"]
+native-tls = ["pimalaya-stream/native-tls"]
+# Pipeline features
+ner = ["hacienda-core/ner-candle"]
+rag = ["hacienda-rag/chunking", "hacienda-rag/embeddings"]
+redact = ["dep:xberg"]
+# Test features
+
+[dependencies]
+# Hacienda core
+hacienda-core = { path = "../../hacienda-core" }
+hacienda-rag = { path = "../../crates/hacienda-rag" }
+
+# Pimalaya ecosystem
+io-email = { version = "0.1", default-features = false, optional = true }
+io-imap = { version = "0.6", default-features = false, optional = true, features = ["client"] }
+io-jmap = { version = "0.3", default-features = false, optional = true }
+io-gmail = { version = "0.3", default-features = false, optional = true }
+io-msgraph = { version = "0.3", default-features = false, optional = true }
+io-maildir = { version = "0.3", default-features = false, optional = true, features = ["client"] }
+io-m2dir = { version = "0.2", default-features = false, optional = true }
+io-smtp = { version = "0.3", default-features = false, optional = true }
+io-sasl = { version = "0.1", default-features = false, features = ["scram"] }
+pimalaya-stream = { version = "0.3", default-features = false }
+pimalaya-config = { version = "0.1", default-features = false, features = ["toml", "secret"] }
+
+# xberg for redaction and NER
+xberg = { workspace = true, optional = true }
+
+# Core
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+url = { version = "2.2", features = ["serde"] }
+secrecy = "0.10"
+async-trait = { workspace = true }
+regex = { workspace = true }
+
+# NER/ML
+candle-core = { version = "0.8", optional = true, features = ["cuda"] }
+tokenizers = { version = "0.19", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
