@@ -13,7 +13,7 @@ export interface EditorLayoutProps {
 
 export function EditorLayout({ findings, onRemoveFinding, onAddFinding, documentText, redactedText }: EditorLayoutProps) {
   return (
-    <ResizablePanelGroup direction="horizontal" className="flex h-full min-h-[600px]">
+    <ResizablePanelGroup orientation="horizontal" className="flex h-full min-h-[600px]">
       <ResizablePanel defaultSize={20} minSize={15} maxSize={35}>
         <div className="h-full border-r">
           <CategorySidebar findings={findings} onRemove={onRemoveFinding} />

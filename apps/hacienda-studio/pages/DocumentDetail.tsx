@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { CodeLines } from "@/components/CodeLines";
 import { DocumentOutline } from "@/components/DocumentOutline";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
+import { InteractiveEditor } from "@/components/editor/InteractiveEditor";
 import { PiiPanel } from "@/components/PiiPanel";
 import { ViewerErrorBoundary } from "@/components/ViewerErrorBoundary";
 import { RedactedEditor } from "@/components/RedactedEditor";
@@ -376,7 +377,7 @@ export function DocumentDetail({
                       Sélectionnez une portion, puis étiquetez-la
                     </span>
                   </p>
-                  <MarkdownEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
+                  <InteractiveEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
                 </div>
 
                 <div>
