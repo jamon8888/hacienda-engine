@@ -12,6 +12,14 @@ const ALL_CATEGORIES: NerCategory[] = [
   "email",
   "phone",
   "url",
+  "first_name",
+  "middle_name",
+  "last_name",
+  "street_address",
+  "city",
+  "state_or_region",
+  "postal_code",
+  "country",
 ];
 
 const CONTRACT = [
