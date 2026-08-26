@@ -629,4 +629,22 @@ mod tests {
         assert!(matches!(error, PiiError::ConfigIo { .. }));
         assert!(error.to_string().contains("/nonexistent/hacienda.toml"));
     }
+
+    #[test]
+    fn should_apply_per_category_threshold_offsets() {
+        let mut config = PipelineConfig::default();
+        config.model_threshold_default = 0.5;
+        // Person family gets boosted
+        assert_eq!(config.effective_threshold(&PiiCategory::Person), 0.65);
+        assert_eq!(config.effective_threshold(&PiiCategory::FirstName), 0.65);
+        assert_eq!(config.effective_threshold(&PiiCategory::LastName), 0.65);
+        // High-precision categories get lowered
+        assert_eq!(config.effective_threshold(&PiiCategory::Email), 0.48);
+        assert_eq!(config.effective_threshold(&PiiCategory::CreditCard), 0.48);
+        // Override via map
+        config.model_thresholds.insert(PiiCategory::Person, 0.7);
+        assert_eq!(config.effective_threshold(&PiiCategory::Person), 0.7);
+        // Default fallback
+        assert_eq!(config.effective_threshold(&PiiCategory::Ssn), 0.5);
+    }
 }
