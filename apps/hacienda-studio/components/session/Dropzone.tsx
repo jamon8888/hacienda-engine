@@ -1,31 +1,45 @@
 import * as React from "react";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Upload } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Upload, Files, Paperclip } from "lucide-react";
 
-export interface DropzoneProps {
-  onFiles: (files: File[]) => void;
-}
-
-export function Dropzone({ onFiles }: DropzoneProps) {
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files);
-    onFiles(files);
-  };
+export function Dropzone({
+  onDropFiles,
+  onDropFolder,
+  disabled,
+}: {
+  onDropFiles?: (files: FileList) => void;
+  onDropFolder?: (files: FileList) => void;
+  disabled?: boolean;
+}) {
+  const [drag, setDrag] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm">Déposez vos fichiers</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div onDragOver={e=>e.preventDefault()} onDrop={onDrop} className="rounded-lg border border-dashed p-8 text-center">
-          <Upload className="mx-auto mb-2 h-6 w-6 text-muted-foreground" />
-          <p className="text-xs text-muted-foreground mb-3">Glissez-déposez ici ou</p>
-          <Button size="sm" variant="outline">Parcourir</Button>
+    <div
+      onDragOver={e => { e.preventDefault(); setDrag(true); }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={e => {
+        e.preventDefault();
+        setDrag(false);
+        const items = e.dataTransfer.files;
+        onDropFiles?.(items);
+      }}
+      className={`flex items-center justify-center rounded-xl border-2 ${drag ? "border-primary" : "border-muted-foreground/25"} bg-muted/50 min-h-[220px]`}
+    >
+      <div className="text-center space-y-4">
+        <Upload className="mx-auto size-12 text-muted-foreground/50" />
+        <div className="space-y-1">
+          <p className="font-medium">Cliquez pour téléverser ou <span className="text-primary underline cursor-pointer" onClick={()=>inputRef.current?.click()}>ouvrez la sélection de fichiers</span></p>
+          <p className="text-xs text-muted-foreground">Formats supportés : PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, LV …</p>
         </div>
-      </CardContent>
-    </Card>
+        <div className="flex items-center justify-center gap-2">
+          <Button variant="outline" size="sm" onClick={()=>inputRef.current?.click()} disabled={disabled}>Choisir le fichier</Button>
+          <Button variant="outline" size="sm" disabled={disabled}>Choisir un dossier</Button>
+        </div>
+        <input ref={inputRef} type="file" multiple className="hidden" />
+      </div>
+    </div>
   );
 }

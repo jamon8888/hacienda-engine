@@ -1,39 +1,35 @@
 import * as React from "react";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Trash2, Eye } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { X, Check, MoreHorizontal } from "lucide-react";
 
-export interface ProcessedFileItem {
-  name: string;
-  size: number;
-}
+export type ProcessedFile = { id: string; name: string; status: string; };
 
-export interface ProcessedFilesListProps {
-  files: ReadonlyArray<ProcessedFileItem>;
-  onView?: (name: string) => void;
-  onDelete?: (name: string) => void;
-}
-
-export function ProcessedFilesList({ files, onView, onDelete }: ProcessedFilesListProps) {
+export function ProcessedFilesList({ files }: { files: ReadonlyArray<ProcessedFile> }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm">Fichiers traités</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ul className="space-y-2">
-          {files.map(f => (
-            <li key={f.name} className="flex items-center justify-between rounded border p-2">
-              <span className="text-xs">{f.name}</span>
-              <div className="flex gap-1">
-                <Button size="icon" variant="ghost" onClick={()=>onView?.(f.name)}><Eye className="h-3 w-3" /></Button>
-                <Button size="icon" variant="ghost" onClick={()=>onDelete?.(f.name)}><Trash2 className="h-3 w-3" /></Button>
+    <div className="space-y-2">
+      <h3 className="text-sm font-medium">Fichiers traités</h3>
+      <div className="space-y-2">
+        {files.map(f => (
+          <Card key={f.id}>
+            <CardContent className="flex items-center justify-between py-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Badge variant="secondary" className="text-[10px]">{f.status}</Badge>
+                <span className="truncate text-xs">{f.name}</span>
               </div>
-            </li>
-          ))}
-          {files.length===0 && <p className="text-xs text-muted-foreground">Aucun fichier traité</p>}
-        </ul>
-      </CardContent>
-    </Card>
+              <div className="flex items-center gap-1">
+                <Button variant="ghost" size="icon" className="h-7 w-7">
+                  <Check className="size-3" />
+                </Button>
+                <Button variant="ghost" size="icon" className="h-7 w-7">
+                  <MoreHorizontal className="size-3" />
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
   );
 }
