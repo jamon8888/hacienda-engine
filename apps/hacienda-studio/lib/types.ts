@@ -105,7 +105,15 @@ export type NerCategory =
   | "percent"
   | "email"
   | "phone"
-  | "url";
+  | "url"
+  | "first_name"
+  | "middle_name"
+  | "last_name"
+  | "street_address"
+  | "city"
+  | "state_or_region"
+  | "postal_code"
+  | "country";
 
 export interface AppConfig {
   nerCategories: NerCategory[];
