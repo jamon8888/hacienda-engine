@@ -15,7 +15,10 @@ export default defineConfig({
       "tests/unit/**/*.{test,spec}.{ts,tsx}",
     ],
     environment: "node",
-    environmentMatchGlobs: [["tests/unit/app-shell.*", "jsdom"]],
+    environmentMatchGlobs: [
+      ["tests/unit/app-shell.*", "jsdom"],
+      ["tests/unit/nouvelle-session.*", "jsdom"],
+    ],
     setupFiles: ["./tests/setup.ts"],
   },
 });

@@ -30,10 +30,14 @@ import { recordKeyUsage } from "./pseudonym-keys";
 import { folderOf } from "./library";
 import type { LibraryDocument } from "./library";
 import { DEFAULT_CONFIG } from "./types";
-import type { AppConfig, OnboardingState, ProcessedFile, ProgressUpdate } from "./types";
+import type { AppConfig, NerCategory, OnboardingState, ProcessedFile, ProgressUpdate } from "./types";
 import type { PiiEntity } from "./pii-engine";
 import type { WhisperBridge } from "./transcription/whisper-bridge";
 import type { TranscriptionConfig, TranscriptionResult } from "./transcription/types";
+import { createSession } from "./session";
+import type { Session, TreatmentMode } from "./session";
+import type { ConversionMode } from "./conversion";
+import { categoryToWire } from "./pii-categories";
 
 function downloadZip(blob: Blob): void {
   const url = URL.createObjectURL(blob);
@@ -55,6 +59,23 @@ function downloadText(fileName: string, content: string): void {
   a.download = fileName;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+const NER_CATEGORIES_SET: ReadonlySet<string> = new Set([
+  "person",
+  "organization",
+  "location",
+  "date",
+  "time",
+  "money",
+  "percent",
+  "email",
+  "phone",
+  "url",
+]);
+
+function isNerCategory(value: string): value is NerCategory {
+  return NER_CATEGORIES_SET.has(value);
 }
 
 /**
@@ -123,6 +144,10 @@ function useAppStateProvider() {
   // the Finder list's "edited" badge keys off, via `handleAddFinding`/`handleRemoveFinding`
   // always writing an entry, never mutating `result.piiFindings` itself.
   const [editedFindings, setEditedFindings] = useState<Map<string, PiiEntity[]>>(new Map());
+
+  // Task 3: current session for Vue d'ensemble panels. Defaults align with screenshot:
+  // 14 categories, pseudonymize, markdown. Persisting to config via setters below.
+  const [session, setSession] = useState<Session>(() => createSession("Session du 26/08"));
 
   const workerPoolRef = useRef<WorkerPool | null>(null);
   const configRef = useRef(config);
@@ -586,6 +611,47 @@ function useAppStateProvider() {
     return files.find((f) => effectiveFileName(f) === result.frontmatter.source);
   }
 
+  // ---- Task 3: session wiring (Détection / Traitement / Conversion) ----
+  const detectionSelection: ReadonlySet<string> = session.detectionSelection;
+  const treatmentMode: TreatmentMode = session.treatmentMode;
+  const conversionMode: ConversionMode = session.conversionMode;
+
+  function setDetectionSelection(next: ReadonlySet<string>): void {
+    const nextSet = new Set(next);
+    setSession((prev) => ({ ...prev, detectionSelection: nextSet }));
+    const nerCategories: NerCategory[] = [];
+    const nerCustomLabels: string[] = [];
+    for (const code of next) {
+      const wire = categoryToWire(code);
+      if (wire === undefined) continue;
+      if (typeof wire === "string") {
+        if (isNerCategory(wire)) nerCategories.push(wire);
+        else nerCustomLabels.push(wire);
+      } else {
+        nerCustomLabels.push(wire.custom);
+      }
+    }
+    setConfig((prev) => ({ ...prev, nerCategories, nerCustomLabels }));
+  }
+
+  function setTreatmentMode(mode: TreatmentMode): void {
+    setSession((prev) => ({ ...prev, treatmentMode: mode }));
+    if (mode === "pseudonymize") {
+      setConfig((prev) => ({ ...prev, redactionMode: "pseudonymize", redactPiiInOutput: true, enablePiiDetection: true }));
+    } else {
+      setConfig((prev) => ({ ...prev, redactionMode: "mask", redactPiiInOutput: true, enablePiiDetection: true }));
+    }
+  }
+
+  function setConversionMode(mode: ConversionMode): void {
+    setSession((prev) => ({ ...prev, conversionMode: mode }));
+    setConfig((prev) => ({ ...prev, outputFormat: mode === "markdown" ? "markdown" : "plain" }));
+  }
+
+  function openDetectionModal(): void {
+    toast.info("Sélection des données — à venir");
+  }
+
   // `files` is append-only (only ever pushed onto, in `handleProcessQueue` above) — a
   // naive `files.length > 0` stays true forever after the very first batch. Derived
   // from actual in-flight work instead: a file with no progress entry yet (just
@@ -630,6 +696,14 @@ function useAppStateProvider() {
     findOriginalFile,
     exportBody: (result: ProcessedFile, body: string) => downloadText(result.name, wrapRedactedBody(result, body)),
     downloadZip,
+    session,
+    detectionSelection,
+    treatmentMode,
+    conversionMode,
+    setDetectionSelection,
+    setTreatmentMode,
+    setConversionMode,
+    openDetectionModal,
   };
 }
 
