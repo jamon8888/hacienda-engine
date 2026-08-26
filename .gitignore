@@ -164,3 +164,4 @@ CLAUDE.md
 .tmp-npmcache/
 .vercel
 .env*
+.worktrees/
