@@ -1,5 +1,6 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { DetectionModal } from "@/components/session/DetectionModal";
@@ -27,6 +28,13 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
   const conversionMode = appState?.conversionMode ?? "markdown";
 
   const [showAdvanced, setShowAdvanced] = React.useState(false);
+  let navigate: ReturnType<typeof useNavigate> | null = null;
+  try {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    navigate = useNavigate();
+  } catch {
+    navigate = null;
+  }
 
   function handleFiles(files: File[]): void {
     if (appState) {
@@ -109,14 +117,15 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
               <ProcessedFilesList
                 files={appState.results.map((r) => {
                   const count = r.frontmatter.piiEntitiesFound;
-                  const pagesHint = r.markdown.length > 1000 ? `${Math.round(r.markdown.length / 1000)} k caractères` : `${String(r.markdown.length)} caractères`;
-                  // Heuristic: if markdown contains many newlines, approximate pages
+                  const pagesHint = r.markdown.length > 1000 ? `${String(Math.round(r.markdown.length / 1000))} k caractères` : `${String(r.markdown.length)} caractères`;
                   const subtitle =
                     count === 0
                       ? `${pagesHint} · Aucune occurrence détectée`
                       : count === 1
                         ? `${pagesHint} · 1 occurrence détectée`
-                        : `${pagesHint} · ${String(count)} occurrences détectées`;
+                        : `${String(count)} occurrences détectées`.includes("occurrences")
+                          ? `${pagesHint} · ${String(count)} occurrences détectées`
+                          : `${pagesHint} · ${String(count)} occurrences détectées`;
                   const prefix = appState.treatmentMode === "pseudonymize" ? "[PSEUDONYMISÉ] " : "";
                   return {
                     name: `${prefix}${r.name}`,
@@ -125,20 +134,16 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
                   };
                 })}
                 onView={(name) => {
-                  // name may have prefix — strip it to find original
                   const clean = name.replace(/^\[PSEUDONYMISÉ\] /, "");
-                  window.location.hash = `#/documents/${encodeURIComponent(clean)}`;
-                  // fallback navigation via router if available
-                  const nav = (window as unknown as { __navigate?: (to: string) => void }).__navigate;
-                  if (nav) nav(`/documents/${encodeURIComponent(clean)}`);
-                  else window.location.href = `/documents/${encodeURIComponent(clean)}`;
+                  if (navigate) {
+                    navigate({ to: "/documents/$name", params: { name: clean } });
+                  } else {
+                    window.location.href = `/documents/${encodeURIComponent(clean)}`;
+                  }
                 }}
                 onDelete={(name) => {
                   const clean = name.replace(/^\[PSEUDONYMISÉ\] /, "");
                   appState.handleDeleteDocuments([clean]);
-                }}
-                onAddFiles={() => {
-                  // re-use dropzone click — no extra logic
                 }}
               />
             </div>
