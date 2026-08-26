@@ -648,8 +648,14 @@ function useAppStateProvider() {
     setConfig((prev) => ({ ...prev, outputFormat: mode === "markdown" ? "markdown" : "plain" }));
   }
 
+  const [isDetectionModalOpen, setIsDetectionModalOpen] = useState(false);
+
   function openDetectionModal(): void {
-    toast.info("Sélection des données — à venir");
+    setIsDetectionModalOpen(true);
+  }
+
+  function closeDetectionModal(): void {
+    setIsDetectionModalOpen(false);
   }
 
   // `files` is append-only (only ever pushed onto, in `handleProcessQueue` above) — a
@@ -703,7 +709,10 @@ function useAppStateProvider() {
     setDetectionSelection,
     setTreatmentMode,
     setConversionMode,
+    isDetectionModalOpen,
+    setIsDetectionModalOpen,
     openDetectionModal,
+    closeDetectionModal,
   };
 }
 

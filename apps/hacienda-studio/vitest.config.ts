@@ -18,6 +18,7 @@ export default defineConfig({
     environmentMatchGlobs: [
       ["tests/unit/app-shell.*", "jsdom"],
       ["tests/unit/nouvelle-session.*", "jsdom"],
+      ["tests/unit/detection-modal.*", "jsdom"],
     ],
     setupFiles: ["./tests/setup.ts"],
   },

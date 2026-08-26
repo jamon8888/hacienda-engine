@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { DetectionModal } from "@/components/session/DetectionModal";
 import { Dropzone } from "@/components/session/Dropzone";
 import { DetectionPanel } from "@/components/session/DetectionPanel";
 import { TreatmentPanel } from "@/components/session/TreatmentPanel";
@@ -49,6 +50,14 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
           <DetectionPanel
             selection={detectionSelection}
             onOpenModal={appState?.openDetectionModal}
+          />
+          <DetectionModal
+            open={appState?.isDetectionModalOpen ?? false}
+            selection={detectionSelection}
+            onChange={appState ? appState.setDetectionSelection : () => {}}
+            onOpenChange={(open) => {
+              if (appState) appState.setIsDetectionModalOpen(open);
+            }}
           />
           <div className="border-t border-slate-100" />
           <TreatmentPanel
