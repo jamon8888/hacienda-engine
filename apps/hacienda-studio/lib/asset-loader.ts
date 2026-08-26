@@ -420,10 +420,10 @@ function insufficientStorage(availableBytes: number, neededBytes: number): NerMo
     availableBytes,
     neededBytes,
     message:
-      `Only ~${Math.round(availableBytes / 1024 / 1024)}MB of storage is available to this ` +
-      `page, but the neural PII model needs ~${Math.round(neededBytes / 1024 / 1024)}MB. ` +
-      `This is typical of private/incognito browsing, where browsers cap storage well ` +
-      `below normal — the model will need to redownload every visit in that mode.`,
+      `Seulement ~${Math.round(availableBytes / 1024 / 1024)} Mo de stockage sont disponibles ` +
+      `pour cette page, mais le modèle PII neuronal nécessite ~${Math.round(neededBytes / 1024 / 1024)} Mo. ` +
+      `C'est typique de la navigation privée, où les navigateurs plafonnent le stockage bien ` +
+      `en dessous de la normale — le modèle devra être retéléchargé à chaque visite dans ce mode.`,
   };
 }
 

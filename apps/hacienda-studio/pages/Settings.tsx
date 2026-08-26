@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { AppConfig, NerCategory } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   listKnownKeys,
   removeKnownKey,
@@ -166,16 +167,15 @@ export function Settings({ config, onChange }: Props) {
   };
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-6 py-12">
-        <h1 className="text-2xl font-semibold">Paramètres</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Valeurs par défaut pour les nouveaux lots, plus tout ce qui est mis en cache sur cet appareil.</p>
+    <main className="w-full min-w-0">
+        <p className="text-sm text-muted-foreground">Valeurs par défaut pour les nouveaux lots, plus tout ce qui est mis en cache sur cet appareil.</p>
 
-        <section className="mt-8 rounded-lg border border-border bg-card p-6">
+        <section className="mt-6 min-w-0 rounded-lg border border-border bg-card p-6">
           <h2 className="mb-4 text-sm font-medium">Valeurs par défaut du pipeline</h2>
 
           <div className="mb-4">
             <div className="mb-2 text-sm font-medium">Mode de rédaction</div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {REDACTION_MODES.map((m) => (
                 <button
                   key={m.value}
@@ -262,16 +262,11 @@ export function Settings({ config, onChange }: Props) {
 
           <div className="mt-4 flex items-center justify-between">
             <span className="text-sm" id="toggle-pii-detection-label">Reconnaissance d'entités</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={config.enablePiiDetection}
+            <Switch
               aria-labelledby="toggle-pii-detection-label"
-              onClick={() => onChange({ ...config, enablePiiDetection: !config.enablePiiDetection })}
-              className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.enablePiiDetection ? "bg-primary" : "bg-muted"}`}
-            >
-              <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${config.enablePiiDetection ? "translate-x-5" : ""}`} />
-            </button>
+              checked={config.enablePiiDetection}
+              onCheckedChange={(checked) => onChange({ ...config, enablePiiDetection: checked })}
+            />
           </div>
 
           {/* `redactPiiInOutput` gates every redaction mode above (worker/pipeline.ts) —
@@ -281,16 +276,11 @@ export function Settings({ config, onChange }: Props) {
            * dropped when its fields were ported into this file (be501cc) — restoring it. */}
           <div className="mt-3 flex items-center justify-between">
             <span className="text-sm" id="toggle-redact-output-label">Rédiger les PII dans la sortie</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={config.redactPiiInOutput}
+            <Switch
               aria-labelledby="toggle-redact-output-label"
-              onClick={() => onChange({ ...config, redactPiiInOutput: !config.redactPiiInOutput })}
-              className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.redactPiiInOutput ? "bg-primary" : "bg-muted"}`}
-            >
-              <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${config.redactPiiInOutput ? "translate-x-5" : ""}`} />
-            </button>
+              checked={config.redactPiiInOutput}
+              onCheckedChange={(checked) => onChange({ ...config, redactPiiInOutput: checked })}
+            />
           </div>
           {!config.redactPiiInOutput && (
             <p className="mt-1 text-xs text-amber-600">
@@ -301,16 +291,11 @@ export function Settings({ config, onChange }: Props) {
 
           <div className="mt-3 flex items-center justify-between">
             <span className="text-sm" id="toggle-transcription-label">Reconnaissance optique</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={config.enableTranscription}
+            <Switch
               aria-labelledby="toggle-transcription-label"
-              onClick={() => onChange({ ...config, enableTranscription: !config.enableTranscription })}
-              className={`h-6 w-11 rounded-full p-0.5 transition-colors ${config.enableTranscription ? "bg-primary" : "bg-muted"}`}
-            >
-              <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${config.enableTranscription ? "translate-x-5" : ""}`} />
-            </button>
+              checked={config.enableTranscription}
+              onCheckedChange={(checked) => onChange({ ...config, enableTranscription: checked })}
+            />
           </div>
           {config.enableTranscription && (
             <div className="mt-3 grid grid-cols-2 gap-4">
@@ -440,7 +425,7 @@ export function Settings({ config, onChange }: Props) {
         <section className="mt-6 rounded-lg border border-border bg-card p-6">
           <h2 className="mb-2 text-sm font-medium">Stockage local</h2>
           <p className="mb-3 text-xs text-muted-foreground">168 Ko utilisés sur 10,00 Go disponibles</p>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm">Vérifier la chaîne d'audit</Button>
             <Button variant="outline" size="sm">Effacer les brouillons</Button>
             <Button variant="outline" size="sm">Effacer les ressources mises en cache</Button>

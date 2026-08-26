@@ -25,13 +25,34 @@ import initWasm from "@xberg-io/xberg-wasm";
 // index.html, and WebAssembly rejects it as "expected magic word 00 61 73 6d,
 // found 3c 21 64 6f".
 import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
+// Same class of bug as xbergWasmUrl above, for tesseract-wasm's OCR engine: its own
+// `createOCREngine()` locates its .wasm via `resolve(path, import.meta.url)` — a
+// *runtime* string concatenation, not a statically-analyzable `new URL('literal.wasm',
+// import.meta.url)` — so Vite's production build never discovers the file to copy it
+// into `dist/`. In dev, `node_modules` is served with real relative paths so it works
+// by accident; in production the request 404s and Vercel's SPA fallback answers with
+// index.html ("expected magic word ... found 54 68 65 20", i.e. the start of "The page
+// could not be found"), which silently disables OCR everywhere it's deployed. Both
+// SIMD and non-SIMD builds are imported so `createOcrBackend` below can pick the right
+// one via `supportsFastBuild()`, exactly mirroring the check tesseract-wasm's own
+// (broken, in production) default path does internally.
+// A relative path into node_modules, not a bare `tesseract-wasm/dist/...` specifier:
+// the package's own `exports` map only lists "." and "./node", so a deep subpath
+// import is blocked by Node/Vite's exports resolution even though the file exists —
+// going in by relative path sidesteps that map entirely while still letting Vite's
+// asset pipeline see and hash the file normally, in both dev and production.
+import tesseractCoreWasmUrl from "../node_modules/tesseract-wasm/dist/tesseract-core.wasm?url";
+import tesseractCoreFallbackWasmUrl from "../node_modules/tesseract-wasm/dist/tesseract-core-fallback.wasm?url";
 import {
   extractEntities,
   isBridgeEntityArray,
   type BridgeEntity,
 } from "../lib/ner-bridge";
 import { createNerBackend, loadNerModel, loadTessdata } from "../lib/asset-loader";
-import { extractPdfWithLiteParse, toLiteParseOcrEngine } from "../lib/pdf-liteparse";
+// `toLiteParseOcrEngine` is unused while the LiteParse-OCR stopgap above forces
+// `ocrEngine: null` unconditionally — restore the import alongside that code once
+// upstream fixes the ocr_merge.rs Tokio panic.
+import { extractPdfWithLiteParse } from "../lib/pdf-liteparse";
 import {
   initPiiEngine,
   redactPii,
@@ -231,8 +252,15 @@ type OcrRuntime = Awaited<ReturnType<typeof createOcrBackend>>;
 let ocrRuntime: OcrRuntime | null = null;
 
 async function createOcrBackend() {
-  const { createOCREngine } = await import("tesseract-wasm");
-  const engine = await createOCREngine();
+  const { createOCREngine, supportsFastBuild } = await import("tesseract-wasm");
+  // Fetch the binary ourselves via the bundler-resolved URLs above and hand it in
+  // directly — this is exactly the `wasmBinary` override tesseract-wasm's own API
+  // documents "to customize how the binary URL is determined and fetched", used here
+  // to bypass its default resolution, which is broken in production (see the import
+  // comment above).
+  const wasmUrl = supportsFastBuild() ? tesseractCoreWasmUrl : tesseractCoreFallbackWasmUrl;
+  const wasmBinary = await fetch(wasmUrl).then((r) => r.arrayBuffer());
+  const engine = await createOCREngine({ wasmBinary });
   const tessdata = await loadTessdata("eng");
   engine.loadModel(tessdata);
   return engine;
@@ -743,14 +771,25 @@ async function processFile(
     // flag is off, keep going through the xberg branch unchanged.
     console.log(`[Worker] Extracting PDF via LiteParse for ${input.name}...`);
     try {
-      if (!input.disableOcr && !ocrRuntime) {
-        // Same rationale as the xberg branch below: no regex-style OCR fallback exists,
-        // so silence here would mean scanned pages silently produce zero text.
-        console.warn(`[Worker] OCR backend unavailable for ${input.name} — scanned/image content will export with no text.`);
+      if (!input.disableOcr) {
+        // OCR is unconditionally withheld from LiteParse right now, not just when
+        // `ocrRuntime` failed to load: wiring a real OCR engine into LiteParse's
+        // `ocrEngine` option makes it exercise `ocr_merge.rs`, and the compiled
+        // @llamaindex/liteparse-wasm@2.13.1 binary panics there ("there is no reactor
+        // running, must be called from the context of a Tokio 1.x runtime") — an
+        // upstream bug in that crate's WASM target, not something fixable from this
+        // repo. Passing `ocrEngine: null` below keeps `needsOcr` false in
+        // `extractPdfWithLiteParse` (lib/pdf-liteparse.ts), which skips that code path
+        // entirely — the same "no crash" behavior LiteParse gets today whenever
+        // `ocrRuntime` itself fails to load, just applied unconditionally until
+        // upstream fixes the crate. Scanned/image PDFs export with no text; other OCR
+        // uses (images, and PDFs on the `xberg` engine below) are unaffected — they go
+        // through a different WASM module (`selectOcrBridge`) that doesn't touch this.
+        console.warn(`[Worker] OCR withheld from LiteParse for ${input.name} (upstream Tokio panic in ocr_merge.rs) — scanned/image content will export with no text.`);
         self.postMessage({
           type: "warning",
           file: input.name,
-          message: "OCR engine failed to load — scanned pages or images in this file will export with no extracted text.",
+          message: "OCR est temporairement désactivée pour l'extraction PDF (bug amont) — les pages scannées ou images de ce fichier seront exportées sans texte extrait.",
         });
       }
 
@@ -758,7 +797,7 @@ async function processFile(
       const { markdown: liteparseMarkdown } = await extractPdfWithLiteParse(
         new Uint8Array(input.bytes),
         {
-          ocrEngine: ocrRuntime ? toLiteParseOcrEngine(ocrRuntime) : null,
+          ocrEngine: null,
           disableOcr: !!input.disableOcr,
           pageCount: input.pdfPageCount,
           dpi: OCR_TARGET_DPI,
@@ -834,7 +873,7 @@ async function processFile(
         self.postMessage({
           type: "warning",
           file: input.name,
-          message: "OCR engine failed to load — scanned pages or images in this file will export with no extracted text.",
+          message: "Échec du chargement du moteur OCR — les pages scannées ou images de ce fichier seront exportées sans texte extrait.",
         });
       }
 
@@ -910,7 +949,7 @@ async function processFile(
     self.postMessage({
       type: "warning",
       file: input.name,
-      message: "Entity extraction (NER) failed for this file — it will export with no entity glossary.",
+      message: "Échec de la reconnaissance d'entités (NER) pour ce fichier — il sera exporté sans glossaire d'entités.",
     });
   }
 
@@ -1214,7 +1253,7 @@ async function processFiles(
     // so, rather than exporting a knowledge graph that's silently missing that metadata.
     self.postMessage({
       type: "warning",
-      message: "Vertical taxonomy failed to load — exported entities will use a coarser, document-level vertical instead of taxonomy matches.",
+      message: "Échec du chargement de la taxonomie verticale — les entités exportées utiliseront un vertical plus large, au niveau du document, plutôt que des correspondances de taxonomie.",
     });
   }
   const registry = new BatchEntityRegistry();
@@ -1259,7 +1298,7 @@ async function processFiles(
       // `redactionMode` at all, so there is no stale "pseudonymize" label to correct.)
       self.postMessage({
         type: "warning",
-        message: "Pseudonymization key derivation failed — this batch will use mask mode instead of reversible tokens.",
+        message: "Échec de la dérivation de la clé de pseudonymisation — ce lot utilisera le mode masquage plutôt que des jetons réversibles.",
       });
     }
   }
@@ -1276,7 +1315,7 @@ async function processFiles(
     self.postMessage({
       type: "warning",
       message:
-        "Hash mode needs a passphrase to key its digest — without one the hashes would be reversible by brute force. This batch will use mask mode instead.",
+        "Le mode hachage nécessite une phrase secrète pour dériver son empreinte — sans elle, les hachages seraient réversibles par force brute. Ce lot utilisera le mode masquage à la place.",
     });
   }
 

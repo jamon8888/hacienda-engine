@@ -179,7 +179,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
               type="password"
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
-              placeholder="Passphrase"
+              placeholder="Phrase secrète"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && passphrase && !busy) onReveal();
               }}
@@ -191,7 +191,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
               onClick={onReveal}
               disabled={busy || !passphrase}
             >
-              {busy ? "Revealing…" : "Reveal"}
+              {busy ? "Révélation…" : "Révéler"}
             </Button>
           </>
         )}

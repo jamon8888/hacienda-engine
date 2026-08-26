@@ -107,7 +107,7 @@ export function MarkdownEditor({
               onAddFinding(selection.from, selection.to, category);
             }}
           >
-            Mark selection as PII
+            Marquer la sélection comme PII
           </button>
         </div>
       )}
