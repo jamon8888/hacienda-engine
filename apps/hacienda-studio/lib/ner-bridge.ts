@@ -19,6 +19,14 @@ const NER_CATEGORIES: readonly NerCategory[] = [
   "email",
   "phone",
   "url",
+  "first_name",
+  "middle_name",
+  "last_name",
+  "street_address",
+  "city",
+  "state_or_region",
+  "postal_code",
+  "country",
 ];
 
 function isBridgeEntity(value: unknown): value is BridgeEntity {
