@@ -262,6 +262,22 @@
     --input: 222 12% 20%;
     --ring: 64 89% 54%;
   }
+
+  /* Task 2: light shell tokens extending the dark Ramp tokens — not a replacement.
+   * Screenshots use a light sidebar (#ffffff) on a light page (#f8fafc) with a violet
+   * active state. These sit alongside the existing dark DESIGN.md tokens rather than
+   * overwriting --background/--foreground. AppShell reads them via bg-[var(--sidebar)]
+   * or directly via hex fallback; the main area uses bg-[#f8fafc]. */
+  :root {
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 222 47% 11%;
+    --sidebar-accent: 250 95% 93%;
+    --sidebar-accent-foreground: 263 70% 50%;
+    --sidebar-border: 214 32% 91%;
+    --sidebar-ring: 263 70% 50%;
+    --sidebar-primary: 263 70% 50%;
+    --sidebar-primary-foreground: 0 0% 98%;
+  }
 }
 
 @layer base {

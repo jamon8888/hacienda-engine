@@ -12,8 +12,10 @@ export default defineConfig({
     include: [
       "lib/**/*.{test,spec}.ts",
       "worker/**/*.{test,spec}.ts",
-      "tests/unit/**/*.{test,spec}.ts",
+      "tests/unit/**/*.{test,spec}.{ts,tsx}",
     ],
     environment: "node",
+    environmentMatchGlobs: [["tests/unit/app-shell.*", "jsdom"]],
+    setupFiles: ["./tests/setup.ts"],
   },
 });
