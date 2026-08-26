@@ -54,3 +54,22 @@ fn should_map_all_42_privacy_filter_labels_to_pii_category() {
         assert_eq!(&cat, expected, "wire {wire:?} mapped to {cat:?} not {expected:?}");
     }
 }
+
+#[test]
+fn should_size_comprehensive_to_41() {
+    use hacienda_core::pii::config::VerticalConfig;
+    assert_eq!(VerticalConfig::comprehensive().labels.len(), 41);
+}
+
+#[test]
+fn should_apply_per_category_threshold_offsets() {
+    use hacienda_core::pii::config::PipelineConfig;
+    use hacienda_core::pii::types::PiiCategory;
+    let cfg = PipelineConfig::default();
+    assert_eq!(cfg.effective_threshold(&PiiCategory::FirstName), 0.65);
+    assert_eq!(cfg.effective_threshold(&PiiCategory::LastName), 0.65);
+    assert_eq!(cfg.effective_threshold(&PiiCategory::Person), 0.65);
+    assert_eq!(cfg.effective_threshold(&PiiCategory::Email), 0.48);
+    assert_eq!(cfg.effective_threshold(&PiiCategory::Iban), 0.48);
+    assert_eq!(cfg.effective_threshold(&PiiCategory::TaxId), 0.50);
+}

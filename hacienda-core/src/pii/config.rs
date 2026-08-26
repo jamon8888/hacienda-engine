@@ -1,10 +1,11 @@
 //! Pipeline configuration, loaded from TOML and overridable from a CLI.
 
 use crate::audit::AuditConfig;
+use crate::pii::types::PiiCategory;
 use crate::pii::PiiError;
 use crate::redaction::{RedactionConfig, RedactionMode};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Length, in hex characters, of the digest suffix in [`VerticalConfig::provenance_id`].
@@ -24,6 +25,10 @@ pub struct PipelineConfig {
     pub regex_first: bool,
     /// Model detections scoring below this are discarded before merging.
     pub model_threshold_default: f32,
+    /// Per-category threshold overrides — when a category is present here its value
+    /// is used instead of `model_threshold_default`. Empty (default) means
+    /// `effective_threshold` applies the hybrid persona-boost table.
+    pub model_thresholds: HashMap<PiiCategory, f32>,
     /// Overlap ratio above which two spans are treated as the same detection.
     pub merge_overlap_threshold: f32,
     pub redaction: RedactionConfig,
@@ -56,12 +61,36 @@ impl Default for PipelineConfig {
         Self {
             regex_first: true,
             model_threshold_default: 0.5,
+            model_thresholds: HashMap::new(),
             merge_overlap_threshold: 0.5,
             redaction: RedactionConfig::default(),
             audit: AuditConfig::default(),
             model: ModelConfig::default(),
             concurrency: 1,
             vertical: None,
+        }
+    }
+}
+
+impl PipelineConfig {
+    /// Effective threshold for a concrete `PiiCategory`, honouring overrides in
+    /// `model_thresholds` or the hybrid persona-boost table otherwise.
+    pub fn effective_threshold(&self, cat: &PiiCategory) -> f32 {
+        if let Some(v) = self.model_thresholds.get(cat) {
+            return *v;
+        }
+        match cat {
+            PiiCategory::Person
+            | PiiCategory::FullName
+            | PiiCategory::FirstName
+            | PiiCategory::MiddleName
+            | PiiCategory::LastName => 0.65,
+            PiiCategory::Email
+            | PiiCategory::PhoneNumber
+            | PiiCategory::Iban
+            | PiiCategory::IpAddress
+            | PiiCategory::CreditCard => 0.48,
+            _ => self.model_threshold_default,
         }
     }
 }
@@ -105,7 +134,7 @@ pub struct VerticalConfig {
 /// `credit_card`, `iban`, `full_name`) use that table's exact spelling so detections land
 /// on their real [`crate::pii::PiiCategory`] variant instead of falling through to
 /// `Custom(label)`.
-const COMPREHENSIVE_LABELS: [&str; 29] = [
+const COMPREHENSIVE_LABELS: [&str; 41] = [
     "address",
     "ssn",
     "passport",
@@ -135,6 +164,18 @@ const COMPREHENSIVE_LABELS: [&str; 29] = [
     "vehicle_vin",
     "date_of_birth",
     "full_name",
+    "first_name",
+    "middle_name",
+    "last_name",
+    "street_address",
+    "city",
+    "state_or_region",
+    "postal_code",
+    "country",
+    "government_id",
+    "payment_card",
+    "card_expiry",
+    "card_cvv",
 ];
 
 impl VerticalConfig {
@@ -574,11 +615,11 @@ mod tests {
 
     #[test]
     fn should_size_the_comprehensive_vertical_to_the_taxonomy_minus_the_base_categories() {
-        // PiiCategory has 33 named variants plus `Custom(String)`; 4 of the named
+        // PiiCategory has 45 named variants (33 + 12 hybrid) plus `Custom(String)`; 4 of the named
         // variants (Email, PhoneNumber, Person, Organization) are already requested
-        // via the base categories, so the comprehensive vertical adds the remaining 29.
+        // via the base categories, so the comprehensive vertical adds the remaining 41.
         let comprehensive = VerticalConfig::comprehensive();
-        assert_eq!(comprehensive.labels.len(), 29);
+        assert_eq!(comprehensive.labels.len(), 41);
         assert_eq!(comprehensive.id, "comprehensive");
     }
 
