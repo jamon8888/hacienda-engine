@@ -8,18 +8,20 @@ export interface InteractiveEditorProps {
   value: string;
   findings: ReadonlyArray<PiiEntity>;
   onAddFinding: (start: number, end: number, category: string) => void;
+  onRemoveFinding?: (index: number) => void;
 }
 
-export function InteractiveEditor({ value, findings, onAddFinding }: InteractiveEditorProps) {
+export function InteractiveEditor({ value, findings, onAddFinding, onRemoveFinding }: InteractiveEditorProps) {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [selection, setSelection] = React.useState<{ start: number; end: number } | null>(null);
+  const [pendingRemove, setPendingRemove] = React.useState<number | null>(null);
 
   return (
     <div className="space-y-2">
       <div className="flex gap-2">
         <Button size="sm" variant="outline" onClick={()=>setDialogOpen(true)}>Sélectionner</Button>
-        <Button size="sm" variant="outline">Retirer</Button>
-        <Button size="sm" variant="outline">Extraire vers le haut</Button>
+        <Button size="sm" variant="outline" onClick={()=>{ if(pendingRemove!==null && onRemoveFinding) onRemoveFinding(pendingRemove); }}>Retirer</Button>
+        <Button size="sm" variant="outline" onClick={()=>{ /* placeholder for extract up */ }}>Extraire vers le haut</Button>
       </div>
       <MarkdownEditor value={value} findings={findings as PiiEntity[]} onAddFinding={(s,e,c)=>onAddFinding(s,e,c)} />
       <AddDetectionDialog open={dialogOpen} onOpenChange={setDialogOpen} onAdd={(s,e,c)=>onAddFinding(s,e,c)} />

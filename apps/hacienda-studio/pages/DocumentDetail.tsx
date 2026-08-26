@@ -377,7 +377,7 @@ export function DocumentDetail({
                       Sélectionnez une portion, puis étiquetez-la
                     </span>
                   </p>
-                  <InteractiveEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
+                  <InteractiveEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} onRemoveFinding={onRemoveFinding} />
                 </div>
 
                 <div>
