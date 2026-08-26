@@ -48,12 +48,12 @@ resource "google_redis_instance" "hacienda" {
 }
 
 # Store Redis password in Vault
-# resource "vault_generic_secret" "redis" {
-#   path = "secret/hacienda/${var.environment}/redis"
-#   data_json = jsonencode({
-#     url = "redis://:${google_redis_instance.hacienda.auth_string}@${google_redis_instance.hacienda.host}:6379"
-#   })
-# }
+resource "vault_generic_secret" "redis" {
+  path = "secret/hacienda/${var.environment}/redis"
+  data_json = jsonencode({
+    url = "redis://:${google_redis_instance.hacienda.auth_string}@${google_redis_instance.hacienda.host}:6379"
+  })
+}
 
 output "host" {
   value = google_redis_instance.hacienda.host

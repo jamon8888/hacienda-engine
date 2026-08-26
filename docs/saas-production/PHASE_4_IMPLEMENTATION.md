@@ -41,7 +41,7 @@
 | Implement MIME type validation | Backend | From content, not extension |
 | Add file size limits | Backend | Per-endpoint configurable |
 | Add zip bomb protection | Backend | Max compression ratio 100:1 |
-| Add request body size limits | Platform | Ingress: 1GB, API: 100MB |
+| Add request body size limits | Platform | Ingress: 100MB (aligned with API), document streaming upload path for >100MB |
 | Add XML/XXE protection | Backend | Disable external entities |
 | Add path traversal protection | Backend | Normalize paths |
 
@@ -97,8 +97,8 @@
 kubectl annotate externalsecret hacienda-secrets -n hacienda-prod force-sync=$(date +%s)
 
 # 2. Test rate limiting
-for i in {1..150}; do curl -H "Authorization: Bearer $TOKEN" https://api.example.com/v1/pii/scan -d '{"text":"test"}'; done
-# Should get 429 after tier limit
+for i in {1..150}; do curl -s -w "%{http_code}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" https://api.example.com/v1/pii/scan -d '{"text":"test"}'; done
+# Should get 200 for first N requests, then 429 after tier limit
 
 # 3. Test input validation
 # Oversized file -> 413

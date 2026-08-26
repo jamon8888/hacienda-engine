@@ -7,7 +7,7 @@
 
 ---
 
-## Week 15-16: Billing & Customer Portal
+## Week 15-16: Billing & Customer Portal (Days 71-80)
 
 ### Day 71-74: Usage-Based Billing Integration
 
@@ -50,7 +50,7 @@
 
 ---
 
-## Week 17: Webhooks & Job Scheduling
+## Week 17: Webhooks & Job Scheduling (Days 81-85)
 
 ### Day 81-83: Webhook System
 
@@ -90,7 +90,7 @@
 
 ---
 
-## Week 18: Plugin Marketplace & Multi-Region
+## Week 18: Plugin Marketplace & Multi-Region (Days 86-90)
 
 ### Day 86-88: Custom Model/Plugin Marketplace
 
@@ -116,7 +116,7 @@
 | Validator | ValidatorBackend | Schema validation, custom rules |
 | Renderer | RendererBackend | PDF, HTML, Markdown output |
 
-### Day 89-90: Multi-Region Active-Active
+### Day 89-90: Multi-Region Active-Passive
 
 | Task | Owner | Acceptance Criteria |
 |------|-------|---------------------|
@@ -125,10 +125,12 @@
 | Configure GeoDNS | Platform | Latency-based routing |
 | Implement audit chain conflict resolution | Backend | Vector clocks, last-writer-wins |
 | Implement cross-region replication | Platform | PG async replica, S3 CRR, Redis replica |
-| Test failover between regions | Platform | < 30s failover |
+| Test failover between regions | Platform | < 60s failover (managed PG) |
 | Add region affinity API | Backend | X-Hacienda-Region header |
 
-### Day 91-100: Integration, Testing, Launch Prep
+---
+
+## Validation
 
 All gate criteria must pass:
 - Usage-based billing with Stripe/Metronome
@@ -136,5 +138,5 @@ All gate criteria must pass:
 - Webhook system with retry, DLQ, signatures
 - Priority job queues with cron scheduling
 - Plugin marketplace with WASM sandbox
-- Multi-region active-active with <30s failover
+- Multi-region active-passive with <60s failover
 - Beta customers onboarded successfully

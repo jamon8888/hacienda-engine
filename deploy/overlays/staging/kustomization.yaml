@@ -36,7 +36,7 @@ patches:
         name: hacienda-api
         namespace: hacienda-staging
       spec:
-        minReplicas: 1
+        minReplicas: 2
         maxReplicas: 5
 
 images:

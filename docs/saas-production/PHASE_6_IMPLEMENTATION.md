@@ -14,7 +14,7 @@
 | Task | Owner | Acceptance Criteria |
 |------|-------|---------------------|
 | Implement URL versioning (/v1/, /v2/) | Backend | Router prefixes all routes |
-| Add Sunset header for deprecated versions | Backend | RFC 7234 compliant |
+| Add Sunset header for deprecated versions | Backend | RFC 8594 compliant (Sunset header) |
 | Add Deprecation header | Backend | Links to migration guide |
 | Implement version negotiation (Accept-Version) | Backend | Vary: Accept-Version |
 | Create migration guide template | Backend | docs/api/migration-v1-v2.md |
@@ -26,12 +26,12 @@
 |------|-------|---------------------|
 | Create alef source files (6 missing) | Backend | hacienda/src/{cli,api,prelude,config}.rs etc |
 | Configure alef.toml for all 15 languages | Backend | python, node, ruby, php, go, java, csharp, elixir, dart, kotlin, swift, zig, ffi, jni, wasm |
-| Generate Python bindings | Backend | cargo alef generate --language python |
-| Generate Node.js bindings | Backend | cargo alef generate --language node |
-| Generate Go bindings | Backend | cargo alef generate --language go |
-| Generate Java bindings | Backend | cargo alef generate --language java |
-| Generate C# bindings | Backend | cargo alef generate --language csharp |
-| Generate remaining 8 languages | Backend | cargo alef generate --all |
+| Generate Python bindings | Backend | cargo alef generate --lang python |
+| Generate Node.js bindings | Backend | cargo alef generate --lang node |
+| Generate Go bindings | Backend | cargo alef generate --lang go |
+| Generate Java bindings | Backend | cargo alef generate --lang java |
+| Generate C# bindings | Backend | cargo alef generate --lang csharp |
+| Generate remaining 10 languages | Backend | cargo alef generate (all configured) |
 | Verify all bindings compile | Backend | cargo alef build --all-targets |
 | Write integration tests per language | Backend | cargo alef test --all-languages |
 
@@ -98,13 +98,13 @@ curl -H "Accept-Version: v1" https://api.example.com/v1/documents
 curl -H "Accept-Version: v2" https://api.example.com/v2/documents
 
 # 2. Verify all 15 bindings generate
-cargo alef generate --all-languages
+cargo alef generate
 
 # 3. Verify all bindings build
 cargo alef build --all-targets
 
 # 4. Verify all bindings test
-cargo alef test --all-languages
+cargo alef test
 
 # 5. Check Swagger UI at /docs
 # 6. Check Redoc at /redoc
@@ -117,9 +117,10 @@ hacienda --help
 cargo test --workspace --features postgres,integration
 
 # 9. All gate criteria pass
-✅ API versioning with Sunset headers
+✅ API versioning with Sunset headers (RFC 8594)
 ✅ 15 FFI bindings generated, build, test
 ✅ SDK publishing to PyPI/npm automated
 ✅ Swagger UI + Redoc at /docs, /redoc
 ✅ CLI on crates.io, Homebrew, GHCR
 ✅ Integration test suite passing
+```

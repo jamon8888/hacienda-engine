@@ -42,9 +42,9 @@ spec:
             summary: "hacienda-api p99 latency > 5s"
             description: "p99 latency is {{ $value }}s for the last 5 minutes"
 
-        # Error Rate
+        # Error Rate - aggregate both operands with sum
         - alert: HaciendaAPIHighErrorRate
-          expr: rate(http_requests_total{job="hacienda-api",status=~"5.."}[5m]) / rate(http_requests_total{job="hacienda-api"}[5m]) > 0.01
+          expr: sum(rate(http_requests_total{job="hacienda-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="hacienda-api"}[5m])) > 0.01
           for: 5m
           labels:
             severity: warning
@@ -55,7 +55,7 @@ spec:
 
         # Resource Usage
         - alert: HaciendaAPIHighCPU
-          expr: rate(container_cpu_usage_seconds_total{pod=~"hacienda-api-.*"}[5m]) > 0.85
+          expr: sum(rate(container_cpu_usage_seconds_total{pod=~"hacienda-api-.*"}[5m])) / sum(container_spec_cpu_quota{pod=~"hacienda-api-.*"} / container_spec_cpu_period{pod=~"hacienda-api-.*"}) > 0.85
           for: 10m
           labels:
             severity: warning
@@ -122,9 +122,9 @@ spec:
             summary: "Audit chain verification failed"
             runbook_url: "https://github.com/jamon8888/hacienda-engine/blob/main/docs/saas-production/runbooks/audit-chain-corruption.md"
 
-        # Pseudonym Key
+        # Pseudonym Key - use .* to match child paths
         - alert: PseudonymKeyAccessAnomaly
-          expr: increase(vault_audit_request_total{path=~"hacienda/pseudonym/*",operation="read"}[5m]) > 10
+          expr: increase(vault_audit_request_total{path=~"hacienda/pseudonym/.*",operation="read"}[5m]) > 10
           for: 5m
           labels:
             severity: critical

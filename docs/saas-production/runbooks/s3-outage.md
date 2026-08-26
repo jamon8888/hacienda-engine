@@ -42,9 +42,9 @@ aws s3 ls s3://hacienda-prod --region us-east-1
 
 ```bash
 # 1. If CRR enabled, redirect to secondary region
-# Update S3_ENDPOINT to secondary region endpoint
+# Update s3-endpoint to secondary region endpoint (ConfigMap key is lowercase)
 kubectl patch configmap hacienda-config -n hacienda-prod \
-  --patch '{"data":{"S3_ENDPOINT":"https://s3-secondary.example.com"}}'
+  --patch '{"data":{"s3-endpoint":"https://s3-secondary.example.com"}}'
 
 # 2. Restart API pods to pick up new endpoint
 kubectl rollout restart deployment/hacienda-api -n hacienda-prod

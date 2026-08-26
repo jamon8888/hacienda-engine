@@ -82,6 +82,17 @@ resource "google_storage_bucket" "hacienda_dr" {
   }
 }
 
+# Cross-region replication (prod only)
+resource "google_storage_bucket_replication" "hacienda_crr" {
+  count = var.environment == "prod" ? 1 : 0
+  bucket = google_storage_bucket.hacienda.name
+  rule {
+    destination_bucket = google_storage_bucket.hacienda_dr[0].name
+    include_prefixes   = ["*"]
+    source_bucket      = google_storage_bucket.hacienda.name
+  }
+}
+
 # Service Account for hacienda API
 resource "google_service_account" "hacienda" {
   account_id   = "hacienda-${var.environment}"
@@ -117,16 +128,16 @@ resource "google_storage_hmac_key" "hacienda" {
 }
 
 # Store HMAC keys in Vault
-# resource "vault_generic_secret" "s3" {
-#   path = "secret/hacienda/${var.environment}/s3"
-#   data_json = jsonencode({
-#     access_key = google_storage_hmac_key.hacienda.access_id
-#     secret_key = google_storage_hmac_key.hacienda.secret
-#     endpoint   = "https://storage.googleapis.com"
-#     region     = var.region
-#     bucket     = google_storage_bucket.hacienda.name
-#   })
-# }
+resource "vault_generic_secret" "s3" {
+  path = "secret/hacienda/${var.environment}/s3"
+  data_json = jsonencode({
+    access_key = google_storage_hmac_key.hacienda.access_id
+    secret_key = google_storage_hmac_key.hacienda.secret
+    endpoint   = "https://storage.googleapis.com"
+    region     = var.region
+    bucket     = google_storage_bucket.hacienda.name
+  })
+}
 
 output "bucket_name" {
   value = google_storage_bucket.hacienda.name

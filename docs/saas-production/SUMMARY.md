@@ -109,4 +109,3 @@ deploy/
 
 *Generated as part of hacienda-engine SaaS production readiness initiative*
 *Worktree: feat/saas-production-plan*
-*Location: /home/jamin/Documents/hacienda-engine-saas-plan/docs/saas-production/*

@@ -33,9 +33,10 @@
 
 ## Status Page
 
-- https://status.hacienda.example.com
+- **Template**: Replace with deployed status-page URL (e.g., https://status.yourdomain.com)
 - Updated within 5 min of incident detection
 - Templates for common scenarios
+- **Release check**: Verify placeholder replaced before production deployment
 
 ## Post-Incident Review
 

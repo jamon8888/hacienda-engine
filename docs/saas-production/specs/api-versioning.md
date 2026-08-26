@@ -16,7 +16,7 @@
 
 ## Deprecation Process
 
-1. **Announce**: Add `Sunset` header with RFC 7234 date
+1. **Announce**: Add `Sunset` header with RFC 8594 HTTP-date
 2. **Document**: Migration guide in `/docs/api/migration-v{X}-v{Y}.md`
 3. **Support**: Both versions operational during overlap
 4. **Remove**: After deprecation period, return 410 with `Link` header to new version
@@ -29,9 +29,9 @@ API-Version: v1
 
 # Deprecated response
 API-Version: v1
-Sunset: Sat, 01 Jan 2026 00:00:00 GMT
+Sunset: Sat, 01 Jan 2027 00:00:00 GMT
 Link: </v2/>; rel="successor-version"
-Deprecation: true
+Deprecation: "Sat, 01 Jan 2027 00:00:00 GMT"
 
 # Retired response
 410 Gone

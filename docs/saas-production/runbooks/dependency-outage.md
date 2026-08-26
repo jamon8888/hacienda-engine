@@ -58,7 +58,7 @@ kubectl set env deployment/hacienda-api -n hacienda-prod \
 ### Redis Outage
 
 ```bash
-# 1. Disable rate limiting (fail-open for availability)
+# 1. Retain bounded local rate limiter or ingress limit-rps as compensating control
 kubectl set env deployment/hacienda-api -n hacienda-prod RATE_LIMIT_ENABLED=false
 
 # 2. Disable caching
@@ -66,6 +66,11 @@ kubectl set env deployment/hacienda-api -n hacienda-prod CACHE_ENABLED=false
 
 # 3. Restart Redis or failover
 # 4. Re-enable when healthy
+
+> **Warning**: Disabling rate limiting without protection exposes the API to abuse.
+> Only use as a short-term measure with compensating controls (ingress rate limiting,
+> Cloud Armor, Cloudflare). Document maximum duration and compensating control if
+> a fail-open exception is unavoidable.
 ```
 
 ## Escalation

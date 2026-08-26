@@ -38,6 +38,8 @@ spec:
         - name: hacienda-api
           image: ghcr.io/jamon8888/hacienda:latest
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 8787
               name: http

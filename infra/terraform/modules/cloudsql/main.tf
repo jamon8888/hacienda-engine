@@ -83,9 +83,12 @@ resource "google_sql_database_instance" "hacienda" {
       environment = var.environment
       managed_by  = "terraform"
     }
+
+    # Deletion protection (Cloud SQL API)
+    deletion_protection_enabled = var.environment == "prod"
   }
 
-  # Deletion protection
+  # Deletion protection (Terraform)
   deletion_protection = var.environment == "prod"
 }
 
@@ -110,13 +113,13 @@ resource "random_password" "hacienda" {
   special = false
 }
 
-# Store password in Vault (requires Vault provider)
-# resource "vault_generic_secret" "database" {
-#   path = "secret/hacienda/${var.environment}/database"
-#   data_json = jsonencode({
-#     url = "postgresql://hacienda:${random_password.hacienda.result}@${google_sql_database_instance.hacienda.private_ip_address}:5432/hacienda?sslmode=require"
-#   })
-# }
+# Store password in Vault
+resource "vault_generic_secret" "database" {
+  path = "secret/hacienda/${var.environment}/database"
+  data_json = jsonencode({
+    url = "postgresql://hacienda:${random_password.hacienda.result}@${google_sql_database_instance.hacienda.private_ip_address}:5432/hacienda?sslmode=require"
+  })
+}
 
 output "instance_name" {
   value = google_sql_database_instance.hacienda.name

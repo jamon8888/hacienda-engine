@@ -62,16 +62,11 @@ spec:
     server: https://kubernetes.default.svc
     namespace: hacienda-prod
   syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-      allowEmpty: false
+    # Production requires manual approval
     syncOptions:
       - CreateNamespace=true
       - PrunePropagationPolicy=foreground
       - PruneLast=true
-    # Production requires manual approval
-    # automated: null
     retry:
       limit: 3
       backoff:

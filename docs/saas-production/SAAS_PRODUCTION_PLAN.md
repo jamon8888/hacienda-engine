@@ -26,7 +26,7 @@
 15. [Security & Compliance](#15-security--compliance)
 16. [Operational Runbooks](#16-operational-runbooks)
 17. [Success Metrics](#17-success-metrics)
-18. [Budget](#18-budget)
+18. [Budget & Resources](#18-budget--resources)
 19. [Risk Register](#19-risk-register)
 20. [File Inventory](#20-file-inventory)
 
@@ -89,7 +89,7 @@ Transform hacienda-engine from a self-hosted library into a **multi-tenant SaaS 
 
 ### Timeline
 
-```
+```text
 Week  1-2   3-4   5-6   7-8   9-10  11-12  13-14  15-18
       |-----|-----|-----|-----|------|------|------|
 Phase 0: Foundation ████
@@ -104,7 +104,7 @@ Phase 7: SaaS Features                                  ████
 
 ### Dependencies
 
-```
+```text
 Phase 0 (Foundation)
     ├── Phase 1 (Scaling)
     │       ├── Phase 2 (Multi-Tenancy)
@@ -114,7 +114,8 @@ Phase 0 (Foundation)
 
 Phase 6 (DX) — can start in parallel with Phases 3-5
 Phase 7 (SaaS Features) — requires Phases 1-5 complete
-```---
+```
+---
 
 ## 4. Phase 0: Foundation
 

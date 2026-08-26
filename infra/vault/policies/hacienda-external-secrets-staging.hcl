@@ -1,11 +1,11 @@
-# Vault Policy for ExternalSecrets Operator - Production
-# Allows reading hacienda secrets for production environment only
+# Vault Policy for ExternalSecrets Operator - Staging
+# Allows reading hacienda secrets for staging environment only
 
-path "secret/data/hacienda/prod/*" {
+path "secret/data/hacienda/staging/*" {
   capabilities = ["read", "list"]
 }
 
-path "secret/metadata/hacienda/prod/*" {
+path "secret/metadata/hacienda/staging/*" {
   capabilities = ["list"]
 }
 

@@ -17,6 +17,9 @@ concurrency:
   group: ci-integrations-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   python:
     name: Python Integrations
@@ -31,6 +34,8 @@ jobs:
           - python/hacienda-surrealdb
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
@@ -52,6 +57,8 @@ jobs:
           - langchain-hacienda
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
