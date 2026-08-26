@@ -1346,6 +1346,7 @@ impl HaciendaFacade {
             config_hash: String::new(),
             principal,
             vertical,
+            model: None,
         };
 
         Ok(store.append(&tenant, vec![input]).await?)
@@ -1412,6 +1413,7 @@ impl HaciendaFacade {
                     config_hash: String::new(),
                     principal: principal.clone(),
                     vertical: vertical.clone(),
+                    model: None,
                 }
             })
             .collect();
@@ -1507,6 +1509,7 @@ impl HaciendaFacade {
                 config_hash: String::new(),
                 principal: principal.clone(),
                 vertical: vertical.clone(),
+                model: None,
             })
             .collect();
 

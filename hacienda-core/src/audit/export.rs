@@ -120,6 +120,7 @@ mod tests {
                 config_hash: String::new(),
                 principal: None,
                 vertical: None,
+                model: None,
             });
         }
         chain
@@ -195,6 +196,7 @@ mod tests {
             config_hash: String::new(),
             principal: None,
             vertical: Some("finance@3f9a1c02".into()),
+            model: None,
         });
 
         let bytes = export_csv(&chain).unwrap();
