@@ -103,7 +103,8 @@ impl AuditStore for PostgresAuditStore {
         )
         .bind(tenant_id)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| AuditError::Backend(format!("entries: fetch open segment for tenant {}: {}", tenant_id, e)))?;
 
         rows.into_iter().map(row_to_entry).collect()
     }
