@@ -162,6 +162,7 @@ impl PiiPipeline {
     /// [`VerticalConfig::provenance_id`] and
     /// [`AuditEntry::vertical`](crate::audit::AuditEntry::vertical) for what the value
     /// means and why it is not the bare vertical id.
+    #[allow(dead_code)]
     pub(crate) fn vertical_provenance_id(&self) -> Option<String> {
         self.config
             .vertical
