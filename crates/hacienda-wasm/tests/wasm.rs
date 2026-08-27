@@ -72,6 +72,7 @@ async fn redaction_round_trip_has_a_real_clock_and_uuid_on_wasm32() {
             config_hash: "wasm32-l3-regression-guard".to_string(),
             principal: None,
             vertical: None,
+            model: None,
         })
         .collect();
     let tenant = TenantId::default_tenant();
