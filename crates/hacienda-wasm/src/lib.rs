@@ -53,8 +53,8 @@ pub async fn process_with_model_entities(
 ) -> Result<JsValue, JsValue> {
     let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
         .map_err(to_js_err)?;
-    let model_entities: Vec<ModelEntity> = serde_wasm_bindgen::from_value(model_entities)
-        .map_err(to_js_err)?;
+    let model_entities: Vec<ModelEntity> =
+        serde_wasm_bindgen::from_value(model_entities).map_err(to_js_err)?;
     let result = pipeline
         .process_with_model_entities(&text, model_entities)
         .await
@@ -70,8 +70,8 @@ pub async fn scan_with_model_entities(
 ) -> Result<JsValue, JsValue> {
     let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), current_ner_detector())
         .map_err(to_js_err)?;
-    let model_entities: Vec<ModelEntity> = serde_wasm_bindgen::from_value(model_entities)
-        .map_err(to_js_err)?;
+    let model_entities: Vec<ModelEntity> =
+        serde_wasm_bindgen::from_value(model_entities).map_err(to_js_err)?;
     let result = pipeline
         .scan_with_model_entities(&text, model_entities)
         .await

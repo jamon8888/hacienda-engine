@@ -42,16 +42,31 @@ fn should_map_all_42_privacy_filter_labels_to_pii_category() {
         ("access_token", PiiCategory::SecretToken),
         // 7 left map to Custom collapse — assert that too:
         ("account_id", PiiCategory::Custom("account_id".into())),
-        ("sensitive_account_id", PiiCategory::Custom("sensitive_account_id".into())),
+        (
+            "sensitive_account_id",
+            PiiCategory::Custom("sensitive_account_id".into()),
+        ),
         ("recovery_code", PiiCategory::Custom("recovery_code".into())),
-        ("sensitive_date", PiiCategory::Custom("sensitive_date".into())),
+        (
+            "sensitive_date",
+            PiiCategory::Custom("sensitive_date".into()),
+        ),
         ("document_date", PiiCategory::Custom("document_date".into())),
-        ("expiration_date", PiiCategory::Custom("expiration_date".into())),
-        ("transaction_date", PiiCategory::Custom("transaction_date".into())),
+        (
+            "expiration_date",
+            PiiCategory::Custom("expiration_date".into()),
+        ),
+        (
+            "transaction_date",
+            PiiCategory::Custom("transaction_date".into()),
+        ),
     ];
     for (wire, expected) in cases {
         let cat = to_pii_category(&EntityCategory::Custom(wire.to_string()));
-        assert_eq!(&cat, expected, "wire {wire:?} mapped to {cat:?} not {expected:?}");
+        assert_eq!(
+            &cat, expected,
+            "wire {wire:?} mapped to {cat:?} not {expected:?}"
+        );
     }
 }
 

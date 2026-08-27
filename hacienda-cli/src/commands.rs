@@ -1121,7 +1121,11 @@ pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
 pub async fn run_review_assign(args: ReviewAssignArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .assign(&Caller::Trusted.tenant_ctx().tenant, &args.id, &args.reviewer)
+        .assign(
+            &Caller::Trusted.tenant_ctx().tenant,
+            &args.id,
+            &args.reviewer,
+        )
         .await
         .with_context(|| format!("assigning review item '{}'", args.id))?;
     print_review_item(&item, args.format)
@@ -1627,8 +1631,11 @@ mod tests {
     /// than no auth at all.
     #[test]
     fn should_refuse_a_network_reachable_bind_when_a_static_token_is_still_the_placeholder() {
-        let error = check_bind_policy(addr("0.0.0.0:8787"), &auth_with_token(PLACEHOLDER_STATIC_TOKEN))
-            .expect_err("binding with the placeholder token must be refused");
+        let error = check_bind_policy(
+            addr("0.0.0.0:8787"),
+            &auth_with_token(PLACEHOLDER_STATIC_TOKEN),
+        )
+        .expect_err("binding with the placeholder token must be refused");
         let message = error.to_string();
         assert!(
             message.contains("placeholder"),
@@ -1647,9 +1654,10 @@ mod tests {
     /// the token is only required once the API is actually network-reachable.
     #[test]
     fn should_allow_loopback_even_with_the_placeholder_token() {
-        assert!(
-            check_bind_policy(addr("127.0.0.1:8787"), &auth_with_token(PLACEHOLDER_STATIC_TOKEN))
-                .is_ok()
-        );
+        assert!(check_bind_policy(
+            addr("127.0.0.1:8787"),
+            &auth_with_token(PLACEHOLDER_STATIC_TOKEN)
+        )
+        .is_ok());
     }
 }

@@ -114,11 +114,13 @@ pub async fn shared() -> &'static PostgresFixture {
 /// repeatedly for the same fixed tenant literal a module's tests share across many
 /// invocations against the same long-lived [`shared`] instance.
 pub async fn ensure_tenant(pool: &PgPool, tenant: &TenantId) {
-    sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, NULL) ON CONFLICT (id) DO NOTHING")
-        .bind(tenant.as_str())
-        .execute(pool)
-        .await
-        .expect("failed to admit test tenant");
+    sqlx::query(
+        "INSERT INTO tenants (id, display_name) VALUES ($1, NULL) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(tenant.as_str())
+    .execute(pool)
+    .await
+    .expect("failed to admit test tenant");
 }
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
