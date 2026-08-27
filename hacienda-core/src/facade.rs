@@ -1386,11 +1386,13 @@ impl HaciendaFacade {
         // is already built and cached by the caller that detected `entities` in the
         // first place, so this is a cache hit; a failure here must not block recording
         // the reveal itself.
-        let (vertical, model_id) = self
-            .pii_pipeline_for(&tenant)
-            .ok()
-            .map(|p| (p.vertical_provenance_id(), p.model_identifier()))
-            .unwrap_or((None, None));
+        let (vertical, model_id) = match self.pii_pipeline_for(&tenant) {
+            Ok(p) => (p.vertical_provenance_id(), p.model_identifier()),
+            Err(e) => {
+                tracing::warn!(tenant=%tenant, error=%e, "pii_pipeline_for failed for record_reveal provenance, proceeding with None");
+                (None, None)
+            }
+        };
         let inputs: Vec<AuditEntryInput> = entities
             .iter()
             .map(|entity| {
@@ -1494,11 +1496,13 @@ impl HaciendaFacade {
         // Best-effort, same reasoning as `record_token_reveal`/`record_reveal`: this
         // tenant's pipeline is already built and cached by the caller that produced
         // `audit_log` in the first place.
-        let (vertical, model_id) = self
-            .pii_pipeline_for(&tenant)
-            .ok()
-            .map(|p| (p.vertical_provenance_id(), p.model_identifier()))
-            .unwrap_or((None, None));
+        let (vertical, model_id) = match self.pii_pipeline_for(&tenant) {
+            Ok(p) => (p.vertical_provenance_id(), p.model_identifier()),
+            Err(e) => {
+                tracing::warn!(tenant=%tenant, error=%e, "pii_pipeline_for failed for record_audit_entries provenance, proceeding with None");
+                (None, None)
+            }
+        };
         let inputs: Vec<AuditEntryInput> = audit_log
             .iter()
             .map(|entry| {
