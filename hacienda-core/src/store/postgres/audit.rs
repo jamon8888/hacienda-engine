@@ -91,7 +91,7 @@ impl AuditStore for PostgresAuditStore {
             r#"
             SELECT id, category, action, span_hash,
                    span_length, confidence, source, pipeline_version, config_hash, principal,
-                   chain_hash, created_at
+                   vertical, model, chain_hash, created_at
             FROM audit_entries
             WHERE segment_id = (
                 SELECT segment_id FROM audit_segments
@@ -186,7 +186,7 @@ impl AuditStore for PostgresAuditStore {
                 AuditEntryRow,
                 r#"
                 SELECT id, category, action, span_hash, span_length, confidence, source,
-                       pipeline_version, config_hash, principal, chain_hash, created_at
+                       pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
                 FROM audit_entries
                 WHERE segment_id = $1
                 ORDER BY sequence_num
@@ -204,7 +204,7 @@ impl AuditStore for PostgresAuditStore {
                 AuditEntryRow,
                 r#"
                 SELECT id, category, action, span_hash, span_length, confidence, source,
-                       pipeline_version, config_hash, principal, chain_hash, created_at
+                       pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
                 FROM audit_entries
                 WHERE segment_id = $1
                 ORDER BY sequence_num
