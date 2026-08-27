@@ -133,16 +133,15 @@ impl AuditStore for PostgresAuditStore {
             .execute(&mut *tx)
             .await?;
 
-        let sealed_extents: Vec<ExtentRow> = sqlx::query_as!(
-            ExtentRow,
+        let sealed_extents: Vec<ExtentRow> = sqlx::query_as::<_, ExtentRow>(
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
             WHERE sealed_at IS NOT NULL AND tenant_id = $1
             ORDER BY created_at
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -156,8 +155,7 @@ impl AuditStore for PostgresAuditStore {
         // rotation opens a new one concurrently (blocked from being visible mid-read by
         // the snapshot above regardless, but reusing the id keeps the two queries from
         // ever being able to disagree even under a weaker isolation level).
-        let open_row: Option<ExtentRow> = sqlx::query_as!(
-            ExtentRow,
+        let open_row: Option<ExtentRow> = sqlx::query_as::<_, ExtentRow>(
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
@@ -165,8 +163,8 @@ impl AuditStore for PostgresAuditStore {
             ORDER BY created_at DESC
             LIMIT 1
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -258,8 +256,7 @@ impl AuditStore for PostgresAuditStore {
 
     async fn seals(&self, tenant: &TenantId) -> Result<Vec<SegmentSeal>, AuditError> {
         let tenant_id = tenant.as_str();
-        let rows = sqlx::query_as!(
-            SealRow,
+        let rows = sqlx::query_as::<_, SealRow>(
             r#"
             SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                    entry_count, created_at, sealed_at
@@ -267,8 +264,8 @@ impl AuditStore for PostgresAuditStore {
             WHERE sealed_at IS NOT NULL AND tenant_id = $1
             ORDER BY created_at
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -404,8 +401,7 @@ impl AuditStore for PostgresAuditStore {
         // same seal rather than erroring — only surface `StoreClosed` when there is truly
         // nothing sealed yet for this tenant.
         let Some(segment_row) = segment_row else {
-            let sealed = sqlx::query_as!(
-                SealRow,
+            let sealed = sqlx::query_as::<_, SealRow>(
                 r#"
                 SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                        entry_count, created_at, sealed_at
@@ -414,8 +410,8 @@ impl AuditStore for PostgresAuditStore {
                 ORDER BY sealed_at DESC
                 LIMIT 1
                 "#,
-                tenant_id
             )
+            .bind(tenant_id)
             .fetch_optional(&mut *tx)
             .await?;
 
@@ -558,6 +554,7 @@ fn compute_tip(entries: &[AuditEntry]) -> String {
 
 // ── row shapes (sqlx::query! anonymous records, named here for reuse) ─────────
 
+#[derive(sqlx::FromRow, Debug)]
 struct AuditEntryRow {
     id: String,
     category: String,
@@ -575,6 +572,7 @@ struct AuditEntryRow {
     created_at: DateTime<Utc>,
 }
 
+#[derive(sqlx::FromRow, Debug)]
 struct SealRow {
     segment_id: Uuid,
     tenant_id: String,
@@ -734,21 +732,21 @@ async fn insert_entry(
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#,
     )
-    .bind(entry.id)
+    .bind(entry.id.clone())
     .bind(segment_id)
     .bind(sequence_num)
-    .bind(entry.category)
-    .bind(entry.action.to_string())
-    .bind(entry.span_hash)
+    .bind(entry.category.clone())
+    .bind(entry.action.clone())
+    .bind(entry.span_hash.clone())
     .bind(entry.span_length as i64)
     .bind(entry.confidence.map(|c| c as f64))
-    .bind(entry.source.to_string())
-    .bind(entry.pipeline_version)
-    .bind(entry.config_hash)
-    .bind(entry.principal)
-    .bind(entry.vertical)
-    .bind(entry.model)
-    .bind(entry.chain_hash)
+    .bind(entry.source.clone())
+    .bind(entry.pipeline_version.clone())
+    .bind(entry.config_hash.clone())
+    .bind(entry.principal.clone())
+    .bind(entry.vertical.clone())
+    .bind(entry.model.clone())
+    .bind(entry.chain_hash.clone())
     .bind(DateTime::parse_from_rfc3339(&entry.timestamp)
         .map(|t| t.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now()))
