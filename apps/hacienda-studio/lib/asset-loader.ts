@@ -9,6 +9,19 @@ const TESSDATA_STORE = "tessdata";
 
 const MODEL_ID = (import.meta.env.VITE_GLINER_MODEL_ID as string | undefined) ?? "jamon8888/gliner2-guardrails-pii-f16";
 const MODEL_BASE_URL = import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingface.co/${MODEL_ID}/resolve/main`;
+
+// # ponytail: simple regex validation replaces zod; upgrade to zod when dependency added
+function validateModelConfig(modelId: string, baseUrl: string): string | null {
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(modelId)) return "VITE_GLINER_MODEL_ID must be owner/repo";
+  try { new URL(baseUrl); } catch { return "VITE_MODEL_BASE_URL must be a valid URL"; }
+  return null;
+}
+const configError = validateModelConfig(MODEL_ID, MODEL_BASE_URL);
+
+// Injective cache key for model id
+function modelIdKey(id: string) {
+  return encodeURIComponent(id);
+}
 const MODEL_BASE = import.meta.env.DEV && MODEL_BASE_URL.startsWith('https://huggingface.co')
   ? MODEL_BASE_URL.replace('https://huggingface.co', '/hf-model')
   : MODEL_BASE_URL;
@@ -348,9 +361,10 @@ async function getDB() {
 
 export async function isModelCached(): Promise<boolean> {
   const db = await getDB();
-  const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
-  const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
-  const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+  const key = modelIdKey(MODEL_ID);
+  const modelKey = `model-${key}`;
+  const tokenizerKey = `tokenizer-${key}`;
+  const configKey = `config-${key}`;
   const model = await db.get(MODEL_STORE, modelKey);
   const tokenizer = await db.get(MODEL_STORE, tokenizerKey);
   const config = await db.get(MODEL_STORE, configKey);
@@ -360,9 +374,10 @@ export async function isModelCached(): Promise<boolean> {
 async function clearStaleModelCache(): Promise<void> {
   try {
     const db = await getDB();
-    const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
-    const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
-    const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+    const key = modelIdKey(MODEL_ID);
+    const modelKey = `model-${key}`;
+    const tokenizerKey = `tokenizer-${key}`;
+    const configKey = `config-${key}`;
     const tx = db.transaction(MODEL_STORE, "readwrite");
     await Promise.all([
       tx.store.delete(modelKey),
@@ -403,6 +418,11 @@ export type NerModelLoad =
       availableBytes: number;
       neededBytes: number;
       /** Ready to show; no retry will change the outcome until the user leaves that mode. */
+      message: string;
+    }
+  | {
+      ok: false;
+      reason: "invalid-configuration";
       message: string;
     };
 
@@ -452,10 +472,14 @@ async function checkStorageQuota(): Promise<NerModelLoad | null> {
 export async function loadNerModel(
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<NerModelLoad> {
+  if (configError) {
+    return { ok: false, reason: "invalid-configuration", message: configError };
+  }
   const db = await getDB();
-  const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
-  const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
-  const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+  const key = modelIdKey(MODEL_ID);
+  const modelKey = `model-${key}`;
+  const tokenizerKey = `tokenizer-${key}`;
+  const configKey = `config-${key}`;
 
   // One-slot eviction: remove any model entries not for current MODEL_ID
   const evictOtherModels = async () => {
@@ -463,17 +487,17 @@ export async function loadNerModel(
     const keys = await tx.store.getAllKeys();
     await Promise.all(
       keys
-        .filter(k => typeof k === "string" && k.startsWith("model-") && !k.startsWith(modelKey))
+        .filter(k => typeof k === "string" && k.startsWith("model-") && k !== modelKey)
         .map(k => tx.store.delete(k))
     );
     await Promise.all(
       keys
-        .filter(k => typeof k === "string" && k.startsWith("tokenizer-") && !k.startsWith(tokenizerKey))
+        .filter(k => typeof k === "string" && k.startsWith("tokenizer-") && k !== tokenizerKey)
         .map(k => tx.store.delete(k))
     );
     await Promise.all(
       keys
-        .filter(k => typeof k === "string" && k.startsWith("config-") && !k.startsWith(configKey))
+        .filter(k => typeof k === "string" && k.startsWith("config-") && k !== configKey)
         .map(k => tx.store.delete(k))
     );
     await tx.done;
@@ -487,12 +511,21 @@ export async function loadNerModel(
   ]);
 
   if (model && tokenizer && config) {
-    // Verify digest placeholder - in production compute hash and compare to MODEL_DIGESTS[MODEL_ID]
+    // # ponytail: digest validation deferred; placeholders in model-digests.ts
+    const digests = MODEL_DIGESTS[MODEL_ID as keyof typeof MODEL_DIGESTS];
+    if (digests && digests.model !== "00000000") {
+      // TODO: compute SHA-256 and compare first 8 hex chars
+    }
     return { ok: true, assets: { model, tokenizer, encoderConfig: config } };
   }
 
   // Evict stale models before download
   await evictOtherModels();
+
+  // Remove legacy cache entries that use fixed keys
+  await db.delete(MODEL_STORE, "gliner2-guardrails-pii-model");
+  await db.delete(MODEL_STORE, "gliner2-guardrails-pii-tokenizer");
+  await db.delete(MODEL_STORE, "gliner2-guardrails-pii-config");
 
   // Quota is checked *after* the cache lookup, never before: the check exists to avoid
   // downloading ~620MB we then cannot persist, so it is only meaningful on the path that

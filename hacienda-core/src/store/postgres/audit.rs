@@ -86,8 +86,7 @@ impl AuditStore for PostgresAuditStore {
 
     async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
         let tenant_id = tenant.as_str();
-        let rows = sqlx::query_as!(
-            AuditEntryRow,
+        let rows = sqlx::query_as::<_, AuditEntryRow>(
             r#"
             SELECT id, category, action, span_hash,
                    span_length, confidence, source, pipeline_version, config_hash, principal,
@@ -101,8 +100,8 @@ impl AuditStore for PostgresAuditStore {
             )
             ORDER BY sequence_num
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -182,8 +181,7 @@ impl AuditStore for PostgresAuditStore {
         let mut all_segment_entries: Vec<Vec<AuditEntry>> = Vec::with_capacity(extents.len());
 
         for row in &sealed_extents {
-            let rows = sqlx::query_as!(
-                AuditEntryRow,
+            let rows = sqlx::query_as::<_, AuditEntryRow>(
                 r#"
                 SELECT id, category, action, span_hash, span_length, confidence, source,
                        pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
@@ -191,8 +189,8 @@ impl AuditStore for PostgresAuditStore {
                 WHERE segment_id = $1
                 ORDER BY sequence_num
                 "#,
-                row.segment_id
             )
+            .bind(row.segment_id)
             .fetch_all(&mut *tx)
             .await?;
             all_segment_entries.push(decode_segment_rows(row.segment_id, rows)?);
@@ -200,8 +198,7 @@ impl AuditStore for PostgresAuditStore {
 
         // Open segment, keyed by the id captured above — not re-queried.
         if let Some(row) = &open_row {
-            let open_rows = sqlx::query_as!(
-                AuditEntryRow,
+            let open_rows = sqlx::query_as::<_, AuditEntryRow>(
                 r#"
                 SELECT id, category, action, span_hash, span_length, confidence, source,
                        pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
@@ -209,8 +206,8 @@ impl AuditStore for PostgresAuditStore {
                 WHERE segment_id = $1
                 ORDER BY sequence_num
                 "#,
-                row.segment_id
             )
+            .bind(row.segment_id)
             .fetch_all(&mut *tx)
             .await?;
             all_segment_entries.push(decode_segment_rows(row.segment_id, open_rows)?);
@@ -729,32 +726,32 @@ async fn insert_entry(
     // position within the segment used for storage ordering.
     let entry = AuditEntry::new(input, prev_chain_hash, (sequence_num - 1) as u64);
 
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO audit_entries (id, segment_id, sequence_num, category, action, span_hash,
                                   span_length, confidence, source, pipeline_version, config_hash,
                                   principal, vertical, model, chain_hash, created_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#,
-        entry.id,
-        segment_id,
-        sequence_num,
-        entry.category,
-        entry.action.to_string(),
-        entry.span_hash,
-        entry.span_length as i64,
-        entry.confidence.map(|c| c as f64),
-        entry.source.to_string(),
-        entry.pipeline_version,
-        entry.config_hash,
-        entry.principal,
-        entry.vertical,
-        entry.model,
-        entry.chain_hash,
-        DateTime::parse_from_rfc3339(&entry.timestamp)
-            .map(|t| t.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now())
     )
+    .bind(entry.id)
+    .bind(segment_id)
+    .bind(sequence_num)
+    .bind(entry.category)
+    .bind(entry.action.to_string())
+    .bind(entry.span_hash)
+    .bind(entry.span_length as i64)
+    .bind(entry.confidence.map(|c| c as f64))
+    .bind(entry.source.to_string())
+    .bind(entry.pipeline_version)
+    .bind(entry.config_hash)
+    .bind(entry.principal)
+    .bind(entry.vertical)
+    .bind(entry.model)
+    .bind(entry.chain_hash)
+    .bind(DateTime::parse_from_rfc3339(&entry.timestamp)
+        .map(|t| t.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now()))
     .execute(&mut **tx)
     .await?;
 
@@ -766,8 +763,7 @@ impl PostgresAuditStore {
         let segment_id = Uuid::parse_str(segment_id)
             .map_err(|e| AuditError::Backend(format!("invalid segment id '{segment_id}': {e}")))?;
 
-        let rows = sqlx::query_as!(
-            AuditEntryRow,
+        let rows = sqlx::query_as::<_, AuditEntryRow>(
             r#"
             SELECT id, category, action, span_hash, span_length, confidence, source,
                    pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
@@ -775,8 +771,8 @@ impl PostgresAuditStore {
             WHERE segment_id = $1
             ORDER BY sequence_num
             "#,
-            segment_id
         )
+        .bind(segment_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -805,8 +801,7 @@ async fn get_segment_entries_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     segment_id: Uuid,
 ) -> Result<Vec<AuditEntry>, AuditError> {
-    let rows = sqlx::query_as!(
-        AuditEntryRow,
+    let rows = sqlx::query_as::<_, AuditEntryRow>(
         r#"
         SELECT id, category, action, span_hash, span_length, confidence, source,
                pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
@@ -814,8 +809,8 @@ async fn get_segment_entries_tx(
         WHERE segment_id = $1
         ORDER BY sequence_num
         "#,
-        segment_id
     )
+    .bind(segment_id)
     .fetch_all(&mut **tx)
     .await?;
 
