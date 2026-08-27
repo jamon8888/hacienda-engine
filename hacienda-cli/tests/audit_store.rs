@@ -35,6 +35,7 @@ fn entry_input(id: &str) -> AuditEntryInput {
         config_hash: String::new(),
         principal: None,
         vertical: None,
+        model: None,
     }
 }
 
