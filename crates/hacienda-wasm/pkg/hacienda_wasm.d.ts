@@ -93,21 +93,6 @@ export class AuditHandle {
     verify(): Promise<void>;
 }
 
-export function isNerModelLoaded(): boolean;
-
-/**
- * Load the model `process`/`scan` will use from now on, replacing any previously
- * loaded one. Bytes are already fully in memory (Studio fetches and IndexedDB-caches
- * them once, shared with its own separate entity-glossary NER pass) — this is
- * synchronous, no I/O happens here.
- *
- * # Errors
- *
- * Throws if the model bytes cannot be loaded — this function is synchronous (per its
- * own doc above), so a JS caller sees a thrown exception, not a rejected Promise.
- */
-export function loadNerModel(weights: Uint8Array, tokenizer: Uint8Array, encoder_config: Uint8Array): void;
-
 /**
  * Regex + NER (when a model is loaded, via [`ner_model::load_ner_model`]) detection and
  * redaction over `text`, using the default pipeline config. Returns the serialized
@@ -154,8 +139,6 @@ export interface InitOutput {
     readonly audithandle_recordReveal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly audithandle_tip: (a: number) => any;
     readonly audithandle_verify: (a: number) => any;
-    readonly isNerModelLoaded: () => number;
-    readonly loadNerModel: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly process: (a: number, b: number) => any;
     readonly process_with_model_entities: (a: number, b: number, c: any) => any;
     readonly redact_empty: (a: number, b: number, c: number, d: number) => [number, number, number];
