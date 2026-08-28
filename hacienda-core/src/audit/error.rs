@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// AuditError enum
 pub enum AuditError {
     #[error("writing audit log to {path}: {source}")]
     Io {

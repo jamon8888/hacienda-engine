@@ -43,6 +43,7 @@ const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// grow the task's stack without limit.
 pub(crate) const MAX_REDACTION_DEPTH: usize = 64;
 
+/// HaciendaFacade struct
 pub struct HaciendaFacade {
     config: HaciendaConfig,
     /// Per-tenant cache of built pipelines (P3a §3.2). `None` when `config.pii` is not
@@ -100,6 +101,7 @@ pub struct HaciendaFacade {
 
 /// Everything one [`HaciendaFacade::process`] call produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// HaciendaResult struct
 pub struct HaciendaResult {
     /// The extraction envelope. When PII is enabled, every document's `content` has
     /// already been redacted — the raw text never leaves this call.
@@ -117,6 +119,7 @@ pub struct HaciendaResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// HaciendaMetadata struct
 pub struct HaciendaMetadata {
     pub processing_time_ms: u64,
     pub pii_enabled: bool,
@@ -132,6 +135,7 @@ pub struct HaciendaMetadata {
 /// `SpanText::Include` causes an additional audit entry to be written to the
 /// chain recording that raw span text was revealed, and to whom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// SpanText enum
 pub enum SpanText {
     /// Clear the `text` field on every returned entity. The caller learns what
     /// *categories* of PII were found but not the exact values.
@@ -148,6 +152,7 @@ pub enum SpanText {
 /// (FFI, CLI, additional transports) does not each need to re-implement
 /// suppression — one of them will forget.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// TextScanResult struct
 pub struct TextScanResult {
     /// Detected entities. `text` is cleared when `SpanText::Omit` was used.
     pub entities: Vec<MergedEntity>,
@@ -165,6 +170,7 @@ pub struct TextScanResult {
 /// The `entities` field never carries span text — returning the plaintext of a
 /// span the caller just had redacted would be self-defeating.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// TextRedactResult struct
 pub struct TextRedactResult {
     /// Input text with every merged span rewritten.
     pub redacted_text: String,
@@ -519,6 +525,7 @@ impl HaciendaFacade {
         }
     }
 
+/// config function
     pub fn config(&self) -> &HaciendaConfig {
         &self.config
     }

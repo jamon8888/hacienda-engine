@@ -44,11 +44,13 @@ pub trait TenantStore: Send + Sync {
 /// Appropriate for testing and for deployments that accept re-admitting tenants on
 /// restart — the same durability trade-off [`crate::jobs::InMemoryJobStore`] documents.
 #[derive(Debug, Default)]
+/// InMemoryTenantStore struct
 pub struct InMemoryTenantStore {
     tenants: Mutex<HashMap<TenantId, Tenant>>,
 }
 
 impl InMemoryTenantStore {
+/// new function
     pub fn new() -> Self {
         Self::default()
     }

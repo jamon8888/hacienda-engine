@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// plaintext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// RedactionAction enum
 pub enum RedactionAction {
     /// Replace span with a fixed mask character.
     Mask,
@@ -80,6 +81,7 @@ impl std::str::FromStr for RedactionAction {
 /// Which detector produced the entity the entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// EntitySource enum
 pub enum EntitySource {
     /// Detected by regex patterns.
     Regex,
@@ -121,6 +123,7 @@ impl From<crate::pii::types::EntitySource> for EntitySource {
 ///
 /// The original span is never stored — only its blake3 digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// AuditEntry struct
 pub struct AuditEntry {
     /// Unique identifier for the entry.
     pub id: String,
@@ -177,6 +180,7 @@ pub struct AuditEntry {
 
 /// Everything needed to mint an [`AuditEntry`] except its position in the chain.
 #[derive(Debug, Clone)]
+/// AuditEntryInput struct
 pub struct AuditEntryInput {
     /// Unique identifier for the entry.
     pub id: String,
@@ -274,6 +278,7 @@ impl AuditEntry {
 /// above exists to avoid. Narrowing visibility instead of adding a constructor keeps
 /// that guarantee intact without giving external crates a way to build one at all.
 #[derive(Debug, Clone, Copy)]
+/// ChainHashFields struct
 pub struct ChainHashFields<'a> {
     pub id: &'a str,
     pub category: &'a str,

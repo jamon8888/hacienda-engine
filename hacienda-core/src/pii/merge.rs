@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// A detection after regex and model results have been reconciled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// MergedEntity struct
 pub struct MergedEntity {
     pub category: PiiCategory,
     /// Mention text. Empty for regex detections, which carry offsets only.

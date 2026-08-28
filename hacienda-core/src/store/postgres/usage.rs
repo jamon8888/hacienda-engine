@@ -28,6 +28,7 @@ use crate::tenancy::TenantId;
 
 /// Error type for usage read-model queries.
 #[derive(Debug, thiserror::Error)]
+/// UsageError enum
 pub enum UsageError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -35,6 +36,7 @@ pub enum UsageError {
 
 /// One principal's aggregate usage within the queried window.
 #[derive(Debug, Clone, PartialEq)]
+/// UsageRecord struct
 pub struct UsageRecord {
     /// `None` groups every entry recorded by an in-process caller
     /// ([`Caller::Trusted`](crate::auth::Caller::Trusted)), matching how
@@ -67,11 +69,13 @@ pub trait UsageStore: Send + Sync {
 
 /// Postgres-backed [`UsageStore`].
 #[derive(Clone)]
+/// PostgresUsageStore struct
 pub struct PostgresUsageStore {
     pool: PgPool,
 }
 
 impl PostgresUsageStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

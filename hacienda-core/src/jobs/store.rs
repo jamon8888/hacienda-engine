@@ -119,6 +119,7 @@ pub trait JobStore: Send + Sync {
 /// required. All operations complete without I/O, so the `Mutex` is never held across
 /// an `.await`. Phase 4 will introduce a durable backend when a real producer exists.
 #[derive(Debug, Default)]
+/// InMemoryJobStore struct
 pub struct InMemoryJobStore {
     jobs: Mutex<HashMap<String, Job>>,
 }

@@ -28,6 +28,7 @@ pub struct PiiPipeline {
 
 /// Everything one `process` call produced.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// PipelineResult struct
 pub struct PipelineResult {
     /// Input text with every merged span rewritten. Equal to the input for [`PiiPipeline::scan`].
     pub redacted_text: String,
@@ -38,6 +39,7 @@ pub struct PipelineResult {
 
 /// Per-stage timings and counts for one `process` call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// PipelineMetrics struct
 pub struct PipelineMetrics {
     pub regex_ms: u64,
     pub model_ms: u64,
@@ -152,6 +154,7 @@ impl PiiPipeline {
         })
     }
 
+/// config function
     pub fn config(&self) -> &PipelineConfig {
         &self.config
     }

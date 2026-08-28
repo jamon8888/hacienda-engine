@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// HaciendaError enum
 pub enum HaciendaError {
     /// Document extraction failed inside xberg.
     #[error("extraction failed")]

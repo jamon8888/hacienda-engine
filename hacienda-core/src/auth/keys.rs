@@ -25,6 +25,7 @@ use thiserror::Error;
 
 /// Errors from API key operations.
 #[derive(Debug, Error)]
+/// ApiKeyError enum
 pub enum ApiKeyError {
     #[error("failed to generate random key material: {0}")]
     Generation(#[from] rand::Error),
@@ -41,6 +42,7 @@ pub enum ApiKeyError {
 
 /// A generated API key pair: the raw key (shown once) and its stored hashes.
 #[derive(Clone)]
+/// ApiKeyPair struct
 pub struct ApiKeyPair {
     /// The raw key, shown to the user exactly once. Format: `hcd_live_<base62>`.
     pub raw_key: String,
@@ -125,6 +127,7 @@ pub fn verify_key(candidate: &str, stored_hash: &str) -> Result<bool, ApiKeyErro
 
 /// Configuration for API key generation.
 #[derive(Debug, Clone)]
+/// ApiKeyConfig struct
 pub struct ApiKeyConfig {
     /// Prefix for generated keys (default: "hcd_live_").
     pub prefix: String,
@@ -178,6 +181,7 @@ impl fmt::Debug for ApiKeyPair {
 
 /// An API key record (never stores the raw key).
 #[derive(Debug, Clone)]
+/// ApiKey struct
 pub struct ApiKey {
     pub id: uuid::Uuid,
     /// Argon2id hash, used for verification (defense-in-depth if the database leaks).

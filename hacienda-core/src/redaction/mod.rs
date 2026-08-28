@@ -19,6 +19,7 @@ pub use types::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// RedactionError enum
 pub enum RedactionError {
     #[error(
         "unknown redaction mode: '{0}' (expected mask, hash, pseudonymize, remove, or custom)"

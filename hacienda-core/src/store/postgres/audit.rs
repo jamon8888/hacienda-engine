@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 /// Postgres-backed [`AuditStore`].
 #[derive(Clone)]
+/// PostgresAuditStore struct
 pub struct PostgresAuditStore {
     pool: PgPool,
 }

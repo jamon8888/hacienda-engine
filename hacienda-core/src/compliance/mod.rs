@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// ComplianceConfig struct
 pub struct ComplianceConfig {
     /// Model the generated artefacts describe.
     pub model_name: String,
@@ -43,6 +44,7 @@ impl Default for ComplianceConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// ReportType enum
 pub enum ReportType {
     Dpia,
     ModelCard,
@@ -52,6 +54,7 @@ pub enum ReportType {
 
 /// A full compliance pack for one pipeline configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ComplianceReport struct
 pub struct ComplianceReport {
     pub dpia: Option<DpiaDocument>,
     pub model_card: Option<ModelCard>,
@@ -60,12 +63,14 @@ pub struct ComplianceReport {
     pub generated_at: String,
 }
 
+/// ComplianceGenerator struct
 pub struct ComplianceGenerator {
     config: ComplianceConfig,
     dpia_generator: DpiaGenerator,
 }
 
 impl ComplianceGenerator {
+/// new function
     pub fn new(config: ComplianceConfig) -> Self {
         let dpia_generator = DpiaGenerator::new(&config.model_name);
         Self {
@@ -94,18 +99,22 @@ impl ComplianceGenerator {
         }
     }
 
+/// model_card function
     pub fn model_card(&self) -> ModelCard {
         generate_model_card(&self.config.model_name)
     }
 
+/// dpia function
     pub fn dpia(&self) -> DpiaDocument {
         self.dpia_generator.generate()
     }
 
+/// dora_report function
     pub fn dora_report(&self, incident: &PiiIncident) -> DoraReport {
         generate_report(incident)
     }
 
+/// checklist function
     pub fn checklist(&self) -> ComplianceChecklist {
         generate_checklist()
     }

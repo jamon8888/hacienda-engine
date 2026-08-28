@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 /// Extension type for storing the authenticated context in request extensions.
 #[derive(Clone)]
+/// AuthExtension struct
 pub struct AuthExtension(pub Arc<AuthContext>);
 
 impl std::ops::Deref for AuthExtension {
@@ -129,6 +130,7 @@ fn parameter_name(segment: &str) -> Option<&str> {
 
 /// State for the auth middleware.
 #[derive(Clone)]
+/// AuthState struct
 pub struct AuthState {
     resolver: Arc<dyn TokenResolver>,
     /// Capabilities required for each route pattern.
@@ -318,6 +320,7 @@ pub struct AuthRouterBuilder {
 }
 
 impl AuthRouterBuilder {
+/// new function
     pub fn new(state: AuthState) -> Self {
         Self { state }
     }

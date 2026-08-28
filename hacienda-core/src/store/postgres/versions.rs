@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 /// Error type for version store operations.
 #[derive(Debug, thiserror::Error)]
+/// VersionError enum
 pub enum VersionError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -66,6 +67,7 @@ pub trait DocumentVersionStore: Send + Sync {
 
 /// A document version record.
 #[derive(Debug, Clone)]
+/// DocumentVersion struct
 pub struct DocumentVersion {
     pub id: Uuid,
     pub document_id: Uuid,
@@ -78,11 +80,13 @@ pub struct DocumentVersion {
 
 /// Postgres-backed [`DocumentVersionStore`].
 #[derive(Clone)]
+/// PostgresDocumentVersionStore struct
 pub struct PostgresDocumentVersionStore {
     pool: PgPool,
 }
 
 impl PostgresDocumentVersionStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
