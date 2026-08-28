@@ -3,59 +3,88 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// PiiIncident struct
 pub struct PiiIncident {
+    /// summary field
     pub summary: String,
+    /// timeline field
     pub timeline: String,
+    /// root_cause field
     pub root_cause: String,
+    /// detected_at field
     pub detected_at: String,
+    /// contained_at field
     pub contained_at: Option<String>,
+    /// resolved_at field
     pub resolved_at: Option<String>,
+    /// actions_taken field
     pub actions_taken: Vec<String>,
+    /// lessons_learned field
     pub lessons_learned: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// DoraReport struct
 pub struct DoraReport {
+    /// reference field
     pub reference: String,
+    /// timestamp field
     pub timestamp: String,
+    /// entity field
     pub entity: String,
+    /// classification field
     pub classification: IncidentClassification,
+    /// description field
     pub description: IncidentDescription,
+    /// response field
     pub response: IncidentResponse,
+    /// communication field
     pub communication: CommunicationLog,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// IncidentClassification struct
 pub struct IncidentClassification {
+    /// severity field
     pub severity: String,
+    /// category field
     pub category: String,
+    /// impact field
     pub impact: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// IncidentDescription struct
 pub struct IncidentDescription {
+    /// summary field
     pub summary: String,
+    /// timeline field
     pub timeline: String,
+    /// root_cause field
     pub root_cause: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// IncidentResponse struct
 pub struct IncidentResponse {
+    /// detected_at field
     pub detected_at: String,
+    /// contained_at field
     pub contained_at: Option<String>,
+    /// resolved_at field
     pub resolved_at: Option<String>,
+    /// actions_taken field
     pub actions_taken: Vec<String>,
+    /// lessons_learned field
     pub lessons_learned: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// CommunicationLog struct
 pub struct CommunicationLog {
+    /// internal_notifications field
     pub internal_notifications: Vec<String>,
+    /// regulatory_notifications field
     pub regulatory_notifications: Vec<String>,
+    /// public_communications field
     pub public_communications: Vec<String>,
 }
 

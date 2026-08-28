@@ -108,6 +108,7 @@ pub struct HaciendaResult {
     pub extraction: ExtractionResult,
     /// One detection result per extracted document, in the same order.
     pub pii: Vec<PipelineResult>,
+    /// compliance field
     pub compliance: Option<ComplianceReport>,
     /// Audit entries appended by this call. The full chain lives in the facade.
     pub audit_entries: Vec<AuditEntry>,
@@ -115,14 +116,18 @@ pub struct HaciendaResult {
     pub review_submitted: usize,
     /// Glossary terms meeting the publication threshold, across every call so far.
     pub glossary: Vec<GlossaryEntry>,
+    /// metadata field
     pub metadata: HaciendaMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// HaciendaMetadata struct
 pub struct HaciendaMetadata {
+    /// processing_time_ms field
     pub processing_time_ms: u64,
+    /// pii_enabled field
     pub pii_enabled: bool,
+    /// documents field
     pub documents: usize,
 }
 
@@ -156,6 +161,7 @@ pub enum SpanText {
 pub struct TextScanResult {
     /// Detected entities. `text` is cleared when `SpanText::Omit` was used.
     pub entities: Vec<MergedEntity>,
+    /// metrics field
     pub metrics: PipelineMetrics,
     /// Audit entries appended by this call.
     ///
@@ -176,6 +182,7 @@ pub struct TextRedactResult {
     pub redacted_text: String,
     /// Detected entities. `text` is always cleared — see struct-level doc.
     pub entities: Vec<MergedEntity>,
+    /// metrics field
     pub metrics: PipelineMetrics,
     /// Audit entries appended by this call (one per redacted span).
     pub audit_entries: Vec<AuditEntry>,

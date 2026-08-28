@@ -117,13 +117,17 @@ impl fmt::Display for PiiCategory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// RegexEntity struct
 pub struct RegexEntity {
+    /// category field
     pub category: PiiCategory,
     /// Byte offset of the first byte of the span.
     pub start: u32,
     /// Byte offset one past the last byte of the span.
     pub end: u32,
+    /// confidence field
     pub confidence: f32,
+    /// format_preserving field
     pub format_preserving: bool,
+    /// redact_template field
     pub redact_template: String,
     /// Copied from the originating [`PatternMeta::context_words`] at match time, so
     /// [`crate::pii::context::enhance`] can look up this span's context words without
@@ -131,6 +135,7 @@ pub struct RegexEntity {
     /// `&'static` slice cannot round-trip through serde, and (as with
     /// [`PatternMeta::validator`]) nothing actually (de)serializes `RegexEntity` today.
     #[serde(skip)]
+    /// context_words field
     pub context_words: &'static [&'static str],
 }
 
@@ -154,9 +159,13 @@ impl RegexEntity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// PatternMeta struct
 pub struct PatternMeta {
+    /// category field
     pub category: PiiCategory,
+    /// pattern field
     pub pattern: String,
+    /// format_preserving field
     pub format_preserving: bool,
+    /// redact_template field
     pub redact_template: String,
     /// Confidence a match gets when [`validator`](Self::validator) is absent, or returns
     /// `None` (no opinion). Defaults to `1.0` via [`PatternMeta::new`] so every pre-existing
@@ -164,6 +173,7 @@ pub struct PatternMeta {
     /// ([`crate::pii::validators`]) set this lower, since an unvalidated match in those
     /// categories is genuinely less certain than a plain regex hit.
     #[serde(default = "default_base_confidence")]
+    /// base_confidence field
     pub base_confidence: f32,
     /// Checksum/structural validator run against the matched text
     /// ([`crate::pii::validators`]'s `Option<bool>` contract: `Some(true)` promotes
@@ -172,10 +182,12 @@ pub struct PatternMeta {
     /// serde, and nothing in this codebase actually (de)serializes `PatternMeta` today —
     /// this only guards against a future config-file/API surface silently losing it.
     #[serde(skip)]
+    /// validator field
     pub validator: Option<fn(&str) -> Option<bool>>,
     /// Words that, found near a match, boost its confidence toward `1.0`
     /// ([`crate::pii::context`]). Empty for patterns with no calibrated context word list.
     #[serde(skip)]
+    /// context_words field
     pub context_words: &'static [&'static str],
 }
 
@@ -233,10 +245,15 @@ impl PatternMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// ModelEntity struct
 pub struct ModelEntity {
+    /// category field
     pub category: PiiCategory,
+    /// text field
     pub text: String,
+    /// start field
     pub start: u32,
+    /// end field
     pub end: u32,
+    /// confidence field
     pub confidence: f32,
 }
 
@@ -278,6 +295,7 @@ pub enum MergePriority {
 pub struct MergeConfig {
     /// Overlap ratio above which two spans are considered the same detection.
     pub overlap_threshold: f32,
+    /// priority field
     pub priority: MergePriority,
     /// Confidence difference required before a candidate displaces an existing span.
     pub confidence_epsilon: f32,

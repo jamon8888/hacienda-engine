@@ -32,8 +32,11 @@ pub struct PiiPipeline {
 pub struct PipelineResult {
     /// Input text with every merged span rewritten. Equal to the input for [`PiiPipeline::scan`].
     pub redacted_text: String,
+    /// entities field
     pub entities: Vec<MergedEntity>,
+    /// audit_log field
     pub audit_log: Vec<RedactionAuditEntry>,
+    /// metrics field
     pub metrics: PipelineMetrics,
 }
 
@@ -41,12 +44,19 @@ pub struct PipelineResult {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// PipelineMetrics struct
 pub struct PipelineMetrics {
+    /// regex_ms field
     pub regex_ms: u64,
+    /// model_ms field
     pub model_ms: u64,
+    /// merge_ms field
     pub merge_ms: u64,
+    /// redaction_ms field
     pub redaction_ms: u64,
+    /// total_ms field
     pub total_ms: u64,
+    /// entities_detected field
     pub entities_detected: u32,
+    /// entities_redacted field
     pub entities_redacted: u32,
 }
 

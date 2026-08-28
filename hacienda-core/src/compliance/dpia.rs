@@ -40,11 +40,17 @@ pub enum ResidualRisk {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Risk struct
 pub struct Risk {
+    /// id field
     pub id: String,
+    /// description field
     pub description: String,
+    /// likelihood field
     pub likelihood: Likelihood,
+    /// severity field
     pub severity: Severity,
+    /// mitigation field
     pub mitigation: String,
+    /// residual_risk field
     pub residual_risk: ResidualRisk,
 }
 
@@ -64,11 +70,17 @@ pub enum Annex {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// DpiaDocument struct
 pub struct DpiaDocument {
+    /// processing_description field
     pub processing_description: String,
+    /// necessity_proportionality field
     pub necessity_proportionality: String,
+    /// risks field
     pub risks: Vec<Risk>,
+    /// mitigation_measures field
     pub mitigation_measures: Vec<String>,
+    /// dpo_opinion_template field
     pub dpo_opinion_template: String,
+    /// annexes field
     pub annexes: Vec<Annex>,
 }
 

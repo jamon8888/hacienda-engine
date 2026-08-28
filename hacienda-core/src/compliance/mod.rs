@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 pub struct ComplianceConfig {
     /// Model the generated artefacts describe.
     pub model_name: String,
+    /// enabled_reports field
     pub enabled_reports: Vec<ReportType>,
 }
 
@@ -60,10 +61,15 @@ pub enum ReportType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// ComplianceReport struct
 pub struct ComplianceReport {
+    /// dpia field
     pub dpia: Option<DpiaDocument>,
+    /// model_card field
     pub model_card: Option<ModelCard>,
+    /// dora field
     pub dora: Option<DoraReport>,
+    /// checklist field
     pub checklist: Option<ComplianceChecklist>,
+    /// generated_at field
     pub generated_at: String,
 }
 
