@@ -8,8 +8,11 @@
 //! - `auth:manage` — API key issuance and revocation
 //! - `raw:extract` — `/xberg/v1/*` when passthrough is compiled in
 
+/// Module authn
 pub mod authn;
+/// Module authz
 pub mod authz;
+/// Module keys
 pub mod keys;
 
 pub use crate::auth::keys::ApiKey;
