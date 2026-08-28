@@ -9,14 +9,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// MergedEntity struct
 pub struct MergedEntity {
+    /// category field
     pub category: PiiCategory,
     /// Mention text. Empty for regex detections, which carry offsets only.
     pub text: String,
+    /// start field
     pub start: u32,
+    /// end field
     pub end: u32,
+    /// confidence field
     pub confidence: f32,
+    /// source field
     pub source: EntitySource,
+    /// format_preserving field
     pub format_preserving: bool,
+    /// redact_template field
     pub redact_template: String,
 }
 

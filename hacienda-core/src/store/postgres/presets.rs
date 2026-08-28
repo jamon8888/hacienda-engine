@@ -53,9 +53,13 @@ pub trait PresetStore: Send + Sync {
 #[derive(Debug, Clone)]
 /// Preset struct
 pub struct Preset {
+    /// id field
     pub id: Uuid,
+    /// name field
     pub name: String,
+    /// config field
     pub config: Value,
+    /// created_at field
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

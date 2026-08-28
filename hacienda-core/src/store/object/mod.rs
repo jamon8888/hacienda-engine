@@ -35,8 +35,11 @@ pub enum ObjectStoreError {
 #[derive(Debug, Clone)]
 /// PresignedPut struct
 pub struct PresignedPut {
+    /// url field
     pub url: String,
+    /// required_headers field
     pub required_headers: BTreeMap<String, String>,
+    /// expires_at field
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -44,7 +47,9 @@ pub struct PresignedPut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// ObjectMetadata struct
 pub struct ObjectMetadata {
+    /// size_bytes field
     pub size_bytes: u64,
+    /// content_type field
     pub content_type: Option<String>,
 }
 

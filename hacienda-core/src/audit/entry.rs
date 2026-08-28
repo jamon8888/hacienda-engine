@@ -136,6 +136,7 @@ pub struct AuditEntry {
     /// exactly what entries written before this field existed hashed as, so older chains
     /// still verify.
     #[serde(default)]
+    /// principal field
     pub principal: Option<String>,
     /// The Tier 0 schema vertical active when this entity was detected, or `None` when
     /// no vertical was configured.
@@ -149,6 +150,7 @@ pub struct AuditEntry {
     /// empty string — which is exactly what entries written before this field existed
     /// hashed as, so older chains still verify.
     #[serde(default)]
+    /// vertical field
     pub vertical: Option<String>,
     /// The model that produced this entity, or `None` for regex-only entries or
     /// chains written before this field existed. Recorded as
@@ -156,6 +158,7 @@ pub struct AuditEntry {
     /// covered by [`compute_chain_hash`] so it cannot be rewritten without
     /// breaking verification. `None` hashes as no bytes, so older chains verify.
     #[serde(default)]
+    /// model field
     pub model: Option<String>,
     /// blake3 over the previous chain hash and this entry's identifying fields.
     pub chain_hash: String,
@@ -254,13 +257,21 @@ impl AuditEntry {
 #[derive(Debug, Clone, Copy)]
 /// ChainHashFields struct
 pub struct ChainHashFields<'a> {
+    /// id field
     pub id: &'a str,
+    /// category field
     pub category: &'a str,
+    /// action field
     pub action: &'a RedactionAction,
+    /// span_hash field
     pub span_hash: &'a str,
+    /// config_hash field
     pub config_hash: &'a str,
+    /// principal field
     pub principal: Option<&'a str>,
+    /// vertical field
     pub vertical: Option<&'a str>,
+    /// model field
     pub model: Option<&'a str>,
 }
 

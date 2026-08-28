@@ -29,14 +29,17 @@ use xberg::ExtractionConfig;
 #[serde(default, deny_unknown_fields)]
 /// HaciendaConfig struct
 pub struct HaciendaConfig {
+    /// extraction field
     pub extraction: ExtractionConfig,
     /// Detection and redaction. `None` extracts without touching PII.
     pub pii: Option<PipelineConfig>,
+    /// compliance field
     pub compliance: Option<ComplianceConfig>,
     /// Human review queue for low-confidence detections.
     ///
     /// Requires `pii`: there is nothing to review without detections.
     pub review: Option<ReviewConfig>,
+    /// glossary field
     pub glossary: Option<GlossaryConfig>,
     /// Authentication for `hacienda serve`. Disabled by default, which is correct for
     /// the CLI and the desktop app: there, the process boundary *is* the trust boundary.

@@ -187,15 +187,20 @@ impl fmt::Debug for ApiKeyPair {
 #[derive(Debug, Clone)]
 /// ApiKey struct
 pub struct ApiKey {
+    /// id field
     pub id: uuid::Uuid,
     /// Argon2id hash, used for verification (defense-in-depth if the database leaks).
     pub key_hash: String,
     /// Deterministic BLAKE3 digest, indexed for lookup by presented key. See the module
     /// docs for why this exists separately from `key_hash`.
     pub lookup_hash: String,
+    /// owner field
     pub owner: String,
+    /// capabilities field
     pub capabilities: serde_json::Value,
+    /// created_at field
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// revoked_at field
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The tenant this key was issued under (S1). Scopes
     /// [`ApiKeyStore::revoke`](crate::auth::ApiKeyStore::revoke) and

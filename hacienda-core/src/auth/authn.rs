@@ -334,6 +334,7 @@ pub struct StaticTokenConfig {
     pub id: String,
     /// The actual token string. Never serialised — see the type docs.
     #[serde(skip_serializing)]
+    /// token field
     pub token: String,
     /// Principal ID.
     pub principal_id: String,

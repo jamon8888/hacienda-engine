@@ -258,6 +258,7 @@ impl std::fmt::Display for KeyId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// KeyStatus struct
 pub struct KeyStatus {
+    /// id field
     pub id: KeyId,
     /// `true` for the key new tokens mint under; `false` for a retired key still
     /// loaded for reveal.

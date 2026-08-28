@@ -20,7 +20,9 @@ pub enum LinkStyle {
 #[serde(default, deny_unknown_fields)]
 /// GlossaryConfig struct
 pub struct GlossaryConfig {
+    /// enabled field
     pub enabled: bool,
+    /// link_style field
     pub link_style: LinkStyle,
     /// Mentions detected below this confidence are not recorded.
     pub min_confidence: f32,

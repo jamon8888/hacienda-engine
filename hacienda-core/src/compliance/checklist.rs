@@ -5,16 +5,22 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// ComplianceChecklist struct
 pub struct ComplianceChecklist {
+    /// gdpr_articles field
     pub gdpr_articles: Vec<ChecklistItem>,
+    /// ai_act_articles field
     pub ai_act_articles: Vec<ChecklistItem>,
+    /// dora_articles field
     pub dora_articles: Vec<ChecklistItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// ChecklistItem struct
 pub struct ChecklistItem {
+    /// article field
     pub article: String,
+    /// description field
     pub description: String,
+    /// status field
     pub status: ControlStatus,
     /// The control in this pipeline that evidences the article.
     pub evidence: String,
