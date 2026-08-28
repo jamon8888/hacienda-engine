@@ -11,9 +11,11 @@ use uuid::Uuid;
 /// VersionError enum
 pub enum VersionError {
     #[error("database error: {0}")]
+    /// Database variant
     Database(#[from] sqlx::Error),
 
     #[error("version not found")]
+    /// NotFound variant
     NotFound,
 }
 

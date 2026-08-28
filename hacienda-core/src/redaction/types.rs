@@ -13,6 +13,7 @@ pub enum RedactionMode {
     /// configuration. A default of [`RedactionMode::Pseudonymize`] would mean the
     /// out-of-the-box path depends on a secret the operator has not yet set.
     #[default]
+    /// Mask variant
     Mask,
     /// Replace with a short blake3 digest of the original span.
     Hash,

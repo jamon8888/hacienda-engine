@@ -40,9 +40,11 @@ pub struct S3Config {
 /// S3ConfigError enum
 pub enum S3ConfigError {
     #[error("invalid S3 endpoint or bucket name: {0:?}")]
+    /// InvalidBucket variant
     InvalidBucket(BucketError),
 
     #[error("failed to build HTTP client: {0}")]
+    /// Client variant
     Client(#[source] reqwest::Error),
 }
 
