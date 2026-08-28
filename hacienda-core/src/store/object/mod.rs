@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// Module s3
 pub mod s3;
 
 /// Error type for object store operations.
