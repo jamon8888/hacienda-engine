@@ -68,6 +68,7 @@ pub enum SyncPolicy {
     /// This is the safest setting: a power loss after a successful `append` call will
     /// not lose that batch. The cost is one extra syscall per document.
     #[default]
+    /// EveryBatch variant
     EveryBatch,
 
     /// Call `sync_data()` only when sealing a segment (on `rotate` or `close`).

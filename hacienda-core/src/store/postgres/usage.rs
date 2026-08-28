@@ -31,6 +31,7 @@ use crate::tenancy::TenantId;
 /// UsageError enum
 pub enum UsageError {
     #[error("database error: {0}")]
+    /// Database variant
     Database(#[from] sqlx::Error),
 }
 

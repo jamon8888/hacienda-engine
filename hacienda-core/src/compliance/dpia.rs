@@ -3,26 +3,37 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Likelihood enum
 pub enum Likelihood {
+    /// Low variant
     Low,
+    /// Medium variant
     Medium,
+    /// High variant
     High,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Severity enum
 pub enum Severity {
+    /// Low variant
     Low,
+    /// Medium variant
     Medium,
+    /// High variant
     High,
+    /// Critical variant
     Critical,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// ResidualRisk enum
 pub enum ResidualRisk {
+    /// Negligible variant
     Negligible,
+    /// Low variant
     Low,
+    /// Medium variant
     Medium,
+    /// High variant
     High,
 }
 
@@ -40,9 +51,13 @@ pub struct Risk {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Annex enum
 pub enum Annex {
+    /// ModelCard variant
     ModelCard(String),
+    /// RiskAssessment variant
     RiskAssessment(String),
+    /// DataFlowDiagram variant
     DataFlowDiagram(String),
+    /// SecurityMeasures variant
     SecurityMeasures(String),
 }
 

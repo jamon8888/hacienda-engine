@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 /// LinkStyle enum
 pub enum LinkStyle {
     #[default]
+    /// Markdown variant
     Markdown,
+    /// Html variant
     Html,
+    /// Wiki variant
     Wiki,
 }
 

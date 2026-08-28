@@ -11,9 +11,11 @@ use uuid::Uuid;
 /// PresetError enum
 pub enum PresetError {
     #[error("database error: {0}")]
+    /// Database variant
     Database(#[from] sqlx::Error),
 
     #[error("preset not found")]
+    /// NotFound variant
     NotFound,
 }
 

@@ -8,41 +8,73 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 /// PiiCategory enum
 pub enum PiiCategory {
+    /// Email variant
     Email,
+    /// PhoneNumber variant
     PhoneNumber,
+    /// Address variant
     Address,
+    /// Ssn variant
     Ssn,
+    /// PassportNumber variant
     PassportNumber,
+    /// DriversLicense variant
     DriversLicense,
     /// EU intra-community VAT number: a 2-letter member-state code (`EL` for Greece,
     /// not `GR`) followed by up to 12 digits. Added for Track C2 — the French client
     /// base's most common gap between the browser's 9 regexes and the Rust set.
     EuVat,
+    /// NationalId variant
     NationalId,
+    /// TaxId variant
     TaxId,
+    /// CreditCard variant
     CreditCard,
+    /// Iban variant
     Iban,
+    /// BankAccount variant
     BankAccount,
+    /// RoutingNumber variant
     RoutingNumber,
+    /// SwiftBic variant
     SwiftBic,
+    /// CryptoWallet variant
     CryptoWallet,
+    /// MedicalRecordNumber variant
     MedicalRecordNumber,
+    /// HealthPlanNumber variant
     HealthPlanNumber,
+    /// Diagnosis variant
     Diagnosis,
+    /// Medication variant
     Medication,
+    /// Username variant
     Username,
+    /// Password variant
     Password,
+    /// ApiKey variant
     ApiKey,
+    /// SecretToken variant
     SecretToken,
+    /// JwtToken variant
     JwtToken,
+    /// IpAddress variant
     IpAddress,
+    /// MacAddress variant
     MacAddress,
+    /// Url variant
     Url,
+    /// LicensePlate variant
     LicensePlate,
+    /// VehicleVin variant
     VehicleVin,
+    /// DateOfBirth variant
     DateOfBirth,
+    /// FullName variant
     FullName,
+    /// Person variant
     Person,
+    /// Organization variant
     Organization,
     /// Given name, first name.
     FirstName,
@@ -68,6 +100,7 @@ pub enum PiiCategory {
     CardExpiry,
     /// Card CVV / CVC security code.
     CardCvv,
+    /// Custom variant
     Custom(String),
 }
 
@@ -212,7 +245,9 @@ pub struct ModelEntity {
 #[serde(rename_all = "snake_case")]
 /// EntitySource enum
 pub enum EntitySource {
+    /// Regex variant
     Regex,
+    /// Model variant
     Model,
 }
 
@@ -230,8 +265,11 @@ impl fmt::Display for EntitySource {
 #[serde(rename_all = "snake_case")]
 /// MergePriority enum
 pub enum MergePriority {
+    /// RegexFirst variant
     RegexFirst,
+    /// HigherConfidence variant
     HigherConfidence,
+    /// LongerSpan variant
     LongerSpan,
 }
 
