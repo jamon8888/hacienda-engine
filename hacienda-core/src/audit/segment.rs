@@ -328,6 +328,7 @@ impl Segment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// SegmentSeal struct
 pub struct SegmentSeal {
+    /// segment_id field
     pub segment_id: String,
     /// The tenant this segment belongs to (S1 spec §5). Always `"default"` until the
     /// store that produced this seal is itself threaded with a real tenant context —
@@ -338,8 +339,11 @@ pub struct SegmentSeal {
     /// without this, loading it back would fail outright with a missing-field error
     /// instead of defaulting to `"default"`.
     #[serde(default = "default_tenant_id_string")]
+    /// tenant_id field
     pub tenant_id: String,
+    /// node_id field
     pub node_id: String,
+    /// config_hash field
     pub config_hash: String,
     /// Seal hash of the immediately preceding segment on this node, or `None` for the
     /// first segment. Committed into `seal_hash` so deletion of the predecessor is

@@ -44,7 +44,9 @@ pub struct UsageRecord {
     /// [`AuditEntry::principal`](crate::audit::AuditEntry::principal) itself represents
     /// unattributed entries.
     pub principal: Option<String>,
+    /// entity_count field
     pub entity_count: i64,
+    /// byte_count field
     pub byte_count: i64,
 }
 

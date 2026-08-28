@@ -3,76 +3,112 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// ModelCard struct
 pub struct ModelCard {
+    /// model_details field
     pub model_details: ModelDetails,
+    /// training_data field
     pub training_data: TrainingData,
+    /// evaluation field
     pub evaluation: Evaluation,
+    /// bias_fairness field
     pub bias_fairness: BiasFairness,
+    /// deployment field
     pub deployment: Deployment,
+    /// governance field
     pub governance: Governance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// ModelDetails struct
 pub struct ModelDetails {
+    /// name field
     pub name: String,
+    /// version field
     pub version: String,
+    /// description field
     pub description: String,
+    /// architecture field
     pub architecture: String,
+    /// parameters field
     pub parameters: String,
+    /// license field
     pub license: String,
+    /// contact field
     pub contact: String,
+    /// date field
     pub date: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// TrainingData struct
 pub struct TrainingData {
+    /// description field
     pub description: String,
+    /// size field
     pub size: String,
+    /// sources field
     pub sources: Vec<String>,
+    /// preprocessing field
     pub preprocessing: String,
+    /// pii_categories field
     pub pii_categories: u32,
+    /// languages field
     pub languages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Evaluation struct
 pub struct Evaluation {
+    /// description field
     pub description: String,
+    /// metrics field
     pub metrics: Vec<Metric>,
+    /// benchmarks field
     pub benchmarks: Vec<String>,
+    /// limitations field
     pub limitations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Metric struct
 pub struct Metric {
+    /// name field
     pub name: String,
+    /// value field
     pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// BiasFairness struct
 pub struct BiasFairness {
+    /// description field
     pub description: String,
+    /// known_biases field
     pub known_biases: Vec<String>,
+    /// mitigation_strategies field
     pub mitigation_strategies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Deployment struct
 pub struct Deployment {
+    /// intended_use field
     pub intended_use: String,
+    /// out_of_scope_uses field
     pub out_of_scope_uses: Vec<String>,
+    /// operational_factors field
     pub operational_factors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Governance struct
 pub struct Governance {
+    /// organization field
     pub organization: String,
+    /// review_process field
     pub review_process: String,
+    /// update_frequency field
     pub update_frequency: String,
+    /// changelog field
     pub changelog: Vec<String>,
 }
 

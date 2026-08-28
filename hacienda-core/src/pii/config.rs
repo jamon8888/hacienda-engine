@@ -32,8 +32,11 @@ pub struct PipelineConfig {
     pub model_thresholds: HashMap<PiiCategory, f32>,
     /// Overlap ratio above which two spans are treated as the same detection.
     pub merge_overlap_threshold: f32,
+    /// redaction field
     pub redaction: RedactionConfig,
+    /// audit field
     pub audit: AuditConfig,
+    /// model field
     pub model: ModelConfig,
     /// How many documents [`crate::HaciendaFacade::process_batch_with_auth`] runs
     /// through this pipeline at once.
@@ -312,9 +315,13 @@ pub struct ModelConfig {
 #[derive(Debug, Clone, Default)]
 /// CliOverrides struct
 pub struct CliOverrides {
+    /// model_threshold field
     pub model_threshold: Option<f32>,
+    /// redaction_mode field
     pub redaction_mode: Option<RedactionMode>,
+    /// model_dir field
     pub model_dir: Option<PathBuf>,
+    /// lora_adapter_dir field
     pub lora_adapter_dir: Option<PathBuf>,
 }
 

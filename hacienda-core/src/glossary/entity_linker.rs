@@ -9,8 +9,11 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// GlossaryEntry struct
 pub struct GlossaryEntry {
+    /// category field
     pub category: String,
+    /// term field
     pub term: String,
+    /// count field
     pub count: usize,
     /// Mean detection confidence across every observed mention.
     pub mean_confidence: f32,

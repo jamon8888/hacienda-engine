@@ -24,10 +24,15 @@ use super::{ObjectMetadata, ObjectStore, ObjectStoreError, PresignedPut};
 #[derive(Debug, Clone)]
 /// S3Config struct
 pub struct S3Config {
+    /// endpoint field
     pub endpoint: url::Url,
+    /// bucket field
     pub bucket: String,
+    /// region field
     pub region: String,
+    /// access_key field
     pub access_key: String,
+    /// secret_key field
     pub secret_key: String,
     /// `true` for path-style URLs (`https://host/bucket/key`, what MinIO and most
     /// self-hosted S3-compatible servers expect), `false` for virtual-host style

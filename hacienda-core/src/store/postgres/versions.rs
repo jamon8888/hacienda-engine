@@ -72,12 +72,19 @@ pub trait DocumentVersionStore: Send + Sync {
 #[derive(Debug, Clone)]
 /// DocumentVersion struct
 pub struct DocumentVersion {
+    /// id field
     pub id: Uuid,
+    /// document_id field
     pub document_id: Uuid,
+    /// version_sequence field
     pub version_sequence: i64,
+    /// content_hash field
     pub content_hash: String,
+    /// content field
     pub content: String,
+    /// entities_json field
     pub entities_json: Value,
+    /// created_at field
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
