@@ -21,6 +21,7 @@ use crate::audit::error::AuditError;
     note = "use AuditStore and FileAuditStore; FileSink does not fsync and does not survive \
             power loss"
 )]
+/// AuditSink trait
 pub trait AuditSink {
     /// Persist a single entry.
     fn write(&mut self, entry: &AuditEntry) -> Result<(), AuditError>;

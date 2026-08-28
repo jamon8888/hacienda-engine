@@ -90,6 +90,7 @@ impl Token {
 ///
 /// Implementations can validate API keys, JWTs, opaque tokens against a store, etc.
 #[async_trait]
+/// TokenResolver trait
 pub trait TokenResolver: Send + Sync {
     /// Resolve a token string to its [`Token`] representation.
     ///

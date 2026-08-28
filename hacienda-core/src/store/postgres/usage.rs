@@ -49,6 +49,7 @@ pub struct UsageRecord {
 
 /// Read-model over the audit chain for billing/metering.
 #[async_trait]
+/// UsageStore trait
 pub trait UsageStore: Send + Sync {
     /// Aggregate usage per principal for `tenant`, optionally windowed to
     /// `created_at >= since` and `created_at < until`. `None` on either bound leaves

@@ -306,6 +306,7 @@ pub enum AuthzError {
 /// must hash the incoming token and look up the stored hash — never store
 /// or compare raw keys.
 #[async_trait]
+/// TokenResolver trait
 pub trait TokenResolver: Send + Sync {
     /// Resolve a bearer token to its capability set.
     ///
@@ -322,6 +323,7 @@ pub trait TokenResolver: Send + Sync {
 /// Implementations must be `Send + Sync` because the store lives behind an `Arc`
 /// shared across tasks.
 #[async_trait]
+/// ApiKeyStore trait
 pub trait ApiKeyStore: Send + Sync {
     /// Create a new API key record.
     ///
