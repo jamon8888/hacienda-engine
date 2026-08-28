@@ -54,6 +54,7 @@ use crate::tenancy::TenantId;
 /// method with a type parameter or a return type that names `Self`, you will break this
 /// property and every call site that stores the trait object.
 #[async_trait]
+/// AuditStore trait
 pub trait AuditStore: Send + Sync {
     /// Mint and record a document's worth of entries in one call, into `tenant`'s chain.
     ///

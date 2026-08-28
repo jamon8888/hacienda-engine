@@ -33,6 +33,7 @@ use uuid::Uuid;
 /// [`crate::store::postgres::PostgresJobStore`] (Phase 9) — the trait surface is the real,
 /// stable seam between the async job API and its storage backend, not a placeholder.
 #[async_trait]
+/// JobStore trait
 pub trait JobStore: Send + Sync {
     /// Create a new job in the `Queued` state, owned by `tenant`.
     ///

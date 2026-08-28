@@ -19,6 +19,7 @@ pub enum VersionError {
 
 /// Trait for document version storage.
 #[async_trait]
+/// DocumentVersionStore trait
 pub trait DocumentVersionStore: Send + Sync {
     /// Create a new version for a document.
     ///

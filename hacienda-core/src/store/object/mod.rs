@@ -49,6 +49,7 @@ pub struct ObjectMetadata {
 
 /// Trait for object storage used by the presigned-upload flow.
 #[async_trait]
+/// ObjectStore trait
 pub trait ObjectStore: Send + Sync {
     /// Compute a presigned PUT URL for `key`, constrained to `content_type`.
     ///

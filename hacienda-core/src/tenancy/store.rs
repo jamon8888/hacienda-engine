@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 /// request-time authorization path, which uses [`super::TenantCtx`]/[`TenantId`]
 /// directly and never needs to look up a `Tenant` row to enforce cloisonnement.
 #[async_trait]
+/// TenantStore trait
 pub trait TenantStore: Send + Sync {
     /// Register a new tenant.
     ///
