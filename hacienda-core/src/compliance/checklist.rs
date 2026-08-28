@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// ComplianceChecklist struct
 pub struct ComplianceChecklist {
     pub gdpr_articles: Vec<ChecklistItem>,
     pub ai_act_articles: Vec<ChecklistItem>,
@@ -10,6 +11,7 @@ pub struct ComplianceChecklist {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// ChecklistItem struct
 pub struct ChecklistItem {
     pub article: String,
     pub description: String,
@@ -20,6 +22,7 @@ pub struct ChecklistItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// ControlStatus enum
 pub enum ControlStatus {
     Implemented,
     Partial,

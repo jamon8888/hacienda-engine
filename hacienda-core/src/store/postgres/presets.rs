@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 /// Error type for preset store operations.
 #[derive(Debug, thiserror::Error)]
+/// PresetError enum
 pub enum PresetError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -47,6 +48,7 @@ pub trait PresetStore: Send + Sync {
 
 /// A preset record.
 #[derive(Debug, Clone)]
+/// Preset struct
 pub struct Preset {
     pub id: Uuid,
     pub name: String,
@@ -56,11 +58,13 @@ pub struct Preset {
 
 /// Postgres-backed [`PresetStore`].
 #[derive(Clone)]
+/// PostgresPresetStore struct
 pub struct PostgresPresetStore {
     pool: PgPool,
 }
 
 impl PostgresPresetStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

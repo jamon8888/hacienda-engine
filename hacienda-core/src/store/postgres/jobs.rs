@@ -13,11 +13,13 @@ use uuid::Uuid;
 
 /// Postgres-backed [`JobStore`].
 #[derive(Clone)]
+/// PostgresJobStore struct
 pub struct PostgresJobStore {
     pool: PgPool,
 }
 
 impl PostgresJobStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

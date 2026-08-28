@@ -27,6 +27,7 @@ use xberg::ExtractionConfig;
 /// own the stricter one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// HaciendaConfig struct
 pub struct HaciendaConfig {
     pub extraction: ExtractionConfig,
     /// Detection and redaction. `None` extracts without touching PII.

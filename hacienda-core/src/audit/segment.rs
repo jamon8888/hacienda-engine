@@ -37,6 +37,7 @@ use crate::tenancy::TenantId;
 /// Callers that need strong uniqueness should supply an explicit identifier via
 /// [`NodeId::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// NodeId struct
 pub struct NodeId(String);
 
 impl NodeId {
@@ -115,6 +116,7 @@ fn resolve_hostname() -> String {
 /// `seal_hash` commits to all segment metadata including `prev_seal_hash` from the
 /// predecessor, making any later deletion of the predecessor detectable.
 #[derive(Debug)]
+/// Segment struct
 pub struct Segment {
     /// uuid v4 string — unique per segment, stored in the seal for reference.
     segment_id: String,
@@ -324,6 +326,7 @@ impl Segment {
 /// store can assert at recovery — replayed entries must number exactly this many — which
 /// fails with "expected 40 entries, found 37" instead of an opaque hash mismatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// SegmentSeal struct
 pub struct SegmentSeal {
     pub segment_id: String,
     /// The tenant this segment belongs to (S1 spec §5). Always `"default"` until the
@@ -376,6 +379,7 @@ fn default_tenant_id_string() -> String {
 /// covers. Wrapping them in a struct would force callers to construct one just to call this
 /// function; keeping them flat is both more legible and consistent with `compute_chain_hash`.
 #[allow(clippy::too_many_arguments)]
+/// compute_seal_hash function
 pub fn compute_seal_hash(
     prev_seal_hash: Option<&str>,
     segment_id: &str,

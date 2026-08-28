@@ -186,6 +186,7 @@ pub trait AuditStore: Send + Sync {
 /// then `spawn_blocking` the write. A guard held across an `await` makes the future
 /// `!Send`, which will not compile behind `Arc<dyn AuditStore>`.
 #[derive(Debug)]
+/// InMemoryAuditStore struct
 pub struct InMemoryAuditStore {
     state: Mutex<HashMap<TenantId, State>>,
     node_id: NodeId,

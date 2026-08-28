@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 /// `transition(id, Queued, Running)` and exactly one will succeed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// JobStatus enum
 pub enum JobStatus {
     /// Job has been accepted and is waiting for a worker to claim it.
     Queued,
@@ -59,6 +60,7 @@ impl std::str::FromStr for JobStatus {
 /// implement retries should poll `get` — no push notification mechanism is defined
 /// here, because no consumer exists yet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Job struct
 pub struct Job {
     /// Stable identifier — UUID v4, assigned on creation.
     pub id: String,

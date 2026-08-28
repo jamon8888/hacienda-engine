@@ -6,6 +6,7 @@ use std::fmt;
 /// Category of personally identifiable information a detected span belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// PiiCategory enum
 pub enum PiiCategory {
     Email,
     PhoneNumber,
@@ -69,6 +70,7 @@ impl fmt::Display for PiiCategory {
 
 /// A span matched by the deterministic regex engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// RegexEntity struct
 pub struct RegexEntity {
     pub category: PiiCategory,
     /// Byte offset of the first byte of the span.
@@ -88,6 +90,7 @@ pub struct RegexEntity {
 }
 
 impl RegexEntity {
+/// new function
     pub fn new(category: PiiCategory, start: u32, end: u32) -> Self {
         let redact_template = format!("[{category:?}]").to_uppercase();
         Self {
@@ -104,6 +107,7 @@ impl RegexEntity {
 
 /// A single built-in detection pattern and how its matches should be redacted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// PatternMeta struct
 pub struct PatternMeta {
     pub category: PiiCategory,
     pub pattern: String,
@@ -182,6 +186,7 @@ impl PatternMeta {
 
 /// A span produced by a statistical (NER model) backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ModelEntity struct
 pub struct ModelEntity {
     pub category: PiiCategory,
     pub text: String,
@@ -193,6 +198,7 @@ pub struct ModelEntity {
 /// Which detector produced a merged entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// EntitySource enum
 pub enum EntitySource {
     Regex,
     Model,
@@ -210,6 +216,7 @@ impl fmt::Display for EntitySource {
 /// Tie-break rule applied when two detections overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// MergePriority enum
 pub enum MergePriority {
     RegexFirst,
     HigherConfidence,
@@ -217,6 +224,7 @@ pub enum MergePriority {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// MergeConfig struct
 pub struct MergeConfig {
     /// Overlap ratio above which two spans are considered the same detection.
     pub overlap_threshold: f32,

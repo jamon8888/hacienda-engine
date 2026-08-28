@@ -8,6 +8,7 @@ use thiserror::Error;
 /// Variants carry the job id where applicable so callers can log a useful
 /// message without re-fetching the job.
 #[derive(Debug, Error)]
+/// JobError enum
 pub enum JobError {
     /// No job with the given id exists in the store.
     #[error("job not found: {0}")]

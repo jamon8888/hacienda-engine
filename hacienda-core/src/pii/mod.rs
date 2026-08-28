@@ -30,6 +30,7 @@ use thiserror::Error;
 
 /// Every way the detection pipeline can fail.
 #[derive(Debug, Error)]
+/// PiiError enum
 pub enum PiiError {
     /// A detection pattern did not compile. Carries the category so a bad
     /// caller-supplied pattern can be identified without re-running the set.

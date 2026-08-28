@@ -68,6 +68,7 @@ use serde::{Deserialize, Serialize};
 /// something reads it, not before.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// AuditConfig struct
 pub struct AuditConfig {
     /// Whether to record an audit chain at all. Read by the facade when choosing
     /// whether to build a default store.

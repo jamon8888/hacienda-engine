@@ -44,6 +44,7 @@ pub trait AuditSink {
     note = "use AuditStore and FileAuditStore; FileSink does not fsync and does not survive \
             power loss"
 )]
+/// FileSink struct
 pub struct FileSink {
     writer: BufWriter<File>,
     path: PathBuf,
@@ -92,10 +93,12 @@ impl FileSink {
         })
     }
 
+/// chain function
     pub fn chain(&self) -> &AuditChain {
         &self.chain
     }
 
+/// chain_mut function
     pub fn chain_mut(&mut self) -> &mut AuditChain {
         &mut self.chain
     }

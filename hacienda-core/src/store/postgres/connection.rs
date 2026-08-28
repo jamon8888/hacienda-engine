@@ -9,6 +9,7 @@ use std::time::Duration;
 
 /// Error type for store connection/migration failures.
 #[derive(Debug, thiserror::Error)]
+/// StoreError enum
 pub enum StoreError {
     #[error("failed to connect to Postgres: {0}")]
     Connect(#[source] sqlx::Error),

@@ -5,6 +5,7 @@ use thiserror::Error;
 
 /// Errors returned by [`super::store::TenantStore`] implementations.
 #[derive(Debug, Error)]
+/// TenantError enum
 pub enum TenantError {
     /// `create` was called with an id that already has a row.
     ///

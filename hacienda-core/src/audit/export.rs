@@ -4,6 +4,7 @@ use crate::audit::chain::AuditChain;
 use crate::audit::error::AuditError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ExportFormat enum
 pub enum ExportFormat {
     JsonLines,
     Json,
