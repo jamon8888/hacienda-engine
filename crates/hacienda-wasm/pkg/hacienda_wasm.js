@@ -1,3 +1,5 @@
+/* @ts-self-types="./hacienda_wasm.d.ts" */
+
 /**
  * One open [`IndexedDbAuditStore`] connection, exposed to JS.
  */
@@ -146,6 +148,41 @@ export class AuditHandle {
     }
 }
 if (Symbol.dispose) AuditHandle.prototype[Symbol.dispose] = AuditHandle.prototype.free;
+
+/**
+ * @returns {boolean}
+ */
+export function isNerModelLoaded() {
+    const ret = wasm.isNerModelLoaded();
+    return ret !== 0;
+}
+
+/**
+ * Load the model `process`/`scan` will use from now on, replacing any previously
+ * loaded one. Bytes are already fully in memory (Studio fetches and IndexedDB-caches
+ * them once, shared with its own separate entity-glossary NER pass) — this is
+ * synchronous, no I/O happens here.
+ *
+ * # Errors
+ *
+ * Throws if the model bytes cannot be loaded — this function is synchronous (per its
+ * own doc above), so a JS caller sees a thrown exception, not a rejected Promise.
+ * @param {Uint8Array} weights
+ * @param {Uint8Array} tokenizer
+ * @param {Uint8Array} encoder_config
+ */
+export function loadNerModel(weights, tokenizer, encoder_config) {
+    const ptr0 = passArray8ToWasm0(weights, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(tokenizer, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(encoder_config, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.loadNerModel(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
 
 /**
  * Regex + NER (when a model is loaded, via [`ner_model::load_ner_model`]) detection and
@@ -362,6 +399,9 @@ function __wbg_get_imports() {
         __wbg_error_24e6ac605d438e54: function() { return handleError(function (arg0) {
             const ret = arg0.error;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        }, arguments); },
+        __wbg_getRandomValues_a608c4436c19407a: function() { return handleError(function (arg0, arg1) {
+            globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
         }, arguments); },
         __wbg_getRandomValues_e446ea5ffdd14ee5: function() { return handleError(function (arg0, arg1) {
             globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
@@ -677,12 +717,12 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 916, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1639, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___wasm_bindgen_c6b32ff19ee0a2fc___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_c6b32ff19ee0a2fc___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 881, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 1604, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___web_sys_80e25b5c2239100___features__gen_Event__Event______true_);
             return ret;
         },
@@ -692,7 +732,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 883, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1606, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke_______true_);
             return ret;
         },
@@ -901,6 +941,13 @@ function makeMutClosure(arg0, arg1, f) {
     };
     CLOSURE_DTORS.register(real, state, state);
     return real;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

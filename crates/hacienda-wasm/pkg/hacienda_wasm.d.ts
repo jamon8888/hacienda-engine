@@ -93,6 +93,21 @@ export class AuditHandle {
     verify(): Promise<void>;
 }
 
+export function isNerModelLoaded(): boolean;
+
+/**
+ * Load the model `process`/`scan` will use from now on, replacing any previously
+ * loaded one. Bytes are already fully in memory (Studio fetches and IndexedDB-caches
+ * them once, shared with its own separate entity-glossary NER pass) — this is
+ * synchronous, no I/O happens here.
+ *
+ * # Errors
+ *
+ * Throws if the model bytes cannot be loaded — this function is synchronous (per its
+ * own doc above), so a JS caller sees a thrown exception, not a rejected Promise.
+ */
+export function loadNerModel(weights: Uint8Array, tokenizer: Uint8Array, encoder_config: Uint8Array): void;
+
 /**
  * Regex + NER (when a model is loaded, via [`ner_model::load_ner_model`]) detection and
  * redaction over `text`, using the default pipeline config. Returns the serialized
@@ -139,17 +154,18 @@ export interface InitOutput {
     readonly audithandle_recordReveal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly audithandle_tip: (a: number) => any;
     readonly audithandle_verify: (a: number) => any;
+    readonly isNerModelLoaded: () => number;
+    readonly loadNerModel: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly process: (a: number, b: number) => any;
     readonly process_with_model_entities: (a: number, b: number, c: any) => any;
     readonly redact_empty: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly scan: (a: number, b: number) => any;
     readonly scan_with_model_entities: (a: number, b: number, c: any) => any;
-    readonly wasm_bindgen_49a9365544958414___convert__closures_____invoke___wasm_bindgen_49a9365544958414___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_49a9365544958414___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_49a9365544958414___convert__closures_____invoke___web_sys_70ae0c67b646c3f3___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_49a9365544958414___JsValue___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_49a9365544958414___convert__closures_____invoke___js_sys_904ce36fe59b745e___Function_fn_wasm_bindgen_49a9365544958414___JsValue_____wasm_bindgen_49a9365544958414___sys__Undefined___js_sys_904ce36fe59b745e___Function_fn_wasm_bindgen_49a9365544958414___JsValue_____wasm_bindgen_49a9365544958414___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
-    readonly wasm_bindgen_49a9365544958414___convert__closures_____invoke___web_sys_70ae0c67b646c3f3___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_49a9365544958414___convert__closures_____invoke___bool__true_: (a: number, b: number) => number;
-    readonly wasm_bindgen_49a9365544958414___convert__closures_____invoke_______true_: (a: number, b: number) => void;
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___wasm_bindgen_c6b32ff19ee0a2fc___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_c6b32ff19ee0a2fc___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___web_sys_80e25b5c2239100___features__gen_IdbVersionChangeEvent__IdbVersionChangeEvent__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_c6b32ff19ee0a2fc___JsValue___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___js_sys_bde86a248cf46b9___Function_fn_wasm_bindgen_c6b32ff19ee0a2fc___JsValue_____wasm_bindgen_c6b32ff19ee0a2fc___sys__Undefined___js_sys_bde86a248cf46b9___Function_fn_wasm_bindgen_c6b32ff19ee0a2fc___JsValue_____wasm_bindgen_c6b32ff19ee0a2fc___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke___web_sys_80e25b5c2239100___features__gen_Event__Event______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_c6b32ff19ee0a2fc___convert__closures_____invoke_______true_: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
