@@ -1,10 +1,11 @@
 //! Pipeline configuration, loaded from TOML and overridable from a CLI.
 
 use crate::audit::AuditConfig;
+use crate::pii::types::PiiCategory;
 use crate::pii::PiiError;
 use crate::redaction::{RedactionConfig, RedactionMode};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Length, in hex characters, of the digest suffix in [`VerticalConfig::provenance_id`].
@@ -19,15 +20,23 @@ const BASE_CATEGORY_NAMES: [&str; 5] = ["person", "organization", "location", "e
 /// Effective configuration for one [`crate::pii::PiiPipeline`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// PipelineConfig struct
 pub struct PipelineConfig {
     /// Prefer deterministic regex spans over model spans when the two overlap.
     pub regex_first: bool,
     /// Model detections scoring below this are discarded before merging.
     pub model_threshold_default: f32,
+    /// Per-category threshold overrides — when a category is present here its value
+    /// is used instead of `model_threshold_default`. Empty (default) means
+    /// `effective_threshold` applies the hybrid persona-boost table.
+    pub model_thresholds: HashMap<PiiCategory, f32>,
     /// Overlap ratio above which two spans are treated as the same detection.
     pub merge_overlap_threshold: f32,
+    /// redaction field
     pub redaction: RedactionConfig,
+    /// audit field
     pub audit: AuditConfig,
+    /// model field
     pub model: ModelConfig,
     /// How many documents [`crate::HaciendaFacade::process_batch_with_auth`] runs
     /// through this pipeline at once.
@@ -56,12 +65,41 @@ impl Default for PipelineConfig {
         Self {
             regex_first: true,
             model_threshold_default: 0.5,
+            model_thresholds: HashMap::new(),
             merge_overlap_threshold: 0.5,
             redaction: RedactionConfig::default(),
             audit: AuditConfig::default(),
             model: ModelConfig::default(),
             concurrency: 1,
             vertical: None,
+        }
+    }
+}
+
+/// Threshold for person-name categories in the hybrid persona-boost table.
+const PERSON_NAME_THRESHOLD: f32 = 0.65;
+/// Threshold for contact / financial identifier categories in the hybrid persona-boost table.
+const CONTACT_FINANCIAL_THRESHOLD: f32 = 0.48;
+
+impl PipelineConfig {
+    /// Effective threshold for a concrete `PiiCategory`, honouring overrides in
+    /// `model_thresholds` or the hybrid persona-boost table otherwise.
+    pub fn effective_threshold(&self, cat: &PiiCategory) -> f32 {
+        if let Some(v) = self.model_thresholds.get(cat) {
+            return *v;
+        }
+        match cat {
+            PiiCategory::Person
+            | PiiCategory::FullName
+            | PiiCategory::FirstName
+            | PiiCategory::MiddleName
+            | PiiCategory::LastName => PERSON_NAME_THRESHOLD,
+            PiiCategory::Email
+            | PiiCategory::PhoneNumber
+            | PiiCategory::Iban
+            | PiiCategory::IpAddress
+            | PiiCategory::CreditCard => CONTACT_FINANCIAL_THRESHOLD,
+            _ => self.model_threshold_default,
         }
     }
 }
@@ -88,6 +126,7 @@ impl Default for PipelineConfig {
 /// to you.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// VerticalConfig struct
 pub struct VerticalConfig {
     /// Stable identifier recorded in the audit chain.
     pub id: String,
@@ -105,7 +144,7 @@ pub struct VerticalConfig {
 /// `credit_card`, `iban`, `full_name`) use that table's exact spelling so detections land
 /// on their real [`crate::pii::PiiCategory`] variant instead of falling through to
 /// `Custom(label)`.
-const COMPREHENSIVE_LABELS: [&str; 29] = [
+const COMPREHENSIVE_LABELS: [&str; 41] = [
     "address",
     "ssn",
     "passport",
@@ -135,6 +174,18 @@ const COMPREHENSIVE_LABELS: [&str; 29] = [
     "vehicle_vin",
     "date_of_birth",
     "full_name",
+    "first_name",
+    "middle_name",
+    "last_name",
+    "street_address",
+    "city",
+    "state_or_region",
+    "postal_code",
+    "country",
+    "government_id",
+    "payment_card",
+    "card_expiry",
+    "card_cvv",
 ];
 
 impl VerticalConfig {
@@ -255,6 +306,7 @@ impl VerticalConfig {
 /// on-premise and must not reach the network at inference time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// ModelConfig struct
 pub struct ModelConfig {
     /// When false the pipeline is regex-only. Nothing is loaded.
     pub enabled: bool,
@@ -266,10 +318,15 @@ pub struct ModelConfig {
 
 /// Values supplied on the command line, applied on top of the loaded file.
 #[derive(Debug, Clone, Default)]
+/// CliOverrides struct
 pub struct CliOverrides {
+    /// model_threshold field
     pub model_threshold: Option<f32>,
+    /// redaction_mode field
     pub redaction_mode: Option<RedactionMode>,
+    /// model_dir field
     pub model_dir: Option<PathBuf>,
+    /// lora_adapter_dir field
     pub lora_adapter_dir: Option<PathBuf>,
 }
 
@@ -574,11 +631,11 @@ mod tests {
 
     #[test]
     fn should_size_the_comprehensive_vertical_to_the_taxonomy_minus_the_base_categories() {
-        // PiiCategory has 33 named variants plus `Custom(String)`; 4 of the named
+        // PiiCategory has 45 named variants (33 + 12 hybrid) plus `Custom(String)`; 4 of the named
         // variants (Email, PhoneNumber, Person, Organization) are already requested
-        // via the base categories, so the comprehensive vertical adds the remaining 29.
+        // via the base categories, so the comprehensive vertical adds the remaining 41.
         let comprehensive = VerticalConfig::comprehensive();
-        assert_eq!(comprehensive.labels.len(), 29);
+        assert_eq!(comprehensive.labels.len(), 41);
         assert_eq!(comprehensive.id, "comprehensive");
     }
 
@@ -587,5 +644,25 @@ mod tests {
         let error = PipelineConfig::from_file(Path::new("/nonexistent/hacienda.toml")).unwrap_err();
         assert!(matches!(error, PiiError::ConfigIo { .. }));
         assert!(error.to_string().contains("/nonexistent/hacienda.toml"));
+    }
+
+    #[test]
+    fn should_apply_per_category_threshold_offsets() {
+        let mut config = PipelineConfig {
+            model_threshold_default: 0.5,
+            ..Default::default()
+        };
+        // Person family gets boosted
+        assert_eq!(config.effective_threshold(&PiiCategory::Person), 0.65);
+        assert_eq!(config.effective_threshold(&PiiCategory::FirstName), 0.65);
+        assert_eq!(config.effective_threshold(&PiiCategory::LastName), 0.65);
+        // High-precision categories get lowered
+        assert_eq!(config.effective_threshold(&PiiCategory::Email), 0.48);
+        assert_eq!(config.effective_threshold(&PiiCategory::CreditCard), 0.48);
+        // Override via map
+        config.model_thresholds.insert(PiiCategory::Person, 0.7);
+        assert_eq!(config.effective_threshold(&PiiCategory::Person), 0.7);
+        // Default fallback
+        assert_eq!(config.effective_threshold(&PiiCategory::Ssn), 0.5);
     }
 }

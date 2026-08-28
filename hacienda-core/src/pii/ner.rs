@@ -58,6 +58,7 @@ pub(crate) fn categories_with_vertical(
 ///
 /// [`HaciendaFacade`]: crate::HaciendaFacade
 #[derive(Clone)]
+/// NerDetector struct
 pub struct NerDetector {
     backend: Arc<dyn NerBackend>,
     categories: Vec<EntityCategory>,
@@ -104,6 +105,7 @@ impl NerDetector {
     ///
     /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded.
     #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+/// from_candle_local function
     pub fn from_candle_local(
         model_dir: &std::path::Path,
         lora_adapter_dir: Option<&std::path::Path>,
@@ -127,6 +129,7 @@ impl NerDetector {
     ///
     /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded.
     #[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
+/// from_candle_bytes function
     pub fn from_candle_bytes(
         weights: &[u8],
         tokenizer_json: &[u8],
@@ -171,6 +174,8 @@ impl NerDetector {
     }
 }
 
+/// Convert an xberg [`Entity`] into a pipeline [`ModelEntity`], mapping the category
+/// via [`to_pii_category`] and normalising missing confidence to `1.0`.
 fn to_model_entity(entity: Entity) -> ModelEntity {
     ModelEntity {
         category: to_pii_category(&entity.category),
@@ -187,7 +192,7 @@ fn to_model_entity(entity: Entity) -> ModelEntity {
 ///
 /// Categories with no PII counterpart (Money, Percent, Date, Time) are carried through
 /// as `Custom` rather than dropped, so a caller redacting everything still sees them.
-pub(crate) fn to_pii_category(category: &EntityCategory) -> PiiCategory {
+pub fn to_pii_category(category: &EntityCategory) -> PiiCategory {
     match category {
         EntityCategory::Person => PiiCategory::Person,
         EntityCategory::Organization => PiiCategory::Organization,
@@ -206,6 +211,35 @@ pub(crate) fn to_pii_category(category: &EntityCategory) -> PiiCategory {
             "passport" | "passport_number" => PiiCategory::PassportNumber,
             "address" => PiiCategory::Address,
             "full_name" | "fullname" | "name" => PiiCategory::FullName,
+            "person" => PiiCategory::Person,
+            "first_name" => PiiCategory::FirstName,
+            "middle_name" => PiiCategory::MiddleName,
+            "last_name" => PiiCategory::LastName,
+            "date_of_birth" => PiiCategory::DateOfBirth,
+            "email" => PiiCategory::Email,
+            "phone_number" | "phone" => PiiCategory::PhoneNumber,
+            "street_address" => PiiCategory::StreetAddress,
+            "city" => PiiCategory::City,
+            "state_or_region" => PiiCategory::StateOrRegion,
+            "postal_code" => PiiCategory::PostalCode,
+            "country" => PiiCategory::Country,
+            "government_id" => PiiCategory::GovernmentId,
+            "national_id_number" => PiiCategory::NationalId,
+            "drivers_license_number" | "license_number" => PiiCategory::DriversLicense,
+            "tax_id" | "tax_number" => PiiCategory::TaxId,
+            "bank_account" | "account_number" => PiiCategory::BankAccount,
+            "routing_number" => PiiCategory::RoutingNumber,
+            "payment_card" => PiiCategory::PaymentCard,
+            "card_number" => PiiCategory::CreditCard,
+            "card_expiry" => PiiCategory::CardExpiry,
+            "card_cvv" => PiiCategory::CardCvv,
+            "username" => PiiCategory::Username,
+            "ip_address" => PiiCategory::IpAddress,
+            "password" => PiiCategory::Password,
+            "secret" => PiiCategory::SecretToken,
+            "api_key" => PiiCategory::ApiKey,
+            "access_token" => PiiCategory::SecretToken,
+            "url" => PiiCategory::Url,
             _ => PiiCategory::Custom(label.clone()),
         },
     }

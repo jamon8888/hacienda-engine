@@ -28,23 +28,35 @@ pub struct PiiPipeline {
 
 /// Everything one `process` call produced.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// PipelineResult struct
 pub struct PipelineResult {
     /// Input text with every merged span rewritten. Equal to the input for [`PiiPipeline::scan`].
     pub redacted_text: String,
+    /// entities field
     pub entities: Vec<MergedEntity>,
+    /// audit_log field
     pub audit_log: Vec<RedactionAuditEntry>,
+    /// metrics field
     pub metrics: PipelineMetrics,
 }
 
 /// Per-stage timings and counts for one `process` call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// PipelineMetrics struct
 pub struct PipelineMetrics {
+    /// regex_ms field
     pub regex_ms: u64,
+    /// model_ms field
     pub model_ms: u64,
+    /// merge_ms field
     pub merge_ms: u64,
+    /// redaction_ms field
     pub redaction_ms: u64,
+    /// total_ms field
     pub total_ms: u64,
+    /// entities_detected field
     pub entities_detected: u32,
+    /// entities_redacted field
     pub entities_redacted: u32,
 }
 
@@ -152,6 +164,7 @@ impl PiiPipeline {
         })
     }
 
+/// config function
     pub fn config(&self) -> &PipelineConfig {
         &self.config
     }
@@ -162,6 +175,7 @@ impl PiiPipeline {
     /// [`VerticalConfig::provenance_id`] and
     /// [`AuditEntry::vertical`](crate::audit::AuditEntry::vertical) for what the value
     /// means and why it is not the bare vertical id.
+    #[allow(dead_code)]
     pub(crate) fn vertical_provenance_id(&self) -> Option<String> {
         self.config
             .vertical
@@ -172,6 +186,19 @@ impl PiiPipeline {
     /// True when a NER backend is loaded. A `false` here means regex-only detection.
     pub fn has_model(&self) -> bool {
         self.ner_detector.is_some()
+    }
+
+    /// Model identifier for audit provenance, if a model is loaded.
+    ///
+    /// The identifier is derived from the configured model directory. It is used as the
+    /// `model` field on [`crate::audit::AuditEntry`]. When no model is configured the
+    /// entry is regex-only and the field stays `None`.
+    pub fn model_identifier(&self) -> Option<String> {
+        self.config
+            .model
+            .model_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
     }
 
     /// Detect and redact.

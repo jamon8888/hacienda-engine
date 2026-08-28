@@ -12,22 +12,39 @@ use serde::{Deserialize, Serialize};
 /// `&TenantId` explicitly wherever it cannot resolve the tenant from an item it already
 /// has in hand (`list`/`get`/`stats`, and the pre-lookup half of `assign`/`decide`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ReviewQueueItem struct
 pub struct ReviewQueueItem {
+    /// id field
     pub id: String,
+    /// text_snippet field
     pub text_snippet: String,
+    /// category field
     pub category: String,
+    /// start field
     pub start: u32,
+    /// end field
     pub end: u32,
+    /// confidence field
     pub confidence: f32,
+    /// source field
     pub source: String,
+    /// status field
     pub status: ReviewStatus,
+    /// priority field
     pub priority: Priority,
+    /// assigned_reviewer field
     pub assigned_reviewer: Option<String>,
+    /// created_at field
     pub created_at: String,
+    /// deadline field
     pub deadline: Option<String>,
+    /// decision field
     pub decision: Option<ReviewDecision>,
+    /// decided_by field
     pub decided_by: Option<String>,
+    /// decided_at field
     pub decided_at: Option<String>,
+    /// comment field
     pub comment: Option<String>,
     /// The tenant this item belongs to (S1). Set by
     /// [`ReviewQueue::submit`](crate::review::ReviewQueue::submit) — always `"default"`
@@ -41,6 +58,7 @@ pub struct ReviewQueueItem {
     /// fail outright on any log written before this change (`review/store_file.rs`
     /// reads exactly this struct back via `serde_json`).
     #[serde(default = "default_tenant_id")]
+    /// tenant_id field
     pub tenant_id: String,
 }
 
@@ -50,11 +68,17 @@ fn default_tenant_id() -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// ReviewStatus enum
 pub enum ReviewStatus {
+    /// Pending variant
     Pending,
+    /// InReview variant
     InReview,
+    /// Approved variant
     Approved,
+    /// Rejected variant
     Rejected,
+    /// Modified variant
     Modified,
 }
 
@@ -89,11 +113,16 @@ impl std::str::FromStr for ReviewStatus {
 /// Urgency of a review item, derived from detection confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+/// Priority enum
 pub enum Priority {
+    /// Low variant
     Low,
+    /// Normal variant
     Normal,
     #[default]
+    /// High variant
     High,
+    /// Critical variant
     Critical,
 }
 
@@ -125,10 +154,14 @@ impl std::str::FromStr for Priority {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+/// ReviewDecision enum
 pub enum ReviewDecision {
     #[default]
+    /// Approve variant
     Approve,
+    /// Reject variant
     Reject,
+    /// Modify variant
     Modify,
 }
 
@@ -158,30 +191,46 @@ impl std::str::FromStr for ReviewDecision {
 
 /// Submission payload for a new review item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ReviewRequest struct
 pub struct ReviewRequest {
+    /// text_snippet field
     pub text_snippet: String,
+    /// category field
     pub category: String,
+    /// start field
     pub start: u32,
+    /// end field
     pub end: u32,
+    /// confidence field
     pub confidence: f32,
+    /// source field
     pub source: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// QueueStats struct
 pub struct QueueStats {
+    /// total field
     pub total: usize,
+    /// pending field
     pub pending: usize,
+    /// in_review field
     pub in_review: usize,
+    /// approved field
     pub approved: usize,
+    /// rejected field
     pub rejected: usize,
+    /// modified field
     pub modified: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// ReviewConfig struct
 pub struct ReviewConfig {
     /// Detections at or above this confidence never enter the queue.
     pub confidence_threshold: f32,
+    /// deadline_hours field
     pub deadline_hours: Option<u64>,
 }
 

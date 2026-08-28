@@ -3,21 +3,27 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// HaciendaError enum
 pub enum HaciendaError {
     /// Document extraction failed inside xberg.
     #[error("extraction failed")]
+    /// Extraction variant
     Extraction(#[source] Box<xberg::XbergError>),
 
     #[error(transparent)]
+    /// Pii variant
     Pii(#[from] crate::pii::PiiError),
 
     #[error(transparent)]
+    /// Audit variant
     Audit(#[from] crate::audit::AuditError),
 
     #[error(transparent)]
+    /// Review variant
     Review(#[from] crate::review::ReviewError),
 
     #[error(transparent)]
+    /// Authz variant
     Authz(#[from] crate::auth::AuthzError),
 
     /// A pseudonym token operation failed.
@@ -28,10 +34,12 @@ pub enum HaciendaError {
     /// diagnostics while the HTTP layer can collapse all token errors to a
     /// single 400 response.
     #[error(transparent)]
+    /// Pseudonym variant
     Pseudonym(#[from] crate::redaction::PseudonymError),
 
     /// An API key operation failed.
     #[error(transparent)]
+    /// ApiKey variant
     ApiKey(#[from] crate::auth::keys::ApiKeyError),
 
     /// A detection or redaction operation was requested but no `[pii]` section is
@@ -42,6 +50,7 @@ pub enum HaciendaError {
     /// a clean document — and it is the failure mode that gets privileged material
     /// disclosed.
     #[error("PII detection is not enabled: add a [pii] section to the configuration")]
+    /// PiiDisabled variant
     PiiDisabled,
 
     /// Structured-field redaction recursed into a nested archive member deeper than

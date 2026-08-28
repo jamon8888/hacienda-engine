@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **GLiNER2 privacy taxonomy alignment** — hybrid 12-variant `PiiCategory` extension, 42-label alias table, comprehensive vertical with per-category thresholds, build-time model selection with digest pinning, and audit provenance `model` field with tagged-length chain hashing.
+  - Added 12 new `PiiCategory` variants: `FirstName`, `MiddleName`, `LastName`, `StreetAddress`, `City`, `StateOrRegion`, `PostalCode`, `Country`, `GovernmentId`, `PaymentCard`, `CardExpiry`, `CardCvv`.
+  - `to_pii_category` now maps 42 GLiNER2 wire labels to the 45 hybrid taxonomy variants.
+  - `PipelineConfig.model_thresholds` with `effective_threshold` persona boost: +0.15 for person family, -0.05 for high-precision categories.
+  - `VerticalConfig::comprehensive` now lists 41 labels covering the taxonomy minus base categories.
+  - Studio `NerCategory` expanded 10→18 with address components and name parts; `NER_CATEGORIES` updated.
+  - `apps/hacienda-studio/lib/model-digests.ts` and one-slot IndexedDB eviction for model selection via `VITE_GLINER_MODEL_ID`.
+  - `AuditEntry` now carries optional `model` provenance, framed in chain hash with tag `0xfe`; old chains verify with `model=None`.
+
 ### Fixed
 
 - **Tenant-name sanitisation for pseudonym keys was still not injective after the
@@ -287,9 +298,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only; `decide_review` keeps the original `review_queue_with_auth` (`review:decide`).
   Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
   (no handler-level test exercised the two capabilities' distinction).
-
-### Added
-
 - **Five pure-Rust xberg enrichment capabilities were sitting in the dependency graph,
   unreachable, the same class of gap as the earlier extraction-format win (X1).** Enabled
   `keywords` (YAKE/RAKE), `summarization` (extractive TextRank), `qr-codes` (`rqrr`

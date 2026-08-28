@@ -8,8 +8,11 @@
 //! - `auth:manage` — API key issuance and revocation
 //! - `raw:extract` — `/xberg/v1/*` when passthrough is compiled in
 
+/// Module authn
 pub mod authn;
+/// Module authz
 pub mod authz;
+/// Module keys
 pub mod keys;
 
 pub use crate::auth::keys::ApiKey;
@@ -22,6 +25,7 @@ use std::collections::HashSet;
 /// A capability that guards access to a hacienda operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Capability enum
 pub enum Capability {
     /// Normal extraction with redaction. The default for content-bearing endpoints.
     DocumentsProcess,
@@ -87,41 +91,51 @@ impl std::str::FromStr for Capability {
 
 /// A set of capabilities granted to a principal.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// CapabilitySet struct
 pub struct CapabilitySet(HashSet<Capability>);
 
 impl CapabilitySet {
+/// new function
     pub fn new(capabilities: impl IntoIterator<Item = Capability>) -> Self {
         Self(capabilities.into_iter().collect())
     }
 
+/// empty function
     pub fn empty() -> Self {
         Self::default()
     }
 
+/// all function
     pub fn all() -> Self {
         Self(Capability::all().into_iter().collect())
     }
 
+/// has function
     pub fn has(&self, cap: Capability) -> bool {
         self.0.contains(&cap)
     }
 
+/// insert function
     pub fn insert(&mut self, cap: Capability) {
         self.0.insert(cap);
     }
 
+/// remove function
     pub fn remove(&mut self, cap: Capability) {
         self.0.remove(&cap);
     }
 
+/// iter function
     pub fn iter(&self) -> impl Iterator<Item = Capability> + '_ {
         self.0.iter().copied()
     }
 
+/// is_empty function
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+/// len function
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -152,6 +166,7 @@ impl IntoIterator for CapabilitySet {
 
 /// Authentication context for a request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// AuthContext struct
 pub struct AuthContext {
     /// Unique identifier for the principal (user, service, etc.).
     pub principal_id: String,
@@ -218,6 +233,7 @@ impl AuthContext {
 /// states the intent, and `git grep Caller::Trusted` enumerates every bypass in the
 /// codebase — which is the review question §7 actually cares about.
 #[derive(Debug, Clone, Copy)]
+/// Caller enum
 pub enum Caller<'a> {
     /// An in-process caller: the CLI, the desktop app, a test. The process boundary is
     /// the trust boundary, so no capability is enforced.
@@ -270,8 +286,10 @@ impl<'a> From<&'a AuthContext> for Caller<'a> {
 
 /// Authentication/authorization errors.
 #[derive(Debug, thiserror::Error)]
+/// AuthzError enum
 pub enum AuthzError {
     #[error("authentication required")]
+    /// Unauthenticated variant
     Unauthenticated,
     #[error("capability {required} required for principal {principal}")]
     MissingCapability {
@@ -292,6 +310,7 @@ pub enum AuthzError {
 /// must hash the incoming token and look up the stored hash — never store
 /// or compare raw keys.
 #[async_trait]
+/// TokenResolver trait
 pub trait TokenResolver: Send + Sync {
     /// Resolve a bearer token to its capability set.
     ///
@@ -308,6 +327,7 @@ pub trait TokenResolver: Send + Sync {
 /// Implementations must be `Send + Sync` because the store lives behind an `Arc`
 /// shared across tasks.
 #[async_trait]
+/// ApiKeyStore trait
 pub trait ApiKeyStore: Send + Sync {
     /// Create a new API key record.
     ///
@@ -363,11 +383,13 @@ pub trait ApiKeyStore: Send + Sync {
 
 /// In-memory implementation of [`ApiKeyStore`] for testing.
 #[derive(Debug, Default)]
+/// InMemoryApiKeyStore struct
 pub struct InMemoryApiKeyStore {
     keys: std::sync::Mutex<std::collections::HashMap<String, ApiKey>>,
 }
 
 impl InMemoryApiKeyStore {
+/// new function
     pub fn new() -> Self {
         Self::default()
     }

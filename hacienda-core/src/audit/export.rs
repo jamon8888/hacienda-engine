@@ -4,9 +4,13 @@ use crate::audit::chain::AuditChain;
 use crate::audit::error::AuditError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ExportFormat enum
 pub enum ExportFormat {
+    /// JsonLines variant
     JsonLines,
+    /// Json variant
     Json,
+    /// Csv variant
     Csv,
 }
 
@@ -120,6 +124,7 @@ mod tests {
                 config_hash: String::new(),
                 principal: None,
                 vertical: None,
+                model: None,
             });
         }
         chain
@@ -195,6 +200,7 @@ mod tests {
             config_hash: String::new(),
             principal: None,
             vertical: Some("finance@3f9a1c02".into()),
+            model: None,
         });
 
         let bytes = export_csv(&chain).unwrap();

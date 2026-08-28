@@ -1,7 +1,10 @@
 //! Span redaction with a per-result blake3 hash chain.
 
+/// Module engine
 pub mod engine;
+/// Module pseudonym
 pub mod pseudonym;
+/// Module types
 pub mod types;
 
 pub use engine::RedactionEngine;
@@ -16,10 +19,12 @@ pub use types::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// RedactionError enum
 pub enum RedactionError {
     #[error(
         "unknown redaction mode: '{0}' (expected mask, hash, pseudonymize, remove, or custom)"
     )]
+    /// UnknownMode variant
     UnknownMode(String),
 
     /// Refuses to build a `Pseudonymize` engine with no key.
@@ -32,8 +37,10 @@ pub enum RedactionError {
         "redaction mode 'pseudonymize' requires a pseudonymisation key, and none was supplied \
          (set {ACTIVE_KEY_VAR}, or choose mode 'mask')"
     )]
+    /// MissingPseudonymKey variant
     MissingPseudonymKey,
 
     #[error(transparent)]
+    /// Pseudonym variant
     Pseudonym(#[from] PseudonymError),
 }

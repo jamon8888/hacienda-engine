@@ -6,14 +6,23 @@
 //! `xberg` backend. [`merge::merge_entities`] resolves their overlaps, and
 //! [`pipeline::PiiPipeline`] runs the whole sequence including redaction.
 
+/// Module config
 pub mod config;
+/// Module context
 pub mod context;
+/// Module engine
 pub mod engine;
+/// Module merge
 pub mod merge;
+/// Module ner
 pub mod ner;
+/// Module patterns
 pub mod patterns;
+/// Module pipeline
 pub mod pipeline;
+/// Module types
 pub mod types;
+/// Module validators
 pub mod validators;
 
 pub use config::{CliOverrides, ModelConfig, PipelineConfig, VerticalConfig};
@@ -30,6 +39,7 @@ use thiserror::Error;
 
 /// Every way the detection pipeline can fail.
 #[derive(Debug, Error)]
+/// PiiError enum
 pub enum PiiError {
     /// A detection pattern did not compile. Carries the category so a bad
     /// caller-supplied pattern can be identified without re-running the set.

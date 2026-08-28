@@ -37,6 +37,7 @@ use crate::tenancy::TenantId;
 /// Callers that need strong uniqueness should supply an explicit identifier via
 /// [`NodeId::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// NodeId struct
 pub struct NodeId(String);
 
 impl NodeId {
@@ -115,6 +116,7 @@ fn resolve_hostname() -> String {
 /// `seal_hash` commits to all segment metadata including `prev_seal_hash` from the
 /// predecessor, making any later deletion of the predecessor detectable.
 #[derive(Debug)]
+/// Segment struct
 pub struct Segment {
     /// uuid v4 string — unique per segment, stored in the seal for reference.
     segment_id: String,
@@ -324,7 +326,9 @@ impl Segment {
 /// store can assert at recovery — replayed entries must number exactly this many — which
 /// fails with "expected 40 entries, found 37" instead of an opaque hash mismatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// SegmentSeal struct
 pub struct SegmentSeal {
+    /// segment_id field
     pub segment_id: String,
     /// The tenant this segment belongs to (S1 spec §5). Always `"default"` until the
     /// store that produced this seal is itself threaded with a real tenant context —
@@ -335,8 +339,11 @@ pub struct SegmentSeal {
     /// without this, loading it back would fail outright with a missing-field error
     /// instead of defaulting to `"default"`.
     #[serde(default = "default_tenant_id_string")]
+    /// tenant_id field
     pub tenant_id: String,
+    /// node_id field
     pub node_id: String,
+    /// config_hash field
     pub config_hash: String,
     /// Seal hash of the immediately preceding segment on this node, or `None` for the
     /// first segment. Committed into `seal_hash` so deletion of the predecessor is
@@ -376,6 +383,7 @@ fn default_tenant_id_string() -> String {
 /// covers. Wrapping them in a struct would force callers to construct one just to call this
 /// function; keeping them flat is both more legible and consistent with `compute_chain_hash`.
 #[allow(clippy::too_many_arguments)]
+/// compute_seal_hash function
 pub fn compute_seal_hash(
     prev_seal_hash: Option<&str>,
     segment_id: &str,
@@ -605,6 +613,7 @@ mod tests {
             config_hash: config().into(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 

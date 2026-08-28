@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A resolved authentication token with its associated principal and capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Token struct
 pub struct Token {
     /// Opaque token identifier (for logging/auditing).
     pub id: String,
@@ -89,6 +90,7 @@ impl Token {
 ///
 /// Implementations can validate API keys, JWTs, opaque tokens against a store, etc.
 #[async_trait]
+/// TokenResolver trait
 pub trait TokenResolver: Send + Sync {
     /// Resolve a token string to its [`Token`] representation.
     ///
@@ -105,6 +107,7 @@ pub trait TokenResolver: Send + Sync {
 /// means a `HashMap` probe compares digests rather than short-circuiting on a shared prefix
 /// of the secret itself.
 #[derive(Debug, Default)]
+/// InMemoryTokenStore struct
 pub struct InMemoryTokenStore {
     /// Keyed by `blake3(secret)`; the [`Token`] carries only the loggable id.
     tokens: HashMap<[u8; 32], Token>,
@@ -160,6 +163,7 @@ impl TokenResolver for InMemoryTokenStore {
 ///
 /// **Not secure** — for development only.
 #[derive(Debug)]
+/// DevTokenResolver struct
 pub struct DevTokenResolver;
 
 #[async_trait]
@@ -281,6 +285,7 @@ impl TokenResolver for ApiKeyTokenResolver {
 /// Configuration for authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// AuthConfig struct
 pub struct AuthConfig {
     /// Enable authentication. When false, all requests are treated as unauthenticated.
     pub enabled: bool,
@@ -303,6 +308,7 @@ impl Default for AuthConfig {
 /// Type of token resolver to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// TokenResolverType enum
 pub enum TokenResolverType {
     /// In-memory store with static tokens from config.
     Memory,
@@ -322,11 +328,13 @@ pub enum TokenResolverType {
 ///
 /// `skip_serializing` rather than `skip`: loading a file must still read the secret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// StaticTokenConfig struct
 pub struct StaticTokenConfig {
     /// Token identifier (for logging).
     pub id: String,
     /// The actual token string. Never serialised — see the type docs.
     #[serde(skip_serializing)]
+    /// token field
     pub token: String,
     /// Principal ID.
     pub principal_id: String,

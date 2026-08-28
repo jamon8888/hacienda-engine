@@ -7,6 +7,7 @@ use crate::audit::error::AuditError;
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug)]
+/// Append-only, tamper-evident chain of audit entries.
 pub struct AuditChain {
     entries: Vec<AuditEntry>,
     last_chain_hash: String,
@@ -15,6 +16,7 @@ pub struct AuditChain {
 }
 
 impl AuditChain {
+    /// Create a new chain anchored to `config_hash`.
     pub fn new(config_hash: impl Into<String>) -> Self {
         Self {
             entries: Vec::new(),
@@ -79,18 +81,22 @@ impl AuditChain {
         verify_entries(&self.entries)
     }
 
+    /// Return all entries in order.
     pub fn entries(&self) -> &[AuditEntry] {
         &self.entries
     }
 
+    /// Number of entries in the chain.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the chain contains no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Config hash the chain was created with.
     pub fn config_hash(&self) -> &str {
         &self.config_hash
     }
@@ -152,6 +158,7 @@ mod tests {
             config_hash: String::new(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 

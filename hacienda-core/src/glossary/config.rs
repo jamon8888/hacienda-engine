@@ -5,17 +5,24 @@ use serde::{Deserialize, Serialize};
 /// Markup used when linking a mention back to its glossary entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// LinkStyle enum
 pub enum LinkStyle {
     #[default]
+    /// Markdown variant
     Markdown,
+    /// Html variant
     Html,
+    /// Wiki variant
     Wiki,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// GlossaryConfig struct
 pub struct GlossaryConfig {
+    /// enabled field
     pub enabled: bool,
+    /// link_style field
     pub link_style: LinkStyle,
     /// Mentions detected below this confidence are not recorded.
     pub min_confidence: f32,

@@ -7,7 +7,9 @@
 //! two before this module compiles at all.
 
 #[cfg(feature = "postgres")]
+/// Module postgres
 pub mod postgres;
 
 #[cfg(feature = "s3")]
+/// Module object
 pub mod object;

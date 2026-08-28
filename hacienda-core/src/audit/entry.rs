@@ -12,10 +12,15 @@ use serde::{Deserialize, Serialize};
 /// plaintext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// RedactionAction enum
 pub enum RedactionAction {
+    /// Replace span with a fixed mask character.
     Mask,
+    /// Replace span with a blake3 hash.
     Hash,
+    /// Replace span with a pseudonym.
     Pseudonymize,
+    /// Remove span entirely.
     Remove,
     /// Span text was returned to an authorised caller in plaintext form.
     ///
@@ -23,6 +28,7 @@ pub enum RedactionAction {
     /// that holds `Capability::PiiReveal`. The `span_hash` field on the entry
     /// carries the blake3 digest of the revealed text.
     Reveal,
+    /// Custom template applied to the span.
     Custom(String),
 }
 
@@ -75,8 +81,11 @@ impl std::str::FromStr for RedactionAction {
 /// Which detector produced the entity the entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// EntitySource enum
 pub enum EntitySource {
+    /// Detected by regex patterns.
     Regex,
+    /// Detected by ML model.
     Model,
 }
 
@@ -114,16 +123,27 @@ impl From<crate::pii::types::EntitySource> for EntitySource {
 ///
 /// The original span is never stored — only its blake3 digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// AuditEntry struct
 pub struct AuditEntry {
+    /// Unique identifier for the entry.
     pub id: String,
+    /// ISO-8601 timestamp of creation.
     pub timestamp: String,
+    /// PII category name.
     pub category: String,
+    /// Redaction action applied.
     pub action: RedactionAction,
+    /// blake3 digest of the original span.
     pub span_hash: String,
+    /// Length of the original span in characters.
     pub span_length: u32,
+    /// Detection confidence, if applicable.
     pub confidence: Option<f32>,
+    /// Detector source.
     pub source: EntitySource,
+    /// Pipeline version used.
     pub pipeline_version: String,
+    /// Config hash the entry was minted under.
     pub config_hash: String,
     /// The authenticated principal this entry is attributable to, or `None` for an
     /// in-process caller ([`Caller::Trusted`](crate::auth::Caller::Trusted)).
@@ -133,6 +153,7 @@ pub struct AuditEntry {
     /// exactly what entries written before this field existed hashed as, so older chains
     /// still verify.
     #[serde(default)]
+    /// principal field
     pub principal: Option<String>,
     /// The Tier 0 schema vertical active when this entity was detected, or `None` when
     /// no vertical was configured.
@@ -146,27 +167,48 @@ pub struct AuditEntry {
     /// empty string — which is exactly what entries written before this field existed
     /// hashed as, so older chains still verify.
     #[serde(default)]
+    /// vertical field
     pub vertical: Option<String>,
+    /// The model that produced this entity, or `None` for regex-only entries or
+    /// chains written before this field existed. Recorded as
+    /// `"<model_id>@<digest8>"` — see `VerticalConfig::provenance_id` pattern —
+    /// covered by [`compute_chain_hash`] so it cannot be rewritten without
+    /// breaking verification. `None` hashes as no bytes, so older chains verify.
+    #[serde(default)]
+    /// model field
+    pub model: Option<String>,
     /// blake3 over the previous chain hash and this entry's identifying fields.
     pub chain_hash: String,
 }
 
 /// Everything needed to mint an [`AuditEntry`] except its position in the chain.
 #[derive(Debug, Clone)]
+/// AuditEntryInput struct
 pub struct AuditEntryInput {
+    /// Unique identifier for the entry.
     pub id: String,
+    /// PII category name.
     pub category: String,
+    /// Redaction action applied.
     pub action: RedactionAction,
+    /// blake3 digest of the original span.
     pub span_hash: String,
+    /// Length of the original span.
     pub span_length: u32,
+    /// Detection confidence.
     pub confidence: Option<f32>,
+    /// Detector source.
     pub source: EntitySource,
+    /// Pipeline version.
     pub pipeline_version: String,
+    /// Config hash.
     pub config_hash: String,
     /// See [`AuditEntry::principal`].
     pub principal: Option<String>,
     /// See [`AuditEntry::vertical`].
     pub vertical: Option<String>,
+    /// See [`AuditEntry::model`].
+    pub model: Option<String>,
 }
 
 impl AuditEntry {
@@ -186,6 +228,7 @@ impl AuditEntry {
                 config_hash: &input.config_hash,
                 principal: input.principal.as_deref(),
                 vertical: input.vertical.as_deref(),
+                model: input.model.as_deref(),
             },
         );
 
@@ -202,6 +245,7 @@ impl AuditEntry {
             config_hash: input.config_hash,
             principal: input.principal,
             vertical: input.vertical,
+            model: input.model,
             chain_hash,
         }
     }
@@ -216,6 +260,7 @@ impl AuditEntry {
             config_hash: &self.config_hash,
             principal: self.principal.as_deref(),
             vertical: self.vertical.as_deref(),
+            model: self.model.as_deref(),
         }
     }
 }
@@ -236,14 +281,24 @@ impl AuditEntry {
 /// above exists to avoid. Narrowing visibility instead of adding a constructor keeps
 /// that guarantee intact without giving external crates a way to build one at all.
 #[derive(Debug, Clone, Copy)]
+/// ChainHashFields struct
 pub struct ChainHashFields<'a> {
+    /// id field
     pub id: &'a str,
+    /// category field
     pub category: &'a str,
+    /// action field
     pub action: &'a RedactionAction,
+    /// span_hash field
     pub span_hash: &'a str,
+    /// config_hash field
     pub config_hash: &'a str,
+    /// principal field
     pub principal: Option<&'a str>,
+    /// vertical field
     pub vertical: Option<&'a str>,
+    /// model field
+    pub model: Option<&'a str>,
 }
 
 /// Tag byte prepended to the vertical's length-prefixed bytes when present.
@@ -257,6 +312,7 @@ pub struct ChainHashFields<'a> {
 /// identically, since blake3's streaming `.update()` is equivalent to hashing the
 /// concatenation of everything fed to it.
 const VERTICAL_PRESENT_TAG: u8 = 0xff;
+const MODEL_PRESENT_TAG: u8 = 0xfe;
 
 /// Compute the chain hash linking an entry to its predecessor.
 ///
@@ -286,6 +342,11 @@ pub fn compute_chain_hash(prev_chain_hash: &str, seq: u64, fields: ChainHashFiel
         hasher.update(&(vertical.len() as u64).to_le_bytes());
         hasher.update(vertical.as_bytes());
     }
+    if let Some(model) = fields.model {
+        hasher.update(&[MODEL_PRESENT_TAG]);
+        hasher.update(&(model.len() as u64).to_le_bytes());
+        hasher.update(model.as_bytes());
+    }
     hasher.finalize().to_hex().to_string()
 }
 
@@ -306,6 +367,7 @@ mod tests {
             config_hash: "cfg".into(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 
@@ -359,6 +421,7 @@ mod tests {
             config_hash: "cfg",
             principal: None,
             vertical: None,
+            model: None,
         };
         let empty_string_principal = ChainHashFields {
             principal: Some(""),
@@ -391,6 +454,7 @@ mod tests {
             config_hash: "cfg",
             principal: None,
             vertical: None,
+            model: None,
         };
 
         let mut hasher = blake3::Hasher::new();
@@ -444,6 +508,7 @@ mod tests {
             config_hash: "cfg",
             principal: None,
             vertical: None,
+            model: None,
         };
         let empty_string_vertical = ChainHashFields {
             vertical: Some(""),
@@ -547,4 +612,47 @@ mod tests {
     // The mode-to-action mapping moved to `RedactionEngine::audit_action` along with the
     // `From` impl it used to test; coverage lives in
     // `redaction::engine::tests::should_record_the_applied_action_for_every_mode`.
+
+    #[test]
+    fn should_change_the_chain_hash_when_the_model_changes() {
+        let without_model = AuditEntry::new(input("id-1"), "prev", 0);
+        let with_model = AuditEntry::new(
+            AuditEntryInput {
+                model: Some("fastino/gliner2-privacy-filter-PII-multi@a1b2c3d4".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+        assert_ne!(without_model.chain_hash, with_model.chain_hash);
+
+        let with_different_model = AuditEntry::new(
+            AuditEntryInput {
+                model: Some("jamon8888/gliner2-guardrails-pii-f16@53c73fff".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+        assert_ne!(with_model.chain_hash, with_different_model.chain_hash);
+    }
+
+    #[test]
+    fn should_round_trip_an_entry_with_a_model_through_json() {
+        let entry = AuditEntry::new(
+            AuditEntryInput {
+                model: Some("fastino/gliner2-privacy-filter-PII-multi@a1b2c3d4".into()),
+                ..input("id-1")
+            },
+            "prev",
+            0,
+        );
+        let json = serde_json::to_string(&entry).unwrap();
+        let round_tripped: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            round_tripped.model,
+            Some("fastino/gliner2-privacy-filter-PII-multi@a1b2c3d4".to_string())
+        );
+        assert_eq!(round_tripped.chain_hash, entry.chain_hash);
+    }
 }

@@ -8,16 +8,20 @@ use uuid::Uuid;
 
 /// Error type for version store operations.
 #[derive(Debug, thiserror::Error)]
+/// VersionError enum
 pub enum VersionError {
     #[error("database error: {0}")]
+    /// Database variant
     Database(#[from] sqlx::Error),
 
     #[error("version not found")]
+    /// NotFound variant
     NotFound,
 }
 
 /// Trait for document version storage.
 #[async_trait]
+/// DocumentVersionStore trait
 pub trait DocumentVersionStore: Send + Sync {
     /// Create a new version for a document.
     ///
@@ -66,23 +70,33 @@ pub trait DocumentVersionStore: Send + Sync {
 
 /// A document version record.
 #[derive(Debug, Clone)]
+/// DocumentVersion struct
 pub struct DocumentVersion {
+    /// id field
     pub id: Uuid,
+    /// document_id field
     pub document_id: Uuid,
+    /// version_sequence field
     pub version_sequence: i64,
+    /// content_hash field
     pub content_hash: String,
+    /// content field
     pub content: String,
+    /// entities_json field
     pub entities_json: Value,
+    /// created_at field
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Postgres-backed [`DocumentVersionStore`].
 #[derive(Clone)]
+/// PostgresDocumentVersionStore struct
 pub struct PostgresDocumentVersionStore {
     pool: PgPool,
 }
 
 impl PostgresDocumentVersionStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

@@ -1,11 +1,14 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// ReviewError enum
 pub enum ReviewError {
     #[error("review item not found: {0}")]
+    /// NotFound variant
     NotFound(String),
 
     #[error("review item already decided: {0}")]
+    /// AlreadyDecided variant
     AlreadyDecided(String),
 
     #[error("invalid review status transition from {from} to {to}")]

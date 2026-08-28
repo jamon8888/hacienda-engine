@@ -37,6 +37,7 @@ use crate::audit::error::AuditError;
 /// a hand-built cursor whose index has been nudged forwards would skip entries without
 /// anything noticing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// AuditCursor struct
 pub struct AuditCursor {
     /// The segment holding the entry this cursor names.
     pub segment_id: String,
@@ -88,6 +89,7 @@ impl FromStr for AuditCursor {
 
 /// One page of audit history, oldest entry first.
 #[derive(Debug, Clone)]
+/// AuditPage struct
 pub struct AuditPage {
     /// The entries on this page, in chain order.
     pub entries: Vec<AuditEntry>,

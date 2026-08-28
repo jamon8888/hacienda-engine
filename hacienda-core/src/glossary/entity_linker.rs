@@ -7,9 +7,13 @@ use std::collections::BTreeMap;
 
 /// One glossary term and the evidence behind it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// GlossaryEntry struct
 pub struct GlossaryEntry {
+    /// category field
     pub category: String,
+    /// term field
     pub term: String,
+    /// count field
     pub count: usize,
     /// Mean detection confidence across every observed mention.
     pub mean_confidence: f32,
@@ -21,6 +25,7 @@ pub struct GlossaryEntry {
 /// glossaries are byte-identical across runs — an artefact that reorders itself is
 /// useless as review evidence.
 #[derive(Debug, Clone)]
+/// EntityGlossary struct
 pub struct EntityGlossary {
     entries: BTreeMap<(String, String), Accumulator>,
     config: GlossaryConfig,
@@ -33,6 +38,7 @@ struct Accumulator {
 }
 
 impl EntityGlossary {
+/// new function
     pub fn new(config: GlossaryConfig) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -77,6 +83,7 @@ impl EntityGlossary {
         entries
     }
 
+/// is_empty function
     pub fn is_empty(&self) -> bool {
         self.entries().is_empty()
     }

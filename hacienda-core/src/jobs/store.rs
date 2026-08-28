@@ -33,6 +33,7 @@ use uuid::Uuid;
 /// [`crate::store::postgres::PostgresJobStore`] (Phase 9) — the trait surface is the real,
 /// stable seam between the async job API and its storage backend, not a placeholder.
 #[async_trait]
+/// JobStore trait
 pub trait JobStore: Send + Sync {
     /// Create a new job in the `Queued` state, owned by `tenant`.
     ///
@@ -119,6 +120,7 @@ pub trait JobStore: Send + Sync {
 /// required. All operations complete without I/O, so the `Mutex` is never held across
 /// an `.await`. Phase 4 will introduce a durable backend when a real producer exists.
 #[derive(Debug, Default)]
+/// InMemoryJobStore struct
 pub struct InMemoryJobStore {
     jobs: Mutex<HashMap<String, Job>>,
 }
@@ -173,7 +175,10 @@ impl JobStore for InMemoryJobStore {
         // tenant after, means a cross-tenant id falls straight into the same `None` a
         // nonexistent id produces — the not-found-not-forbidden property (D-S1b-1) falls
         // out of the lookup itself.
-        Ok(guard.get(id).filter(|j| j.tenant_id == tenant.as_str()).cloned())
+        Ok(guard
+            .get(id)
+            .filter(|j| j.tenant_id == tenant.as_str())
+            .cloned())
     }
 
     async fn transition(
@@ -269,7 +274,8 @@ impl JobStore for InMemoryJobStore {
         let mut jobs: Vec<Job> = guard
             .values()
             .filter(|j| {
-                j.tenant_id == tenant.as_str() && filter.map(|status| j.status == status).unwrap_or(true)
+                j.tenant_id == tenant.as_str()
+                    && filter.map(|status| j.status == status).unwrap_or(true)
             })
             .cloned()
             .collect();

@@ -10,14 +10,17 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// Module s3
 pub mod s3;
 
 /// Error type for object store operations.
 #[derive(Debug, thiserror::Error)]
+/// ObjectStoreError enum
 pub enum ObjectStoreError {
     /// The outbound request to the object store failed (network error, TLS error, etc.)
     /// or the store returned a status this client doesn't know how to interpret.
     #[error("object storage request failed: {0}")]
+    /// Request variant
     Request(String),
 }
 
@@ -30,21 +33,29 @@ pub enum ObjectStoreError {
 /// (e.g. a different `content-type`) makes the object store reject the upload with a
 /// signature-mismatch error, not silently accept a different content type than presigned.
 #[derive(Debug, Clone)]
+/// PresignedPut struct
 pub struct PresignedPut {
+    /// url field
     pub url: String,
+    /// required_headers field
     pub required_headers: BTreeMap<String, String>,
+    /// expires_at field
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Metadata about an object confirmed to exist in the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// ObjectMetadata struct
 pub struct ObjectMetadata {
+    /// size_bytes field
     pub size_bytes: u64,
+    /// content_type field
     pub content_type: Option<String>,
 }
 
 /// Trait for object storage used by the presigned-upload flow.
 #[async_trait]
+/// ObjectStore trait
 pub trait ObjectStore: Send + Sync {
     /// Compute a presigned PUT URL for `key`, constrained to `content_type`.
     ///

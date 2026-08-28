@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 /// Postgres-backed [`AuditStore`].
 #[derive(Clone)]
+/// PostgresAuditStore struct
 pub struct PostgresAuditStore {
     pool: PgPool,
 }
@@ -86,12 +87,11 @@ impl AuditStore for PostgresAuditStore {
 
     async fn entries(&self, tenant: &TenantId) -> Result<Vec<AuditEntry>, AuditError> {
         let tenant_id = tenant.as_str();
-        let rows = sqlx::query_as!(
-            AuditEntryRow,
+        let rows = sqlx::query_as::<_, AuditEntryRow>(
             r#"
             SELECT id, category, action, span_hash,
                    span_length, confidence, source, pipeline_version, config_hash, principal,
-                   chain_hash, created_at
+                   vertical, model, chain_hash, created_at
             FROM audit_entries
             WHERE segment_id = (
                 SELECT segment_id FROM audit_segments
@@ -101,10 +101,11 @@ impl AuditStore for PostgresAuditStore {
             )
             ORDER BY sequence_num
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| AuditError::Backend(format!("entries: fetch open segment for tenant {}: {}", tenant_id, e)))?;
 
         rows.into_iter().map(row_to_entry).collect()
     }
@@ -134,16 +135,15 @@ impl AuditStore for PostgresAuditStore {
             .execute(&mut *tx)
             .await?;
 
-        let sealed_extents: Vec<ExtentRow> = sqlx::query_as!(
-            ExtentRow,
+        let sealed_extents: Vec<ExtentRow> = sqlx::query_as::<_, ExtentRow>(
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
             WHERE sealed_at IS NOT NULL AND tenant_id = $1
             ORDER BY created_at
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -157,8 +157,7 @@ impl AuditStore for PostgresAuditStore {
         // rotation opens a new one concurrently (blocked from being visible mid-read by
         // the snapshot above regardless, but reusing the id keeps the two queries from
         // ever being able to disagree even under a weaker isolation level).
-        let open_row: Option<ExtentRow> = sqlx::query_as!(
-            ExtentRow,
+        let open_row: Option<ExtentRow> = sqlx::query_as::<_, ExtentRow>(
             r#"
             SELECT segment_id, entry_count
             FROM audit_segments
@@ -166,8 +165,8 @@ impl AuditStore for PostgresAuditStore {
             ORDER BY created_at DESC
             LIMIT 1
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -182,17 +181,16 @@ impl AuditStore for PostgresAuditStore {
         let mut all_segment_entries: Vec<Vec<AuditEntry>> = Vec::with_capacity(extents.len());
 
         for row in &sealed_extents {
-            let rows = sqlx::query_as!(
-                AuditEntryRow,
+            let rows = sqlx::query_as::<_, AuditEntryRow>(
                 r#"
                 SELECT id, category, action, span_hash, span_length, confidence, source,
-                       pipeline_version, config_hash, principal, chain_hash, created_at
+                       pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
                 FROM audit_entries
                 WHERE segment_id = $1
                 ORDER BY sequence_num
                 "#,
-                row.segment_id
             )
+            .bind(row.segment_id)
             .fetch_all(&mut *tx)
             .await?;
             all_segment_entries.push(decode_segment_rows(row.segment_id, rows)?);
@@ -200,17 +198,16 @@ impl AuditStore for PostgresAuditStore {
 
         // Open segment, keyed by the id captured above — not re-queried.
         if let Some(row) = &open_row {
-            let open_rows = sqlx::query_as!(
-                AuditEntryRow,
+            let open_rows = sqlx::query_as::<_, AuditEntryRow>(
                 r#"
                 SELECT id, category, action, span_hash, span_length, confidence, source,
-                       pipeline_version, config_hash, principal, chain_hash, created_at
+                       pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
                 FROM audit_entries
                 WHERE segment_id = $1
                 ORDER BY sequence_num
                 "#,
-                row.segment_id
             )
+            .bind(row.segment_id)
             .fetch_all(&mut *tx)
             .await?;
             all_segment_entries.push(decode_segment_rows(row.segment_id, open_rows)?);
@@ -261,8 +258,7 @@ impl AuditStore for PostgresAuditStore {
 
     async fn seals(&self, tenant: &TenantId) -> Result<Vec<SegmentSeal>, AuditError> {
         let tenant_id = tenant.as_str();
-        let rows = sqlx::query_as!(
-            SealRow,
+        let rows = sqlx::query_as::<_, SealRow>(
             r#"
             SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                    entry_count, created_at, sealed_at
@@ -270,8 +266,8 @@ impl AuditStore for PostgresAuditStore {
             WHERE sealed_at IS NOT NULL AND tenant_id = $1
             ORDER BY created_at
             "#,
-            tenant_id
         )
+        .bind(tenant_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -407,8 +403,7 @@ impl AuditStore for PostgresAuditStore {
         // same seal rather than erroring — only surface `StoreClosed` when there is truly
         // nothing sealed yet for this tenant.
         let Some(segment_row) = segment_row else {
-            let sealed = sqlx::query_as!(
-                SealRow,
+            let sealed = sqlx::query_as::<_, SealRow>(
                 r#"
                 SELECT segment_id, tenant_id, node_id, config_hash, prev_seal_hash, sealed_tip, seal_hash,
                        entry_count, created_at, sealed_at
@@ -417,8 +412,8 @@ impl AuditStore for PostgresAuditStore {
                 ORDER BY sealed_at DESC
                 LIMIT 1
                 "#,
-                tenant_id
             )
+            .bind(tenant_id)
             .fetch_optional(&mut *tx)
             .await?;
 
@@ -519,10 +514,8 @@ fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
         pipeline_version: row.pipeline_version,
         config_hash: row.config_hash,
         principal: row.principal,
-        // The `audit_entries` table has no `vertical` column yet — the postgres backend
-        // does not persist vertical provenance. Tracked separately from this fix, which
-        // only restores compilation after `AuditEntry` gained the field.
-        vertical: None,
+        vertical: row.vertical,
+        model: row.model,
         chain_hash: row.chain_hash,
     })
 }
@@ -563,6 +556,7 @@ fn compute_tip(entries: &[AuditEntry]) -> String {
 
 // ── row shapes (sqlx::query! anonymous records, named here for reuse) ─────────
 
+#[derive(sqlx::FromRow, Debug)]
 struct AuditEntryRow {
     id: String,
     category: String,
@@ -574,10 +568,13 @@ struct AuditEntryRow {
     pipeline_version: String,
     config_hash: String,
     principal: Option<String>,
+    vertical: Option<String>,
+    model: Option<String>,
     chain_hash: String,
     created_at: DateTime<Utc>,
 }
 
+#[derive(sqlx::FromRow, Debug)]
 struct SealRow {
     segment_id: Uuid,
     tenant_id: String,
@@ -729,30 +726,32 @@ async fn insert_entry(
     // position within the segment used for storage ordering.
     let entry = AuditEntry::new(input, prev_chain_hash, (sequence_num - 1) as u64);
 
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO audit_entries (id, segment_id, sequence_num, category, action, span_hash,
                                   span_length, confidence, source, pipeline_version, config_hash,
-                                  principal, chain_hash, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                                  principal, vertical, model, chain_hash, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#,
-        entry.id,
-        segment_id,
-        sequence_num,
-        entry.category,
-        entry.action.to_string(),
-        entry.span_hash,
-        entry.span_length as i64,
-        entry.confidence.map(|c| c as f64),
-        entry.source.to_string(),
-        entry.pipeline_version,
-        entry.config_hash,
-        entry.principal,
-        entry.chain_hash,
-        DateTime::parse_from_rfc3339(&entry.timestamp)
-            .map(|t| t.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now())
     )
+    .bind(entry.id.clone())
+    .bind(segment_id)
+    .bind(sequence_num)
+    .bind(entry.category.clone())
+    .bind(entry.action.to_string())
+    .bind(entry.span_hash.clone())
+    .bind(entry.span_length as i64)
+    .bind(entry.confidence.map(|c| c as f64))
+    .bind(entry.source.to_string())
+    .bind(entry.pipeline_version.clone())
+    .bind(entry.config_hash.clone())
+    .bind(entry.principal.clone())
+    .bind(entry.vertical.clone())
+    .bind(entry.model.clone())
+    .bind(entry.chain_hash.clone())
+    .bind(DateTime::parse_from_rfc3339(&entry.timestamp)
+        .map(|t| t.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now()))
     .execute(&mut **tx)
     .await?;
 
@@ -764,17 +763,16 @@ impl PostgresAuditStore {
         let segment_id = Uuid::parse_str(segment_id)
             .map_err(|e| AuditError::Backend(format!("invalid segment id '{segment_id}': {e}")))?;
 
-        let rows = sqlx::query_as!(
-            AuditEntryRow,
+        let rows = sqlx::query_as::<_, AuditEntryRow>(
             r#"
             SELECT id, category, action, span_hash, span_length, confidence, source,
-                   pipeline_version, config_hash, principal, chain_hash, created_at
+                   pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
             FROM audit_entries
             WHERE segment_id = $1
             ORDER BY sequence_num
             "#,
-            segment_id
         )
+        .bind(segment_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -803,17 +801,16 @@ async fn get_segment_entries_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     segment_id: Uuid,
 ) -> Result<Vec<AuditEntry>, AuditError> {
-    let rows = sqlx::query_as!(
-        AuditEntryRow,
+    let rows = sqlx::query_as::<_, AuditEntryRow>(
         r#"
         SELECT id, category, action, span_hash, span_length, confidence, source,
-               pipeline_version, config_hash, principal, chain_hash, created_at
+               pipeline_version, config_hash, principal, vertical, model, chain_hash, created_at
         FROM audit_entries
         WHERE segment_id = $1
         ORDER BY sequence_num
         "#,
-        segment_id
     )
+    .bind(segment_id)
     .fetch_all(&mut **tx)
     .await?;
 
@@ -936,6 +933,7 @@ mod tests {
             config_hash: config_hash.to_owned(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 

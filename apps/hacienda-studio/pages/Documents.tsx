@@ -116,7 +116,7 @@ export function Documents({
             <div className="min-w-0">
               <h1 className="text-xl font-semibold tracking-tight">Documents</h1>
               <p className="mt-1 truncate text-xs text-white/50">
-                {documents.length} processed · stored locally on this device
+                {documents.length} traité(s) · stocké(s) localement sur cet appareil
               </p>
             </div>
 
@@ -148,14 +148,14 @@ export function Documents({
                         className="h-7 rounded-full px-3 text-xs text-white/70 hover:bg-white/[0.06] hover:text-white"
                         onClick={() => onOpenDocument(selected.path)}
                       >
-                        <Eye className="size-3.5" /> Open
+                        <Eye className="size-3.5" /> Ouvrir
                       </Button>
                       <Button
                         size="sm"
                         className="h-7 rounded-full bg-white px-3.5 text-xs font-medium text-[#0a0e13] hover:bg-white/90"
                         onClick={handleDownloadFile}
                       >
-                        <FileDown className="size-3.5" /> Download
+                        <FileDown className="size-3.5" /> Télécharger
                       </Button>
                       <span className="mx-1 h-5 w-px bg-white/[0.08]" aria-hidden />
                       <button
@@ -176,7 +176,7 @@ export function Documents({
                         disabled={selectedFolderDocs.length === 0}
                         onClick={handleDownloadFolder}
                       >
-                        <FolderDown className="size-3.5" /> Download folder
+                        <FolderDown className="size-3.5" /> Télécharger le dossier
                       </Button>
                       <span className="mx-1 h-5 w-px bg-white/[0.08]" aria-hidden />
                       <button
@@ -199,16 +199,16 @@ export function Documents({
                     ×
                   </button>
                 </div>
-              ) : (
-                <span className="hidden text-xs text-white/20 lg:inline" aria-hidden>
-                  Select a file or folder to download
-                </span>
-              )}
+               ) : (
+                 <span className="hidden text-xs text-white/20 lg:inline" aria-hidden>
+                   Sélectionnez un fichier ou un dossier à télécharger
+                 </span>
+               )}
             </div>
 
             <div className="flex items-center gap-2 lg:justify-end">
               <Button variant="outline" size="sm" onClick={onAddFiles} className="h-8 border-white/10 bg-white/[0.04] hover:bg-white/[0.08]">
-                <Upload className="size-3.5" /> Add files
+                <Upload className="size-3.5" /> Ajouter des fichiers
               </Button>
               <Button
                 size="sm"
@@ -216,7 +216,7 @@ export function Documents({
                 disabled={documents.length === 0}
                 onClick={handleDownloadAll}
               >
-                <Archive className="size-3.5" /> Export all
+                <Archive className="size-3.5" /> Exporter tout
               </Button>
             </div>
           </div>
@@ -224,8 +224,8 @@ export function Documents({
           {selected && (
             <p className="text-center text-[11px] text-white/30 lg:hidden">
               {selected.kind === "file"
-                ? "Selected file · redacted .md ready"
-                : `Selected folder · ${selectedFolderDocs.length} redacted files`}
+                ? "Fichier sélectionné · .md masqué prêt"
+                : `Dossier sélectionné · ${selectedFolderDocs.length} fichier(s) masqué(s)`}
             </p>
           )}
         </div>
@@ -238,12 +238,12 @@ export function Documents({
                 <div className="mx-auto flex size-10 items-center justify-center rounded-xl border border-white/[0.06] bg-white/[0.04]">
                   <Folder className="size-5 text-white/40" />
                 </div>
-                <p className="mt-3 text-sm font-medium">No documents yet</p>
+                <p className="mt-3 text-sm font-medium">Aucun document pour l'instant</p>
                 <p className="mt-1 text-xs leading-relaxed text-white/40">
-                  Add files to run the on-device pipeline. Source previews for <span className="font-mono text-[11px]">pdf</span>, <span className="font-mono text-[11px]">docx</span>, <span className="font-mono text-[11px]">pptx</span>, <span className="font-mono text-[11px]">xlsx</span> render here; click a file to see the extracted markdown with PII chips.
+                  Ajoutez des fichiers pour lancer le pipeline sur l'appareil. Les aperçus sources pour <span className="font-mono text-[11px]">pdf</span>, <span className="font-mono text-[11px]">docx</span>, <span className="font-mono text-[11px]">pptx</span>, <span className="font-mono text-[11px]">xlsx</span> s'affichent ici ; cliquez sur un fichier pour voir le markdown extrait avec les puces PII.
                 </p>
                 <Button size="sm" className="mt-4" onClick={onAddFiles}>
-                  <Upload className="size-3.5" /> Add files
+                  <Upload className="size-3.5" /> Ajouter des fichiers
                 </Button>
               </div>
             </div>
@@ -262,7 +262,7 @@ export function Documents({
         </div>
 
         <p className="mx-auto mt-3 max-w-[640px] text-center text-[11px] leading-relaxed text-white/30">
-          Click a file to open its extracted markdown with PII chips. Select a file or folder to download the redacted output — single <span className="font-mono">.md</span> for a file, <span className="font-mono">.zip</span> of all <span className="font-mono">documents/*.md</span> for a folder.
+          Cliquez sur un fichier pour ouvrir son markdown extrait avec les puces PII. Sélectionnez un fichier ou un dossier pour télécharger la sortie masquée — un seul <span className="font-mono">.md</span> pour un fichier, <span className="font-mono">.zip</span> de tous les <span className="font-mono">documents/*.md</span> pour un dossier.
         </p>
       </div>
     </div>

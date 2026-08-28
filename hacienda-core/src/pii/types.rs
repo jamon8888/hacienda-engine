@@ -6,43 +6,101 @@ use std::fmt;
 /// Category of personally identifiable information a detected span belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// PiiCategory enum
 pub enum PiiCategory {
+    /// Email variant
     Email,
+    /// PhoneNumber variant
     PhoneNumber,
+    /// Address variant
     Address,
+    /// Ssn variant
     Ssn,
+    /// PassportNumber variant
     PassportNumber,
+    /// DriversLicense variant
     DriversLicense,
     /// EU intra-community VAT number: a 2-letter member-state code (`EL` for Greece,
     /// not `GR`) followed by up to 12 digits. Added for Track C2 — the French client
     /// base's most common gap between the browser's 9 regexes and the Rust set.
     EuVat,
+    /// NationalId variant
     NationalId,
+    /// TaxId variant
     TaxId,
+    /// CreditCard variant
     CreditCard,
+    /// Iban variant
     Iban,
+    /// BankAccount variant
     BankAccount,
+    /// RoutingNumber variant
     RoutingNumber,
+    /// SwiftBic variant
     SwiftBic,
+    /// CryptoWallet variant
     CryptoWallet,
+    /// MedicalRecordNumber variant
     MedicalRecordNumber,
+    /// HealthPlanNumber variant
     HealthPlanNumber,
+    /// Diagnosis variant
     Diagnosis,
+    /// Medication variant
     Medication,
+    /// Username variant
     Username,
+    /// Password variant
     Password,
+    /// ApiKey variant
     ApiKey,
+    /// SecretToken variant
     SecretToken,
+    /// JwtToken variant
     JwtToken,
+    /// IpAddress variant
     IpAddress,
+    /// MacAddress variant
     MacAddress,
+    /// Url variant
     Url,
+    /// LicensePlate variant
     LicensePlate,
+    /// VehicleVin variant
     VehicleVin,
+    /// DateOfBirth variant
     DateOfBirth,
+    /// FullName variant
     FullName,
+    /// Person variant
     Person,
+    /// Organization variant
     Organization,
+    /// Given name, first name.
+    FirstName,
+    /// Middle name, second given name.
+    MiddleName,
+    /// Family name, last name, surname.
+    LastName,
+    /// Street number and name, e.g. "123 Main St".
+    StreetAddress,
+    /// City or municipality name.
+    City,
+    /// State, province or region name.
+    StateOrRegion,
+    /// Postal or ZIP code.
+    PostalCode,
+    /// Country name or ISO code.
+    Country,
+    /// Government-issued identifier, e.g. passport or national ID.
+    GovernmentId,
+    /// Payment card number.
+    PaymentCard,
+    /// Card expiry date.
+    CardExpiry,
+    /// Card CVV / CVC security code.
+    CardCvv,
+    /// Custom variant
     Custom(String),
 }
 
@@ -57,14 +115,19 @@ impl fmt::Display for PiiCategory {
 
 /// A span matched by the deterministic regex engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// RegexEntity struct
 pub struct RegexEntity {
+    /// category field
     pub category: PiiCategory,
     /// Byte offset of the first byte of the span.
     pub start: u32,
     /// Byte offset one past the last byte of the span.
     pub end: u32,
+    /// confidence field
     pub confidence: f32,
+    /// format_preserving field
     pub format_preserving: bool,
+    /// redact_template field
     pub redact_template: String,
     /// Copied from the originating [`PatternMeta::context_words`] at match time, so
     /// [`crate::pii::context::enhance`] can look up this span's context words without
@@ -72,10 +135,12 @@ pub struct RegexEntity {
     /// `&'static` slice cannot round-trip through serde, and (as with
     /// [`PatternMeta::validator`]) nothing actually (de)serializes `RegexEntity` today.
     #[serde(skip)]
+    /// context_words field
     pub context_words: &'static [&'static str],
 }
 
 impl RegexEntity {
+/// new function
     pub fn new(category: PiiCategory, start: u32, end: u32) -> Self {
         let redact_template = format!("[{category:?}]").to_uppercase();
         Self {
@@ -92,10 +157,15 @@ impl RegexEntity {
 
 /// A single built-in detection pattern and how its matches should be redacted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// PatternMeta struct
 pub struct PatternMeta {
+    /// category field
     pub category: PiiCategory,
+    /// pattern field
     pub pattern: String,
+    /// format_preserving field
     pub format_preserving: bool,
+    /// redact_template field
     pub redact_template: String,
     /// Confidence a match gets when [`validator`](Self::validator) is absent, or returns
     /// `None` (no opinion). Defaults to `1.0` via [`PatternMeta::new`] so every pre-existing
@@ -103,6 +173,7 @@ pub struct PatternMeta {
     /// ([`crate::pii::validators`]) set this lower, since an unvalidated match in those
     /// categories is genuinely less certain than a plain regex hit.
     #[serde(default = "default_base_confidence")]
+    /// base_confidence field
     pub base_confidence: f32,
     /// Checksum/structural validator run against the matched text
     /// ([`crate::pii::validators`]'s `Option<bool>` contract: `Some(true)` promotes
@@ -111,10 +182,12 @@ pub struct PatternMeta {
     /// serde, and nothing in this codebase actually (de)serializes `PatternMeta` today —
     /// this only guards against a future config-file/API surface silently losing it.
     #[serde(skip)]
+    /// validator field
     pub validator: Option<fn(&str) -> Option<bool>>,
     /// Words that, found near a match, boost its confidence toward `1.0`
     /// ([`crate::pii::context`]). Empty for patterns with no calibrated context word list.
     #[serde(skip)]
+    /// context_words field
     pub context_words: &'static [&'static str],
 }
 
@@ -170,19 +243,28 @@ impl PatternMeta {
 
 /// A span produced by a statistical (NER model) backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ModelEntity struct
 pub struct ModelEntity {
+    /// category field
     pub category: PiiCategory,
+    /// text field
     pub text: String,
+    /// start field
     pub start: u32,
+    /// end field
     pub end: u32,
+    /// confidence field
     pub confidence: f32,
 }
 
 /// Which detector produced a merged entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// EntitySource enum
 pub enum EntitySource {
+    /// Regex variant
     Regex,
+    /// Model variant
     Model,
 }
 
@@ -198,16 +280,22 @@ impl fmt::Display for EntitySource {
 /// Tie-break rule applied when two detections overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// MergePriority enum
 pub enum MergePriority {
+    /// RegexFirst variant
     RegexFirst,
+    /// HigherConfidence variant
     HigherConfidence,
+    /// LongerSpan variant
     LongerSpan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// MergeConfig struct
 pub struct MergeConfig {
     /// Overlap ratio above which two spans are considered the same detection.
     pub overlap_threshold: f32,
+    /// priority field
     pub priority: MergePriority,
     /// Confidence difference required before a candidate displaces an existing span.
     pub confidence_epsilon: f32,

@@ -61,12 +61,14 @@ use crate::tenancy::TenantId;
 /// for reduced write amplification on high-throughput workloads. Phase 2's benchmarks
 /// will quantify the trade-off on the production corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// SyncPolicy enum
 pub enum SyncPolicy {
     /// Call `sync_data()` after writing every append batch and after every seal write.
     ///
     /// This is the safest setting: a power loss after a successful `append` call will
     /// not lose that batch. The cost is one extra syscall per document.
     #[default]
+    /// EveryBatch variant
     EveryBatch,
 
     /// Call `sync_data()` only when sealing a segment (on `rotate` or `close`).
@@ -185,6 +187,7 @@ struct FileState {
 /// hash does not verify). With poison, the second `append` is rejected immediately;
 /// the caller reopens the store and gets a clean chain that matches the file.
 #[derive(Debug)]
+/// FileAuditStore struct
 pub struct FileAuditStore {
     /// Serialises the mint-then-write sequence of `append`, `rotate`, and `close` so that
     /// on-disk order matches chain order. See "Why there are two locks" above.
@@ -470,12 +473,10 @@ impl AuditStore for FileAuditStore {
         // lock's — do not try to solve it by swapping `state` for a tokio mutex.
         let (entries, bytes, path, should_sync) = {
             let mut map = self.state();
-            let state = map.get_mut(tenant).ok_or_else(|| {
-                AuditError::Internal {
-                    operation: "append",
-                    tenant: tenant.as_str().to_string(),
-                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                }
+            let state = map.get_mut(tenant).ok_or_else(|| AuditError::Internal {
+                operation: "append",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
             })?;
 
             let segment = state.open.as_mut().ok_or(AuditError::StoreClosed {
@@ -549,12 +550,10 @@ impl AuditStore for FileAuditStore {
         self.check_not_poisoned()?;
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
-        let state = map.get(tenant).ok_or_else(|| {
-            AuditError::Internal {
-                operation: "entries",
-                tenant: tenant.as_str().to_string(),
-                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-            }
+        let state = map.get(tenant).ok_or_else(|| AuditError::Internal {
+            operation: "entries",
+            tenant: tenant.as_str().to_string(),
+            cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
         })?;
         Ok(state
             .open
@@ -599,12 +598,10 @@ impl AuditStore for FileAuditStore {
         // that no later step needs its file.
         let (sealed, open) = {
             let map = self.state();
-            let state = map.get(tenant).ok_or_else(|| {
-                AuditError::Internal {
-                    operation: "history",
-                    tenant: tenant.as_str().to_string(),
-                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                }
+            let state = map.get(tenant).ok_or_else(|| AuditError::Internal {
+                operation: "history",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
             })?;
             let open = state
                 .open
@@ -639,12 +636,10 @@ impl AuditStore for FileAuditStore {
         self.check_not_poisoned()?;
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
-        let state = map.get(tenant).ok_or_else(|| {
-            AuditError::Internal {
-                operation: "tip",
-                tenant: tenant.as_str().to_string(),
-                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-            }
+        let state = map.get(tenant).ok_or_else(|| AuditError::Internal {
+            operation: "tip",
+            tenant: tenant.as_str().to_string(),
+            cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
         })?;
         match state.open.as_ref() {
             Some(segment) if !segment.is_empty() => Ok(segment.tip().to_owned()),
@@ -661,12 +656,10 @@ impl AuditStore for FileAuditStore {
         self.check_not_poisoned()?;
         self.ensure_tenant_loaded(tenant).await?;
         let map = self.state();
-        let state = map.get(tenant).ok_or_else(|| {
-            AuditError::Internal {
-                operation: "seals",
-                tenant: tenant.as_str().to_string(),
-                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-            }
+        let state = map.get(tenant).ok_or_else(|| AuditError::Internal {
+            operation: "seals",
+            tenant: tenant.as_str().to_string(),
+            cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
         })?;
         Ok(state.sealed.clone())
     }
@@ -679,12 +672,10 @@ impl AuditStore for FileAuditStore {
         // a routine integrity check into an outage.
         let (sealed, open_entries, open_tip, tenant_dir) = {
             let map = self.state();
-            let state = map.get(tenant).ok_or_else(|| {
-                AuditError::Internal {
-                    operation: "verify",
-                    tenant: tenant.as_str().to_string(),
-                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                }
+            let state = map.get(tenant).ok_or_else(|| AuditError::Internal {
+                operation: "verify",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
             })?;
             let (entries, tip) = match state.open.as_ref() {
                 Some(s) => (s.entries().to_vec(), s.tip().to_owned()),
@@ -723,12 +714,10 @@ impl AuditStore for FileAuditStore {
         // ── Step 1: seal the open segment under the state lock ────────────────
         let (seal, seal_bytes, seal_path, new_path) = {
             let mut map = self.state();
-            let state = map.get_mut(tenant).ok_or_else(|| {
-                AuditError::Internal {
-                    operation: "rotate",
-                    tenant: tenant.as_str().to_string(),
-                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                }
+            let state = map.get_mut(tenant).ok_or_else(|| AuditError::Internal {
+                operation: "rotate",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
             })?;
 
             let old = state.open.take().ok_or(AuditError::StoreClosed {
@@ -801,12 +790,10 @@ impl AuditStore for FileAuditStore {
         // acquisition, matching InMemoryAuditStore's single-lock design.
         let (seal, seal_bytes, sp, already_closed) = {
             let mut map = self.state();
-            let state = map.get_mut(tenant).ok_or_else(|| {
-                AuditError::Internal {
-                    operation: "close",
-                    tenant: tenant.as_str().to_string(),
-                    cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
-                }
+            let state = map.get_mut(tenant).ok_or_else(|| AuditError::Internal {
+                operation: "close",
+                tenant: tenant.as_str().to_string(),
+                cause: "tenant map entry disappeared after ensure_tenant_loaded".to_string(),
             })?;
 
             if let Some(existing) = &state.closed_seal {
@@ -1311,6 +1298,7 @@ mod tests {
             config_hash: CONFIG.into(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 

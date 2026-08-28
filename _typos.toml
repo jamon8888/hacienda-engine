@@ -4,6 +4,8 @@ extend-exclude = [
   ".ai-rulez/",
   "scripts/",
   "poly.toml",
+  "apps/hacienda-studio/pages/",
+  "apps/hacienda-studio/components/extend/",
   # fixtures/ner-eval/ is hand-written French/English NER eval prose
   # (hacienda-core/tests/ner_eval.rs); an English spell-checker has nothing useful to say
   # about French sentences.

@@ -54,6 +54,7 @@ use crate::tenancy::TenantId;
 /// method with a type parameter or a return type that names `Self`, you will break this
 /// property and every call site that stores the trait object.
 #[async_trait]
+/// AuditStore trait
 pub trait AuditStore: Send + Sync {
     /// Mint and record a document's worth of entries in one call, into `tenant`'s chain.
     ///
@@ -186,6 +187,7 @@ pub trait AuditStore: Send + Sync {
 /// then `spawn_blocking` the write. A guard held across an `await` makes the future
 /// `!Send`, which will not compile behind `Arc<dyn AuditStore>`.
 #[derive(Debug)]
+/// InMemoryAuditStore struct
 pub struct InMemoryAuditStore {
     state: Mutex<HashMap<TenantId, State>>,
     node_id: NodeId,
@@ -559,6 +561,7 @@ mod tests {
             config_hash: "test-config".into(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 
@@ -648,7 +651,10 @@ mod tests {
     async fn should_return_one_entry_per_input_in_order() {
         let store = make_store();
         let inputs = vec![make_input("e1"), make_input("e2"), make_input("e3")];
-        let entries = store.append(&t(), inputs).await.expect("append must succeed");
+        let entries = store
+            .append(&t(), inputs)
+            .await
+            .expect("append must succeed");
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].id, "e1");
         assert_eq!(entries[1].id, "e2");
@@ -749,9 +755,15 @@ mod tests {
             .await
             .expect("append");
         store.rotate(&t()).await.expect("rotate 1");
-        store.append(&t(), vec![make_input("m3")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("m3")])
+            .await
+            .expect("append");
         store.rotate(&t()).await.expect("rotate 2");
-        store.append(&t(), vec![make_input("m4")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("m4")])
+            .await
+            .expect("append");
 
         let expected = vec!["m1", "m2", "m3", "m4"];
 
@@ -766,7 +778,10 @@ mod tests {
         let mut collected = Vec::new();
         let mut cursor = None;
         loop {
-            let page = store.history(&t(), cursor.as_ref(), 1).await.expect("history");
+            let page = store
+                .history(&t(), cursor.as_ref(), 1)
+                .await
+                .expect("history");
             if page.entries.is_empty() {
                 break;
             }
@@ -780,7 +795,10 @@ mod tests {
             store.entries(&t()).await.expect("entries").is_empty(),
             "entries() reports the open segment, and close left none"
         );
-        let page = store.history(&t(), None, 100).await.expect("history after close");
+        let page = store
+            .history(&t(), None, 100)
+            .await
+            .expect("history after close");
         assert_eq!(
             ids(&page),
             expected,
@@ -794,7 +812,10 @@ mod tests {
     #[tokio::test]
     async fn should_reject_a_cursor_this_store_cannot_resolve() {
         let store = make_store();
-        store.append(&t(), vec![make_input("u1")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("u1")])
+            .await
+            .expect("append");
 
         let foreign = crate::audit::AuditCursor {
             segment_id: "00000000-0000-4000-8000-000000000000".into(),
@@ -813,7 +834,10 @@ mod tests {
     #[tokio::test]
     async fn should_be_idempotent_when_closed_twice() {
         let store = make_store();
-        store.append(&t(), vec![make_input("x")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("x")])
+            .await
+            .expect("append");
         let seal1 = store.close(&t()).await.expect("first close");
         let seal2 = store.close(&t()).await.expect("second close");
         assert_eq!(
@@ -929,7 +953,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn should_be_idempotent_when_closed_concurrently() {
         let store = Arc::new(make_store());
-        store.append(&t(), vec![make_input("x")]).await.expect("append");
+        store
+            .append(&t(), vec![make_input("x")])
+            .await
+            .expect("append");
 
         const CLOSERS: usize = 8;
         let mut handles = Vec::with_capacity(CLOSERS);
@@ -1071,7 +1098,10 @@ mod tests {
         store.rotate(&t()).await.expect("tenant a rotate");
         assert_eq!(store.seals(&t()).await.expect("tenant a seals").len(), 1);
         assert_eq!(store.seals(&t2()).await.expect("tenant b seals").len(), 0);
-        assert_eq!(store.entries(&t2()).await.expect("tenant b entries").len(), 2);
+        assert_eq!(
+            store.entries(&t2()).await.expect("tenant b entries").len(),
+            2
+        );
 
         // Each tenant's own chain still verifies independently.
         store.verify(&t()).await.expect("tenant a chain verifies");
@@ -1100,11 +1130,17 @@ mod tests {
             .await
             .expect("tenant b append");
 
-        let a_page = store.history(&t(), None, 100).await.expect("tenant a history");
+        let a_page = store
+            .history(&t(), None, 100)
+            .await
+            .expect("tenant a history");
         let a_ids: Vec<&str> = a_page.entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(a_ids, vec!["a-1", "a-2"]);
 
-        let b_page = store.history(&t2(), None, 100).await.expect("tenant b history");
+        let b_page = store
+            .history(&t2(), None, 100)
+            .await
+            .expect("tenant b history");
         let b_ids: Vec<&str> = b_page.entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(b_ids, vec!["b-1", "b-2"]);
     }
