@@ -4,9 +4,13 @@
 //! actually does. They are inputs to a compliance process, not a substitute for one —
 //! the DPIA still needs DPO sign-off and incident reports still need a submission.
 
+/// Module checklist
 pub mod checklist;
+/// Module dora
 pub mod dora;
+/// Module dpia
 pub mod dpia;
+/// Module model_card
 pub mod model_card;
 
 pub use checklist::{generate_checklist, ChecklistItem, ComplianceChecklist, ControlStatus};

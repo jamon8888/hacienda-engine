@@ -1,7 +1,10 @@
 //! Span redaction with a per-result blake3 hash chain.
 
+/// Module engine
 pub mod engine;
+/// Module pseudonym
 pub mod pseudonym;
+/// Module types
 pub mod types;
 
 pub use engine::RedactionEngine;

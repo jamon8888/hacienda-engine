@@ -5,7 +5,9 @@
 //! [`GlossaryConfig::min_confidence`] both gate publication, because every published
 //! term reproduces a real mention in clear text.
 
+/// Module config
 pub mod config;
+/// Module entity_linker
 pub mod entity_linker;
 
 pub use config::{GlossaryConfig, LinkStyle};

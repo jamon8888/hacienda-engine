@@ -20,10 +20,13 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Module error
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module store
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module types
 pub mod types;
 
 #[cfg(not(target_arch = "wasm32"))]
