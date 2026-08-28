@@ -46,9 +46,13 @@ impl Default for ComplianceConfig {
 #[serde(rename_all = "snake_case")]
 /// ReportType enum
 pub enum ReportType {
+    /// Dpia variant
     Dpia,
+    /// ModelCard variant
     ModelCard,
+    /// Dora variant
     Dora,
+    /// Checklist variant
     Checklist,
 }
 

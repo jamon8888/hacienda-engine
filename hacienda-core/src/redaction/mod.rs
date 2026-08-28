@@ -24,6 +24,7 @@ pub enum RedactionError {
     #[error(
         "unknown redaction mode: '{0}' (expected mask, hash, pseudonymize, remove, or custom)"
     )]
+    /// UnknownMode variant
     UnknownMode(String),
 
     /// Refuses to build a `Pseudonymize` engine with no key.
@@ -36,8 +37,10 @@ pub enum RedactionError {
         "redaction mode 'pseudonymize' requires a pseudonymisation key, and none was supplied \
          (set {ACTIVE_KEY_VAR}, or choose mode 'mask')"
     )]
+    /// MissingPseudonymKey variant
     MissingPseudonymKey,
 
     #[error(transparent)]
+    /// Pseudonym variant
     Pseudonym(#[from] PseudonymError),
 }

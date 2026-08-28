@@ -24,8 +24,11 @@ pub struct ChecklistItem {
 #[serde(rename_all = "snake_case")]
 /// ControlStatus enum
 pub enum ControlStatus {
+    /// Implemented variant
     Implemented,
+    /// Partial variant
     Partial,
+    /// NotImplemented variant
     NotImplemented,
 }
 

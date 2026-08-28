@@ -12,12 +12,15 @@ use std::time::Duration;
 /// StoreError enum
 pub enum StoreError {
     #[error("failed to connect to Postgres: {0}")]
+    /// Connect variant
     Connect(#[source] sqlx::Error),
 
     #[error("failed to run migrations: {0}")]
+    /// Migrate variant
     Migrate(#[source] sqlx::migrate::MigrateError),
 
     #[error("migration source not found: {0}")]
+    /// MigrationSource variant
     MigrationSource(String),
 }
 

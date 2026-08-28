@@ -53,10 +53,15 @@ fn default_tenant_id() -> String {
 #[serde(rename_all = "snake_case")]
 /// ReviewStatus enum
 pub enum ReviewStatus {
+    /// Pending variant
     Pending,
+    /// InReview variant
     InReview,
+    /// Approved variant
     Approved,
+    /// Rejected variant
     Rejected,
+    /// Modified variant
     Modified,
 }
 
@@ -93,10 +98,14 @@ impl std::str::FromStr for ReviewStatus {
 #[serde(rename_all = "snake_case")]
 /// Priority enum
 pub enum Priority {
+    /// Low variant
     Low,
+    /// Normal variant
     Normal,
     #[default]
+    /// High variant
     High,
+    /// Critical variant
     Critical,
 }
 
@@ -131,8 +140,11 @@ impl std::str::FromStr for Priority {
 /// ReviewDecision enum
 pub enum ReviewDecision {
     #[default]
+    /// Approve variant
     Approve,
+    /// Reject variant
     Reject,
+    /// Modify variant
     Modify,
 }
 

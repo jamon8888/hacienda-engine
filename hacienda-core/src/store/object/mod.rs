@@ -20,6 +20,7 @@ pub enum ObjectStoreError {
     /// The outbound request to the object store failed (network error, TLS error, etc.)
     /// or the store returned a status this client doesn't know how to interpret.
     #[error("object storage request failed: {0}")]
+    /// Request variant
     Request(String),
 }
 

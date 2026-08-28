@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 /// PseudonymError enum
 pub enum PseudonymError {
     #[error("pseudonym token padding is malformed")]
+    /// MalformedPadding variant
     MalformedPadding,
 
     #[error(
@@ -41,6 +42,7 @@ pub enum PseudonymError {
         "no active pseudonym key is configured \
          (set HACIENDA_PSEUDONYM_ACTIVE_KEY to the id of the key to mint tokens under)"
     )]
+    /// NoActiveKey variant
     NoActiveKey,
 
     #[error("pseudonym key '{id}' is not {KEY_BYTES}-byte lowercase hex")]
@@ -50,12 +52,14 @@ pub enum PseudonymError {
     WrongKeyLength { id: String, actual: usize },
 
     #[error("not a pseudonym token: expected [CATEGORY:key_id:data]")]
+    /// MalformedToken variant
     MalformedToken,
 
     /// Covers a wrong key, a relabelled category, and a tampered ciphertext alike.
     ///
     /// Distinguishing them would tell an attacker which of their guesses was closer.
     #[error("pseudonym token could not be revealed (wrong key, altered, or forged)")]
+    /// UnreadableToken variant
     UnreadableToken,
 
     #[error("category '{category}' cannot appear in a pseudonym token: {reason}")]

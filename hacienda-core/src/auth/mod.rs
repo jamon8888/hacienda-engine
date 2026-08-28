@@ -289,6 +289,7 @@ impl<'a> From<&'a AuthContext> for Caller<'a> {
 /// AuthzError enum
 pub enum AuthzError {
     #[error("authentication required")]
+    /// Unauthenticated variant
     Unauthenticated,
     #[error("capability {required} required for principal {principal}")]
     MissingCapability {

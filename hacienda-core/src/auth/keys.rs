@@ -28,15 +28,19 @@ use thiserror::Error;
 /// ApiKeyError enum
 pub enum ApiKeyError {
     #[error("failed to generate random key material: {0}")]
+    /// Generation variant
     Generation(#[from] rand::Error),
 
     #[error("failed to hash key: {0}")]
+    /// Hashing variant
     Hashing(String),
 
     #[error("failed to verify key: {0}")]
+    /// Verification variant
     Verification(String),
 
     #[error("invalid key format: expected hcd_<prefix>_<base62>")]
+    /// InvalidFormat variant
     InvalidFormat,
 }
 
