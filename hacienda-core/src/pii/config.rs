@@ -72,6 +72,11 @@ impl Default for PipelineConfig {
     }
 }
 
+/// Threshold for person-name categories in the hybrid persona-boost table.
+const PERSON_NAME_THRESHOLD: f32 = 0.65;
+/// Threshold for contact / financial identifier categories in the hybrid persona-boost table.
+const CONTACT_FINANCIAL_THRESHOLD: f32 = 0.48;
+
 impl PipelineConfig {
     /// Effective threshold for a concrete `PiiCategory`, honouring overrides in
     /// `model_thresholds` or the hybrid persona-boost table otherwise.
@@ -84,12 +89,12 @@ impl PipelineConfig {
             | PiiCategory::FullName
             | PiiCategory::FirstName
             | PiiCategory::MiddleName
-            | PiiCategory::LastName => 0.65,
+            | PiiCategory::LastName => PERSON_NAME_THRESHOLD,
             PiiCategory::Email
             | PiiCategory::PhoneNumber
             | PiiCategory::Iban
             | PiiCategory::IpAddress
-            | PiiCategory::CreditCard => 0.48,
+            | PiiCategory::CreditCard => CONTACT_FINANCIAL_THRESHOLD,
             _ => self.model_threshold_default,
         }
     }
