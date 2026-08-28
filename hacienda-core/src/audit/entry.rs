@@ -13,9 +13,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RedactionAction {
+    /// Replace span with a fixed mask character.
     Mask,
+    /// Replace span with a blake3 hash.
     Hash,
+    /// Replace span with a pseudonym.
     Pseudonymize,
+    /// Remove span entirely.
     Remove,
     /// Span text was returned to an authorised caller in plaintext form.
     ///
@@ -23,6 +27,7 @@ pub enum RedactionAction {
     /// that holds `Capability::PiiReveal`. The `span_hash` field on the entry
     /// carries the blake3 digest of the revealed text.
     Reveal,
+    /// Custom template applied to the span.
     Custom(String),
 }
 
@@ -76,7 +81,9 @@ impl std::str::FromStr for RedactionAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntitySource {
+    /// Detected by regex patterns.
     Regex,
+    /// Detected by ML model.
     Model,
 }
 
@@ -115,15 +122,25 @@ impl From<crate::pii::types::EntitySource> for EntitySource {
 /// The original span is never stored — only its blake3 digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
+    /// Unique identifier for the entry.
     pub id: String,
+    /// ISO-8601 timestamp of creation.
     pub timestamp: String,
+    /// PII category name.
     pub category: String,
+    /// Redaction action applied.
     pub action: RedactionAction,
+    /// blake3 digest of the original span.
     pub span_hash: String,
+    /// Length of the original span in characters.
     pub span_length: u32,
+    /// Detection confidence, if applicable.
     pub confidence: Option<f32>,
+    /// Detector source.
     pub source: EntitySource,
+    /// Pipeline version used.
     pub pipeline_version: String,
+    /// Config hash the entry was minted under.
     pub config_hash: String,
     /// The authenticated principal this entry is attributable to, or `None` for an
     /// in-process caller ([`Caller::Trusted`](crate::auth::Caller::Trusted)).
@@ -161,14 +178,23 @@ pub struct AuditEntry {
 /// Everything needed to mint an [`AuditEntry`] except its position in the chain.
 #[derive(Debug, Clone)]
 pub struct AuditEntryInput {
+    /// Unique identifier for the entry.
     pub id: String,
+    /// PII category name.
     pub category: String,
+    /// Redaction action applied.
     pub action: RedactionAction,
+    /// blake3 digest of the original span.
     pub span_hash: String,
+    /// Length of the original span.
     pub span_length: u32,
+    /// Detection confidence.
     pub confidence: Option<f32>,
+    /// Detector source.
     pub source: EntitySource,
+    /// Pipeline version.
     pub pipeline_version: String,
+    /// Config hash.
     pub config_hash: String,
     /// See [`AuditEntry::principal`].
     pub principal: Option<String>,
