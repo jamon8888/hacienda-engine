@@ -171,6 +171,8 @@ impl NerDetector {
     }
 }
 
+/// Convert an xberg [`Entity`] into a pipeline [`ModelEntity`], mapping the category
+/// via [`to_pii_category`] and normalising missing confidence to `1.0`.
 fn to_model_entity(entity: Entity) -> ModelEntity {
     ModelEntity {
         category: to_pii_category(&entity.category),

@@ -43,17 +43,29 @@ pub enum PiiCategory {
     FullName,
     Person,
     Organization,
+    /// Given name, first name.
     FirstName,
+    /// Middle name, second given name.
     MiddleName,
+    /// Family name, last name, surname.
     LastName,
+    /// Street number and name, e.g. "123 Main St".
     StreetAddress,
+    /// City or municipality name.
     City,
+    /// State, province or region name.
     StateOrRegion,
+    /// Postal or ZIP code.
     PostalCode,
+    /// Country name or ISO code.
     Country,
+    /// Government-issued identifier, e.g. passport or national ID.
     GovernmentId,
+    /// Payment card number.
     PaymentCard,
+    /// Card expiry date.
     CardExpiry,
+    /// Card CVV / CVC security code.
     CardCvv,
     Custom(String),
 }
