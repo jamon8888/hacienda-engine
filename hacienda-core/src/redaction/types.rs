@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// How a detected span is rewritten in the output text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+/// RedactionMode enum
 pub enum RedactionMode {
     /// Replace with the category's redaction template, e.g. `[EMAIL]`.
     ///
@@ -46,6 +47,7 @@ impl std::str::FromStr for RedactionMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// RedactionConfig struct
 pub struct RedactionConfig {
     pub mode: RedactionMode,
     /// Template used when `mode` is [`RedactionMode::Custom`].
@@ -78,6 +80,7 @@ impl Default for RedactionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// RedactionResult struct
 pub struct RedactionResult {
     pub text: String,
     pub audit_log: Vec<RedactionAuditEntry>,
@@ -86,6 +89,7 @@ pub struct RedactionResult {
 
 /// One hash-chained record of a single redacted span.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// RedactionAuditEntry struct
 pub struct RedactionAuditEntry {
     pub category: String,
     /// The rewrite that was applied — not merely the mode that was configured.
@@ -108,6 +112,7 @@ pub struct RedactionAuditEntry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// RedactionMetrics struct
 pub struct RedactionMetrics {
     pub redaction_ms: u64,
     pub entities_detected: u32,

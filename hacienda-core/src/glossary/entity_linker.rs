@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 /// One glossary term and the evidence behind it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// GlossaryEntry struct
 pub struct GlossaryEntry {
     pub category: String,
     pub term: String,
@@ -21,6 +22,7 @@ pub struct GlossaryEntry {
 /// glossaries are byte-identical across runs — an artefact that reorders itself is
 /// useless as review evidence.
 #[derive(Debug, Clone)]
+/// EntityGlossary struct
 pub struct EntityGlossary {
     entries: BTreeMap<(String, String), Accumulator>,
     config: GlossaryConfig,
@@ -33,6 +35,7 @@ struct Accumulator {
 }
 
 impl EntityGlossary {
+/// new function
     pub fn new(config: GlossaryConfig) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -77,6 +80,7 @@ impl EntityGlossary {
         entries
     }
 
+/// is_empty function
     pub fn is_empty(&self) -> bool {
         self.entries().is_empty()
     }

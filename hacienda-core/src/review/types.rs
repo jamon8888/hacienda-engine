@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// `&TenantId` explicitly wherever it cannot resolve the tenant from an item it already
 /// has in hand (`list`/`get`/`stats`, and the pre-lookup half of `assign`/`decide`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ReviewQueueItem struct
 pub struct ReviewQueueItem {
     pub id: String,
     pub text_snippet: String,
@@ -50,6 +51,7 @@ fn default_tenant_id() -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// ReviewStatus enum
 pub enum ReviewStatus {
     Pending,
     InReview,
@@ -89,6 +91,7 @@ impl std::str::FromStr for ReviewStatus {
 /// Urgency of a review item, derived from detection confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+/// Priority enum
 pub enum Priority {
     Low,
     Normal,
@@ -125,6 +128,7 @@ impl std::str::FromStr for Priority {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+/// ReviewDecision enum
 pub enum ReviewDecision {
     #[default]
     Approve,
@@ -158,6 +162,7 @@ impl std::str::FromStr for ReviewDecision {
 
 /// Submission payload for a new review item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ReviewRequest struct
 pub struct ReviewRequest {
     pub text_snippet: String,
     pub category: String,
@@ -168,6 +173,7 @@ pub struct ReviewRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// QueueStats struct
 pub struct QueueStats {
     pub total: usize,
     pub pending: usize,
@@ -179,6 +185,7 @@ pub struct QueueStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// ReviewConfig struct
 pub struct ReviewConfig {
     /// Detections at or above this confidence never enter the queue.
     pub confidence_threshold: f32,

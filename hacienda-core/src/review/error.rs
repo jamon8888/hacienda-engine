@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// ReviewError enum
 pub enum ReviewError {
     #[error("review item not found: {0}")]
     NotFound(String),

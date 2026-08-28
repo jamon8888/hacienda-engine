@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 /// design, and distinguishing "wrong key" from "tampered ciphertext" in a message handed
 /// back to a caller would be an oracle. Callers get "this token could not be revealed".
 #[derive(Debug, Error)]
+/// PseudonymError enum
 pub enum PseudonymError {
     #[error("pseudonym token padding is malformed")]
     MalformedPadding,
@@ -199,6 +200,7 @@ pub const KEY_VAR_PREFIX: &str = "HACIENDA_PSEUDONYM_KEY_";
 /// * Uppercase is rejected rather than folded, so that exactly one spelling of an id maps
 ///   to one key and audit records cannot disagree about which key was used.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// KeyId struct
 pub struct KeyId(String);
 
 impl KeyId {
@@ -221,6 +223,7 @@ impl KeyId {
         }
     }
 
+/// as_str function
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -249,6 +252,7 @@ impl std::fmt::Display for KeyId {
 /// contains only the keys loaded for *their* tenant. Two tenants configured with
 /// disjoint key sets never see each other's `id`s through this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// KeyStatus struct
 pub struct KeyStatus {
     pub id: KeyId,
     /// `true` for the key new tokens mint under; `false` for a retired key still
@@ -291,6 +295,7 @@ impl PseudonymKey {
         })
     }
 
+/// id function
     pub fn id(&self) -> &KeyId {
         &self.id
     }
@@ -742,11 +747,13 @@ impl std::fmt::Debug for Pseudonymiser {
 /// as fatal here would only turn one thread's panic into every future tenant lookup
 /// panicking too, for no added safety.
 #[derive(Default)]
+/// TenantPseudonymiserRegistry struct
 pub struct TenantPseudonymiserRegistry {
     by_tenant: RwLock<HashMap<TenantId, Arc<Pseudonymiser>>>,
 }
 
 impl TenantPseudonymiserRegistry {
+/// new function
     pub fn new() -> Self {
         Self::default()
     }

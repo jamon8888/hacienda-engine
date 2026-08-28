@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// PiiIncident struct
 pub struct PiiIncident {
     pub summary: String,
     pub timeline: String,
@@ -13,6 +14,7 @@ pub struct PiiIncident {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// DoraReport struct
 pub struct DoraReport {
     pub reference: String,
     pub timestamp: String,
@@ -24,6 +26,7 @@ pub struct DoraReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// IncidentClassification struct
 pub struct IncidentClassification {
     pub severity: String,
     pub category: String,
@@ -31,6 +34,7 @@ pub struct IncidentClassification {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// IncidentDescription struct
 pub struct IncidentDescription {
     pub summary: String,
     pub timeline: String,
@@ -38,6 +42,7 @@ pub struct IncidentDescription {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// IncidentResponse struct
 pub struct IncidentResponse {
     pub detected_at: String,
     pub contained_at: Option<String>,
@@ -47,15 +52,18 @@ pub struct IncidentResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// CommunicationLog struct
 pub struct CommunicationLog {
     pub internal_notifications: Vec<String>,
     pub regulatory_notifications: Vec<String>,
     pub public_communications: Vec<String>,
 }
 
+/// DoraIncidentReporter struct
 pub struct DoraIncidentReporter;
 
 impl DoraIncidentReporter {
+/// generate_report function
     pub fn generate_report(incident: &PiiIncident) -> DoraReport {
         let sanitized = incident.detected_at.replace(['-', ':', 'T'], "");
         let timestamp_part = sanitized.get(..13).unwrap_or(&sanitized);
@@ -103,6 +111,7 @@ impl DoraIncidentReporter {
     }
 }
 
+/// generate_report function
 pub fn generate_report(incident: &PiiIncident) -> DoraReport {
     DoraIncidentReporter::generate_report(incident)
 }

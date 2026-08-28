@@ -166,6 +166,7 @@ pub trait ReviewStore: Send + Sync {
 ///
 /// [`FileReviewStore`]: crate::review::store_file::FileReviewStore
 #[derive(Debug, Default)]
+/// InMemoryReviewStore struct
 pub struct InMemoryReviewStore {
     items: Mutex<Vec<ReviewQueueItem>>,
 }

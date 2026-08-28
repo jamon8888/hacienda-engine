@@ -12,11 +12,13 @@ use sqlx::PgPool;
 
 /// Postgres-backed [`ReviewStore`].
 #[derive(Clone)]
+/// PostgresReviewStore struct
 pub struct PostgresReviewStore {
     pool: PgPool,
 }
 
 impl PostgresReviewStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

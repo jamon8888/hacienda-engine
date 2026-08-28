@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// ModelCard struct
 pub struct ModelCard {
     pub model_details: ModelDetails,
     pub training_data: TrainingData,
@@ -11,6 +12,7 @@ pub struct ModelCard {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// ModelDetails struct
 pub struct ModelDetails {
     pub name: String,
     pub version: String,
@@ -23,6 +25,7 @@ pub struct ModelDetails {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// TrainingData struct
 pub struct TrainingData {
     pub description: String,
     pub size: String,
@@ -33,6 +36,7 @@ pub struct TrainingData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Evaluation struct
 pub struct Evaluation {
     pub description: String,
     pub metrics: Vec<Metric>,
@@ -41,12 +45,14 @@ pub struct Evaluation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Metric struct
 pub struct Metric {
     pub name: String,
     pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// BiasFairness struct
 pub struct BiasFairness {
     pub description: String,
     pub known_biases: Vec<String>,
@@ -54,6 +60,7 @@ pub struct BiasFairness {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Deployment struct
 pub struct Deployment {
     pub intended_use: String,
     pub out_of_scope_uses: Vec<String>,
@@ -61,6 +68,7 @@ pub struct Deployment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Governance struct
 pub struct Governance {
     pub organization: String,
     pub review_process: String,
@@ -68,6 +76,7 @@ pub struct Governance {
     pub changelog: Vec<String>,
 }
 
+/// generate_model_card function
 pub fn generate_model_card(model_name: &str) -> ModelCard {
     ModelCard {
         model_details: ModelDetails {

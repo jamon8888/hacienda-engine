@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Likelihood enum
 pub enum Likelihood {
     Low,
     Medium,
@@ -8,6 +9,7 @@ pub enum Likelihood {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Severity enum
 pub enum Severity {
     Low,
     Medium,
@@ -16,6 +18,7 @@ pub enum Severity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// ResidualRisk enum
 pub enum ResidualRisk {
     Negligible,
     Low,
@@ -24,6 +27,7 @@ pub enum ResidualRisk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Risk struct
 pub struct Risk {
     pub id: String,
     pub description: String,
@@ -34,6 +38,7 @@ pub struct Risk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Annex enum
 pub enum Annex {
     ModelCard(String),
     RiskAssessment(String),
@@ -42,6 +47,7 @@ pub enum Annex {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// DpiaDocument struct
 pub struct DpiaDocument {
     pub processing_description: String,
     pub necessity_proportionality: String,
@@ -51,17 +57,20 @@ pub struct DpiaDocument {
     pub annexes: Vec<Annex>,
 }
 
+/// DpiaGenerator struct
 pub struct DpiaGenerator {
     model_name: String,
 }
 
 impl DpiaGenerator {
+/// new function
     pub fn new(model_name: &str) -> Self {
         Self {
             model_name: model_name.to_string(),
         }
     }
 
+/// generate function
     pub fn generate(&self) -> DpiaDocument {
         DpiaDocument {
             processing_description: format!(

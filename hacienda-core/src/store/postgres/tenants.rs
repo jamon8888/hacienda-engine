@@ -7,11 +7,13 @@ use sqlx::PgPool;
 
 /// Postgres-backed [`TenantStore`].
 #[derive(Clone)]
+/// PostgresTenantStore struct
 pub struct PostgresTenantStore {
     pool: PgPool,
 }
 
 impl PostgresTenantStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

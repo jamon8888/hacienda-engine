@@ -40,6 +40,7 @@ pub use types::Tenant;
 /// decision D-S1-6. `TenantId` is intentionally opaque (no ordering, no arithmetic) so
 /// nothing can be tempted to derive one tenant's identifier from another's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// TenantId struct
 pub struct TenantId(String);
 
 impl TenantId {
@@ -77,6 +78,7 @@ pub const DEFAULT_TENANT: &str = "default";
 /// (service accounts acting on behalf of a user, for instance) does not require touching
 /// every [`TenantCtx`] call site.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// ActorId struct
 pub struct ActorId(String);
 
 impl ActorId {
@@ -100,6 +102,7 @@ impl std::fmt::Display for ActorId {
 /// An optional sub-division within a tenant, for parity with Xberg Enterprise's
 /// `project`. **Not a security boundary** — see the module doc and decision D-S1-2.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// ProjectId struct
 pub struct ProjectId(String);
 
 impl ProjectId {
@@ -125,6 +128,7 @@ impl std::fmt::Display for ProjectId {
 /// Every tenant-scoped store method takes `&TenantCtx` as a parameter (D-S1-1) rather
 /// than having it captured at construction time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// TenantCtx struct
 pub struct TenantCtx {
     /// The tenant this context is scoped to — the cloisonnement boundary.
     pub tenant: TenantId,

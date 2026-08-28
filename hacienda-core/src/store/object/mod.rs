@@ -14,6 +14,7 @@ pub mod s3;
 
 /// Error type for object store operations.
 #[derive(Debug, thiserror::Error)]
+/// ObjectStoreError enum
 pub enum ObjectStoreError {
     /// The outbound request to the object store failed (network error, TLS error, etc.)
     /// or the store returned a status this client doesn't know how to interpret.
@@ -30,6 +31,7 @@ pub enum ObjectStoreError {
 /// (e.g. a different `content-type`) makes the object store reject the upload with a
 /// signature-mismatch error, not silently accept a different content type than presigned.
 #[derive(Debug, Clone)]
+/// PresignedPut struct
 pub struct PresignedPut {
     pub url: String,
     pub required_headers: BTreeMap<String, String>,
@@ -38,6 +40,7 @@ pub struct PresignedPut {
 
 /// Metadata about an object confirmed to exist in the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// ObjectMetadata struct
 pub struct ObjectMetadata {
     pub size_bytes: u64,
     pub content_type: Option<String>,
