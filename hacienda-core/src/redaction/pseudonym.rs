@@ -204,7 +204,6 @@ pub const KEY_VAR_PREFIX: &str = "HACIENDA_PSEUDONYM_KEY_";
 /// * Uppercase is rejected rather than folded, so that exactly one spelling of an id maps
 ///   to one key and audit records cannot disagree about which key was used.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-/// KeyId struct
 pub struct KeyId(String);
 
 impl KeyId {
