@@ -76,17 +76,29 @@ pub enum PiiCategory {
     Person,
     /// Organization variant
     Organization,
+    /// FirstName variant
     FirstName,
+    /// MiddleName variant
     MiddleName,
+    /// LastName variant
     LastName,
+    /// StreetAddress variant
     StreetAddress,
+    /// City variant
     City,
+    /// StateOrRegion variant
     StateOrRegion,
+    /// PostalCode variant
     PostalCode,
+    /// Country variant
     Country,
+    /// GovernmentId variant
     GovernmentId,
+    /// PaymentCard variant
     PaymentCard,
+    /// CardExpiry variant
     CardExpiry,
+    /// CardCvv variant
     CardCvv,
     /// Custom variant
     Custom(String),
