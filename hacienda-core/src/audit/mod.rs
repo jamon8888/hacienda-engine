@@ -10,19 +10,29 @@
 // feature (a self-contained `wasm-bindgen`/WebCrypto binding, see `hacienda-core`'s
 // `Cargo.toml`), and neither `chain` nor `store` ever needed anything wasm32-incompatible
 // in the first place.
+/// Module chain
 pub mod chain;
+/// Module cursor
 pub mod cursor;
+/// Module entry
 pub mod entry;
+/// Module error
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module export
 pub mod export;
+/// Module segment
 pub mod segment;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module sink
 pub mod sink;
+/// Module store
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module store_file
 pub mod store_file;
 #[cfg(target_arch = "wasm32")]
+/// Module store_idb
 pub mod store_idb;
 
 pub use chain::{verify_entries, AuditChain, GENESIS_HASH};
@@ -68,6 +78,7 @@ use serde::{Deserialize, Serialize};
 /// something reads it, not before.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// AuditConfig struct
 pub struct AuditConfig {
     /// Whether to record an audit chain at all. Read by the facade when choosing
     /// whether to build a default store.

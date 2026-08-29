@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! PII detection, redaction, audit, review, glossary, and compliance for documents.
 //!
 //! The pipeline is deterministic patterns plus an optional statistical NER backend,
@@ -26,6 +27,7 @@
 //! # }
 //! ```
 
+/// Module audit
 pub mod audit;
 // Everything below is server/native-only: `auth` pulls in axum, `facade`/`config`/`error`
 // bind the whole crate (review queue, compliance reports, the file-backed audit store)
@@ -35,30 +37,42 @@ pub mod audit;
 // submodules stay native-only — see `audit/mod.rs` — but the in-memory `AuditStore` and
 // hash chain are wasm32-safe as of Track L3).
 #[cfg(not(target_arch = "wasm32"))]
+/// Module auth
 pub mod auth;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module compliance
 pub mod compliance;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module config
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module error
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module facade
 pub mod facade;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module glossary
 pub mod glossary;
 #[cfg(all(feature = "jobs", not(target_arch = "wasm32")))]
+/// Module jobs
 pub mod jobs;
+/// Module pii
 pub mod pii;
+/// Module redaction
 pub mod redaction;
 #[cfg(not(target_arch = "wasm32"))]
+/// Module review
 pub mod review;
 #[cfg(all(any(feature = "postgres", feature = "s3"), not(target_arch = "wasm32")))]
+/// Module store
 pub mod store;
 // Not native-only despite living near `auth`/`facade`: `tenancy`'s types are plain
 // `String` newtypes plus serde, and `redaction::pseudonym` — wasm-safe, see above — takes
 // a `TenantCtx` parameter on `KeyResolver`/`Pseudonymiser` (S1). Gating this behind
 // `not(target_arch = "wasm32")` would make the browser build's own `Pseudonymiser::new`
 // call site (`crates/hacienda-wasm/src/lib.rs`) uncompilable.
+/// Module tenancy
 pub mod tenancy;
 
 #[cfg(not(target_arch = "wasm32"))]

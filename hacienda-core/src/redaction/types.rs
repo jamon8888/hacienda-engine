@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// How a detected span is rewritten in the output text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+/// RedactionMode enum
 pub enum RedactionMode {
     /// Replace with the category's redaction template, e.g. `[EMAIL]`.
     ///
@@ -12,6 +13,7 @@ pub enum RedactionMode {
     /// configuration. A default of [`RedactionMode::Pseudonymize`] would mean the
     /// out-of-the-box path depends on a secret the operator has not yet set.
     #[default]
+    /// Mask variant
     Mask,
     /// Replace with a short blake3 digest of the original span.
     Hash,
@@ -46,7 +48,9 @@ impl std::str::FromStr for RedactionMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// RedactionConfig struct
 pub struct RedactionConfig {
+    /// mode field
     pub mode: RedactionMode,
     /// Template used when `mode` is [`RedactionMode::Custom`].
     ///
@@ -63,6 +67,7 @@ pub struct RedactionConfig {
     /// config, log line, and support bundle. Key material reaches the engine only through
     /// a [`KeyResolver`](crate::redaction::KeyResolver).
     #[serde(default)]
+    /// key_id field
     pub key_id: Option<String>,
 }
 
@@ -78,15 +83,21 @@ impl Default for RedactionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// RedactionResult struct
 pub struct RedactionResult {
+    /// text field
     pub text: String,
+    /// audit_log field
     pub audit_log: Vec<RedactionAuditEntry>,
+    /// metrics field
     pub metrics: RedactionMetrics,
 }
 
 /// One hash-chained record of a single redacted span.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// RedactionAuditEntry struct
 pub struct RedactionAuditEntry {
+    /// category field
     pub category: String,
     /// The rewrite that was applied — not merely the mode that was configured.
     ///
@@ -101,16 +112,24 @@ pub struct RedactionAuditEntry {
     pub source: crate::pii::types::EntitySource,
     /// blake3 digest of the original span. The span itself is never recorded.
     pub span_hash: String,
+    /// span_length field
     pub span_length: u32,
+    /// confidence field
     pub confidence: Option<f32>,
+    /// timestamp field
     pub timestamp: u64,
+    /// chain_hash field
     pub chain_hash: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// RedactionMetrics struct
 pub struct RedactionMetrics {
+    /// redaction_ms field
     pub redaction_ms: u64,
+    /// entities_detected field
     pub entities_detected: u32,
+    /// entities_redacted field
     pub entities_redacted: u32,
 }
 

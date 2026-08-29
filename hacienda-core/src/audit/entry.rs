@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// plaintext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// RedactionAction enum
 pub enum RedactionAction {
     Mask,
     Hash,
@@ -75,6 +76,7 @@ impl std::str::FromStr for RedactionAction {
 /// Which detector produced the entity the entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// EntitySource enum
 pub enum EntitySource {
     Regex,
     Model,
@@ -114,6 +116,7 @@ impl From<crate::pii::types::EntitySource> for EntitySource {
 ///
 /// The original span is never stored — only its blake3 digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// AuditEntry struct
 pub struct AuditEntry {
     pub id: String,
     pub timestamp: String,
@@ -133,6 +136,7 @@ pub struct AuditEntry {
     /// exactly what entries written before this field existed hashed as, so older chains
     /// still verify.
     #[serde(default)]
+    /// principal field
     pub principal: Option<String>,
     /// The Tier 0 schema vertical active when this entity was detected, or `None` when
     /// no vertical was configured.
@@ -146,6 +150,7 @@ pub struct AuditEntry {
     /// empty string — which is exactly what entries written before this field existed
     /// hashed as, so older chains still verify.
     #[serde(default)]
+    /// vertical field
     pub vertical: Option<String>,
     /// The model that produced this entity, or `None` for regex-only entries or
     /// chains written before this field existed. Recorded as
@@ -153,6 +158,7 @@ pub struct AuditEntry {
     /// covered by [`compute_chain_hash`] so it cannot be rewritten without
     /// breaking verification. `None` hashes as no bytes, so older chains verify.
     #[serde(default)]
+    /// model field
     pub model: Option<String>,
     /// blake3 over the previous chain hash and this entry's identifying fields.
     pub chain_hash: String,
@@ -160,6 +166,7 @@ pub struct AuditEntry {
 
 /// Everything needed to mint an [`AuditEntry`] except its position in the chain.
 #[derive(Debug, Clone)]
+/// AuditEntryInput struct
 pub struct AuditEntryInput {
     pub id: String,
     pub category: String,
@@ -248,14 +255,23 @@ impl AuditEntry {
 /// above exists to avoid. Narrowing visibility instead of adding a constructor keeps
 /// that guarantee intact without giving external crates a way to build one at all.
 #[derive(Debug, Clone, Copy)]
+/// ChainHashFields struct
 pub struct ChainHashFields<'a> {
+    /// id field
     pub id: &'a str,
+    /// category field
     pub category: &'a str,
+    /// action field
     pub action: &'a RedactionAction,
+    /// span_hash field
     pub span_hash: &'a str,
+    /// config_hash field
     pub config_hash: &'a str,
+    /// principal field
     pub principal: Option<&'a str>,
+    /// vertical field
     pub vertical: Option<&'a str>,
+    /// model field
     pub model: Option<&'a str>,
 }
 

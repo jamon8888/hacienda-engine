@@ -20,45 +20,76 @@ use zeroize::Zeroizing;
 /// design, and distinguishing "wrong key" from "tampered ciphertext" in a message handed
 /// back to a caller would be an oracle. Callers get "this token could not be revealed".
 #[derive(Debug, Error)]
+/// PseudonymError enum
 pub enum PseudonymError {
     #[error("pseudonym token padding is malformed")]
+    /// MalformedPadding variant
     MalformedPadding,
 
+    /// Invalid key ID
     #[error(
         "invalid pseudonym key id '{id}': expected 1-16 characters from [a-z0-9_] \
          (lowercase, no ':' or ']', usable as an environment variable suffix)"
     )]
-    InvalidKeyId { id: String },
+    InvalidKeyId { 
+        /// Key ID
+        id: String 
+    },
 
+    /// Key not found
     #[error(
         "no pseudonym key is configured for id '{id}' \
          (expected environment variable {variable})"
     )]
-    KeyNotFound { id: String, variable: String },
+    KeyNotFound { 
+        /// Key ID
+        id: String, 
+        /// Variable name
+        variable: String 
+    },
 
     #[error(
         "no active pseudonym key is configured \
          (set HACIENDA_PSEUDONYM_ACTIVE_KEY to the id of the key to mint tokens under)"
     )]
+    /// NoActiveKey variant
     NoActiveKey,
 
+    /// Malformed key material
     #[error("pseudonym key '{id}' is not {KEY_BYTES}-byte lowercase hex")]
-    MalformedKeyMaterial { id: String },
+    MalformedKeyMaterial { 
+        /// Key ID
+        id: String 
+    },
 
+    /// Wrong key length
     #[error("pseudonym key '{id}' is {actual} bytes, expected {KEY_BYTES}")]
-    WrongKeyLength { id: String, actual: usize },
+    WrongKeyLength { 
+        /// Key ID
+        id: String, 
+        /// Actual length
+        actual: usize 
+    },
 
     #[error("not a pseudonym token: expected [CATEGORY:key_id:data]")]
+    /// MalformedToken variant
     MalformedToken,
 
     /// Covers a wrong key, a relabelled category, and a tampered ciphertext alike.
     ///
     /// Distinguishing them would tell an attacker which of their guesses was closer.
     #[error("pseudonym token could not be revealed (wrong key, altered, or forged)")]
+    /// UnreadableToken variant
     UnreadableToken,
 
+    /// Unsupported category
     #[error("category '{category}' cannot appear in a pseudonym token: {reason}")]
-    UnsupportedCategory { category: String, reason: String },
+    UnsupportedCategory { 
+        /// Category
+        category: String, 
+        /// Reason
+        reason: String 
+    },
 
     /// A non-default tenant id contains characters outside `[a-z0-9_]` — lowercase only.
     ///
@@ -72,12 +103,16 @@ pub enum PseudonymError {
     /// variable). Restricting the accepted alphabet to exactly the one case the output
     /// uses is the same discipline [`KeyId::new`] already applies to `-` in a key id,
     /// extended to tenant ids.
+    /// Unsupported tenant ID
     #[error(
         "tenant id '{tenant}' cannot be used to name a pseudonym key variable: \
          expected characters from [a-z0-9_] so that no two tenant ids map to the \
          same environment variable name"
     )]
-    UnsupportedTenantId { tenant: String },
+    UnsupportedTenantId { 
+        /// Tenant
+        tenant: String 
+    },
 }
 
 /// Collapse spelling variants of one value onto a single canonical form.
@@ -199,6 +234,7 @@ pub const KEY_VAR_PREFIX: &str = "HACIENDA_PSEUDONYM_KEY_";
 /// * Uppercase is rejected rather than folded, so that exactly one spelling of an id maps
 ///   to one key and audit records cannot disagree about which key was used.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// KeyId struct
 pub struct KeyId(String);
 
 impl KeyId {
@@ -221,6 +257,7 @@ impl KeyId {
         }
     }
 
+/// as_str function
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -249,7 +286,9 @@ impl std::fmt::Display for KeyId {
 /// contains only the keys loaded for *their* tenant. Two tenants configured with
 /// disjoint key sets never see each other's `id`s through this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// KeyStatus struct
 pub struct KeyStatus {
+    /// id field
     pub id: KeyId,
     /// `true` for the key new tokens mint under; `false` for a retired key still
     /// loaded for reveal.
@@ -291,6 +330,7 @@ impl PseudonymKey {
         })
     }
 
+/// id function
     pub fn id(&self) -> &KeyId {
         &self.id
     }
@@ -742,11 +782,13 @@ impl std::fmt::Debug for Pseudonymiser {
 /// as fatal here would only turn one thread's panic into every future tenant lookup
 /// panicking too, for no added safety.
 #[derive(Default)]
+/// TenantPseudonymiserRegistry struct
 pub struct TenantPseudonymiserRegistry {
     by_tenant: RwLock<HashMap<TenantId, Arc<Pseudonymiser>>>,
 }
 
 impl TenantPseudonymiserRegistry {
+/// new function
     pub fn new() -> Self {
         Self::default()
     }

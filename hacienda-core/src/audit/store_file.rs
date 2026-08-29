@@ -61,12 +61,14 @@ use crate::tenancy::TenantId;
 /// for reduced write amplification on high-throughput workloads. Phase 2's benchmarks
 /// will quantify the trade-off on the production corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// SyncPolicy enum
 pub enum SyncPolicy {
     /// Call `sync_data()` after writing every append batch and after every seal write.
     ///
     /// This is the safest setting: a power loss after a successful `append` call will
     /// not lose that batch. The cost is one extra syscall per document.
     #[default]
+    /// EveryBatch variant
     EveryBatch,
 
     /// Call `sync_data()` only when sealing a segment (on `rotate` or `close`).
@@ -185,6 +187,7 @@ struct FileState {
 /// hash does not verify). With poison, the second `append` is rejected immediately;
 /// the caller reopens the store and gets a clean chain that matches the file.
 #[derive(Debug)]
+/// FileAuditStore struct
 pub struct FileAuditStore {
     /// Serialises the mint-then-write sequence of `append`, `rotate`, and `close` so that
     /// on-disk order matches chain order. See "Why there are two locks" above.

@@ -25,22 +25,28 @@ use thiserror::Error;
 
 /// Errors from API key operations.
 #[derive(Debug, Error)]
+/// ApiKeyError enum
 pub enum ApiKeyError {
     #[error("failed to generate random key material: {0}")]
+    /// Generation variant
     Generation(#[from] rand::Error),
 
     #[error("failed to hash key: {0}")]
+    /// Hashing variant
     Hashing(String),
 
     #[error("failed to verify key: {0}")]
+    /// Verification variant
     Verification(String),
 
     #[error("invalid key format: expected hcd_<prefix>_<base62>")]
+    /// InvalidFormat variant
     InvalidFormat,
 }
 
 /// A generated API key pair: the raw key (shown once) and its stored hashes.
 #[derive(Clone)]
+/// ApiKeyPair struct
 pub struct ApiKeyPair {
     /// The raw key, shown to the user exactly once. Format: `hcd_live_<base62>`.
     pub raw_key: String,
@@ -125,6 +131,7 @@ pub fn verify_key(candidate: &str, stored_hash: &str) -> Result<bool, ApiKeyErro
 
 /// Configuration for API key generation.
 #[derive(Debug, Clone)]
+/// ApiKeyConfig struct
 pub struct ApiKeyConfig {
     /// Prefix for generated keys (default: "hcd_live_").
     pub prefix: String,
@@ -178,16 +185,22 @@ impl fmt::Debug for ApiKeyPair {
 
 /// An API key record (never stores the raw key).
 #[derive(Debug, Clone)]
+/// ApiKey struct
 pub struct ApiKey {
+    /// id field
     pub id: uuid::Uuid,
     /// Argon2id hash, used for verification (defense-in-depth if the database leaks).
     pub key_hash: String,
     /// Deterministic BLAKE3 digest, indexed for lookup by presented key. See the module
     /// docs for why this exists separately from `key_hash`.
     pub lookup_hash: String,
+    /// owner field
     pub owner: String,
+    /// capabilities field
     pub capabilities: serde_json::Value,
+    /// created_at field
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// revoked_at field
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The tenant this key was issued under (S1). Scopes
     /// [`ApiKeyStore::revoke`](crate::auth::ApiKeyStore::revoke) and

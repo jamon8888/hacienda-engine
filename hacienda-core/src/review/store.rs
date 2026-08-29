@@ -54,6 +54,7 @@ use crate::tenancy::TenantId;
 /// transaction at `READ COMMITTED` — reintroduces the race and will only appear under Phase 2's
 /// concurrent workload, not in sequential tests.
 #[async_trait]
+/// ReviewStore trait
 pub trait ReviewStore: Send + Sync {
     /// Insert a pre-built item into the store, scoped to `tenant`.
     ///
@@ -166,6 +167,7 @@ pub trait ReviewStore: Send + Sync {
 ///
 /// [`FileReviewStore`]: crate::review::store_file::FileReviewStore
 #[derive(Debug, Default)]
+/// InMemoryReviewStore struct
 pub struct InMemoryReviewStore {
     items: Mutex<Vec<ReviewQueueItem>>,
 }

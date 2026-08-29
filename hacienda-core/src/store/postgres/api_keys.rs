@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 /// Postgres-backed [`ApiKeyStore`].
 #[derive(Clone)]
+/// PostgresApiKeyStore struct
 pub struct PostgresApiKeyStore {
     pool: PgPool,
 }

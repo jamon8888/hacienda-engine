@@ -20,6 +20,7 @@ const BASE_CATEGORY_NAMES: [&str; 5] = ["person", "organization", "location", "e
 /// Effective configuration for one [`crate::pii::PiiPipeline`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// PipelineConfig struct
 pub struct PipelineConfig {
     /// Prefer deterministic regex spans over model spans when the two overlap.
     pub regex_first: bool,
@@ -31,8 +32,11 @@ pub struct PipelineConfig {
     pub model_thresholds: HashMap<PiiCategory, f32>,
     /// Overlap ratio above which two spans are treated as the same detection.
     pub merge_overlap_threshold: f32,
+    /// redaction field
     pub redaction: RedactionConfig,
+    /// audit field
     pub audit: AuditConfig,
+    /// model field
     pub model: ModelConfig,
     /// How many documents [`crate::HaciendaFacade::process_batch_with_auth`] runs
     /// through this pipeline at once.
@@ -117,6 +121,7 @@ impl PipelineConfig {
 /// to you.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// VerticalConfig struct
 pub struct VerticalConfig {
     /// Stable identifier recorded in the audit chain.
     pub id: String,
@@ -296,6 +301,7 @@ impl VerticalConfig {
 /// on-premise and must not reach the network at inference time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// ModelConfig struct
 pub struct ModelConfig {
     /// When false the pipeline is regex-only. Nothing is loaded.
     pub enabled: bool,
@@ -307,10 +313,15 @@ pub struct ModelConfig {
 
 /// Values supplied on the command line, applied on top of the loaded file.
 #[derive(Debug, Clone, Default)]
+/// CliOverrides struct
 pub struct CliOverrides {
+    /// model_threshold field
     pub model_threshold: Option<f32>,
+    /// redaction_mode field
     pub redaction_mode: Option<RedactionMode>,
+    /// model_dir field
     pub model_dir: Option<PathBuf>,
+    /// lora_adapter_dir field
     pub lora_adapter_dir: Option<PathBuf>,
 }
 

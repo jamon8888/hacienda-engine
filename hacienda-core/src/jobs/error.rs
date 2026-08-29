@@ -8,9 +8,11 @@ use thiserror::Error;
 /// Variants carry the job id where applicable so callers can log a useful
 /// message without re-fetching the job.
 #[derive(Debug, Error)]
+/// JobError enum
 pub enum JobError {
     /// No job with the given id exists in the store.
     #[error("job not found: {0}")]
+    /// NotFound variant
     NotFound(String),
 
     /// A `transition` call failed because the job's current status was not the
@@ -18,8 +20,11 @@ pub enum JobError {
     /// two-worker race; callers should treat it as a signal to back off, not a bug.
     #[error("job {id}: expected status {expected} for transition, found {actual}")]
     StatusMismatch {
+        /// Job ID
         id: String,
+        /// Expected status
         expected: JobStatus,
+        /// Actual status
         actual: JobStatus,
     },
 

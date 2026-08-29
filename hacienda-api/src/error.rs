@@ -25,13 +25,21 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
+    /// Invalid request
     InvalidRequest,
+    /// Unauthenticated
     Unauthenticated,
+    /// Forbidden
     Forbidden,
+    /// Not found
     NotFound,
+    /// Payload too large
     PayloadTooLarge,
+    /// Unsupported media type
     UnsupportedMediaType,
+    /// Rate limited
     RateLimited,
+    /// Internal error
     Internal,
 }
 
@@ -57,12 +65,14 @@ impl ApiErrorCode {
 #[derive(Debug, Error)]
 #[error("{code:?}: {message}")]
 pub struct ApiError {
+    /// Error code
     pub code: ApiErrorCode,
     /// Short, generic, client-safe sentence. No PII, no paths, no spans.
     pub message: String,
 }
 
 impl ApiError {
+    /// Invalid request
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self {
             code: ApiErrorCode::InvalidRequest,
@@ -70,6 +80,7 @@ impl ApiError {
         }
     }
 
+    /// Unauthenticated
     pub fn unauthenticated() -> Self {
         Self {
             code: ApiErrorCode::Unauthenticated,
@@ -77,6 +88,7 @@ impl ApiError {
         }
     }
 
+    /// Forbidden
     pub fn forbidden() -> Self {
         Self {
             code: ApiErrorCode::Forbidden,
@@ -84,6 +96,7 @@ impl ApiError {
         }
     }
 
+    /// Not found
     pub fn not_found() -> Self {
         Self {
             code: ApiErrorCode::NotFound,
@@ -106,6 +119,7 @@ impl ApiError {
         }
     }
 
+    /// Payload too large
     pub fn payload_too_large() -> Self {
         Self {
             code: ApiErrorCode::PayloadTooLarge,
@@ -113,6 +127,7 @@ impl ApiError {
         }
     }
 
+    /// Unsupported media type
     pub fn unsupported_media_type() -> Self {
         Self {
             code: ApiErrorCode::UnsupportedMediaType,
@@ -120,6 +135,7 @@ impl ApiError {
         }
     }
 
+    /// Internal error
     pub fn internal() -> Self {
         Self {
             code: ApiErrorCode::Internal,
