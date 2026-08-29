@@ -20,8 +20,11 @@ pub enum JobError {
     /// two-worker race; callers should treat it as a signal to back off, not a bug.
     #[error("job {id}: expected status {expected} for transition, found {actual}")]
     StatusMismatch {
+        /// Job ID
         id: String,
+        /// Expected status
         expected: JobStatus,
+        /// Actual status
         actual: JobStatus,
     },
 

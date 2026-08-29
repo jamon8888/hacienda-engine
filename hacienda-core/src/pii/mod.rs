@@ -72,6 +72,7 @@ pub enum PiiError {
     #[error("model backend unavailable: {0}")]
     ModelUnavailable(String),
 
+    /// Config I/O error
     #[error("reading configuration from {path}")]
     ConfigIo {
         /// Path
@@ -81,6 +82,7 @@ pub enum PiiError {
         source: std::io::Error,
     },
 
+    /// Config parse error
     #[error("parsing configuration from {path}")]
     ConfigParse {
         /// Path
@@ -90,6 +92,7 @@ pub enum PiiError {
         source: toml::de::Error,
     },
 
+    /// Redaction error
     #[error(transparent)]
     Redaction(#[from] crate::redaction::RedactionError),
 
