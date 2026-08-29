@@ -3,25 +3,39 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 /// AuditError enum
 pub enum AuditError {
+    /// I/O error writing audit log
     #[error("writing audit log to {path}: {source}")]
     Io {
+        /// Path
         path: String,
+        /// Source error
         #[source]
         source: std::io::Error,
     },
 
+    /// JSON serialization error
     #[error("serializing audit entry: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Chain integrity error
     #[error("audit chain broken at entry {index}: expected hash '{expected}', found '{actual}'")]
     ChainIntegrity {
+        /// Index
         index: u64,
+        /// Expected hash
         expected: String,
+        /// Actual hash
         actual: String,
     },
 
+    /// Config mismatch
     #[error("audit entry was minted under config '{actual}' but this chain uses '{expected}'")]
-    ConfigMismatch { expected: String, actual: String },
+    ConfigMismatch { 
+        /// Expected config
+        expected: String, 
+        /// Actual config
+        actual: String 
+    },
 
     /// A segment's recorded `seal_hash` does not match the hash recomputed from its
     /// own fields. This fires when any field of the seal (including `entry_count` and
@@ -30,8 +44,11 @@ pub enum AuditError {
         "segment '{segment_id}' seal hash is corrupt: expected '{expected}', found '{actual}'"
     )]
     SegmentIntegrity {
+        /// Segment ID
         segment_id: String,
+        /// Expected hash
         expected: String,
+        /// Actual hash
         actual: String,
     },
 
@@ -45,8 +62,11 @@ pub enum AuditError {
          from the preceding seal"
     )]
     SegmentLink {
+        /// Segment ID
         segment_id: String,
+        /// Expected hash
         expected: String,
+        /// Actual hash
         actual: String,
     },
 
@@ -57,8 +77,11 @@ pub enum AuditError {
     /// different responses, and collapsing them into one error would hide that.
     #[error("segment '{segment_id}' holds {actual} entries but its seal records {expected}")]
     SegmentEntryCount {
+        /// Segment ID
         segment_id: String,
+        /// Expected count
         expected: u64,
+        /// Actual count
         actual: u64,
     },
 
@@ -68,7 +91,10 @@ pub enum AuditError {
     /// simply used the store after shutting it down. Reporting a closed store as a broken
     /// chain would raise a tamper alarm for what is only a lifecycle mistake.
     #[error("the audit store is closed and cannot accept '{operation}'")]
-    StoreClosed { operation: &'static str },
+    StoreClosed { 
+        /// Operation name
+        operation: &'static str 
+    },
 
     /// A pagination cursor could not be resolved to a position in this history.
     ///
@@ -78,7 +104,12 @@ pub enum AuditError {
     /// would then record every entry it already had a second time, and could not tell the
     /// duplicate run from new activity.
     #[error("audit cursor '{cursor}' is not a position in this history: {reason}")]
-    UnresolvableCursor { cursor: String, reason: String },
+    UnresolvableCursor { 
+        /// Cursor value
+        cursor: String, 
+        /// Reason
+        reason: String 
+    },
 
     /// A non-file persistence backend failed. `Io` is file-specific (it carries a
     /// `std::io::Error`); this is the equivalent for backends like
