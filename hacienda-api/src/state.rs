@@ -80,6 +80,7 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    /// Create a new ApiState
     pub fn new(
         facade: Arc<HaciendaFacade>,
         jobs: Arc<dyn JobStore>,
