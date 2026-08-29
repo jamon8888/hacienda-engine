@@ -12,14 +12,21 @@ pub enum ReviewError {
     AlreadyDecided(String),
 
     #[error("invalid review status transition from {from} to {to}")]
-    InvalidTransition { from: String, to: String },
+    InvalidTransition { 
+        /// From status
+        from: String, 
+        /// To status
+        to: String 
+    },
 
     /// Returned by [`FileReviewStore`] when a file operation fails.
     ///
     /// [`FileReviewStore`]: crate::review::store_file::FileReviewStore
     #[error("review store I/O error at {path}: {source}")]
     Io {
+        /// Path
         path: String,
+        /// Source error
         #[source]
         source: std::io::Error,
     },
