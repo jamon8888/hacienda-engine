@@ -25,13 +25,21 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
+    /// Invalid request
     InvalidRequest,
+    /// Unauthenticated
     Unauthenticated,
+    /// Forbidden
     Forbidden,
+    /// Not found
     NotFound,
+    /// Payload too large
     PayloadTooLarge,
+    /// Unsupported media type
     UnsupportedMediaType,
+    /// Rate limited
     RateLimited,
+    /// Internal error
     Internal,
 }
 
