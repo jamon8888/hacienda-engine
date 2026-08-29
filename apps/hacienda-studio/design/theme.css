@@ -1,0 +1,69 @@
+/*
+ * Tailwind v4 theme extracted from https://ramp.com/ on 2026-08-24T09:52:54.921Z
+ * dembrandt v0.28.0
+ *
+ * Observed values only. Every token below was measured on the page; no
+ * shades, states or scale steps were generated. Tailwind defaults still
+ * apply for anything not listed here, so extend rather than replace.
+ *
+ * This is a draft to check, not a source of truth. Each token carries the
+ * evidence behind it; read down the counts and drop what the page only did
+ * once before you build on this file.
+ */
+@import "tailwindcss";
+
+@theme {
+  /* Colors */
+  --color-primary: #e4f222;     /* semantic */
+  --color-background: #ffffff;  /* semantic */
+  --color-text: #0c0a08;        /* semantic */
+  --color-brand-1: #d2cecb;     /* palette, 40x, high confidence */
+  --color-brand-2: #4a5568;     /* palette, 35x, high confidence */
+  --color-brand-3: #2b2e35;     /* palette, 3x, high confidence */
+
+  /* Typography */
+  --font-lausanne: lausanne, "lausanne Fallback";  /* display */
+  --font-inter: "Inter";                            /* text */
+  --text-display: 64px;                            /* display */
+  --text-display--line-height: 1;
+  --text-heading-2: 48px;                          /* heading-2 */
+  --text-heading-2--line-height: 1.04;
+  --text-text: 40px;                               /* text */
+  --text-text--line-height: 1.05;
+  --text-heading-3: 24px;                          /* heading-3 */
+  --text-heading-3--line-height: 1.17;
+  --text-body: 20px;                               /* body */
+  --text-body--line-height: 1.3;
+  --text-ui: 18px;                                 /* ui */
+  --text-ui--line-height: 1.33;
+  --text-link: 16px;                               /* link */
+  --text-link--line-height: 1.5;
+  --text-caption: 10px;                            /* caption */
+  --text-caption--line-height: 1.5;
+  --font-weight-normal: 400;
+  --font-weight-semibold: 600;
+  --font-weight-medium: 500;
+  --tracking-display: -0.01px;                     /* display */
+  --tracking-heading-2: -0.005px;                  /* heading-2 */
+  --tracking-caption: 0.5px;                       /* caption */
+
+  /* Spacing */
+  --spacing: 8px;  /* 8px scale */
+
+  /* Radius */
+  --radius-sm: 6px;   /* 31x */
+  --radius-md: 8px;   /* 34x */
+  --radius-lg: 12px;  /* 42x */
+  --radius-xl: 16px;  /* 36x */
+
+  /* Shadows */
+  --shadow-sm: rgba(255, 255, 255, 0.6) 0px 0px 2px 0px inset;
+  --shadow-md: rgba(0, 0, 0, 0.008) 0px 232px 65px 0px, rgba(0, 0, 0, 0.03) 0px 35px 59px 0px, rgba(0, 0, 0, 0.09) 0px 20px 50px 0px, rgba(0, 0, 0, 0.067) 0px 37px 37px 0px, rgba(0, 0, 0, 0.086) 0px 9px 20px 0px, rgba(0, 0, 0, 0.08) 0px 0px 0px 0px;
+
+  /* Breakpoints */
+  --breakpoint-sm: 98px;
+  --breakpoint-md: 449px;
+  --breakpoint-lg: 480px;
+  --breakpoint-xl: 500px;
+  --breakpoint-2xl: 600px;
+}

@@ -68,7 +68,7 @@ export function RedactedEditor({
             setSelection({ from: selection.from, to: selection.from });
           }}
         >
-          Redact selection
+          Masquer la sélection
         </button>
       </div>
       <CodeMirror

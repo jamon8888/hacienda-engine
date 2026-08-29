@@ -3,7 +3,16 @@ import { extractHeadings } from "./document-outline";
 import type { PiiEntity } from "./pii-engine";
 
 function finding(start: number, end: number): PiiEntity {
-  return { category: "email", text: "x".repeat(end - start), start, end };
+  return {
+    category: "email",
+    text: "x".repeat(end - start),
+    start,
+    end,
+    confidence: 1,
+    source: "test",
+    format_preserving: false,
+    redact_template: "[EMAIL]",
+  };
 }
 
 describe("extractHeadings", () => {

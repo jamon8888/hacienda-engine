@@ -90,7 +90,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
   const [knownKeys] = useState(() => listKnownKeys());
 
   const CREDENTIAL_ERROR =
-    "Wrong passphrase, wrong key id, or this document used mask mode.";
+    "Phrase secrète incorrecte, identifiant de clé incorrect, ou ce document a été traité en mode masquage.";
 
   async function onReveal() {
     setBusy(true);
@@ -126,7 +126,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
       await recordPiiReveal(value, finding.category, finding.source);
     } catch {
       setError(
-        "Your passphrase was correct, but the reveal could not be written to the audit chain, so the value is not shown. Try again — revealing PII without an audit record is not permitted.",
+        "Votre phrase secrète était correcte, mais la révélation n'a pas pu être écrite dans la chaîne d'audit, donc la valeur n'est pas affichée. Réessayez — révéler une PII sans enregistrement d'audit n'est pas autorisé.",
       );
       setBusy(false);
       setPassphrase("");
@@ -179,7 +179,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
               type="password"
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
-              placeholder="Passphrase"
+              placeholder="Phrase secrète"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && passphrase && !busy) onReveal();
               }}
@@ -191,7 +191,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
               onClick={onReveal}
               disabled={busy || !passphrase}
             >
-              {busy ? "Revealing…" : "Reveal"}
+              {busy ? "Révélation…" : "Révéler"}
             </Button>
           </>
         )}

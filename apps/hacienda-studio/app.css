@@ -1,6 +1,124 @@
 @import 'tailwindcss';
 
 /*
+ * Track E3 (Ramp redesign): self-hosted fonts, not a Google Fonts <link> — this app
+ * markets itself as "no external network calls" (see Landing's "Pipeline local · zéro
+ * upload" badge), so webfonts ship with the bundle instead of fetching from a CDN.
+ * Space Grotesk stands in for TWK Lausanne (paid/unlicensed here) on display sizes;
+ * Inter covers UI/body text, mirroring ramp.com's own font split in design/DESIGN.md.
+ *
+ * Hand-written @font-face rules, not `@import '@fontsource/inter/400.css'` (etc.):
+ * @fontsource's own CSS locates its .woff2 files via a *relative* `url(./files/...)`,
+ * which needs the bundler to rewrite it against the final asset path. Confirmed broken
+ * here — same failure class as the tesseract-wasm and xberg-wasm wasm-URL bugs
+ * elsewhere in this app: `dist/assets/*.css` still contained the literal, unrewritten
+ * `url(./files/inter-latin-400-normal.woff2)` after a full `vite build`, no `files/`
+ * directory existed anywhere in `dist/`, and the fonts 404'd on the deployed Vercel
+ * preview. Only latin + latin-ext subsets are declared (unicode-ranges copied verbatim
+ * from @fontsource's own CSS) — sufficient for French text; the other five subsets
+ * (cyrillic, cyrillic-ext, greek, greek-ext, vietnamese) aren't used by this app's UI.
+ * Re-copy from node_modules/@fontsource/{inter,space-grotesk}/files/ into
+ * public/fonts/ if a weight is ever added or a package version changes which files it
+ * ships.
+ */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(/fonts/inter/inter-latin-400-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(/fonts/inter/inter-latin-ext-400-normal.woff2) format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url(/fonts/inter/inter-latin-500-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url(/fonts/inter/inter-latin-ext-500-normal.woff2) format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url(/fonts/inter/inter-latin-600-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url(/fonts/inter/inter-latin-ext-600-normal.woff2) format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(/fonts/space-grotesk/space-grotesk-latin-400-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(/fonts/space-grotesk/space-grotesk-latin-ext-400-normal.woff2) format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url(/fonts/space-grotesk/space-grotesk-latin-500-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url(/fonts/space-grotesk/space-grotesk-latin-ext-500-normal.woff2) format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url(/fonts/space-grotesk/space-grotesk-latin-600-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url(/fonts/space-grotesk/space-grotesk-latin-ext-600-normal.woff2) format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
+/*
   AI Elements `message` component (MessageResponse) is built on Streamdown.
   Tailwind v4 needs this @source so streamdown's emitted classes are scanned and
   its styles are applied. Path is relative to this file (apps/hacienda-studio/),
@@ -47,9 +165,26 @@
   --color-card: hsl(var(--card));
   --color-card-foreground: hsl(var(--card-foreground));
 
-  --radius-lg: var(--radius);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-sm: calc(var(--radius) - 4px);
+  /* Track E3 (Ramp redesign): radius scale ported from design/theme.css's extracted
+   * ramp.com tokens (sm 6 / md 8 / lg 12 / xl 16) — not a linear offset from a single
+   * base like the previous 0.5rem/-2px/-4px derivation, so each step is explicit. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Elevation, adapted from design/theme.css's ramp.com-extracted shadows: the source
+   * values assume a light card on a light page (a white inset highlight, near-invisible
+   * blurred grays) and read as nothing on this app's dark-only surfaces — same magnitude
+   * and layering intent, recolored for a dark background instead of copied literally. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 24px -4px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
+
+  /* Typography, ported from design/DESIGN.md's ramp.com extraction: Lausanne (paid,
+   * unlicensed here) is substituted with Space Grotesk for display/heading sizes —
+   * see app.css's font-face imports below and the plan's "Font decision" section. */
+  --font-display: "Space Grotesk", "Space Grotesk Fallback", var(--font-sans);
+  --font-sans: "Inter", "Inter Fallback", -apple-system, "BlinkMacSystemFont", sans-serif;
 }
 
 /*
@@ -98,25 +233,50 @@
 
   /* Redesign: Hacienda Studio ships dark-only, no light/dark toggle in the mockup —
    * `.dark` is applied unconditionally in `main.tsx` rather than gated behind
-   * `prefers-color-scheme`, so this is the app's one real palette, not an alternate. */
+   * `prefers-color-scheme`, so this is the app's one real palette, not an alternate.
+   *
+   * Track E3 (Ramp redesign): recolored from the orange scheme to the ramp.com palette
+   * extracted in design/DESIGN.md / design/theme.css — primary #E4F222 (acid
+   * yellow-green, HSL 64 89% 54%), surfaces derived from on-surface #2B2E35 (HSL hue
+   * ~222, matching this app's existing dark-neutral hue so the swap doesn't also shift
+   * every neutral gray). `--primary-foreground` uses the same dark on-surface hue rather
+   * than white, since white-on-#E4F222 fails contrast — dark text is what ramp.com itself
+   * uses on this yellow-green. `--destructive` is a semantic status color, not a brand
+   * color, and is intentionally left as-is. */
   .dark {
-    --background: 222 22% 7%;
-    --foreground: 210 20% 96%;
-    --card: 222 20% 10%;
-    --card-foreground: 210 20% 96%;
-    --primary: 28 92% 54%;
-    --primary-foreground: 20 40% 10%;
-    --secondary: 222 15% 16%;
-    --secondary-foreground: 210 20% 96%;
-    --muted: 222 15% 14%;
-    --muted-foreground: 215 12% 62%;
-    --accent: 222 15% 17%;
-    --accent-foreground: 210 20% 96%;
+    --background: 222 16% 8%;
+    --foreground: 220 15% 95%;
+    --card: 222 14% 11%;
+    --card-foreground: 220 15% 95%;
+    --primary: 64 89% 54%;
+    --primary-foreground: 222 20% 12%;
+    --secondary: 222 12% 18%;
+    --secondary-foreground: 220 15% 95%;
+    --muted: 222 12% 15%;
+    --muted-foreground: 218 10% 62%;
+    --accent: 222 12% 19%;
+    --accent-foreground: 220 15% 95%;
     --destructive: 0 72% 55%;
     --destructive-foreground: 210 20% 96%;
-    --border: 222 15% 18%;
-    --input: 222 15% 18%;
-    --ring: 28 92% 54%;
+    --border: 222 12% 20%;
+    --input: 222 12% 20%;
+    --ring: 64 89% 54%;
+  }
+
+  /* Task 2: light shell tokens extending the dark Ramp tokens — not a replacement.
+   * Screenshots use a light sidebar (#ffffff) on a light page (#f8fafc) with a violet
+   * active state. These sit alongside the existing dark DESIGN.md tokens rather than
+   * overwriting --background/--foreground. AppShell reads them via bg-[var(--sidebar)]
+   * or directly via hex fallback; the main area uses bg-[#f8fafc]. */
+  :root {
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 222 47% 11%;
+    --sidebar-accent: 250 95% 93%;
+    --sidebar-accent-foreground: 263 70% 50%;
+    --sidebar-border: 214 32% 91%;
+    --sidebar-ring: 263 70% 50%;
+    --sidebar-primary: 263 70% 50%;
+    --sidebar-primary-foreground: 0 0% 98%;
   }
 }
 
@@ -221,7 +381,7 @@
   }
 
   body {
-    font-family: var(--legacy-font-sans);
+    font-family: var(--font-sans);
     font-size: 1rem;
     line-height: 1.5;
     color: var(--legacy-text);

@@ -89,9 +89,26 @@ appareil = "appareil"
 espace = "espace"
 convertis = "convertis"
 invalide = "invalide"
+# Same false-positive class as the block above, for the French strings added/completed in
+# the Ramp redesign + localization pass across apps/hacienda-studio/{lib/app-state.tsx,
+# lib/asset-loader.ts, pages/Studio.tsx, pages/DocumentDetail.tsx, worker/pipeline.ts}.
+normale = "normale"
+amont = "amont"
+moteur = "moteur"
+correspondances = "correspondances"
+pris = "pris"
+individuels = "individuels"
+complet = "complet"
+remplace = "remplace"
+reste = "reste"
 # apps/hacienda-studio/lib/registry.ts's HONORIFIC_PATTERN: `ma[iî]tre` (French "maître"/"maitre",
 # the honorific in "Maître Dupont") is split by the `[iî]` character class, so the checker sees
 # the bare fragment "tre" rather than the whole word and flags it as a typo for "tree"/"the".
 tre = "tre"
+# apps/hacienda-studio/app.css's hand-written @font-face `unicode-range` values (see the
+# Inter/Space Grotesk font-fix comment there) contain the hex range `U+0100-02BA`; the
+# checker tokenizes the trailing "BA" out of the hex digits and reads it as a typo for
+# "BY"/"BE". Not a word at all — a fragment of a Unicode codepoint.
+ba = "ba"
 
 [default.extend-identifiers]

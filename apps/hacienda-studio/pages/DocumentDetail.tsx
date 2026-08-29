@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { CodeLines } from "@/components/CodeLines";
 import { DocumentOutline } from "@/components/DocumentOutline";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
+import { InteractiveEditor } from "@/components/editor/InteractiveEditor";
 import { PiiPanel } from "@/components/PiiPanel";
 import { ViewerErrorBoundary } from "@/components/ViewerErrorBoundary";
 import { RedactedEditor } from "@/components/RedactedEditor";
@@ -133,7 +134,7 @@ export function DocumentDetail({
         // keeps their edit — but the toast previously fired unconditionally, telling
         // them a draft was restored even though their own edit was what's shown.
         setDraft((prev) => {
-          if (prev === undefined) toast("Restored your last redacted draft for this file");
+          if (prev === undefined) toast("Dernier brouillon masqué restauré pour ce fichier");
           return prev ?? saved;
         });
       }
@@ -150,8 +151,8 @@ export function DocumentDetail({
     const timer = setTimeout(() => {
       pendingSaveRef.current = null;
       saveDraft(contentHash, draft)
-        .then(() => toast.success("Redacted draft saved"))
-        .catch(() => toast.error("Couldn't save the redacted draft"));
+        .then(() => toast.success("Brouillon masqué enregistré"))
+        .catch(() => toast.error("Échec de l'enregistrement du brouillon masqué"));
     }, 1000);
     return () => clearTimeout(timer);
   }, [contentHash, draft]);
@@ -257,14 +258,14 @@ export function DocumentDetail({
       {/* ── Split body: left document, right controls ── */}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         {/* LEFT PANEL — document */}
-        <div className="flex min-h-[420px] min-w-0 flex-1 flex-col border-b border-border bg-[#0a0e13] lg:border-b-0 lg:border-r">
+        <div className="flex min-h-[420px] min-w-0 flex-1 flex-col border-b border-border bg-background lg:border-b-0 lg:border-r">
           {activeTab !== "layout" && (
             <DocumentOutline markdown={result.rawMarkdown} findings={findings} containerRef={leftPanelRef} />
           )}
           <div ref={leftPanelRef} className="flex-1 overflow-auto">
             {activeTab === "source" ? (
               hasViewer ? (
-                <div className="h-full min-h-[520px] bg-[#0a0e13] p-2">
+                <div className="h-full min-h-[520px] bg-background p-2">
                   <div className="h-full overflow-hidden rounded-lg border border-border bg-background">
                     <ViewerErrorBoundary fileName={result.frontmatter.source}>
                     <Suspense fallback={<ViewerLoadingFallback />}>
@@ -312,7 +313,7 @@ export function DocumentDetail({
                 <div className="p-5">
                   <div className="mb-3 flex items-center gap-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                     <FileText className="size-3.5" />
-                    Extracted markdown
+                    Markdown extrait
                     <span className="ml-auto rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-muted-foreground">
                       markdown
                     </span>
@@ -321,7 +322,7 @@ export function DocumentDetail({
                     <CodeLines text={result.rawMarkdown} />
                   </div>
                   <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                    No native preview for this file type. The extracted markdown above is what the pipeline redacted.
+                    Aucun aperçu natif pour ce type de fichier. Le markdown extrait ci-dessus est ce que le pipeline a masqué.
                   </p>
                 </div>
               )
@@ -329,9 +330,9 @@ export function DocumentDetail({
               <div className="p-8">
                 <div className="mx-auto max-w-lg rounded-lg border border-dashed border-border bg-card/50 p-8 text-center">
                   <LayoutGrid className="mx-auto size-6 text-muted-foreground" />
-                  <p className="mt-3 text-sm font-medium">No layout map for this document</p>
+                  <p className="mt-3 text-sm font-medium">Aucune carte de mise en page pour ce document</p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Layout block and bounding-box positions are produced for scanned PDFs and image documents. This document was processed as plain text — nothing to show here.
+                    Les blocs de mise en page et les positions des encadrés sont produits pour les PDF scannés et les documents image. Ce document a été traité comme du texte brut — rien à afficher ici.
                   </p>
                 </div>
               </div>
@@ -339,29 +340,29 @@ export function DocumentDetail({
               <div className="p-5">
                 <div className="mb-3 flex items-center gap-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                   <ScanSearch className="size-3.5" />
-                  Annotated document
+                  Document annoté
                   <span className="ml-auto inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 font-mono text-[11px] normal-case tracking-normal text-amber-300">
                     <span className="size-1.5 rounded-full bg-amber-400" />
-                    {findings.length} PII span{findings.length === 1 ? "" : "s"}
+                    {findings.length} portion{findings.length === 1 ? "" : "s"} PII
                   </span>
                 </div>
-                <div className="rounded-lg border border-border bg-[#0f1419] p-5">
+                <div className="rounded-lg border border-border bg-card p-5">
                   <PiiAnnotatedView text={result.rawMarkdown} findings={findings} />
                 </div>
                 <p className="mt-3 text-xs text-muted-foreground">
-                  Click a highlighted span to reveal its category. Manage false positives in the Findings panel →
+                  Cliquez sur une portion surlignée pour révéler sa catégorie. Gérez les faux positifs dans le panneau Détections →
                 </p>
               </div>
             ) : activeTab === "audit" ? (
               <div className="p-5">
                 <div className="mb-3 flex items-center gap-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                   <ClipboardCheck className="size-3.5" />
-                  Redacted preview
+                  Aperçu masqué
                   <span className="ml-auto rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-muted-foreground">
-                    {isPseudonymizeActive ? "pseudonymized" : `${mode} mode`}
+                    {isPseudonymizeActive ? "pseudonymisé" : `mode ${mode}`}
                   </span>
                 </div>
-                <div className="rounded-lg border border-border bg-[#0f1419] p-5">
+                <div className="rounded-lg border border-border bg-card p-5">
                   <PiiAnnotatedView text={result.rawMarkdown} findings={findings} />
                 </div>
               </div>
@@ -371,20 +372,20 @@ export function DocumentDetail({
                 <div>
                   <p className="mb-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                     <ScanSearch className="size-3.5" />
-                    Mark additional PII
+                    Marquer une PII supplémentaire
                     <span className="ml-auto text-[11px] font-normal normal-case tracking-normal text-muted-foreground/70">
-                      Drag to select, then tag the span
+                      Sélectionnez une portion, puis étiquetez-la
                     </span>
                   </p>
-                  <MarkdownEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
+                  <InteractiveEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} onRemoveFinding={onRemoveFinding} />
                 </div>
 
                 <div>
                   <p className="mb-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                     <FileText className="size-3.5" />
-                    Redacted output
+                    Sortie masquée
                     <span className="ml-2 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-muted-foreground">
-                      {mode} mode
+                      mode {mode}
                     </span>
                   </p>
                   {redactedBody === undefined ? (
@@ -411,20 +412,22 @@ export function DocumentDetail({
             )}
           </div>
 
-          {/* selection hint bar — matches screenshot's bottom "Select text..." */}
+          {/* selection hint bar */}
           <div className="border-t border-border bg-card px-4 py-2 text-center text-[11px] text-muted-foreground">
             Sélectionnez du texte dans le document pour le marquer comme PII.
           </div>
         </div>
 
         {/* RIGHT PANEL — tab bar + details */}
-        <div className="flex w-full shrink-0 flex-col bg-[#11161d] lg:w-[400px] lg:max-w-[44vw]">
-          {/* Tab pill */}
-          <div className="border-b border-border bg-[#0f1419] px-3 py-2.5">
+        <div className="flex w-full shrink-0 flex-col bg-background lg:w-[400px] lg:max-w-[44vw]">
+          {/* Tab pill — reuses the Switch's primary-tinted active/inactive language: the
+           * active segment sits on `bg-card` with a subtle ring, same visual weight as the
+           * Switch's checked thumb, for consistency across the redesign's toggle controls. */}
+          <div className="border-b border-border bg-card px-3 py-2.5">
             <div
               role="tablist"
-              aria-label="Document sections"
-              className="inline-flex w-full items-center gap-0.5 rounded-lg border border-border bg-[#1a212c] p-1"
+              aria-label="Sections du document"
+              className="inline-flex w-full items-center gap-0.5 rounded-lg border border-border bg-muted/40 p-1"
             >
               {(["redacted", "source", "findings", "layout", "audit"] as const).map((tab) => {
                 const active = activeTab === tab;
@@ -436,8 +439,8 @@ export function DocumentDetail({
                     onClick={() => setActiveTab(tab)}
                     className={
                       active
-                        ? "flex-1 rounded-md bg-[#0f1419] px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm ring-1 ring-border"
-                        : "flex-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
+                        ? "flex-1 rounded-md bg-card px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm ring-1 ring-primary/30"
+                        : "flex-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
                     }
                   >
                     {tab === "redacted"
@@ -456,7 +459,7 @@ export function DocumentDetail({
           </div>
 
           {/* Right content */}
-          <div className="flex-1 overflow-auto bg-[#11161d]">
+          <div className="flex-1 overflow-auto bg-background">
             {activeTab === "audit" ? (
               <AuditTab />
             ) : activeTab === "findings" ? (
@@ -480,12 +483,12 @@ export function DocumentDetail({
                   <p className="mt-1 break-all font-mono text-xs text-foreground">{result.frontmatter.source}</p>
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                     <div className="rounded-md bg-muted/40 px-2.5 py-2">
-                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Viewer</p>
-                      <p className="mt-0.5 font-mono text-foreground">{viewerKind ?? "none"}</p>
+                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Visualiseur</p>
+                      <p className="mt-0.5 font-mono text-foreground">{viewerKind ?? "aucun"}</p>
                     </div>
                     <div className="rounded-md bg-muted/40 px-2.5 py-2">
-                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Bytes</p>
-                      <p className="mt-0.5 font-mono text-foreground">{originalFile ? `${originalFile.size.toLocaleString()} B` : "—"}</p>
+                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Octets</p>
+                      <p className="mt-0.5 font-mono text-foreground">{originalFile ? `${originalFile.size.toLocaleString()} o` : "—"}</p>
                     </div>
                   </div>
                   {!hasViewer && (
@@ -663,7 +666,7 @@ function PiiAnnotatedView({ text, findings }: { text: string; findings: PiiEntit
         <span className="inline-flex items-center bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase leading-none tracking-wide text-amber-300">
           {f.category}
         </span>
-        <span className="inline-flex items-center bg-[#1e160b] px-1.5 py-0.5 font-mono text-xs leading-none text-amber-100/90">
+        <span className="inline-flex items-center bg-amber-950/40 px-1.5 py-0.5 font-mono text-xs leading-none text-amber-100/90">
           {raw}
         </span>
       </span>,
@@ -718,10 +721,10 @@ function AuditTab() {
     try {
       await verifyAuditChain();
       setStatus("ok");
-      toast.success("Chain verified — no tampering detected");
+      toast.success("Chaîne vérifiée — aucune falsification détectée");
     } catch (e) {
       setStatus("error");
-      const message = e instanceof Error ? e.message : "Chain verification failed";
+      const message = e instanceof Error ? e.message : "Échec de la vérification de la chaîne";
       setError(message);
       toast.error(message);
     }
@@ -733,9 +736,9 @@ function AuditTab() {
 
   return (
     <div className="flex flex-col">
-      <div className="flex items-center gap-2 border-b border-border bg-[#0f1419] px-3 py-2.5">
+      <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2.5">
         <ShieldCheck className="size-3.5 text-muted-foreground" />
-        <span className="text-xs font-medium">Verify chain</span>
+        <span className="text-xs font-medium">Vérifier la chaîne</span>
         <button
           type="button"
           onClick={verify}
@@ -756,7 +759,7 @@ function AuditTab() {
         ) : entries.length === 0 ? (
           <div className="px-3 py-3">
             <p className="text-xs text-muted-foreground">
-              No entries recorded on this device yet.
+              Aucune entrée enregistrée sur cet appareil pour l'instant.
             </p>
           </div>
         ) : (
@@ -779,7 +782,7 @@ function AuditTab() {
 
         {status === "ok" && (
           <p className="px-3 py-2 text-xs font-medium text-emerald-400">
-            Chain verified — no tampering detected.
+            Chaîne vérifiée — aucune falsification détectée.
           </p>
         )}
         {status === "error" && error && (
@@ -788,9 +791,9 @@ function AuditTab() {
 
         <div className="px-3 py-4">
           <div className="rounded-lg border border-border bg-card p-3">
-            <p className="text-xs font-medium">Chain tip</p>
+            <p className="text-xs font-medium">Tête de chaîne</p>
             <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">
-              {tip ?? (error ? "unavailable" : "loading…")}
+              {tip ?? (error ? "indisponible" : "chargement…")}
             </p>
           </div>
         </div>

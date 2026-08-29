@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { fileURLToPath, URL } from "node:url";
 
 const CROSS_ORIGIN_ISOLATION = {
@@ -9,7 +10,18 @@ const CROSS_ORIGIN_ISOLATION = {
 
 export default defineConfig({
   base: "/",
-  plugins: [react()],
+  plugins: [
+    // Must come before `react()` — the router plugin injects code the React plugin's
+    // babel transform then needs to see. No `src/` in this app, so `routesDirectory`/
+    // `generatedRouteTree` point at the package root instead of the plugin's defaults.
+    tanstackRouter({
+      target: "react",
+      autoCodeSplitting: true,
+      routesDirectory: "./routes",
+      generatedRouteTree: "./routeTree.gen.ts",
+    }),
+    react(),
+  ],
   // Mirrors tsconfig.json's "@/*" path and hacienda-private's own components.json
   // alias convention, so ported components need no import-path changes.
   resolve: {
@@ -18,7 +30,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    // All three packages resolve their .wasm via new URL(..., import.meta.url).
+    // All of these packages resolve their .wasm via new URL(..., import.meta.url).
     // Pre-bundling rewrites that base to .vite/deps/, so the request misses
     // and the dev server's SPA fallback answers with index.html — WebAssembly
     // then rejects it ("expected magic word 00 61 73 6d, found 3c 21 64 6f").
@@ -26,6 +38,12 @@ export default defineConfig({
     // pre-bundler tries to bundle as regular ESM, producing the
     // `…/docx-import-worker.js?worker_file&type=module` MIME-block you saw
     // (the worker is fetched as a plain script in .vite/deps/).
+    //
+    // `@llamaindex/liteparse-wasm` (PDF extraction) was missing from this list: Vite only
+    // discovers it mid-session, on first actual PDF upload, then re-optimizes and reloads —
+    // any worker that already grabbed a wasm reference before that reload is left pointing
+    // at a mangled URL, and the very next PDF hits `Uncaught RuntimeError: unreachable`
+    // inside the corrupted module instead of a clean "file not found".
     exclude: [
       "@remotion/whisper-web",
       "@xberg-io/xberg-wasm",
@@ -35,6 +53,7 @@ export default defineConfig({
       "@extend-ai/react-xlsx",
       "@embedpdf/engines",
       "tesseract-wasm",
+      "@llamaindex/liteparse-wasm",
     ],
     // UMD/CommonJS bundles without ESM default (`module.exports = …`) throw
     // `doesn't provide an export named: 'default'` when served raw:
