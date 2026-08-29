@@ -30,13 +30,21 @@ pub enum PseudonymError {
         "invalid pseudonym key id '{id}': expected 1-16 characters from [a-z0-9_] \
          (lowercase, no ':' or ']', usable as an environment variable suffix)"
     )]
-    InvalidKeyId { id: String },
+    InvalidKeyId { 
+        /// Key ID
+        id: String 
+    },
 
     #[error(
         "no pseudonym key is configured for id '{id}' \
          (expected environment variable {variable})"
     )]
-    KeyNotFound { id: String, variable: String },
+    KeyNotFound { 
+        /// Key ID
+        id: String, 
+        /// Variable name
+        variable: String 
+    },
 
     #[error(
         "no active pseudonym key is configured \
@@ -46,10 +54,18 @@ pub enum PseudonymError {
     NoActiveKey,
 
     #[error("pseudonym key '{id}' is not {KEY_BYTES}-byte lowercase hex")]
-    MalformedKeyMaterial { id: String },
+    MalformedKeyMaterial { 
+        /// Key ID
+        id: String 
+    },
 
     #[error("pseudonym key '{id}' is {actual} bytes, expected {KEY_BYTES}")]
-    WrongKeyLength { id: String, actual: usize },
+    WrongKeyLength { 
+        /// Key ID
+        id: String, 
+        /// Actual length
+        actual: usize 
+    },
 
     #[error("not a pseudonym token: expected [CATEGORY:key_id:data]")]
     /// MalformedToken variant
