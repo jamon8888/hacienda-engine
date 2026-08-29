@@ -65,3 +65,7 @@ jobs:
       - name: Run clippy
         if: steps.deps.outcome == 'success'
         run: cargo clippy --workspace --all-targets --features "ner-candle" -- -D warnings
+
+      - name: Check Rust docs coverage
+        if: steps.deps.outcome == 'success'
+        run: cargo rustdoc --workspace --all-targets --features "ner-candle" -- -W missing_docs
