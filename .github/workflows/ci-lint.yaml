@@ -51,7 +51,6 @@ jobs:
 
       - name: Checkout dependency repos
         id: deps
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -68,4 +67,4 @@ jobs:
 
       - name: Check Rust docs coverage
         if: steps.deps.outcome == 'success'
-        run: cargo rustdoc --workspace --all-targets --features "ner-candle" -- -W missing_docs
+        run: cargo rustdoc --workspace --all-targets --features "ner-candle" -- -D missing_docs
