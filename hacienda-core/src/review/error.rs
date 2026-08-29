@@ -11,6 +11,7 @@ pub enum ReviewError {
     /// AlreadyDecided variant
     AlreadyDecided(String),
 
+    /// Invalid status transition
     #[error("invalid review status transition from {from} to {to}")]
     InvalidTransition { 
         /// From status
