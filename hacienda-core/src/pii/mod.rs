@@ -45,7 +45,9 @@ pub enum PiiError {
     /// caller-supplied pattern can be identified without re-running the set.
     #[error("pattern for category '{category}' failed to compile")]
     Pattern {
+        /// Category
         category: String,
+        /// Source error
         #[source]
         source: regex::Error,
     },
@@ -55,7 +57,9 @@ pub enum PiiError {
     /// Boxed because `xberg::XbergError` is large relative to the other variants.
     #[error("{message}")]
     Ner {
+        /// Message
         message: String,
+        /// Source error
         #[source]
         source: Box<xberg::XbergError>,
     },
@@ -70,14 +74,18 @@ pub enum PiiError {
 
     #[error("reading configuration from {path}")]
     ConfigIo {
+        /// Path
         path: String,
+        /// Source error
         #[source]
         source: std::io::Error,
     },
 
     #[error("parsing configuration from {path}")]
     ConfigParse {
+        /// Path
         path: String,
+        /// Source error
         #[source]
         source: toml::de::Error,
     },
@@ -96,7 +104,12 @@ pub enum PiiError {
         "entity label '{label}' cannot be used with Pseudonymize mode: {reason} \
          (labels must not contain '[', ':', or ']')"
     )]
-    InvalidEntityLabel { label: String, reason: String },
+    InvalidEntityLabel { 
+        /// Label
+        label: String, 
+        /// Reason
+        reason: String 
+    },
 
     /// A configured [`config::VerticalConfig`] is malformed: an empty id, an empty
     /// label set, an empty or delimiter-containing label, or a duplicate label.
@@ -108,7 +121,12 @@ pub enum PiiError {
     /// Task 2.2 for why: validating inside `load_detector` would silently accept a
     /// malformed vertical everywhere that function is not reached.
     #[error("vertical '{id}' is invalid: {reason}")]
-    InvalidVertical { id: String, reason: String },
+    InvalidVertical { 
+        /// ID
+        id: String, 
+        /// Reason
+        reason: String 
+    },
 
     /// A caller-supplied [`crate::pii::types::ModelEntity`] (the
     /// `process_with_model_entities`/`scan_with_model_entities` bypass, used when a caller
@@ -120,8 +138,11 @@ pub enum PiiError {
     /// no indication anything was wrong.
     #[error("invalid model entity at [{start}, {end}): {reason}")]
     InvalidModelEntity {
+        /// Start
         start: u32,
+        /// End
         end: u32,
+        /// Reason
         reason: String,
     },
 }
