@@ -66,7 +66,10 @@ pub enum HaciendaError {
         "archive nesting exceeds hacienda's redaction depth limit ({limit}); reduce the \
          archive's nesting or, if this depth is expected, raise MAX_REDACTION_DEPTH"
     )]
-    RedactionDepthExceeded { limit: usize },
+    RedactionDepthExceeded { 
+        /// Limit
+        limit: usize 
+    },
 }
 
 impl From<xberg::XbergError> for HaciendaError {
