@@ -289,17 +289,23 @@ impl<'a> From<&'a AuthContext> for Caller<'a> {
 /// AuthzError enum
 pub enum AuthzError {
     #[error("authentication required")]
-    /// Unauthenticated variant
+    /// Unauthenticated
     Unauthenticated,
+    /// Missing capability
     #[error("capability {required} required for principal {principal}")]
     MissingCapability {
+        /// Required capability
         required: Capability,
+        /// Principal
         principal: String,
     },
+    /// Invalid token
     #[error("invalid token: {0}")]
     InvalidToken(String),
+    /// Token expired
     #[error("token expired")]
     TokenExpired,
+    /// Untrusted issuer
     #[error("issuer not trusted: {0}")]
     UntrustedIssuer(String),
 }
