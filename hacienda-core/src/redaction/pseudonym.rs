@@ -26,6 +26,7 @@ pub enum PseudonymError {
     /// MalformedPadding variant
     MalformedPadding,
 
+    /// Invalid key ID
     #[error(
         "invalid pseudonym key id '{id}': expected 1-16 characters from [a-z0-9_] \
          (lowercase, no ':' or ']', usable as an environment variable suffix)"
@@ -35,6 +36,7 @@ pub enum PseudonymError {
         id: String 
     },
 
+    /// Key not found
     #[error(
         "no pseudonym key is configured for id '{id}' \
          (expected environment variable {variable})"
@@ -53,12 +55,14 @@ pub enum PseudonymError {
     /// NoActiveKey variant
     NoActiveKey,
 
+    /// Malformed key material
     #[error("pseudonym key '{id}' is not {KEY_BYTES}-byte lowercase hex")]
     MalformedKeyMaterial { 
         /// Key ID
         id: String 
     },
 
+    /// Wrong key length
     #[error("pseudonym key '{id}' is {actual} bytes, expected {KEY_BYTES}")]
     WrongKeyLength { 
         /// Key ID
@@ -78,8 +82,14 @@ pub enum PseudonymError {
     /// UnreadableToken variant
     UnreadableToken,
 
+    /// Unsupported category
     #[error("category '{category}' cannot appear in a pseudonym token: {reason}")]
-    UnsupportedCategory { category: String, reason: String },
+    UnsupportedCategory { 
+        /// Category
+        category: String, 
+        /// Reason
+        reason: String 
+    },
 
     /// A non-default tenant id contains characters outside `[a-z0-9_]` — lowercase only.
     ///
@@ -93,12 +103,16 @@ pub enum PseudonymError {
     /// variable). Restricting the accepted alphabet to exactly the one case the output
     /// uses is the same discipline [`KeyId::new`] already applies to `-` in a key id,
     /// extended to tenant ids.
+    /// Unsupported tenant ID
     #[error(
         "tenant id '{tenant}' cannot be used to name a pseudonym key variable: \
          expected characters from [a-z0-9_] so that no two tenant ids map to the \
          same environment variable name"
     )]
-    UnsupportedTenantId { tenant: String },
+    UnsupportedTenantId { 
+        /// Tenant
+        tenant: String 
+    },
 }
 
 /// Collapse spelling variants of one value onto a single canonical form.
