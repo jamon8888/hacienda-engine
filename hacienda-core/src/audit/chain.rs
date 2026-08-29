@@ -15,6 +15,7 @@ pub struct AuditChain {
 }
 
 impl AuditChain {
+    ///
     pub fn new(config_hash: impl Into<String>) -> Self {
         Self {
             entries: Vec::new(),
@@ -79,18 +80,22 @@ impl AuditChain {
         verify_entries(&self.entries)
     }
 
+    ///
     pub fn entries(&self) -> &[AuditEntry] {
         &self.entries
     }
 
+    ///
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    ///
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    ///
     pub fn config_hash(&self) -> &str {
         &self.config_hash
     }

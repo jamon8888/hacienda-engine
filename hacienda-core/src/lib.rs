@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! PII detection, redaction, audit, review, glossary, and compliance for documents.
 //!
 //! The pipeline is deterministic patterns plus an optional statistical NER backend,
