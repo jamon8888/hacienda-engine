@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hacienda-config
+  namespace: hacienda-prod
+  labels:
+    app: hacienda-api
+data:
+  s3-endpoint: "https://s3.example.com"
+  s3-bucket: "hacienda-prod"
+  s3-region: "us-east-1"
+  s3-presign-ttl-seconds: "3600"
+  s3-max-file-size-bytes: "1073741824"
+  rag-embedding-dim: "384"
+  rag-distance-metric: "cosine"
+  rag-hnsw-m: "16"
+  rag-hnsw-ef-construction: "200"
+  pii-threshold: "0.7"
+  pii-redaction-profile: "GDPR"
+  compliance-enabled-reports: "DPIA,ModelCard,DORA,AIAct,Checklist"
+  review-deadline-hours: "24"
+  review-escalation-hours: "48"
+  glossary-min-confidence: "0.5"
+  jobs-worker-count: "4"
+  jobs-priority-levels: "3"
+  audit-segment-max-entries: "10000"
+  audit-segment-max-bytes: "10485760"
+  audit-export-schedule: "0 2 * * *"
+  versions-max-per-document: "100"
+  uploads-enabled: "true"
+  uploads-backend: "s3"

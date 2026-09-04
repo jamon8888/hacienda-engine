@@ -1,0 +1,47 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: hacienda-staging
+
+resources:
+  - ../../base
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: hacienda-api
+        namespace: hacienda-staging
+      spec:
+        replicas: 2
+        template:
+          spec:
+            containers:
+              - name: hacienda-api
+                resources:
+                  requests:
+                    cpu: "500m"
+                    memory: "1Gi"
+                  limits:
+                    cpu: "1000m"
+                    memory: "2Gi"
+                env:
+                  - name: RUST_LOG
+                    value: "debug,hacienda=debug,hacienda_api=debug"
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: hacienda-api
+        namespace: hacienda-staging
+      spec:
+        minReplicas: 2
+        maxReplicas: 5
+
+images:
+  - name: ghcr.io/jamon8888/hacienda
+    newTag: "latest"
+
+commonLabels:
+  environment: staging

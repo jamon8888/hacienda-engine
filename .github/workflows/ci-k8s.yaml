@@ -1,0 +1,66 @@
+name: CI - Kubernetes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - ".github/workflows/ci-k8s.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - ".github/workflows/ci-k8s.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  kustomize-build:
+    name: Kustomize Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+      - name: Build staging overlay
+        run: kustomize build deploy/overlays/staging
+      - name: Build production overlay
+        run: kustomize build deploy/overlays/production
+
+  kubeconform:
+    name: Kubeconform Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install kubeconform
+        run: |
+          curl -L https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Validate staging
+        run: |
+          kustomize build deploy/overlays/staging | kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.28.0 -
+      - name: Validate production
+        run: |
+          kustomize build deploy/overlays/production | kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.28.0 -
+
+  policy-check:
+    name: OPA Policy Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install conftest
+        run: |
+          curl -L https://github.com/open-policy-agent/conftest/releases/download/v0.48.0/conftest_0.48.0_Linux_x86_64.tar.gz | tar xz
+          sudo mv conftest /usr/local/bin/
+      - name: Check policies
+        run: |
+          kustomize build deploy/overlays/production | conftest test -

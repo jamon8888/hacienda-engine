@@ -1,0 +1,38 @@
+# Redis Dependency - Use Memorystore / ElastiCache / Redis Operator
+
+# Option 1: Managed Redis (Recommended for Production)
+# Google Cloud Memorystore / AWS ElastiCache / Azure Cache for Redis
+# Configure via Terraform, reference in ExternalSecrets
+
+# Option 2: Redis Operator (Self-managed on K8s)
+apiVersion: redis.opstreelabs.in/v1beta1
+kind: RedisCluster
+metadata:
+  name: hacienda-redis
+  namespace: cache
+spec:
+  clusterSize: 3
+  replicasPerMaster: 1
+  resources:
+    requests:
+      memory: 2Gi
+      cpu: 1000m
+    limits:
+      memory: 4Gi
+      cpu: 2000m
+  storage:
+    volumeClaimTemplate:
+      spec:
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 20Gi
+  redisConfig:
+    maxmemory: 3gb
+    maxmemory-policy: allkeys-lru
+    save: ""
+    appendonly: "yes"
+  affinity:
+    podAntiAffinityType: required
+  monitoring:
+    enablePodMonitor: true

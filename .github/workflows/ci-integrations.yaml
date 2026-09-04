@@ -1,0 +1,71 @@
+name: CI Integrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "integrations/**"
+      - ".github/workflows/ci-integrations.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "integrations/**"
+      - ".github/workflows/ci-integrations.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-integrations-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python Integrations
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+        package:
+          - python/hacienda-crewai
+          - python/hacienda-langchain
+          - python/hacienda-surrealdb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Sync
+        working-directory: integrations/${{ matrix.package }}
+        run: uv sync --all-extras --prerelease=allow
+      - name: Test
+        working-directory: integrations/${{ matrix.package }}
+        run: uv run pytest -q
+
+  node:
+    name: Node Integrations
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - n8n-nodes-hacienda
+          - langchain-hacienda
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: 'npm'
+      - name: Install
+        working-directory: integrations/${{ matrix.package }}
+        run: npm ci
+      - name: Test
+        working-directory: integrations/${{ matrix.package }}
+        run: npm test

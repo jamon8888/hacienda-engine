@@ -1,0 +1,68 @@
+name: CI - Load Test
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  k6-load-test:
+    name: k6 Load Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+      - name: Run k6 smoke test (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          k6 run --vus 10 --duration 30s \
+            -e BASE_URL=https://hacienda-staging.example.com \
+            -e TOKEN=${{ secrets.STAGING_API_TOKEN }} \
+            tests/load/smoke.js
+      - name: Run k6 load test (manual)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          k6 run --vus 100 --duration 5m \
+            -e BASE_URL=https://hacienda-${{ github.event.inputs.environment }}.example.com \
+            -e TOKEN=${{ secrets.${{ github.event.inputs.environment | upper }}_API_TOKEN }} \
+            tests/load/load.js
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('k6-results.json', 'utf8');
+            const body = `## k6 Load Test Results
+```json
+${output}
+````;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
