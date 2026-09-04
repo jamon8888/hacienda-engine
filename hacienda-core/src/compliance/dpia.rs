@@ -1,67 +1,103 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Likelihood enum
 pub enum Likelihood {
+    /// Low variant
     Low,
+    /// Medium variant
     Medium,
+    /// High variant
     High,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Severity enum
 pub enum Severity {
+    /// Low variant
     Low,
+    /// Medium variant
     Medium,
+    /// High variant
     High,
+    /// Critical variant
     Critical,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// ResidualRisk enum
 pub enum ResidualRisk {
+    /// Negligible variant
     Negligible,
+    /// Low variant
     Low,
+    /// Medium variant
     Medium,
+    /// High variant
     High,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Risk struct
 pub struct Risk {
+    /// id field
     pub id: String,
+    /// description field
     pub description: String,
+    /// likelihood field
     pub likelihood: Likelihood,
+    /// severity field
     pub severity: Severity,
+    /// mitigation field
     pub mitigation: String,
+    /// residual_risk field
     pub residual_risk: ResidualRisk,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Annex enum
 pub enum Annex {
+    /// ModelCard variant
     ModelCard(String),
+    /// RiskAssessment variant
     RiskAssessment(String),
+    /// DataFlowDiagram variant
     DataFlowDiagram(String),
+    /// SecurityMeasures variant
     SecurityMeasures(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// DpiaDocument struct
 pub struct DpiaDocument {
+    /// processing_description field
     pub processing_description: String,
+    /// necessity_proportionality field
     pub necessity_proportionality: String,
+    /// risks field
     pub risks: Vec<Risk>,
+    /// mitigation_measures field
     pub mitigation_measures: Vec<String>,
+    /// dpo_opinion_template field
     pub dpo_opinion_template: String,
+    /// annexes field
     pub annexes: Vec<Annex>,
 }
 
+/// DpiaGenerator struct
 pub struct DpiaGenerator {
     model_name: String,
 }
 
 impl DpiaGenerator {
+/// new function
     pub fn new(model_name: &str) -> Self {
         Self {
             model_name: model_name.to_string(),
         }
     }
 
+/// generate function
     pub fn generate(&self) -> DpiaDocument {
         DpiaDocument {
             processing_description: format!(

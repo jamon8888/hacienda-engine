@@ -1,22 +1,33 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// ReviewError enum
 pub enum ReviewError {
     #[error("review item not found: {0}")]
+    /// NotFound variant
     NotFound(String),
 
     #[error("review item already decided: {0}")]
+    /// AlreadyDecided variant
     AlreadyDecided(String),
 
+    /// Invalid status transition
     #[error("invalid review status transition from {from} to {to}")]
-    InvalidTransition { from: String, to: String },
+    InvalidTransition { 
+        /// From status
+        from: String, 
+        /// To status
+        to: String 
+    },
 
     /// Returned by [`FileReviewStore`] when a file operation fails.
     ///
     /// [`FileReviewStore`]: crate::review::store_file::FileReviewStore
     #[error("review store I/O error at {path}: {source}")]
     Io {
+        /// Path
         path: String,
+        /// Source error
         #[source]
         source: std::io::Error,
     },

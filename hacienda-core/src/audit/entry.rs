@@ -12,10 +12,15 @@ use serde::{Deserialize, Serialize};
 /// plaintext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// RedactionAction enum
 pub enum RedactionAction {
+    /// Replace span with a fixed mask character.
     Mask,
+    /// Replace span with a blake3 hash.
     Hash,
+    /// Replace span with a pseudonym.
     Pseudonymize,
+    /// Remove span entirely.
     Remove,
     /// Span text was returned to an authorised caller in plaintext form.
     ///
@@ -23,6 +28,7 @@ pub enum RedactionAction {
     /// that holds `Capability::PiiReveal`. The `span_hash` field on the entry
     /// carries the blake3 digest of the revealed text.
     Reveal,
+    /// Custom template applied to the span.
     Custom(String),
 }
 
@@ -75,8 +81,11 @@ impl std::str::FromStr for RedactionAction {
 /// Which detector produced the entity the entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// EntitySource enum
 pub enum EntitySource {
+    /// Detected by regex patterns.
     Regex,
+    /// Detected by ML model.
     Model,
 }
 
@@ -114,16 +123,27 @@ impl From<crate::pii::types::EntitySource> for EntitySource {
 ///
 /// The original span is never stored — only its blake3 digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// AuditEntry struct
 pub struct AuditEntry {
+    /// Unique identifier for the entry.
     pub id: String,
+    /// ISO-8601 timestamp of creation.
     pub timestamp: String,
+    /// PII category name.
     pub category: String,
+    /// Redaction action applied.
     pub action: RedactionAction,
+    /// blake3 digest of the original span.
     pub span_hash: String,
+    /// Length of the original span in characters.
     pub span_length: u32,
+    /// Detection confidence, if applicable.
     pub confidence: Option<f32>,
+    /// Detector source.
     pub source: EntitySource,
+    /// Pipeline version used.
     pub pipeline_version: String,
+    /// Config hash the entry was minted under.
     pub config_hash: String,
     /// The authenticated principal this entry is attributable to, or `None` for an
     /// in-process caller ([`Caller::Trusted`](crate::auth::Caller::Trusted)).
@@ -133,6 +153,7 @@ pub struct AuditEntry {
     /// exactly what entries written before this field existed hashed as, so older chains
     /// still verify.
     #[serde(default)]
+    /// principal field
     pub principal: Option<String>,
     /// The Tier 0 schema vertical active when this entity was detected, or `None` when
     /// no vertical was configured.
@@ -146,6 +167,7 @@ pub struct AuditEntry {
     /// empty string — which is exactly what entries written before this field existed
     /// hashed as, so older chains still verify.
     #[serde(default)]
+    /// vertical field
     pub vertical: Option<String>,
     /// The model that produced this entity, or `None` for regex-only entries or
     /// chains written before this field existed. Recorded as
@@ -153,6 +175,7 @@ pub struct AuditEntry {
     /// covered by [`compute_chain_hash`] so it cannot be rewritten without
     /// breaking verification. `None` hashes as no bytes, so older chains verify.
     #[serde(default)]
+    /// model field
     pub model: Option<String>,
     /// blake3 over the previous chain hash and this entry's identifying fields.
     pub chain_hash: String,
@@ -160,15 +183,25 @@ pub struct AuditEntry {
 
 /// Everything needed to mint an [`AuditEntry`] except its position in the chain.
 #[derive(Debug, Clone)]
+/// AuditEntryInput struct
 pub struct AuditEntryInput {
+    /// Unique identifier for the entry.
     pub id: String,
+    /// PII category name.
     pub category: String,
+    /// Redaction action applied.
     pub action: RedactionAction,
+    /// blake3 digest of the original span.
     pub span_hash: String,
+    /// Length of the original span.
     pub span_length: u32,
+    /// Detection confidence.
     pub confidence: Option<f32>,
+    /// Detector source.
     pub source: EntitySource,
+    /// Pipeline version.
     pub pipeline_version: String,
+    /// Config hash.
     pub config_hash: String,
     /// See [`AuditEntry::principal`].
     pub principal: Option<String>,
@@ -248,14 +281,23 @@ impl AuditEntry {
 /// above exists to avoid. Narrowing visibility instead of adding a constructor keeps
 /// that guarantee intact without giving external crates a way to build one at all.
 #[derive(Debug, Clone, Copy)]
+/// ChainHashFields struct
 pub struct ChainHashFields<'a> {
+    /// id field
     pub id: &'a str,
+    /// category field
     pub category: &'a str,
+    /// action field
     pub action: &'a RedactionAction,
+    /// span_hash field
     pub span_hash: &'a str,
+    /// config_hash field
     pub config_hash: &'a str,
+    /// principal field
     pub principal: Option<&'a str>,
+    /// vertical field
     pub vertical: Option<&'a str>,
+    /// model field
     pub model: Option<&'a str>,
 }
 

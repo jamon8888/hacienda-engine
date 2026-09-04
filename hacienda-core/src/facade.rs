@@ -43,6 +43,7 @@ const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// grow the task's stack without limit.
 pub(crate) const MAX_REDACTION_DEPTH: usize = 64;
 
+/// HaciendaFacade struct
 pub struct HaciendaFacade {
     config: HaciendaConfig,
     /// Per-tenant cache of built pipelines (P3a §3.2). `None` when `config.pii` is not
@@ -100,12 +101,14 @@ pub struct HaciendaFacade {
 
 /// Everything one [`HaciendaFacade::process`] call produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// HaciendaResult struct
 pub struct HaciendaResult {
     /// The extraction envelope. When PII is enabled, every document's `content` has
     /// already been redacted — the raw text never leaves this call.
     pub extraction: ExtractionResult,
     /// One detection result per extracted document, in the same order.
     pub pii: Vec<PipelineResult>,
+    /// compliance field
     pub compliance: Option<ComplianceReport>,
     /// Audit entries appended by this call. The full chain lives in the facade.
     pub audit_entries: Vec<AuditEntry>,
@@ -113,13 +116,18 @@ pub struct HaciendaResult {
     pub review_submitted: usize,
     /// Glossary terms meeting the publication threshold, across every call so far.
     pub glossary: Vec<GlossaryEntry>,
+    /// metadata field
     pub metadata: HaciendaMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// HaciendaMetadata struct
 pub struct HaciendaMetadata {
+    /// processing_time_ms field
     pub processing_time_ms: u64,
+    /// pii_enabled field
     pub pii_enabled: bool,
+    /// documents field
     pub documents: usize,
 }
 
@@ -132,6 +140,7 @@ pub struct HaciendaMetadata {
 /// `SpanText::Include` causes an additional audit entry to be written to the
 /// chain recording that raw span text was revealed, and to whom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// SpanText enum
 pub enum SpanText {
     /// Clear the `text` field on every returned entity. The caller learns what
     /// *categories* of PII were found but not the exact values.
@@ -148,9 +157,11 @@ pub enum SpanText {
 /// (FFI, CLI, additional transports) does not each need to re-implement
 /// suppression — one of them will forget.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// TextScanResult struct
 pub struct TextScanResult {
     /// Detected entities. `text` is cleared when `SpanText::Omit` was used.
     pub entities: Vec<MergedEntity>,
+    /// metrics field
     pub metrics: PipelineMetrics,
     /// Audit entries appended by this call.
     ///
@@ -165,11 +176,13 @@ pub struct TextScanResult {
 /// The `entities` field never carries span text — returning the plaintext of a
 /// span the caller just had redacted would be self-defeating.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// TextRedactResult struct
 pub struct TextRedactResult {
     /// Input text with every merged span rewritten.
     pub redacted_text: String,
     /// Detected entities. `text` is always cleared — see struct-level doc.
     pub entities: Vec<MergedEntity>,
+    /// metrics field
     pub metrics: PipelineMetrics,
     /// Audit entries appended by this call (one per redacted span).
     pub audit_entries: Vec<AuditEntry>,
@@ -519,6 +532,7 @@ impl HaciendaFacade {
         }
     }
 
+/// config function
     pub fn config(&self) -> &HaciendaConfig {
         &self.config
     }

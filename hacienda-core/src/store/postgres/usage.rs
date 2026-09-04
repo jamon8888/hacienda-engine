@@ -28,25 +28,31 @@ use crate::tenancy::TenantId;
 
 /// Error type for usage read-model queries.
 #[derive(Debug, thiserror::Error)]
+/// UsageError enum
 pub enum UsageError {
     #[error("database error: {0}")]
+    /// Database variant
     Database(#[from] sqlx::Error),
 }
 
 /// One principal's aggregate usage within the queried window.
 #[derive(Debug, Clone, PartialEq)]
+/// UsageRecord struct
 pub struct UsageRecord {
     /// `None` groups every entry recorded by an in-process caller
     /// ([`Caller::Trusted`](crate::auth::Caller::Trusted)), matching how
     /// [`AuditEntry::principal`](crate::audit::AuditEntry::principal) itself represents
     /// unattributed entries.
     pub principal: Option<String>,
+    /// entity_count field
     pub entity_count: i64,
+    /// byte_count field
     pub byte_count: i64,
 }
 
 /// Read-model over the audit chain for billing/metering.
 #[async_trait]
+/// UsageStore trait
 pub trait UsageStore: Send + Sync {
     /// Aggregate usage per principal for `tenant`, optionally windowed to
     /// `created_at >= since` and `created_at < until`. `None` on either bound leaves
@@ -67,11 +73,13 @@ pub trait UsageStore: Send + Sync {
 
 /// Postgres-backed [`UsageStore`].
 #[derive(Clone)]
+/// PostgresUsageStore struct
 pub struct PostgresUsageStore {
     pool: PgPool,
 }
 
 impl PostgresUsageStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

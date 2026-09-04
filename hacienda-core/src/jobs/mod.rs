@@ -6,8 +6,11 @@
 //! none of those are specified and adding them now would be speculation ahead of
 //! a real consumer. See plan D5.
 
+/// Module error
 pub mod error;
+/// Module store
 pub mod store;
+/// Module types
 pub mod types;
 
 pub use error::JobError;

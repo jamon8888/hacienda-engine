@@ -8,11 +8,14 @@ use uuid::Uuid;
 
 /// Error type for preset store operations.
 #[derive(Debug, thiserror::Error)]
+/// PresetError enum
 pub enum PresetError {
     #[error("database error: {0}")]
+    /// Database variant
     Database(#[from] sqlx::Error),
 
     #[error("preset not found")]
+    /// NotFound variant
     NotFound,
 }
 
@@ -28,6 +31,7 @@ pub enum PresetError {
 /// `get`/`get_by_name` on an id/name belonging to a different tenant resolve as `None`,
 /// indistinguishable from one that never existed (D-S1b-1).
 #[async_trait]
+/// PresetStore trait
 pub trait PresetStore: Send + Sync {
     async fn create(
         &self,
@@ -47,20 +51,27 @@ pub trait PresetStore: Send + Sync {
 
 /// A preset record.
 #[derive(Debug, Clone)]
+/// Preset struct
 pub struct Preset {
+    /// id field
     pub id: Uuid,
+    /// name field
     pub name: String,
+    /// config field
     pub config: Value,
+    /// created_at field
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Postgres-backed [`PresetStore`].
 #[derive(Clone)]
+/// PostgresPresetStore struct
 pub struct PostgresPresetStore {
     pool: PgPool,
 }
 
 impl PostgresPresetStore {
+/// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

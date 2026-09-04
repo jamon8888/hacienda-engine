@@ -188,6 +188,7 @@ impl FileState {
 /// [`InMemoryReviewStore`]: crate::review::store::InMemoryReviewStore
 /// [`ReviewStore`]: crate::review::store::ReviewStore
 #[derive(Debug)]
+/// FileReviewStore struct
 pub struct FileReviewStore {
     /// Serialises the mutate-then-write sequence so on-disk event order matches
     /// in-memory mutation order. See module docs "why there are two locks".

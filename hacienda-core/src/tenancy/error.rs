@@ -5,6 +5,7 @@ use thiserror::Error;
 
 /// Errors returned by [`super::store::TenantStore`] implementations.
 #[derive(Debug, Error)]
+/// TenantError enum
 pub enum TenantError {
     /// `create` was called with an id that already has a row.
     ///
@@ -15,15 +16,18 @@ pub enum TenantError {
     /// second `create("acme", ...)` with a different `display_name` overwrite the
     /// first without the caller ever deciding that was intended.
     #[error("tenant already exists: {0}")]
+    /// AlreadyExists variant
     AlreadyExists(TenantId),
 
     /// No tenant with the given id exists in the store.
     #[error("tenant not found: {0}")]
+    /// NotFound variant
     NotFound(TenantId),
 
     /// An internal store error (e.g. lock poisoning) that cannot be recovered by the
     /// caller. Should not occur under normal operation.
     #[error("tenant store internal error: {0}")]
+    /// Internal variant
     Internal(String),
 }
 

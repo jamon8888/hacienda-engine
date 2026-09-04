@@ -22,11 +22,17 @@ use super::{ObjectMetadata, ObjectStore, ObjectStoreError, PresignedPut};
 /// caller wanting env-var-driven config reads the vars itself, matching the existing
 /// `EnvKeyResolver` pattern in `redaction/pseudonym.rs`.
 #[derive(Debug, Clone)]
+/// S3Config struct
 pub struct S3Config {
+    /// endpoint field
     pub endpoint: url::Url,
+    /// bucket field
     pub bucket: String,
+    /// region field
     pub region: String,
+    /// access_key field
     pub access_key: String,
+    /// secret_key field
     pub secret_key: String,
     /// `true` for path-style URLs (`https://host/bucket/key`, what MinIO and most
     /// self-hosted S3-compatible servers expect), `false` for virtual-host style
@@ -36,14 +42,18 @@ pub struct S3Config {
 
 /// Error constructing an [`S3ObjectStore`] from an [`S3Config`].
 #[derive(Debug, thiserror::Error)]
+/// S3ConfigError enum
 pub enum S3ConfigError {
     #[error("invalid S3 endpoint or bucket name: {0:?}")]
+    /// InvalidBucket variant
     InvalidBucket(BucketError),
 
     #[error("failed to build HTTP client: {0}")]
+    /// Client variant
     Client(#[source] reqwest::Error),
 }
 
+/// S3ObjectStore struct
 pub struct S3ObjectStore {
     bucket: Bucket,
     credentials: Credentials,
@@ -51,6 +61,7 @@ pub struct S3ObjectStore {
 }
 
 impl S3ObjectStore {
+/// new function
     pub fn new(config: S3Config) -> Result<Self, S3ConfigError> {
         let path_style = if config.path_style {
             UrlStyle::Path

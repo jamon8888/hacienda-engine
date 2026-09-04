@@ -54,6 +54,7 @@ use crate::tenancy::TenantId;
 /// method with a type parameter or a return type that names `Self`, you will break this
 /// property and every call site that stores the trait object.
 #[async_trait]
+/// AuditStore trait
 pub trait AuditStore: Send + Sync {
     /// Mint and record a document's worth of entries in one call, into `tenant`'s chain.
     ///
@@ -186,6 +187,7 @@ pub trait AuditStore: Send + Sync {
 /// then `spawn_blocking` the write. A guard held across an `await` makes the future
 /// `!Send`, which will not compile behind `Arc<dyn AuditStore>`.
 #[derive(Debug)]
+/// InMemoryAuditStore struct
 pub struct InMemoryAuditStore {
     state: Mutex<HashMap<TenantId, State>>,
     node_id: NodeId,

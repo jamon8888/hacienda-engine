@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 /// request-time authorization path, which uses [`super::TenantCtx`]/[`TenantId`]
 /// directly and never needs to look up a `Tenant` row to enforce cloisonnement.
 #[async_trait]
+/// TenantStore trait
 pub trait TenantStore: Send + Sync {
     /// Register a new tenant.
     ///
@@ -44,11 +45,13 @@ pub trait TenantStore: Send + Sync {
 /// Appropriate for testing and for deployments that accept re-admitting tenants on
 /// restart — the same durability trade-off [`crate::jobs::InMemoryJobStore`] documents.
 #[derive(Debug, Default)]
+/// InMemoryTenantStore struct
 pub struct InMemoryTenantStore {
     tenants: Mutex<HashMap<TenantId, Tenant>>,
 }
 
 impl InMemoryTenantStore {
+/// new function
     pub fn new() -> Self {
         Self::default()
     }

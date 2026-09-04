@@ -4,9 +4,13 @@
 //! actually does. They are inputs to a compliance process, not a substitute for one —
 //! the DPIA still needs DPO sign-off and incident reports still need a submission.
 
+/// Module checklist
 pub mod checklist;
+/// Module dora
 pub mod dora;
+/// Module dpia
 pub mod dpia;
+/// Module model_card
 pub mod model_card;
 
 pub use checklist::{generate_checklist, ChecklistItem, ComplianceChecklist, ControlStatus};
@@ -18,9 +22,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// ComplianceConfig struct
 pub struct ComplianceConfig {
     /// Model the generated artefacts describe.
     pub model_name: String,
+    /// enabled_reports field
     pub enabled_reports: Vec<ReportType>,
 }
 
@@ -39,29 +45,42 @@ impl Default for ComplianceConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// ReportType enum
 pub enum ReportType {
+    /// Dpia variant
     Dpia,
+    /// ModelCard variant
     ModelCard,
+    /// Dora variant
     Dora,
+    /// Checklist variant
     Checklist,
 }
 
 /// A full compliance pack for one pipeline configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// ComplianceReport struct
 pub struct ComplianceReport {
+    /// dpia field
     pub dpia: Option<DpiaDocument>,
+    /// model_card field
     pub model_card: Option<ModelCard>,
+    /// dora field
     pub dora: Option<DoraReport>,
+    /// checklist field
     pub checklist: Option<ComplianceChecklist>,
+    /// generated_at field
     pub generated_at: String,
 }
 
+/// ComplianceGenerator struct
 pub struct ComplianceGenerator {
     config: ComplianceConfig,
     dpia_generator: DpiaGenerator,
 }
 
 impl ComplianceGenerator {
+/// new function
     pub fn new(config: ComplianceConfig) -> Self {
         let dpia_generator = DpiaGenerator::new(&config.model_name);
         Self {
@@ -90,18 +109,22 @@ impl ComplianceGenerator {
         }
     }
 
+/// model_card function
     pub fn model_card(&self) -> ModelCard {
         generate_model_card(&self.config.model_name)
     }
 
+/// dpia function
     pub fn dpia(&self) -> DpiaDocument {
         self.dpia_generator.generate()
     }
 
+/// dora_report function
     pub fn dora_report(&self, incident: &PiiIncident) -> DoraReport {
         generate_report(incident)
     }
 
+/// checklist function
     pub fn checklist(&self) -> ComplianceChecklist {
         generate_checklist()
     }

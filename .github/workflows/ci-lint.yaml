@@ -51,7 +51,6 @@ jobs:
 
       - name: Checkout dependency repos
         id: deps
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -65,3 +64,7 @@ jobs:
       - name: Run clippy
         if: steps.deps.outcome == 'success'
         run: cargo clippy --workspace --all-targets --features "ner-candle" -- -D warnings
+
+      - name: Check Rust docs coverage
+        if: steps.deps.outcome == 'success'
+        run: cargo rustdoc --workspace --all-targets --features "ner-candle" -- -D missing_docs

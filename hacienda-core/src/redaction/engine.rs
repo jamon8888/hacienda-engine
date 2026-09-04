@@ -14,6 +14,7 @@ use web_time::{Instant, SystemTime, UNIX_EPOCH};
 const GENESIS_CHAIN_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug)]
+/// RedactionEngine struct
 pub struct RedactionEngine {
     mode: RedactionMode,
     custom_template: Option<String>,

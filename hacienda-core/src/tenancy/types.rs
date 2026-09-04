@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 /// security uses `TenantCtx`/`TenantId` directly, not this type: `Tenant` exists for
 /// administration (create/list a tenant), not for authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Tenant struct
 pub struct Tenant {
+    /// id field
     pub id: TenantId,
     /// Human-readable label. Not unique, not used for lookup — `id` is the only key.
     pub display_name: Option<String>,
