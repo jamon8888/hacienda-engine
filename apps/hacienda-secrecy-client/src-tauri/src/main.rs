@@ -23,9 +23,10 @@ use zeroize::Zeroizing;
 
 use hacienda_client_core::{
     ClaudeDesktopRequest, ClaudeDesktopResponse, ClientError, CodexRequest, CodexResponse,
-    GatewayProviderTransport, OpaqueTokenReference, ProviderKind, ProviderRequest,
-    ProviderResponse, ProviderStreamChunk, ProviderTransport, RedactedContext,
-    RedactedProviderRequest, RedactionAdapter, RedactionError, TokenizedText, TransportError,
+    GatewayConfig, GatewayProviderTransport, InstallationConfig, OpaqueTokenReference,
+    ProviderKind, ProviderRequest, ProviderResponse, ProviderStreamChunk, ProviderTransport,
+    RedactedContext, RedactedProviderRequest, RedactionAdapter, RedactionError, SecretReference,
+    TokenizedText, TransportError,
 };
 
 /// Opaque references are resolved inside the desktop process.  The renderer is
@@ -864,20 +865,20 @@ impl ProviderCommandState {
     fn from_environment_with_redactor(
         redactor: Option<Arc<HaciendaLocalRedactor>>,
     ) -> Result<Self, String> {
-        let endpoint = env::var("HACIENDA_GATEWAY_URL")
-            .or_else(|_| env::var("HACIENDA_PROVIDER_ENDPOINT"))
-            .map_err(|_| "Hacienda gateway is not configured".to_owned())?;
+        let installation = installation_config_from_environment()?;
+        let gateway = provider_gateway_for_installation(&installation)?;
         let model = env::var("HACIENDA_PROVIDER_MODEL").unwrap_or_else(|_| "hacienda-local".into());
         let max_tokens = env::var("HACIENDA_PROVIDER_MAX_TOKENS")
             .unwrap_or_else(|_| "2048".into())
             .parse::<u32>()
             .map_err(|_| "Hacienda provider token limit is invalid".to_owned())?;
-        let credential = env::var("HACIENDA_GATEWAY_TOKEN")
-            .or_else(|_| env::var("HACIENDA_PROVIDER_CREDENTIAL"))
-            .map_err(|_| "Hacienda gateway credential is not configured".to_owned())?;
+        let credential = gateway_credential(&gateway.authentication)?;
         let transport =
             GatewayProviderTransport::new(hacienda_client_core::ProviderTransportConfig::new(
-                endpoint, model, max_tokens, credential,
+                gateway.endpoint,
+                model,
+                max_tokens,
+                credential,
             ))
             .map_err(|_| "Hacienda gateway transport is invalid".to_owned())?;
         let redactor =
@@ -932,6 +933,105 @@ impl ProviderCommandState {
         validate_response(request, &response)?;
         Ok(response)
     }
+}
+
+const INSTALLATION_CONFIG_ENV: &str = "HACIENDA_INSTALLATION_CONFIG";
+const GATEWAY_TOKEN_ENV: &str = "HACIENDA_GATEWAY_TOKEN";
+const PROVIDER_CREDENTIAL_ENV: &str = "HACIENDA_PROVIDER_CREDENTIAL";
+
+struct ProviderGateway {
+    endpoint: String,
+    authentication: Option<SecretReference>,
+}
+
+fn installation_config_from_environment() -> Result<InstallationConfig, String> {
+    let serialized = env::var(INSTALLATION_CONFIG_ENV)
+        .map_err(|_| "Hacienda installation configuration is not configured".to_owned())?;
+    let config: InstallationConfig = serde_json::from_str(&serialized)
+        .map_err(|_| "Hacienda installation configuration is invalid".to_owned())?;
+    config
+        .validate()
+        .map_err(|_| "Hacienda installation configuration is invalid".to_owned())?;
+    Ok(config)
+}
+
+fn provider_gateway_for_installation(
+    installation: &InstallationConfig,
+) -> Result<ProviderGateway, String> {
+    // Validate here as well as at the environment boundary so this helper cannot
+    // accidentally become a route around the profile's topology invariants.
+    installation
+        .validate()
+        .map_err(|_| "Hacienda installation configuration is invalid".to_owned())?;
+    match installation {
+        InstallationConfig::LocalFull(config) => match config.gateway.as_ref() {
+            Some(GatewayConfig::Local { endpoint, .. }) => Ok(ProviderGateway {
+                endpoint: endpoint.0.clone(),
+                authentication: None,
+            }),
+            _ => Err("Hacienda LocalFull gateway is invalid".to_owned()),
+        },
+        InstallationConfig::TeamOnPremise(config) => match config.gateway.as_ref() {
+            Some(GatewayConfig::AuthenticatedTenantScoped {
+                endpoint,
+                authentication,
+                ..
+            }) => Ok(ProviderGateway {
+                endpoint: endpoint.0.clone(),
+                authentication: Some(authentication.clone()),
+            }),
+            _ => Err("Hacienda TeamOnPremise gateway is invalid".to_owned()),
+        },
+    }
+}
+
+fn gateway_credential(authentication: &Option<SecretReference>) -> Result<String, String> {
+    match authentication {
+        // LocalFull's loopback gateway may still require its configured transport
+        // credential, but it has no profile SecretReference to resolve.
+        None => env::var(GATEWAY_TOKEN_ENV)
+            .or_else(|_| env::var(PROVIDER_CREDENTIAL_ENV))
+            .map_err(|_| "Hacienda gateway credential is not configured".to_owned()),
+        Some(reference) => {
+            let variable = secret_reference_environment_name(reference)?;
+            env::var(&variable)
+                .map_err(|_| "Hacienda gateway credential is not configured".to_owned())
+        }
+    }
+}
+
+fn secret_reference_environment_name(reference: &SecretReference) -> Result<String, String> {
+    let value = reference.0.trim();
+    if let Some(name) = value.strip_prefix("env:") {
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_uppercase() || byte.is_ascii_digit() && index > 0 || byte == b'_'
+            })
+        {
+            return Err("Hacienda gateway credential reference is invalid".to_owned());
+        }
+        return Ok(name.to_owned());
+    }
+    if value.is_empty() {
+        return Err("Hacienda gateway credential reference is invalid".to_owned());
+    }
+    let normalized = value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_uppercase() || byte.is_ascii_digit() {
+                byte
+            } else if byte.is_ascii_lowercase() {
+                byte.to_ascii_uppercase()
+            } else {
+                b'_'
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(format!(
+        "HACIENDA_CREDENTIAL_{}",
+        String::from_utf8(normalized)
+            .map_err(|_| "Hacienda gateway credential reference is invalid")?
+    ))
 }
 
 fn redact_response(
@@ -1169,6 +1269,115 @@ mod tests {
             let key = stored.get_or_insert([7_u8; hacienda_core::redaction::KEY_BYTES]);
             Ok(Zeroizing::new(*key))
         }
+    }
+
+    fn local_installation() -> InstallationConfig {
+        InstallationConfig::LocalFull(hacienda_client_core::LocalFullConfig {
+            client: hacienda_client_core::ClientSurface::LocalTauri,
+            trust_boundary: hacienda_client_core::TrustBoundary::LocalProcess,
+            hacienda: Some(hacienda_client_core::ServiceEndpoint::new(
+                "http://127.0.0.1:8001",
+            )),
+            xberg: Some(hacienda_client_core::ServiceEndpoint::new(
+                "http://localhost:8002",
+            )),
+            gateway: Some(GatewayConfig::Local {
+                id: hacienda_client_core::GatewayId("local-gateway".into()),
+                endpoint: hacienda_client_core::ServiceEndpoint::new("http://127.0.0.1:8000"),
+            }),
+            storage: hacienda_client_core::LocalStorageTopology {
+                vault: Some(hacienda_client_core::EncryptedLocalVault {
+                    id: hacienda_client_core::VaultId("local-vault".into()),
+                    path: hacienda_client_core::StoragePath("./vault".into()),
+                    key_reference: SecretReference("env:LOCAL_VAULT_KEY".into()),
+                }),
+                lancedb: hacienda_client_core::LanceDbTopology::LocalEmbedded {
+                    path: hacienda_client_core::StoragePath("./lancedb".into()),
+                },
+            },
+            provider_route: hacienda_client_core::ProviderRoute::RedactedViaGateway {
+                gateway: hacienda_client_core::GatewayId("local-gateway".into()),
+            },
+        })
+    }
+
+    fn team_installation() -> InstallationConfig {
+        InstallationConfig::TeamOnPremise(hacienda_client_core::TeamOnPremiseConfig {
+            client: hacienda_client_core::ClientSurface::LightTauri,
+            trust_boundary: hacienda_client_core::TrustBoundary::AuthenticatedTenantGateway,
+            gateway: Some(GatewayConfig::AuthenticatedTenantScoped {
+                id: hacienda_client_core::GatewayId("team-gateway".into()),
+                endpoint: hacienda_client_core::ServiceEndpoint::new(
+                    "https://hacienda.example.test/gateway",
+                ),
+                engine: hacienda_client_core::ServiceEndpoint::new(
+                    "https://hacienda.example.test/engine",
+                ),
+                authentication: SecretReference("oidc:client-session".into()),
+                tenant_scope: hacienda_client_core::TenantScope("tenant-a".into()),
+            }),
+            storage: hacienda_client_core::TeamStorageTopology {
+                lancedb: hacienda_client_core::LanceDbTopology::ServerTokenOnly {
+                    control_plane: hacienda_client_core::ServiceEndpoint::new(
+                        "https://hacienda.example.test/lancedb",
+                    ),
+                    token_reference: SecretReference("control-plane:lancedb".into()),
+                    tenant_scope: hacienda_client_core::TenantScope("tenant-a".into()),
+                },
+            },
+            provider_route: hacienda_client_core::ProviderRoute::RedactedViaGateway {
+                gateway: hacienda_client_core::GatewayId("team-gateway".into()),
+            },
+            tenant_scope: Some(hacienda_client_core::TenantScope("tenant-a".into())),
+        })
+    }
+
+    #[test]
+    fn selects_valid_local_full_loopback_gateway_endpoint() {
+        let gateway = provider_gateway_for_installation(&local_installation())
+            .expect("valid LocalFull gateway");
+        assert_eq!(gateway.endpoint, "http://127.0.0.1:8000");
+        assert!(gateway.authentication.is_none());
+    }
+
+    #[test]
+    fn selects_valid_team_on_premise_https_gateway_and_authentication_reference() {
+        let gateway = provider_gateway_for_installation(&team_installation())
+            .expect("valid TeamOnPremise gateway");
+        assert_eq!(gateway.endpoint, "https://hacienda.example.test/gateway");
+        assert_eq!(
+            secret_reference_environment_name(
+                gateway
+                    .authentication
+                    .as_ref()
+                    .expect("authentication reference"),
+            )
+            .expect("environment name"),
+            "HACIENDA_CREDENTIAL_OIDC_CLIENT_SESSION"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_profiles_before_gateway_selection() {
+        let mut local = local_installation();
+        if let InstallationConfig::LocalFull(config) = &mut local {
+            config.provider_route = hacienda_client_core::ProviderRoute::DirectUnredacted {
+                endpoint: hacienda_client_core::ServiceEndpoint::new(
+                    "https://provider.example.test",
+                ),
+            };
+        }
+        assert!(provider_gateway_for_installation(&local).is_err());
+
+        let mut team = team_installation();
+        if let InstallationConfig::TeamOnPremise(config) = &mut team {
+            config.storage.lancedb = hacienda_client_core::LanceDbTopology::DirectClient {
+                endpoint: hacienda_client_core::ServiceEndpoint::new(
+                    "https://lancedb.example.test",
+                ),
+            };
+        }
+        assert!(provider_gateway_for_installation(&team).is_err());
     }
 
     fn open_viewer_request(tokenized: TokenizedText) -> OpenLocalViewerRequest {
