@@ -28,16 +28,22 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use futures::TryStreamExt;
+use lancedb::index::scalar::FullTextSearchQuery;
+use lancedb::index::{Index, IndexType};
 use lancedb::query::ExecutableQuery;
+use lancedb::query::QueryBase;
 use lancedb::{Connection, Table};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const META_TABLE: &str = "__hacienda_rag_collections";
 const PREFIX: &str = "__hacienda_rag_";
+const FTS_INDEX_NAME: &str = "__hacienda_rag_chunks_content_fts";
+const RRF_K: f64 = 60.0;
 #[derive(Clone)]
 struct StoredDocument {
     id: DocumentId,
@@ -56,6 +62,8 @@ struct StoredChunk {
 pub struct LanceDbStore {
     name: String,
     db: Connection,
+    fts_ready: Arc<AtomicBool>,
+    fts_lock: Arc<futures::lock::Mutex<()>>,
 }
 
 impl LanceDbStore {
@@ -65,10 +73,14 @@ impl LanceDbStore {
             .execute()
             .await
             .map_err(backend_err)?;
-        Ok(Self {
+        let store = Self {
             name: format!("lancedb:{}", uri.as_ref()),
             db,
-        })
+            fts_ready: Arc::new(AtomicBool::new(false)),
+            fts_lock: Arc::new(futures::lock::Mutex::new(())),
+        };
+        store.refresh_fts_status().await?;
+        Ok(store)
     }
 
     /// Connect with a stable display name, useful when several stores share a process.
@@ -105,6 +117,83 @@ impl LanceDbStore {
             .execute()
             .await
             .map_err(backend_err)
+    }
+
+    async fn refresh_fts_status(&self) -> RagResult<()> {
+        let chunk_tables = self
+            .table_names()
+            .await?
+            .into_iter()
+            .filter(|name| name.starts_with(PREFIX) && name.ends_with("_chunks"))
+            .collect::<Vec<_>>();
+        let mut ready = !chunk_tables.is_empty();
+        for name in chunk_tables {
+            let table = self.open_table(&name).await?;
+            ready &= has_fts_index(&table).await;
+        }
+        self.fts_ready.store(ready, AtomicOrdering::Release);
+        Ok(())
+    }
+
+    async fn ensure_fts_index(&self, table: &Table, rebuild: bool) -> RagResult<()> {
+        let _guard = self.fts_lock.lock().await;
+        let existing = table
+            .list_indices()
+            .await
+            .map_err(backend_err)?
+            .into_iter()
+            .find(is_content_fts_index);
+        if existing.is_none() || rebuild {
+            let mut builder = table
+                .create_index(&["content"], Index::FTS(Default::default()))
+                .replace(true);
+            if let Some(index) = existing {
+                builder = builder.name(index.name);
+            } else {
+                builder = builder.name(FTS_INDEX_NAME.to_string());
+            }
+            builder.execute().await.map_err(backend_err)?;
+        }
+        drop(_guard);
+        self.refresh_fts_status().await
+    }
+
+    async fn bm25_candidates(
+        &self,
+        table: &Table,
+        query: &str,
+        limit: usize,
+    ) -> RagResult<HashMap<String, f32>> {
+        let fts_query = FullTextSearchQuery::new(query.to_string())
+            .columns(Some(vec!["content".to_string()]))
+            .limit(Some(limit as i64));
+        let batches = table
+            .query()
+            .full_text_search(fts_query)
+            .limit(limit)
+            .execute()
+            .await
+            .map_err(backend_err)?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(backend_err)?;
+        let mut scores = HashMap::new();
+        for batch in batches {
+            let ids = column(&batch, "chunk_id")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| RagError::InvalidQuery("LanceDB FTS chunk_id is not Utf8".into()))?;
+            let values = column(&batch, "_score")?
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| {
+                    RagError::InvalidQuery("LanceDB FTS _score is not Float32".into())
+                })?;
+            for row in 0..batch.num_rows() {
+                scores.insert(ids.value(row).to_string(), values.value(row));
+            }
+        }
+        Ok(scores)
     }
 
     async fn ensure_metadata_table(&self) -> RagResult<Table> {
@@ -338,9 +427,10 @@ impl RagStore for LanceDbStore {
     }
 
     fn capabilities(&self) -> Capabilities {
+        let fts_ready = self.fts_ready.load(AtomicOrdering::Acquire);
         Capabilities {
-            full_text: true,
-            hybrid: true,
+            full_text: fts_ready,
+            hybrid: fts_ready,
             filtering: true,
             sparse: false,
             late_interaction: false,
@@ -355,6 +445,10 @@ impl RagStore for LanceDbStore {
             {
                 return Err(RagError::CollectionAlreadyExists(spec.name.clone()));
             }
+            let chunks = self
+                .open_table(&Self::table_name(&spec.name, "chunks"))
+                .await?;
+            self.ensure_fts_index(&chunks, false).await?;
             return Ok(());
         }
         let docs_name = Self::table_name(&spec.name, "documents");
@@ -369,6 +463,8 @@ impl RagStore for LanceDbStore {
             .execute()
             .await
             .map_err(backend_err)?;
+        let chunks = self.open_table(&chunks_name).await?;
+        self.ensure_fts_index(&chunks, false).await?;
         let mut persisted = spec.clone();
         persisted.created_at = Some(now_secs());
         self.merge_metadata(&persisted).await
@@ -389,7 +485,8 @@ impl RagStore for LanceDbStore {
         let meta = self.ensure_metadata_table().await?;
         meta.delete(&format!("name = '{}'", sql_quote(collection)))
             .await
-            .map_err(backend_err)
+            .map_err(backend_err)?;
+        self.refresh_fts_status().await
     }
 
     async fn get_collection(&self, collection: &str) -> RagResult<Option<CollectionSpec>> {
@@ -438,13 +535,20 @@ impl RagStore for LanceDbStore {
             .collect::<Vec<_>>();
         self.merge_chunks(&chunk_table, &rows, spec.embedding_dim)
             .await?;
+        self.ensure_fts_index(&chunk_table, true).await?;
         Ok(id)
     }
 
     async fn delete_documents(&self, collection: &str, ids: &[DocumentId]) -> RagResult<u64> {
         self.require_spec(collection).await?;
-        self.delete_doc_rows(collection, &ids.iter().map(|id| id.0.clone()).collect())
-            .await
+        let count = self
+            .delete_doc_rows(collection, &ids.iter().map(|id| id.0.clone()).collect())
+            .await?;
+        let chunks = self
+            .open_table(&Self::table_name(collection, "chunks"))
+            .await?;
+        self.ensure_fts_index(&chunks, true).await?;
+        Ok(count)
     }
 
     async fn delete_by_filter(&self, collection: &str, filter: &Filter) -> RagResult<u64> {
@@ -460,12 +564,22 @@ impl RagStore for LanceDbStore {
             })
             .map(|d| d.id.0.clone())
             .collect::<HashSet<_>>();
-        self.delete_doc_rows(collection, &ids).await
+        let count = self.delete_doc_rows(collection, &ids).await?;
+        let table = self
+            .open_table(&Self::table_name(collection, "chunks"))
+            .await?;
+        self.ensure_fts_index(&table, true).await?;
+        Ok(count)
     }
 
     async fn retrieve(&self, collection: &str, query: &RetrieveQuery) -> RagResult<RetrieveOutput> {
         let (spec, docs, chunks) = self.read_collection_rows(collection).await?;
         query.validate(&spec)?;
+        if query.mode == RetrieveMode::Hybrid && query.query_vector.is_none() {
+            return Err(RagError::InvalidQuery(
+                "LanceDB hybrid mode requires query_vector in addition to query_text".to_string(),
+            ));
+        }
         if matches!(
             query.mode,
             RetrieveMode::Sparse | RetrieveMode::LateInteraction
@@ -475,6 +589,26 @@ impl RagStore for LanceDbStore {
                 mode: query.mode.as_str().to_string(),
             });
         }
+        let native_text = matches!(query.mode, RetrieveMode::FullText | RetrieveMode::Hybrid);
+        let fts_scores = if native_text {
+            let chunk_table = self
+                .open_table(&Self::table_name(collection, "chunks"))
+                .await?;
+            self.ensure_fts_index(&chunk_table, false).await?;
+            let candidate_limit = if query.mode == RetrieveMode::Hybrid {
+                query.top_k as usize * query.candidate_multiplier.unwrap_or(1) as usize
+            } else {
+                chunks.len().max(1)
+            };
+            self.bm25_candidates(
+                &chunk_table,
+                query.query_text.as_deref().expect("validated text query"),
+                candidate_limit,
+            )
+            .await?
+        } else {
+            HashMap::new()
+        };
         let docs_by_id = docs
             .into_iter()
             .map(|d| (d.id.0.clone(), d))
@@ -496,11 +630,18 @@ impl RagStore for LanceDbStore {
                 .query_vector
                 .as_ref()
                 .map(|v| dense_score(spec.distance_metric, v, &chunk.record.embedding));
-            let text_score = query
-                .query_text
-                .as_ref()
-                .map(|q| text_score(q, &doc.record.full_text, &chunk.record.content))
-                .unwrap_or(0.0);
+            let text_score = if native_text {
+                fts_scores.get(&chunk.id.0).copied().unwrap_or(0.0)
+            } else {
+                query
+                    .query_text
+                    .as_ref()
+                    .map(|q| text_score(q, &chunk.record.content))
+                    .unwrap_or(0.0)
+            };
+            if query.mode == RetrieveMode::FullText && text_score == 0.0 {
+                continue;
+            }
             let (score, primary) = match query.mode {
                 RetrieveMode::Vector => (
                     vector_score.unwrap_or(text_score),
@@ -513,20 +654,70 @@ impl RagStore for LanceDbStore {
                 }
                 RetrieveMode::Hybrid => {
                     let vector = vector_score.unwrap_or(0.0);
-                    let rrf = vector / (1.0 + vector.abs()) + text_score / (1.0 + text_score);
                     (
-                        rrf,
+                        0.0,
                         PrimaryScore::Hybrid {
                             vector,
                             full_text: text_score,
                             sparse: 0.0,
-                            rrf,
+                            rrf: 0.0,
                         },
                     )
                 }
                 RetrieveMode::Sparse | RetrieveMode::LateInteraction => unreachable!(),
             };
             scored.push((score, chunk, doc.clone(), primary));
+        }
+        if query.mode == RetrieveMode::Hybrid {
+            let candidate_limit =
+                query.top_k as usize * query.candidate_multiplier.unwrap_or(1) as usize;
+            let mut vector_order = (0..scored.len()).collect::<Vec<_>>();
+            vector_order.sort_by(|a, b| {
+                let score = |index: usize| match scored[index].3 {
+                    PrimaryScore::Hybrid { vector, .. } => vector,
+                    _ => unreachable!("hybrid query only produces hybrid score components"),
+                };
+                score(b).partial_cmp(&score(a)).unwrap_or(Ordering::Equal)
+            });
+            vector_order.truncate(candidate_limit);
+
+            let mut text_order = (0..scored.len())
+                .filter(|index| match scored[*index].3 {
+                    PrimaryScore::Hybrid { full_text, .. } => full_text > 0.0,
+                    _ => unreachable!("hybrid query only produces hybrid score components"),
+                })
+                .collect::<Vec<_>>();
+            text_order.sort_by(|a, b| {
+                let score = |index: usize| match scored[index].3 {
+                    PrimaryScore::Hybrid { full_text, .. } => full_text,
+                    _ => unreachable!("hybrid query only produces hybrid score components"),
+                };
+                score(b).partial_cmp(&score(a)).unwrap_or(Ordering::Equal)
+            });
+            text_order.truncate(candidate_limit);
+
+            let mut fused = vec![0.0_f64; scored.len()];
+            let mut included = vec![false; scored.len()];
+            for (rank, index) in vector_order.into_iter().enumerate() {
+                fused[index] += 1.0 / (RRF_K + rank as f64 + 1.0);
+                included[index] = true;
+            }
+            for (rank, index) in text_order.into_iter().enumerate() {
+                fused[index] += 1.0 / (RRF_K + rank as f64 + 1.0);
+                included[index] = true;
+            }
+            for (index, entry) in scored.iter_mut().enumerate() {
+                let rrf = fused[index] as f32;
+                entry.0 = rrf;
+                if let PrimaryScore::Hybrid { rrf: score, .. } = &mut entry.3 {
+                    *score = rrf;
+                }
+            }
+            scored = scored
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, entry)| included[index].then_some(entry))
+                .collect();
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
         if query.group_by_document {
@@ -657,12 +848,23 @@ impl RagStore for LanceDbStore {
             .filter(|c| c.document_id == *document)
             .collect::<Vec<_>>();
         self.merge_chunks(&table, &changed, spec.embedding_dim)
-            .await
+            .await?;
+        self.ensure_fts_index(&table, true).await
     }
 }
 
 fn backend_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> RagError {
     RagError::Backend(Box::new(e))
+}
+async fn has_fts_index(table: &Table) -> bool {
+    table
+        .list_indices()
+        .await
+        .map(|indices| indices.iter().any(is_content_fts_index))
+        .unwrap_or(false)
+}
+fn is_content_fts_index(index: &lancedb::index::IndexConfig) -> bool {
+    index.index_type == IndexType::FTS && index.columns.len() == 1 && index.columns[0] == "content"
 }
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -960,12 +1162,12 @@ fn dense_score(metric: DistanceMetric, a: &[f32], b: &[f32]) -> f32 {
             .sqrt(),
     }
 }
-fn text_score(query: &str, full_text: &str, content: &str) -> f32 {
+fn text_score(query: &str, content: &str) -> f32 {
     query
         .split_whitespace()
         .filter(|term| {
             let term = term.to_lowercase();
-            full_text.to_lowercase().contains(&term) || content.to_lowercase().contains(&term)
+            content.to_lowercase().contains(&term)
         })
         .count() as f32
 }
@@ -1209,12 +1411,16 @@ mod tests {
             query_vector: Some(vec![1.0, 0.0]),
             ..RetrieveQuery::vector(5)
         };
-        assert_eq!(
-            store.retrieve("docs", &hybrid).await.unwrap().chunks[0]
-                .content
-                .as_deref(),
-            Some("alpha")
-        );
+        let hybrid = store.retrieve("docs", &hybrid).await.unwrap();
+        assert_eq!(hybrid.chunks[0].content.as_deref(), Some("alpha"));
+        let PrimaryScore::Hybrid { rrf, .. } = hybrid.chunks[0].primary_score else {
+            panic!("hybrid retrieval reports component scores")
+        };
+        assert!((rrf - (2.0 / 61.0)).abs() < 1e-6, "{rrf}");
+        let PrimaryScore::Hybrid { rrf, .. } = hybrid.chunks[1].primary_score else {
+            panic!("hybrid retrieval reports component scores")
+        };
+        assert!((rrf - (1.0 / 62.0)).abs() < 1e-6, "{rrf}");
         let sparse = RetrieveQuery {
             mode: RetrieveMode::Sparse,
             query_sparse: Some(crate::types::SparseVector {
@@ -1227,5 +1433,306 @@ mod tests {
             store.retrieve("docs", &sparse).await,
             Err(RagError::UnsupportedMode { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn hybrid_retrieval_requires_a_dense_query_vector() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+
+        let query = RetrieveQuery {
+            mode: RetrieveMode::Hybrid,
+            query_text: Some("alpha".into()),
+            ..RetrieveQuery::vector(5)
+        };
+        assert!(matches!(
+            store.retrieve("docs", &query).await,
+            Err(RagError::InvalidQuery(message)) if message.contains("requires query_vector")
+        ));
+    }
+
+    #[tokio::test]
+    async fn hybrid_candidate_pool_fuses_only_each_mode_top_candidates() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+        for (id, content, embedding) in [
+            ("dense", "unmatched", vec![1.0, 0.0]),
+            ("lexical", "alpha beta", vec![0.5, 0.8660254]),
+            ("outside", "alpha", vec![0.0, 1.0]),
+        ] {
+            store
+                .upsert_document(
+                    "docs",
+                    &DocumentRecord {
+                        external_id: Some(id.into()),
+                        full_text: content.into(),
+                        ..Default::default()
+                    },
+                    &[chunk(content, 0, embedding)],
+                )
+                .await
+                .unwrap();
+        }
+
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    mode: RetrieveMode::Hybrid,
+                    query_text: Some("alpha beta".into()),
+                    query_vector: Some(vec![1.0, 0.0]),
+                    ..RetrieveQuery::vector(1)
+                },
+            )
+            .await
+            .unwrap();
+        let PrimaryScore::Hybrid { rrf, .. } = output.chunks[0].primary_score else {
+            panic!("hybrid retrieval reports component scores")
+        };
+        assert!((rrf - (1.0 / 61.0)).abs() < 1e-6, "{rrf}");
+    }
+
+    #[tokio::test]
+    async fn full_text_retrieval_does_not_match_parent_text_outside_chunk() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+        store
+            .upsert_document(
+                "docs",
+                &DocumentRecord {
+                    external_id: Some("doc".into()),
+                    full_text: "alpha exists in another chunk".into(),
+                    ..Default::default()
+                },
+                &[chunk("plain paragraph", 0, vec![1.0, 0.0])],
+            )
+            .await
+            .unwrap();
+
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    mode: RetrieveMode::FullText,
+                    query_text: Some("alpha".into()),
+                    ..RetrieveQuery::vector(5)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(output.chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_empty_collection_has_an_fts_index_and_advertises_text_capability() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+
+        let chunks = store
+            .open_table(&LanceDbStore::table_name("docs", "chunks"))
+            .await
+            .unwrap();
+        let indices = chunks.list_indices().await.unwrap();
+        assert!(indices.iter().any(is_content_fts_index));
+        assert!(store.capabilities().full_text);
+        let result = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    mode: RetrieveMode::FullText,
+                    query_text: Some("missing".into()),
+                    ..RetrieveQuery::vector(5)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fts_index_survives_reopen_and_upsert_rebuilds_it_once() {
+        let dir = tempdir().unwrap();
+        let uri = dir.path().to_str().unwrap().to_string();
+        let store = LanceDbStore::connect(&uri).await.unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+        let document = DocumentRecord {
+            external_id: Some("doc".into()),
+            full_text: "alpha".into(),
+            ..Default::default()
+        };
+        store
+            .upsert_document("docs", &document, &[chunk("alpha", 0, vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        drop(store);
+
+        let reopened = LanceDbStore::connect(&uri).await.unwrap();
+        assert!(reopened.capabilities().full_text);
+        let updated = DocumentRecord {
+            external_id: Some("doc".into()),
+            full_text: "beta".into(),
+            ..Default::default()
+        };
+        reopened
+            .upsert_document("docs", &updated, &[chunk("beta", 0, vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        let beta = reopened
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    mode: RetrieveMode::FullText,
+                    query_text: Some("beta".into()),
+                    ..RetrieveQuery::vector(5)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(beta.chunks.len(), 1);
+        assert_eq!(beta.chunks[0].content.as_deref(), Some("beta"));
+        let alpha = reopened
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    mode: RetrieveMode::FullText,
+                    query_text: Some("alpha".into()),
+                    ..RetrieveQuery::vector(5)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(alpha.chunks.is_empty());
+        let chunks = reopened
+            .open_table(&LanceDbStore::table_name("docs", "chunks"))
+            .await
+            .unwrap();
+        assert_eq!(
+            chunks
+                .list_indices()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(is_content_fts_index)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn full_text_uses_bm25_to_rank_chunks_not_documents() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+        store
+            .upsert_document(
+                "docs",
+                &DocumentRecord {
+                    external_id: Some("doc".into()),
+                    full_text: "needle needle needle".into(),
+                    ..Default::default()
+                },
+                &[
+                    chunk("needle", 0, vec![1.0, 0.0]),
+                    chunk("needle needle needle", 1, vec![1.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    mode: RetrieveMode::FullText,
+                    query_text: Some("needle".into()),
+                    ..RetrieveQuery::vector(2)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.chunks.len(), 2);
+        assert_eq!(output.chunks[0].ordinal, 1);
+        assert!(output.chunks[0].score > output.chunks[1].score);
+        assert!(matches!(
+            output.chunks[0].primary_score,
+            PrimaryScore::FullText { score } if score > 0.0
+        ));
+    }
+
+    #[tokio::test]
+    async fn full_text_applies_allowlisted_filters_after_bm25_candidates() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+        for (title, id) in [("keep", "one"), ("drop", "two")] {
+            store
+                .upsert_document(
+                    "docs",
+                    &DocumentRecord {
+                        external_id: Some(id.into()),
+                        title: Some(title.into()),
+                        full_text: "needle".into(),
+                        ..Default::default()
+                    },
+                    &[chunk("needle", 0, vec![1.0, 0.0])],
+                )
+                .await
+                .unwrap();
+        }
+
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    mode: RetrieveMode::FullText,
+                    query_text: Some("needle".into()),
+                    filter: Some(Filter::Eq {
+                        field: FilterField("doc.title".into()),
+                        value: serde_json::json!("keep"),
+                    }),
+                    ..RetrieveQuery::vector(5)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.chunks.len(), 1);
+        assert_eq!(output.chunks[0].external_id.as_deref(), Some("one"));
     }
 }
