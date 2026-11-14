@@ -14,3 +14,6 @@ pub mod memory;
 
 #[cfg(feature = "postgres")]
 pub mod pgvector;
+
+#[cfg(feature = "lancedb")]
+pub mod lancedb;

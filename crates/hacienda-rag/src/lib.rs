@@ -49,6 +49,8 @@ pub mod store;
 pub mod stream;
 pub mod types;
 
+#[cfg(feature = "lancedb")]
+pub use backends::lancedb::LanceDbStore;
 pub use backends::memory::InMemoryVectorStore;
 pub use capability::Capabilities;
 #[cfg(feature = "chunking")]
