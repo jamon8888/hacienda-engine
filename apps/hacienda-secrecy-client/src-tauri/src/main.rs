@@ -1,17 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use futures::executor::block_on;
-use hacienda_core::pii::{PiiPipeline, PipelineConfig};
+use hacienda_core::{
+    pii::{PiiPipeline, PipelineConfig},
+    redaction::{KeyId, KeyResolver, PseudonymKey, Pseudonymiser, RedactionMode, KEY_BYTES},
+    tenancy::TenantId,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 #[cfg(not(test))]
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
+use zeroize::Zeroizing;
 
 use hacienda_client_core::{
     ClaudeDesktopRequest, ClaudeDesktopResponse, ClientError, CodexRequest, CodexResponse,
@@ -36,33 +42,206 @@ struct OpenOriginalResponse {
     opened: bool,
 }
 
-/// Hacienda's local deterministic PII pipeline is the only redaction capability
-/// injected into the provider command state. It deliberately starts regex-only;
-/// enabling a model is a deployment decision and a failed model load must keep the
-/// client unavailable rather than silently downgrade.
+const LOCAL_KEYRING_SERVICE: &str = "org.hacienda.secrecy-client";
+const LOCAL_KEYRING_USER: &str = "local-full-pseudonym-key-v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VaultError {
+    Locked,
+    InvalidKey,
+    RandomSourceUnavailable,
+}
+
+trait LocalPseudonymKeyStore: Send + Sync {
+    fn load_or_create(&self) -> Result<Zeroizing<[u8; KEY_BYTES]>, VaultError>;
+}
+
+/// The OS credential store is the only production source of the LocalFull key.
+/// No file, environment variable, renderer state, or provider configuration is used.
+struct OsCredentialKeyStore;
+
+impl LocalPseudonymKeyStore for OsCredentialKeyStore {
+    fn load_or_create(&self) -> Result<Zeroizing<[u8; KEY_BYTES]>, VaultError> {
+        let entry = keyring::Entry::new(LOCAL_KEYRING_SERVICE, LOCAL_KEYRING_USER)
+            .map_err(|_| VaultError::Locked)?;
+        match entry.get_secret() {
+            Ok(secret) => key_from_bytes(secret),
+            Err(keyring::Error::NoEntry) => {
+                let mut secret = Zeroizing::new([0_u8; KEY_BYTES]);
+                getrandom::fill(&mut *secret).map_err(|_| VaultError::RandomSourceUnavailable)?;
+                entry
+                    .set_secret(secret.as_ref())
+                    .map_err(|_| VaultError::Locked)?;
+                // Re-read after creation so concurrent first launches converge on the
+                // item actually committed to the OS store.
+                let stored = entry.get_secret().map_err(|_| VaultError::Locked)?;
+                key_from_bytes(stored)
+            }
+            Err(_) => Err(VaultError::Locked),
+        }
+    }
+}
+
+fn key_from_bytes(secret: Vec<u8>) -> Result<Zeroizing<[u8; KEY_BYTES]>, VaultError> {
+    let secret = Zeroizing::new(secret);
+    let key: [u8; KEY_BYTES] = secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| VaultError::InvalidKey)?;
+    Ok(Zeroizing::new(key))
+}
+
+struct LocalKeyResolver(Zeroizing<[u8; KEY_BYTES]>);
+
+impl KeyResolver for LocalKeyResolver {
+    fn active(
+        &self,
+        _tenant: &TenantId,
+    ) -> Result<PseudonymKey, hacienda_core::redaction::PseudonymError> {
+        PseudonymKey::from_bytes(KeyId::new("local")?, self.0.as_ref())
+    }
+
+    fn resolve(
+        &self,
+        _tenant: &TenantId,
+        id: &KeyId,
+    ) -> Result<PseudonymKey, hacienda_core::redaction::PseudonymError> {
+        if id.as_str() != "local" {
+            return Err(hacienda_core::redaction::PseudonymError::KeyNotFound {
+                id: id.as_str().to_owned(),
+                variable: "LocalFull OS credential store".to_owned(),
+            });
+        }
+        self.active(_tenant)
+    }
+}
+
+/// Rust-only, short-lived, one-shot viewer capability. It is intentionally neither
+/// serializable nor part of provider/MCP commands. The current Tauri config has only a
+/// default renderer window and no isolated viewer origin, so production has no issuer
+/// and no reveal IPC command until that boundary exists.
+pub struct ViewerCapability {
+    expires_at: Instant,
+    consumed: bool,
+}
+
+impl ViewerCapability {
+    #[cfg(test)]
+    fn issued_for_test() -> Self {
+        Self::issue()
+    }
+
+    #[cfg(test)]
+    fn issue() -> Self {
+        Self {
+            expires_at: Instant::now() + Duration::from_secs(30),
+            consumed: false,
+        }
+    }
+
+    fn consume(&mut self) -> Result<(), RedactionError> {
+        if self.consumed || Instant::now() >= self.expires_at {
+            return Err(RedactionError::Rejected);
+        }
+        self.consumed = true;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ViewerRevealAudit {
+    token_digest: [u8; 32],
+    value_digest: [u8; 32],
+}
+
+/// LocalFull uses Hacienda's authenticated pseudonym tokens. The OS credential store
+/// supplies the stable key; failure to open it disables this adapter.
 struct HaciendaLocalRedactor {
     pipeline: PiiPipeline,
+    pseudonymiser: Arc<Pseudonymiser>,
+    reveal_audit: Mutex<Vec<ViewerRevealAudit>>,
 }
 
 impl HaciendaLocalRedactor {
     fn new() -> Result<Self, RedactionError> {
-        PiiPipeline::new(PipelineConfig::default())
-            .map(|pipeline| Self { pipeline })
-            .map_err(|_| RedactionError::Rejected)
+        Self::from_key_store(Arc::new(OsCredentialKeyStore))
+    }
+
+    fn from_key_store(store: Arc<dyn LocalPseudonymKeyStore>) -> Result<Self, RedactionError> {
+        let key = store
+            .load_or_create()
+            .map_err(|_| RedactionError::Rejected)?;
+        let resolver = LocalKeyResolver(key);
+        let pseudonymiser = Arc::new(
+            Pseudonymiser::new(&resolver, &TenantId::default_tenant(), &[])
+                .map_err(|_| RedactionError::Rejected)?,
+        );
+        let mut config = PipelineConfig::default();
+        config.redaction.mode = RedactionMode::Pseudonymize;
+        let pipeline = PiiPipeline::with_pseudonymiser(config, Some(pseudonymiser.clone()))
+            .map_err(|_| RedactionError::Rejected)?;
+        Ok(Self {
+            pipeline,
+            pseudonymiser,
+            reveal_audit: Mutex::new(Vec::new()),
+        })
     }
 
     fn tokenize(&self, text: &str) -> Result<TokenizedText, RedactionError> {
         let result = block_on(self.pipeline.process(text)).map_err(|_| RedactionError::Rejected)?;
-        let mut references = Vec::new();
-        for entity in result.entities {
-            let reference =
-                OpaqueTokenReference::new(entity.redact_template, entity.category.to_string());
+        let references = emitted_token_references(&result.redacted_text, &self.pseudonymiser);
+        Ok(TokenizedText::new(result.redacted_text, references))
+    }
+
+    fn reveal(
+        &self,
+        token: &str,
+        capability: Option<&mut ViewerCapability>,
+    ) -> Result<Zeroizing<String>, RedactionError> {
+        capability.ok_or(RedactionError::Rejected)?.consume()?;
+        let revealed = self
+            .pseudonymiser
+            .reveal(token)
+            .map(Zeroizing::new)
+            .map_err(|_| RedactionError::Rejected)?;
+        let audit = ViewerRevealAudit {
+            token_digest: *blake3::hash(token.as_bytes()).as_bytes(),
+            value_digest: *blake3::hash(revealed.as_bytes()).as_bytes(),
+        };
+        self.reveal_audit
+            .lock()
+            .map_err(|_| RedactionError::Rejected)?
+            .push(audit);
+        Ok(revealed)
+    }
+}
+
+fn emitted_token_references(
+    text: &str,
+    pseudonymiser: &Pseudonymiser,
+) -> Vec<OpaqueTokenReference> {
+    let mut references = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find('[') {
+        let candidate = &remaining[start..];
+        let Some(end) = candidate.find(']') else {
+            break;
+        };
+        let token = &candidate[..=end];
+        let category = token
+            .strip_prefix('[')
+            .and_then(|body| body.split_once(':'))
+            .map(|(category, _)| category);
+        let authenticated = pseudonymiser.reveal(token).map(Zeroizing::new);
+        if category.is_some() && authenticated.is_ok() {
+            let reference = OpaqueTokenReference::new(token, category.unwrap_or_default());
             if !references.contains(&reference) {
                 references.push(reference);
             }
         }
-        Ok(TokenizedText::new(result.redacted_text, references))
+        remaining = &candidate[end + 1..];
     }
+    references
 }
 
 impl RedactionAdapter for HaciendaLocalRedactor {
@@ -92,7 +271,7 @@ impl RedactionAdapter for HaciendaLocalRedactor {
                 .iter()
                 .map(|item| {
                     Ok(RedactedContext {
-                        label: item.label.clone(),
+                        label: self.tokenize(&item.label)?.text,
                         content: self.tokenize(&item.content)?,
                     })
                 })
@@ -486,6 +665,100 @@ fn main() {}
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestKeyStore(Mutex<Option<[u8; hacienda_core::redaction::KEY_BYTES]>>);
+
+    impl LocalPseudonymKeyStore for TestKeyStore {
+        fn load_or_create(
+            &self,
+        ) -> Result<Zeroizing<[u8; hacienda_core::redaction::KEY_BYTES]>, VaultError> {
+            let mut stored = self.0.lock().map_err(|_| VaultError::Locked)?;
+            let key = stored.get_or_insert([7_u8; hacienda_core::redaction::KEY_BYTES]);
+            Ok(Zeroizing::new(*key))
+        }
+    }
+
+    #[test]
+    fn local_full_emits_stable_reversible_hacienda_tokens_across_reopen() {
+        let store = Arc::new(TestKeyStore::default());
+        let first = HaciendaLocalRedactor::from_key_store(store.clone()).expect("vault opens");
+        let output = first
+            .redact_text("Contact alice@example.com")
+            .expect("redacts");
+        assert!(output.text.contains("[EMAIL:local:"), "{}", output.text);
+        assert!(!output.text.contains("alice@example.com"));
+        let token = output.references[0].token.clone();
+
+        let reopened = HaciendaLocalRedactor::from_key_store(store).expect("vault reopens");
+        let again = reopened
+            .redact_text("Contact alice@example.com")
+            .expect("redacts");
+        assert_eq!(again.references[0].token, token);
+        let mut capability = ViewerCapability::issued_for_test();
+        let revealed = reopened
+            .reveal(&token, Some(&mut capability))
+            .expect("viewer reveals");
+        assert_eq!(&*revealed, "alice@example.com");
+        assert!(reopened.reveal(&token, Some(&mut capability)).is_err());
+        let audit = reopened.reveal_audit.lock().expect("audit lock");
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].token_digest,
+            *blake3::hash(token.as_bytes()).as_bytes()
+        );
+        assert_eq!(
+            audit[0].value_digest,
+            *blake3::hash(b"alice@example.com").as_bytes()
+        );
+    }
+
+    #[test]
+    fn rehydration_requires_an_explicit_viewer_capability() {
+        let redactor = HaciendaLocalRedactor::from_key_store(Arc::new(TestKeyStore::default()))
+            .expect("vault opens");
+        let token = redactor
+            .redact_text("alice@example.com")
+            .unwrap()
+            .references[0]
+            .token
+            .clone();
+        assert!(redactor.reveal(&token, None).is_err());
+    }
+
+    #[test]
+    fn missing_or_locked_vault_fails_closed() {
+        struct LockedKeyStore;
+        impl LocalPseudonymKeyStore for LockedKeyStore {
+            fn load_or_create(
+                &self,
+            ) -> Result<Zeroizing<[u8; hacienda_core::redaction::KEY_BYTES]>, VaultError>
+            {
+                Err(VaultError::Locked)
+            }
+        }
+        assert!(HaciendaLocalRedactor::from_key_store(Arc::new(LockedKeyStore)).is_err());
+    }
+
+    #[test]
+    fn provider_request_contains_tokens_but_not_plaintext() {
+        let redactor = HaciendaLocalRedactor::from_key_store(Arc::new(TestKeyStore::default()))
+            .expect("vault opens");
+        let safe = redactor
+            .redact(&ProviderRequest::ClaudeDesktop(ClaudeDesktopRequest {
+                conversation_id: hacienda_client_core::ConversationId::new("conversation-1"),
+                context_id: hacienda_client_core::ContextId::new("context-1"),
+                prompt: "Email alice@example.com".into(),
+                context: vec![hacienda_client_core::PromptContext::new(
+                    "Owner alice@example.com",
+                    "Contact alice@example.com",
+                )],
+            }))
+            .expect("redacts provider request");
+        let payload = serde_json::to_string(&safe).expect("serializes provider payload");
+        assert!(payload.contains("[EMAIL:local:"), "{payload}");
+        assert!(!payload.contains("alice@example.com"), "{payload}");
+    }
 
     struct RecordingOpener(Mutex<Option<PathBuf>>);
 
