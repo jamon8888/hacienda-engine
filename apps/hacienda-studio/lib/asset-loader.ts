@@ -13,7 +13,10 @@ const MODEL_BASE_URL = import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingfa
 // # ponytail: simple regex validation replaces zod; upgrade to zod when dependency added
 function validateModelConfig(modelId: string, baseUrl: string): string | null {
   if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(modelId)) return "VITE_GLINER_MODEL_ID must be owner/repo";
-  try { new URL(baseUrl); } catch { return "VITE_MODEL_BASE_URL must be a valid URL"; }
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error();
+  } catch { return "VITE_MODEL_BASE_URL must be a valid HTTP(S) URL"; }
   return null;
 }
 const configError = validateModelConfig(MODEL_ID, MODEL_BASE_URL);
