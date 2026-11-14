@@ -136,18 +136,13 @@ web-time = "1"
 # smallest/best-understood backend, picked over the full `candle-vlm-ocr` umbrella
 # for the first pass per the spec's §3.
 #
-# `static-embeddings` (the spec's fifth capability) is deliberately NOT enabled here,
-# unlike the four above: this repo's own contributing guidelines require a Cargo
-# feature addition to the `xberg` dependency to have a matching call site, and none
-# exists — nothing in `hacienda-rag`/`hacienda-api` constructs the
-# `EmbeddingModelType::Preset { name: "lightweight" }` config needed to reach it
-# through `xberg::embed_texts`/`embed_texts_async`. Enabling it would only grow the
-# native build surface for a capability nothing can call. See the X1 spec's §6 for
-# the fuller reasoning — it also documents a separate finding, that reaching this
-# safely needs an ingestion-time redaction guard (`GuardedLlm`-shaped) that doesn't
-# exist yet for the vector-store embedding path, a pre-existing E4 gap. Re-enable once
-# both a call site and that guard exist. Found by CodeRabbit review on this branch;
-# caught before merge.
+# `static-embeddings` (the spec's fifth capability) is enabled because the API's
+# `migrate-embeddings` route now has a matching call site: it constructs the
+# `EmbeddingModelType::Preset` config and calls `xberg::embed_texts_async`. This is
+# pure-Rust model2vec inference (no ONNX Runtime), but it may download model weights
+# on first use. The route still requires the caller to opt into the migration itself;
+# enabling the feature only makes its implementation available to the generated SDK
+# server and keeps the docs-coverage build honest.
 #
 # `candle-trocr` gotcha: enabling it compiles in xberg's `ocr-pipeline`, which
 # changes `extractors::image`'s behaviour even for callers who never touch OCR —
@@ -230,6 +225,7 @@ xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "d926382a0c124dca
     "keywords",
     "summarization",
     "qr-codes",
+    "static-embeddings",
     "candle-trocr",
 ] }
 # Key material must not survive a drop. `PseudonymKey` holds the secret that
