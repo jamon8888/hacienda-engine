@@ -32,6 +32,7 @@ use crate::state::ApiState;
         crate::handlers::info::health,
         crate::handlers::info::version,
         crate::handlers::info::info,
+        crate::routes::metrics,
         crate::handlers::documents::process_documents,
         crate::handlers::documents::process_documents_async,
         crate::handlers::pii::scan_text,

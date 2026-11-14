@@ -11,7 +11,7 @@ spec:
       rules:
         # Availability
         - alert: HaciendaAPIDown
-          expr: sum(up{job="hacienda-api"} == 0) > 0 or absent(up{job="hacienda-api"})
+          expr: count(up{job="hacienda-api"} == 0) > 0 or absent(up{job="hacienda-api"})
           for: 1m
           labels:
             severity: critical
@@ -103,7 +103,7 @@ spec:
 
         # S3
         - alert: S3ErrorsHigh
-          expr: sum(rate(s3_request_errors_total[5m])) / clamp_min(sum(rate(s3_requests_total[5m])), 1) > 0.05
+          expr: (sum(rate(s3_request_errors_total[5m])) / sum(rate(s3_requests_total[5m])) > 0.05) or (sum(rate(s3_requests_total[5m])) == 0 and sum(rate(s3_request_errors_total[5m])) > 0)
           for: 5m
           labels:
             severity: warning

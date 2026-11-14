@@ -36,7 +36,7 @@ jobs:
         run: |
           schemathesis run --checks=all \
             --base-url=http://localhost:8787 \
-            --header="Authorization: Bearer test-token" \
+            --header="Authorization: Bearer replace-me-before-deploying" \
             http://localhost:8787/openapi.json
       - name: Upload results
         uses: actions/upload-artifact@v4

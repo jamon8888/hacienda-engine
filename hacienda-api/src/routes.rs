@@ -12,7 +12,7 @@
 //! silently omit a capability requirement.
 
 use axum::{
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, MatchedPath},
     middleware,
     routing::{delete, get, post},
     Router,
@@ -449,7 +449,12 @@ async fn record_request_duration(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let method = request.method().to_string();
-    let path = request.uri().path().to_owned();
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str())
+        .unwrap_or("<unmatched>")
+        .to_owned();
     let started = Instant::now();
     let response = next.run(request).await;
     request_duration()
@@ -470,7 +475,8 @@ fn request_duration() -> &'static HistogramVec {
     })
 }
 
-async fn metrics() -> axum::response::Response {
+#[utoipa::path(get, path = "/metrics", responses((status = 200, description = "Prometheus metrics")))]
+pub(crate) async fn metrics() -> axum::response::Response {
     let metric_families = prometheus::gather();
     let mut output = Vec::new();
     TextEncoder::new()

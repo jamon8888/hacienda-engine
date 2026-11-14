@@ -3,7 +3,6 @@
 resource "google_storage_bucket" "hacienda" {
   name          = "hacienda-${var.environment}"
   location      = var.region
-  rpo           = var.environment == "prod" ? "ASYNC_TURBO" : "DEFAULT"
   project       = var.project_id
   force_destroy = var.environment != "prod"
 
@@ -84,6 +83,26 @@ resource "google_storage_bucket" "hacienda_dr" {
 }
 
 # Cross-region replication (prod only)
+data "google_storage_transfer_project_service_account" "sts" {
+  project = var.project_id
+}
+
+resource "google_storage_bucket_iam_member" "sts_source_viewer" {
+  bucket = google_storage_bucket.hacienda.name
+  role = "roles/storage.objectViewer"
+  member = "serviceAccount:${data.google_storage_transfer_project_service_account.sts.email}"
+}
+resource "google_storage_bucket_iam_member" "sts_dr_user" {
+  count = var.environment == "prod" ? 1 : 0
+  bucket = google_storage_bucket.hacienda_dr[0].name
+  role = "roles/storage.objectUser"
+  member = "serviceAccount:${data.google_storage_transfer_project_service_account.sts.email}"
+}
+resource "google_project_iam_member" "sts_pubsub_editor" {
+  project = var.project_id
+  role = "roles/pubsub.editor"
+  member = "serviceAccount:${data.google_storage_transfer_project_service_account.sts.email}"
+}
 resource "google_storage_transfer_job" "hacienda_crr" {
   count = var.environment == "prod" ? 1 : 0
   description = "Replicate Hacienda production objects to DR"

@@ -22,6 +22,11 @@ if [ -z "$VAULT_TOKEN" ]; then
   exit 1
 fi
 
+if [ -n "$TENANT_ID" ]; then
+  echo "ERROR: tenant-specific rotation requires a tenant ExternalSecret/API wiring; refusing to update an unconsumed Vault path" >&2
+  exit 1
+fi
+
 echo "Rotating pseudonym key for $ENV environment${TENANT_ID:+ (tenant: $TENANT_ID)}"
 
 # Get current active key (fail if not found)
@@ -35,7 +40,7 @@ OLD_MATERIAL=$(vault kv get -field="${OLD_KEY}" "secret/hacienda/$ENV/pseudonym"
 TIMESTAMP=$(date +%s)
 ARCHIVE_KEY="key_${TIMESTAMP}${TENANT_ID:+_$TENANT_ID}"
 echo "Archiving current key as $ARCHIVE_KEY"
-vault kv put "secret/hacienda/$ENV/pseudonym/$ARCHIVE_KEY" key="$OLD_KEY"
+vault kv put "secret/hacienda/$ENV/pseudonym/$ARCHIVE_KEY" key_id="$OLD_KEY" material="$OLD_MATERIAL"
 
 # Generate new key
 NEW_KEY=$(openssl rand -hex 32)
@@ -43,6 +48,7 @@ NEW_KEY=$(openssl rand -hex 32)
 # the active key ID so the resolver can continue to load it without a manifest
 # change. The previous material remains archived above for audit/recovery.
 NEW_KEY_ID="key_1"
+if [ "$OLD_KEY" = "key_1" ]; then NEW_KEY_ID="key_2"; fi
 echo "Generated new key"
 
 # Update active key (same path consumed by ExternalSecret)

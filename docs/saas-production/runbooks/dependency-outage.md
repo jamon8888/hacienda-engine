@@ -59,8 +59,8 @@ kubectl set env deployment/hacienda-api -n hacienda-prod \
 
 ```bash
 # 1. Apply and verify ingress limit-rps before disabling the application limiter
-kubectl patch ingress hacienda-api -n hacienda-prod -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/limit-rps":"100"}}}'
-kubectl get ingress hacienda-api -n hacienda-prod -o jsonpath='{.metadata.annotations.nginx\.ingress\.kubernetes\.io/limit-rps}'
+kubectl patch ingress hacienda-api -n hacienda-prod --type merge -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/limit-rps":"100"}}}'
+test "$(kubectl get ingress hacienda-api -n hacienda-prod -o jsonpath='{.metadata.annotations.nginx\.ingress\.kubernetes\.io/limit-rps}')" = 100
 kubectl set env deployment/hacienda-api -n hacienda-prod RATE_LIMIT_ENABLED=false
 
 # 2. Disable caching

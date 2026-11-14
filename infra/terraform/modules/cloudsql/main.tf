@@ -65,7 +65,7 @@ resource "google_sql_database_instance" "hacienda" {
     ip_configuration {
       ipv4_enabled            = false
       private_network         = var.network
-      require_ssl             = true
+      ssl_mode                = "ENCRYPTED_ONLY"
       authorized_networks     = []
       allocated_ip_range     = "google-managed-services-default"
       enable_private_path_for_google_cloud_services = true

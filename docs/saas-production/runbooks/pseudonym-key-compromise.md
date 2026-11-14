@@ -26,7 +26,8 @@ OLD_KEY=$(vault kv get -field=active_key "secret/hacienda/prod/pseudonym" 2>/dev
 TIMESTAMP=$(date +%s)
 ARCHIVE_KEY="key_${TIMESTAMP}"
 echo "Archiving current key as $ARCHIVE_KEY"
-vault kv put "secret/hacienda/prod/pseudonym/$ARCHIVE_KEY" key="$OLD_KEY"
+OLD_MATERIAL=$(vault kv get -field="$OLD_KEY" secret/hacienda/prod/pseudonym)
+vault kv put "secret/hacienda/prod/pseudonym/$ARCHIVE_KEY" key_id="$OLD_KEY" material="$OLD_MATERIAL"
 
 # 3. Generate new key
 NEW_KEY=$(openssl rand -hex 32)
@@ -34,6 +35,7 @@ echo "Generated new key"
 
 # 4. Update active key (same path consumed by ExternalSecret)
 NEW_KEY_ID="key_1"
+[ "$OLD_KEY" = "key_1" ] && NEW_KEY_ID="key_2"
 vault kv patch "secret/hacienda/prod/pseudonym" active_key="$NEW_KEY_ID" "$NEW_KEY_ID"="$NEW_KEY"
 echo "Updated active_key"
 
@@ -44,7 +46,7 @@ kubectl annotate externalsecret hacienda-secrets -n hacienda-prod \
 # 6. Verify the rendered secret changed before restart
 for attempt in $(seq 1 12); do
   if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY_ID" && \
-     kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_KEY_KEY_1}' | base64 -d | grep -qx "$NEW_KEY"; then
+     kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath="{.data.HACIENDA_PSEUDONYM_KEY_${NEW_KEY_ID^^}}" | base64 -d | grep -qx "$NEW_KEY"; then
     echo "Secret verified with new key ID $NEW_KEY_ID"
     break
   fi
@@ -67,15 +69,20 @@ kubectl rollout restart deployment/hacienda-api -n hacienda-prod
 
 ## Full Key Rotation (If Master Key Compromised)
 
+Tenant-specific Vault paths are not consumed by the current API ExternalSecret. Do not
+claim a tenant rotation succeeded until tenant-scoped ExternalSecret data and API
+environment variables have been provisioned; the rotation script intentionally refuses
+that unsafe partial operation.
+
 ```bash
 # 1. Generate new keys for ALL tenants
 for tenant in $(kubectl exec -n hacienda-prod <pg-pod> -- psql -t -c "SELECT id FROM tenants;"); do
   NEW_KEY=$(openssl rand -hex 32)
-  vault kv put secret/hacienda/prod/pseudonym/tenant_${tenant} key=$NEW_KEY
+  vault kv patch secret/hacienda/prod/pseudonym/tenant_${tenant} active_key=key_2 key_2=$NEW_KEY
 done
 
 # 2. Update global active_key as well
-NEW_ACTIVE_KEY_ID="key_1"
+NEW_ACTIVE_KEY_ID="key_2"
 NEW_ACTIVE_KEY=$(openssl rand -hex 32)
 vault kv patch secret/hacienda/prod/pseudonym active_key="$NEW_ACTIVE_KEY_ID" "$NEW_ACTIVE_KEY_ID"="$NEW_ACTIVE_KEY"
 
@@ -85,7 +92,7 @@ kubectl annotate externalsecret hacienda-secrets -n hacienda-prod force-sync=$(d
 # 5. Verify the rendered active key ID and material before restarting
 for attempt in $(seq 1 12); do
   if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_ACTIVE_KEY_ID" && \
-     kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_KEY_KEY_1}' | base64 -d | grep -qx "$NEW_ACTIVE_KEY"; then
+     kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath="{.data.HACIENDA_PSEUDONYM_KEY_${NEW_ACTIVE_KEY_ID^^}}" | base64 -d | grep -qx "$NEW_ACTIVE_KEY"; then
     echo "Secret verified with new key ID $NEW_ACTIVE_KEY_ID"
     break
   fi
