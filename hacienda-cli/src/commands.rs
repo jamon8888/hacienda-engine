@@ -23,7 +23,7 @@ use hacienda::review::{
     ReviewStore as _,
 };
 use hacienda::{HaciendaConfig, HaciendaError, HaciendaFacade, HaciendaResult};
-use hacienda_api::{ApiLimits, ApiState};
+use hacienda_api::{AnthropicMessagesProvider, ApiLimits, ApiState, ClaudeMessagesProvider};
 use hacienda_core::auth::authn::AuthConfig;
 use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
@@ -35,6 +35,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task;
 use xberg::ExtractInput;
+
+const ANTHROPIC_MESSAGES_API_KEY_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_API_KEY";
+const ANTHROPIC_MESSAGES_ENDPOINT_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_ENDPOINT";
+const DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 
 fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
     args.concurrency.unwrap_or_else(num_cpus::get)
@@ -58,6 +62,66 @@ fn build_facade(config: HaciendaConfig) -> Result<HaciendaFacade, hacienda::Haci
     } else {
         HaciendaFacade::new(config)
     }
+}
+
+struct AnthropicMessagesConfig {
+    endpoint: String,
+    api_key: String,
+}
+
+/// Parse the optional environment configuration for the TeamOnPremise provider.
+///
+/// The endpoint is only meaningful when an API key is configured: an endpoint by
+/// itself is an incomplete configuration, while a key without an endpoint uses the
+/// Anthropic default. This function accepts values instead of reading the process
+/// environment so its validation can be tested without changing global state.
+fn parse_anthropic_messages_config(
+    api_key: Option<&str>,
+    endpoint: Option<&str>,
+) -> Result<Option<AnthropicMessagesConfig>> {
+    match (api_key, endpoint) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => anyhow::bail!("invalid Anthropic Messages gateway configuration"),
+        (Some(api_key), endpoint) if api_key.trim().is_empty() => {
+            let _ = endpoint;
+            anyhow::bail!("invalid Anthropic Messages gateway configuration")
+        }
+        (Some(api_key), endpoint) => {
+            let endpoint = endpoint.unwrap_or(DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT);
+            if endpoint.trim().is_empty() {
+                anyhow::bail!("invalid Anthropic Messages gateway configuration");
+            }
+            Ok(Some(AnthropicMessagesConfig {
+                endpoint: endpoint.to_owned(),
+                api_key: api_key.to_owned(),
+            }))
+        }
+    }
+}
+
+fn read_optional_env(name: &str) -> Result<Option<String>> {
+    std::env::var_os(name)
+        .map(|value| {
+            value
+                .into_string()
+                .map(Some)
+                .map_err(|_| anyhow::anyhow!("invalid Anthropic Messages gateway configuration"))
+        })
+        .transpose()
+        .map(|value| value.flatten())
+}
+
+fn build_anthropic_messages_provider() -> Result<Option<Arc<dyn ClaudeMessagesProvider>>> {
+    let api_key = read_optional_env(ANTHROPIC_MESSAGES_API_KEY_ENV)?;
+    let endpoint = read_optional_env(ANTHROPIC_MESSAGES_ENDPOINT_ENV)?;
+    let Some(config) = parse_anthropic_messages_config(api_key.as_deref(), endpoint.as_deref())?
+    else {
+        return Ok(None);
+    };
+
+    let provider = AnthropicMessagesProvider::with_reqwest(config.endpoint, config.api_key)
+        .map_err(|_| anyhow::anyhow!("invalid Anthropic Messages gateway configuration"))?;
+    Ok(Some(Arc::new(provider)))
 }
 
 /// Close `facade`'s stores after `result`, regardless of whether `result` is `Ok`.
@@ -1527,6 +1591,7 @@ pub async fn run_serve(
 
     let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
     let auth_enabled = config.auth.enabled;
+    let claude_messages_provider = build_anthropic_messages_provider()?;
 
     let facade = Arc::new(build_facade(config).context("building the facade")?);
     let jobs = InMemoryJobStore::new().into_arc();
@@ -1534,6 +1599,10 @@ pub async fn run_serve(
     // decision (embed a `PgVectorStore` instead), not this command's to make.
     let rag_store: Arc<dyn hacienda_rag::RagStore> = Arc::new(InMemoryVectorStore::new("default"));
     let state = ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(rag_store);
+    let state = match claude_messages_provider {
+        Some(provider) => state.with_claude_messages_provider(provider),
+        None => state,
+    };
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -1559,7 +1628,10 @@ pub async fn run_serve(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_bind_policy, PLACEHOLDER_STATIC_TOKEN};
+    use super::{
+        check_bind_policy, parse_anthropic_messages_config, DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT,
+        PLACEHOLDER_STATIC_TOKEN,
+    };
     use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
     use std::net::SocketAddr;
 
@@ -1588,6 +1660,40 @@ mod tests {
                 expires_at: None,
             }],
         }
+    }
+
+    #[test]
+    fn anthropic_messages_gateway_is_disabled_without_configuration() {
+        assert!(parse_anthropic_messages_config(None, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn anthropic_messages_gateway_uses_the_default_endpoint_for_a_key_only() {
+        let config = parse_anthropic_messages_config(Some("secret"), None)
+            .expect("a key is sufficient with the default endpoint")
+            .expect("key-only configuration should enable the gateway");
+        assert_eq!(config.endpoint, DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT);
+        assert_eq!(config.api_key, "secret");
+    }
+
+    #[test]
+    fn anthropic_messages_gateway_rejects_incomplete_configuration() {
+        assert!(parse_anthropic_messages_config(None, Some("https://example.test")).is_err());
+        assert!(parse_anthropic_messages_config(Some("   "), None).is_err());
+        assert!(parse_anthropic_messages_config(Some("secret"), Some("   ")).is_err());
+    }
+
+    #[test]
+    fn anthropic_messages_gateway_preserves_a_configured_endpoint() {
+        let config = parse_anthropic_messages_config(
+            Some("secret"),
+            Some("http://127.0.0.1:8080/v1/messages"),
+        )
+        .expect("a non-empty endpoint should be accepted by parsing")
+        .expect("configured key and endpoint should enable the gateway");
+        assert_eq!(config.endpoint, "http://127.0.0.1:8080/v1/messages");
     }
 
     /// The default is loopback, so the common case must not need auth configured.

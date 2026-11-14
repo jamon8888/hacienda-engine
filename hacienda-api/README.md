@@ -128,6 +128,15 @@ Claude Code. It is disabled unless an application attaches a `ClaudeMessagesProv
 when the API's general authentication middleware is disabled. Tenant routing comes from that
 principal; the request body cannot select a tenant.
 
+The CLI's TeamOnPremise server configures the gateway from environment variables:
+`HACIENDA_ANTHROPIC_MESSAGES_API_KEY` enables it, and
+`HACIENDA_ANTHROPIC_MESSAGES_ENDPOINT` optionally overrides the default
+`https://api.anthropic.com/v1/messages`. With neither variable configured, the gateway remains
+disabled. A key without a custom endpoint uses the default; an endpoint without a key, an empty
+value, or an invalid endpoint refuses server startup. Endpoints must use HTTPS, except that HTTP
+is accepted for loopback hosts (`localhost`, `127.0.0.1`, or `::1`). The API key is used only by
+the outbound provider request and is never accepted from or forwarded from incoming requests.
+
 The gateway accepts streaming requests (`stream: true`) with a supported subset of the Messages
 schema. It redacts text in user and system content, tool definitions and tool results, and
 metadata before calling the configured provider. Images, files, unknown content blocks, unknown
