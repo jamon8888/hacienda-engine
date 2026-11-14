@@ -16,6 +16,8 @@ const modelConfig = z.object({
   baseUrl: import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingface.co/${import.meta.env.VITE_GLINER_MODEL_ID ?? "jamon8888/gliner2-guardrails-pii-f16"}/resolve/main`,
 });
 const MODEL_ID = modelConfig.modelId;
+const TRUSTED_DIGESTS = MODEL_DIGESTS[MODEL_ID as keyof typeof MODEL_DIGESTS];
+if (!TRUSTED_DIGESTS) throw new Error(`No trusted digest is configured for model ${MODEL_ID}`);
 const MODEL_BASE_URL = modelConfig.baseUrl;
 const MODEL_BASE = import.meta.env.DEV && MODEL_BASE_URL.startsWith('https://huggingface.co')
   ? MODEL_BASE_URL.replace('https://huggingface.co', '/hf-model')
@@ -433,8 +435,7 @@ function insufficientStorage(availableBytes: number, neededBytes: number): NerMo
 const MODEL_STORAGE_BYTES_NEEDED = 620 * 1024 * 1024;
 
 async function verifyAssetDigests(assets: NerModelAssets): Promise<void> {
-  const expected = MODEL_DIGESTS[MODEL_ID as keyof typeof MODEL_DIGESTS];
-  if (!expected) throw new Error(`No trusted digest is configured for model ${MODEL_ID}`);
+  const expected = TRUSTED_DIGESTS;
   const digest = async (bytes: Uint8Array) => {
     const hash = await crypto.subtle.digest("SHA-256", bytes);
     return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -502,12 +503,14 @@ export async function loadNerModel(
   };
 
   // Migrate the pre-encoded keys used by older Studio releases before quota checks.
-  const legacyKeys = ["gliner2-guardrails-pii-model", "gliner2-guardrails-pii-tokenizer", "gliner2-guardrails-pii-config"];
+  const legacyKeys = MODEL_ID === "jamon8888/gliner2-guardrails-pii-f16"
+    ? ["gliner2-guardrails-pii-model", "gliner2-guardrails-pii-tokenizer", "gliner2-guardrails-pii-config"]
+    : [];
   const newKeys = [modelKey, tokenizerKey, configKey];
   const migration = db.transaction(MODEL_STORE, "readwrite");
   for (let i = 0; i < legacyKeys.length; i++) {
     const value = await migration.store.get(legacyKeys[i]);
-    if (value) await migration.store.put(value, newKeys[i]);
+    if (value && !(await migration.store.get(newKeys[i]))) await migration.store.put(value, newKeys[i]);
     if (value) await migration.store.delete(legacyKeys[i]);
   }
   await migration.done;
@@ -520,8 +523,13 @@ export async function loadNerModel(
   ]);
 
   if (model && tokenizer && config) {
-    await verifyAssetDigests({ model, tokenizer, encoderConfig: config });
-    return { ok: true, assets: { model, tokenizer, encoderConfig: config } };
+    try {
+      await verifyAssetDigests({ model, tokenizer, encoderConfig: config });
+      return { ok: true, assets: { model, tokenizer, encoderConfig: config } };
+    } catch {
+      const tx = db.transaction(MODEL_STORE, "readwrite");
+      await Promise.all([tx.store.delete(modelKey), tx.store.delete(tokenizerKey), tx.store.delete(configKey), tx.done]);
+    }
   }
 
   // Evict stale models before download

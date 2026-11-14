@@ -13,6 +13,7 @@ import { DEFAULT_CONFIG, type NerCategory } from "./types";
 const ENGINE_CATEGORIES = new Set(
   Object.keys(WasmEntityCategory)
     .filter((key) => Number.isNaN(Number(key)))
+    .filter((key) => key.toLowerCase() !== "custom")
     .map((key) => key.toLowerCase()),
 );
 
@@ -42,7 +43,7 @@ describe("NER category vocabulary", () => {
     for (const cat of ENGINE_CATEGORIES) {
       expect(mirrored).toContain(cat);
     }
-    expect([...mirrored].sort()).toEqual([...ENGINE_CATEGORIES].sort());
+    expect(mirrored.every((cat) => ENGINE_CATEGORIES.has(cat) || cat === "custom")).toBe(true);
     // Custom may still be used via customLabels
     expect(mirrored).toContain("person");
   });

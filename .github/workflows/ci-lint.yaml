@@ -23,6 +23,7 @@ jobs:
         with:
           toolchain: nightly-2026-08-06
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Install rumdl
         run: cargo install rumdl --locked
@@ -67,11 +68,13 @@ jobs:
 
       - name: Check Rust docs coverage
         if: steps.deps.outcome == 'success'
+        env:
+          RUSTDOCFLAGS: -D missing_docs
         run: |
-          cargo rustdoc -p hacienda-core --all-targets --features ner-candle -- -D missing_docs
-          cargo rustdoc -p hacienda-api --all-targets -- -D missing_docs
-          cargo rustdoc -p hacienda-cli --all-targets -- -D missing_docs
-          cargo rustdoc -p hacienda-mcp --all-targets -- -D missing_docs
-          cargo rustdoc -p hacienda-rag --all-targets -- -D missing_docs
-          cargo rustdoc -p hacienda --all-targets -- -D missing_docs
-          cargo rustdoc -p hacienda-wasm --all-targets --features ner-candle-wasm --target wasm32-unknown-unknown -- -D missing_docs
+          cargo rustdoc -p hacienda-core --all-targets --features ner-candle
+          cargo rustdoc -p hacienda-api --all-targets
+          cargo rustdoc -p hacienda-cli --all-targets
+          cargo rustdoc -p hacienda-mcp --all-targets
+          cargo rustdoc -p hacienda-rag --all-targets
+          cargo rustdoc -p hacienda --all-targets
+          cargo rustdoc -p hacienda-wasm --all-targets --features ner-candle-wasm --target wasm32-unknown-unknown

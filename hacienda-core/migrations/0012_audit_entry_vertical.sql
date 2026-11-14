@@ -1,0 +1,1 @@
+ALTER TABLE audit_entries ADD COLUMN IF NOT EXISTS vertical TEXT;

@@ -1427,9 +1427,7 @@ impl HaciendaFacade {
                     config_hash: String::new(),
                     principal: principal.clone(),
                     vertical: vertical.clone(),
-                    model: (entity.source == EntitySource::Model)
-                        .then(|| vertical.clone())
-                        .flatten(),
+                    model: None,
                 }
             })
             .collect();
@@ -1525,9 +1523,7 @@ impl HaciendaFacade {
                 config_hash: String::new(),
                 principal: principal.clone(),
                 vertical: vertical.clone(),
-                model: (entry.source == EntitySource::Model)
-                    .then(|| vertical.clone())
-                    .flatten(),
+                model: None,
             })
             .collect();
 
