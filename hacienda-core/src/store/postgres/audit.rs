@@ -519,6 +519,8 @@ fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
         pipeline_version: row.pipeline_version,
         config_hash: row.config_hash,
         principal: row.principal,
+        // The legacy Postgres schema does not persist model provenance yet.
+        model: None,
         // The `audit_entries` table has no `vertical` column yet — the postgres backend
         // does not persist vertical provenance. Tracked separately from this fix, which
         // only restores compilation after `AuditEntry` gained the field.

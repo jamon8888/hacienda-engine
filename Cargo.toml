@@ -215,7 +215,7 @@ web-time = "1"
 #   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml
 #
 # Pin the public upstream commit so CI does not depend on the removed private fork.
-xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd", features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "d926382a0c124dcac4562c7c61a5086d71a3aa68", features = [
     "redaction",
     "ner",
     "tokio-runtime",
