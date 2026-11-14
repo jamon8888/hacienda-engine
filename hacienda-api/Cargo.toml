@@ -37,10 +37,10 @@ uuid = { workspace = true }
 # `EmbeddingPreset` type — no ONNX Runtime, no extra deps). Always on so
 # `POST /v1/rag/collections/{name}/migrate-embeddings` can validate a target
 # preset name/dimension without requiring the `rag-embeddings` build below.
-# It also makes xberg's `embed_texts_async` *stub* available (the stub is
-# cfg-gated on `embedding-presets` being on and `embeddings`/`static-embeddings`
-# being off) — see `[features] rag-embeddings` for the real implementation.
-xberg = { workspace = true, features = ["embedding-presets"] }
+# xberg's current embedding API is gated behind an actual backend: use its
+# pure-Rust model2vec backend for the default build, while `rag-embeddings`
+# below remains the opt-in ONNX backend.
+xberg = { workspace = true, features = ["static-embeddings"] }
 
 [features]
 # Off by default: turns `POST .../migrate-embeddings` from "validates the
