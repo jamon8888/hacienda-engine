@@ -77,6 +77,12 @@ loaction = "loaction"
 # The "mis-" prefix in "mis-scoring"/"mis-counting" (hacienda-core, crates/hacienda-rag,
 # CHANGELOG.md) reads as a truncated "miss"/"mist" to the checker; it is not one.
 mis = "mis"
+# French UI copy in the studio is intentionally multilingual.
+moteur = "moteur"
+individuels = "individuels"
+complet = "complet"
+remplace = "remplace"
+reste = "reste"
 # French UI copy in apps/hacienda-studio/{App,pages/Assets,pages/Landing,pages/Settings}.tsx
 # (the interface was translated to French) — same false-positive class the
 # docs/architecture/ exclusion above already documents ("ressources" read as "resources",

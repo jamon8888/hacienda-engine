@@ -256,6 +256,7 @@ mod audit_handle {
                         // surface exists in the browser today), so no vertical is ever
                         // configured here either.
                         vertical: None,
+                        model: None,
                     })
                     .collect();
 
@@ -320,6 +321,7 @@ mod audit_handle {
                 config_hash: String::new(),
                 principal: None,
                 vertical: None,
+                model: None,
             };
 
             self.store
