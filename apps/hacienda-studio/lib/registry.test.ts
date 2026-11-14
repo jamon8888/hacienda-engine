@@ -131,10 +131,11 @@ describe("BatchEntityRegistry.inferRelationships", () => {
 
     // Proof the fix is load-bearing, not just source_documents bookkeeping: doc-002's
     // inferRelationships must be able to see this entity to score anything against it.
-    const text = "        Acme SAS confirmed the order.";
-    addEntity(registry, "doc-002", "the order", "organization", [{ start: 30, end: 39 }]);
+    const text = "Acme SAS confirmed the order.";
+    const orderStart = text.indexOf("the order");
+    addEntity(registry, "doc-002", "the order", "organization", [{ start: orderStart, end: orderStart + "the order".length }]);
     registry.inferRelationships("doc-002", text);
-    expect(registry.getRelationships().length).toBeGreaterThan(0);
+    expect(registry.getRelationships()).toHaveLength(1);
   });
 
   it("emits nothing when text is omitted", () => {

@@ -306,7 +306,9 @@ mod audit_handle {
             category: String,
             source: String,
         ) -> Result<String, JsValue> {
-            let source = EntitySource::from_str(&source).map_err(to_js_err)?;
+            let source = EntitySource::from_str(&source).map_err(|cause| {
+                to_js_err(format!("invalid source `{source}` (expected `regex` or `model`): {cause}"))
+            })?;
             let span_hash = blake3::hash(revealed_text.as_bytes()).to_hex().to_string();
             let input = AuditEntryInput {
                 id: uuid::Uuid::new_v4().to_string(),

@@ -202,7 +202,7 @@ export function Settings({ config, onChange }: Props) {
                   className={control}
                   list="known-pseudonym-keys"
                   value={config.pseudonymKeyId}
-                  onChange={(e) => onChange({ ...config, pseudonymKeyId: e.target.value })}
+                onChange={(e) => onChange({ ...config, pseudonymKeyId: e.target.value.trim() })}
                   aria-invalid={!keyIdValid}
                   aria-describedby={keyIdValid ? undefined : "pseudonym-key-id-error"}
                   placeholder="session"
@@ -250,7 +250,7 @@ export function Settings({ config, onChange }: Props) {
             <select
               value={config.enabledVerticals?.[0] || "m&a"}
               onChange={(e) =>
-                onChange({ ...config, enabledVerticals: [e.target.value as AppConfig["enabledVerticals"][number]] })
+                onChange({ ...config, enabledVerticals: e.target.value === "m&a" || e.target.value === "financial_services" || e.target.value === "shared" ? [e.target.value] : config.enabledVerticals })
               }
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             >
@@ -300,7 +300,7 @@ export function Settings({ config, onChange }: Props) {
           )}
 
           <div className="mt-3 flex items-center justify-between">
-            <span className="text-sm" id="toggle-transcription-label">Reconnaissance optique</span>
+            <span className="text-sm" id="toggle-transcription-label">Transcription audio et vidéo</span>
             <button
               type="button"
               role="switch"
@@ -504,7 +504,7 @@ function PseudonymKeyVault() {
                 }
                 onBlur={() => commitRename(k.keyId)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                  if (e.key === "Enter") e.currentTarget.blur();
                 }}
               />
               <Button

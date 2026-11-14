@@ -1095,7 +1095,7 @@ async function processFiles(
     self.postMessage({
       type: "warning",
       message:
-        "Hash mode needs a passphrase to key its digest — without one the hashes would be reversible by brute force. This batch will use mask mode instead.",
+        "Le mode Hachage nécessite une phrase secrète pour protéger son condensat — sans elle, les hachages seraient réversibles par force brute. Ce traitement utilisera le mode Masquage.",
     });
   }
 

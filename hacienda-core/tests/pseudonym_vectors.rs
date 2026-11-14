@@ -13,7 +13,7 @@
 //! input, is what forces a change here to be a *reviewed* change on the TS side too.
 
 use hacienda_core::pii::PiiCategory;
-use hacienda_core::redaction::{EnvKeyResolver, Pseudonymiser};
+use hacienda_core::redaction::{EnvKeyResolver, Pseudonymiser, KEY_BYTES};
 use hacienda_core::tenancy::TenantId;
 
 const KEY_ID: &str = "k1";
@@ -21,7 +21,7 @@ const KEY_ID: &str = "k1";
 fn pseudonymiser() -> Pseudonymiser {
     // `"07"` repeated to fill `KEY_BYTES` (64) bytes — the same fixed key
     // `pseudonymize.test.ts` uses as `KEY_HEX`.
-    let key_hex = "07".repeat(64);
+    let key_hex = "07".repeat(KEY_BYTES);
     let resolver = EnvKeyResolver::with_lookup(move |name| match name {
         "HACIENDA_PSEUDONYM_ACTIVE_KEY" => Some(KEY_ID.to_string()),
         "HACIENDA_PSEUDONYM_KEY_K1" => Some(key_hex.clone()),

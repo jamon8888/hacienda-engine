@@ -119,7 +119,7 @@ function classifyProximity(
 ): ProximityBand | null {
   if (to - from > MAX_PROXIMITY_GAP_CHARS) return null;
   const between = text.slice(from, to);
-  if (/\n[ \t]*\n/.test(between)) return null;
+  if (/(?:\r?\n)[ \t]*(?:\r?\n)/.test(between)) return null;
   if (/[.!?]["')\]]?\s/.test(between)) return "same_paragraph";
   return "same_sentence";
 }
@@ -273,7 +273,10 @@ export class BatchEntityRegistry {
     }
 
     const stableKeyForId = `${entity.type}|${metadata.vertical}|${entity.type === "organization" ? stripLegalSuffixes(entity.name) : normalizedName}`;
-    const id = `ent-${hashString(stableKeyForId)}`;
+    let id = `ent-${hashString(stableKeyForId)}`;
+    for (let attempt = 1; this.entities.has(id); attempt++) {
+      id = `ent-${hashString(`${stableKeyForId}#${attempt}`)}`;
+    }
     const registryEntity = {
       id,
       canonical_name: entity.name,
@@ -362,7 +365,6 @@ export class BatchEntityRegistry {
       }
       existing.canonical_name = surfaceForm;
       existing.display_name = surfaceForm;
-      existing.slug = slugify(surfaceForm);
       return;
     }
     if (surfaceForm !== existing.display_name && !existing.aliases.includes(surfaceForm)) {

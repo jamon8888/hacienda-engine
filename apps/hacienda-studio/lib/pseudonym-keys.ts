@@ -67,7 +67,7 @@ function readAll(): KnownPseudonymKey[] {
 
 function writeAll(keys: KnownPseudonymKey[]): void {
   if (typeof localStorage === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(keys));
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(keys)); } catch { /* unavailable or unwritable */ }
 }
 
 /** Newest-used first, so the picker's most likely choice is also its first option. */

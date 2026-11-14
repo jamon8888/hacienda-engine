@@ -718,6 +718,7 @@ function AuditTab() {
     try {
       await verifyAuditChain();
       setStatus("ok");
+      await load();
       toast.success("Chain verified — no tampering detected");
     } catch (e) {
       setStatus("error");

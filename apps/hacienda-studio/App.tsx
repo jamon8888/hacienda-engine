@@ -584,7 +584,7 @@ export function App() {
     }
 
     try {
-      const batchConfig = JSON.parse(JSON.stringify(configRef.current)) as AppConfig;
+      const batchConfig = configRef.current;
       const results = await pool.processFiles(fileInputs, batchConfig);
       // Results are handled via callbacks, but we can also use the returned array
       console.log("[App] Worker pool completed:", results.length, "files");

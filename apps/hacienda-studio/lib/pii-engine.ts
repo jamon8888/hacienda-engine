@@ -326,12 +326,12 @@ export interface AuditEntryRow {
  */
 function isAuditEntryRow(value: unknown): value is AuditEntryRow {
   if (typeof value !== "object" || value === null) return false;
-  const e = value as Record<string, unknown>;
+  const e: Record<string, unknown> = Object.fromEntries(Object.entries(value));
   const actionOk =
     typeof e.action === "string" ||
     (typeof e.action === "object" &&
       e.action !== null &&
-      typeof (e.action as Record<string, unknown>).custom === "string");
+      typeof Object.fromEntries(Object.entries(e.action)).custom === "string");
   return (
     typeof e.id === "string" &&
     typeof e.timestamp === "string" &&
@@ -355,11 +355,12 @@ export async function listAuditEntries(): Promise<AuditEntryRow[]> {
   // disagrees with the chain itself, and quietly dropping the rows we cannot parse would
   // show a shorter, plausible-looking history — the same "events that exist never
   // happened" failure the open-segment-vs-history distinction exists to prevent.
-  const bad = raw.findIndex((entry) => !isAuditEntryRow(entry));
-  if (bad !== -1) {
-    throw new Error(
-      `[pii-engine] audit entry at index ${bad} does not match the expected shape — refusing to render a partial chain`,
-    );
+  const entries: AuditEntryRow[] = [];
+  for (const [index, entry] of raw.entries()) {
+    if (!isAuditEntryRow(entry)) {
+      throw new Error(`[pii-engine] audit entry at index ${index} does not match the expected shape — refusing to render a partial chain`);
+    }
+    entries.push(entry);
   }
-  return raw as AuditEntryRow[];
+  return entries;
 }

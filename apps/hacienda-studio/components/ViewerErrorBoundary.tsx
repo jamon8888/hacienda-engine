@@ -44,11 +44,11 @@ export class ViewerErrorBoundary extends Component<Props, State> {
       return (
         <div className="flex h-full min-h-[400px] flex-col items-center justify-center gap-2 p-6 text-center">
           <p className="text-sm font-medium text-foreground">
-            This file&rsquo;s preview could not be displayed.
+            L&rsquo;aperçu de ce fichier ne peut pas être affiché.
           </p>
           <p className="max-w-sm text-xs text-muted-foreground">
-            The extracted text, detected PII and audit trail are unaffected — switch to the
-            Redacted or Findings tab to keep working with
+            Le texte extrait, les données personnelles détectées et la piste d’audit ne sont pas affectés —
+            passez à l’onglet Caviardé ou Résultats pour continuer à travailler avec
             {this.props.fileName ? ` ${this.props.fileName}` : " this document"}.
           </p>
         </div>

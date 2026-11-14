@@ -90,7 +90,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
   const [knownKeys] = useState(() => listKnownKeys());
 
   const CREDENTIAL_ERROR =
-    "Wrong passphrase, wrong key id, or this document used mask mode.";
+    "Phrase secrète ou identifiant incorrect, ou ce document utilise le mode Masquage.";
 
   async function onReveal() {
     setBusy(true);
@@ -126,7 +126,7 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
       await recordPiiReveal(value, finding.category, finding.source);
     } catch {
       setError(
-        "Your passphrase was correct, but the reveal could not be written to the audit chain, so the value is not shown. Try again — revealing PII without an audit record is not permitted.",
+        "Votre phrase secrète est correcte, mais la révélation n’a pas pu être écrite dans la chaîne d’audit et la valeur ne sera pas affichée. Réessayez — révéler des données personnelles sans trace d’audit est interdit.",
       );
       setBusy(false);
       setPassphrase("");
