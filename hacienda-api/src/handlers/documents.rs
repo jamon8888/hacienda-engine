@@ -11,6 +11,7 @@ use xberg::ExtractInput;
 use crate::{
     dto::{
         AsyncJobResponse, DocumentInput, DocumentResult, EntityDto, ProcessDocumentsRequest,
+        StructuredExtractionDto,
         ProcessDocumentsResponse,
     },
     error::ApiError,
@@ -148,11 +149,14 @@ pub async fn process_documents(
             (None, None)
         };
 
+        let structured = StructuredExtractionDto::from_document(&doc)
+            .map_err(|_| ApiError::internal())?;
         documents.push(DocumentResult {
             content: doc.content,
             entities: entities.into_iter().map(EntityDto::from).collect(),
             document_id,
             version_sequence,
+            structured,
         });
     }
 

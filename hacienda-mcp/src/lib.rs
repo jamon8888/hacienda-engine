@@ -401,6 +401,9 @@ impl HaciendaMcp {
         &self,
         Parameters(params): Parameters<MimeDetectParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.content_base64.len() > (hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES * 4 / 3 + 4) {
+            return Err(rmcp::ErrorData::invalid_params("content_base64 exceeds the 8 MiB limit", None));
+        }
         let bytes = data_encoding::BASE64
             .decode(params.content_base64.as_bytes())
             .map_err(|_| rmcp::ErrorData::invalid_params("content_base64 is invalid", None))?;

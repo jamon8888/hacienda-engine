@@ -3,10 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// Maximum decoded input accepted by MIME detection (8 MiB).
+pub const MAX_MIME_INPUT_BYTES: usize = 8 * 1024 * 1024;
+
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum XbergSurfaceError {
+    #[error("MIME input exceeds the 8 MiB limit")]
+    MimeInputTooLarge,
     #[error(
         "MIME detection failed: the input bytes are not a supported document; suggestion: provide a supported format or an explicit filename hint"
     )]
@@ -59,6 +64,9 @@ pub fn supported_formats() -> Vec<xberg::SupportedFormat> {
 }
 
 pub fn detect_mime_type(bytes: &[u8], filename: Option<&str>) -> Result<String, XbergSurfaceError> {
+    if bytes.len() > MAX_MIME_INPUT_BYTES {
+        return Err(XbergSurfaceError::MimeInputTooLarge);
+    }
     match xberg::detect_mime_type_from_bytes(bytes) {
         Ok(mime) => Ok(mime),
         Err(error) => filename
@@ -161,7 +169,8 @@ fn cache_operation_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 fn is_safe_cache_root(root: &PathBuf) -> bool {
-    root != &PathBuf::from("/") && root != &std::env::current_dir().unwrap_or_default()
+    let Ok(canonical) = std::fs::canonicalize(root) else { return false };
+    canonical.file_name().is_some_and(|name| name == "xberg")
 }
 
 #[cfg(test)]
