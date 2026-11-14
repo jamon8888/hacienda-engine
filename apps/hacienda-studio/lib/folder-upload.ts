@@ -3,27 +3,26 @@ export interface FolderEntry {
   file: File;
 }
 
-export async function traverseFolder(entry: FileSystemDirectoryEntry): Promise<FolderEntry[]> {
+export async function traverseFolder(entry: FileSystemDirectoryEntry, parentPath = ""): Promise<FolderEntry[]> {
   const results: FolderEntry[] = [];
   const reader = entry.createReader();
+  const currentPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
 
   const readEntries = async (): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      reader.readEntries(async (entries, err) => {
-        if (err) return reject(err);
-        if (!entries.length) return resolve();
-        for (const e of entries) {
-          if (e.isFile) {
-            const fileEntry = e as FileSystemFileEntry;
-            const file = await new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
-            results.push({ path: entry.name + "/" + file.name, file });
-          } else if (e.isDirectory) {
-            results.push(...await traverseFolder(e as FileSystemDirectoryEntry));
-          }
-        }
-        await readEntries();
-      });
+    const entries = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
     });
+    if (!entries.length) return;
+    for (const e of entries) {
+      if (e.isFile) {
+        const fileEntry = e as FileSystemFileEntry;
+        const file = await new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
+        results.push({ path: `${currentPath}/${file.name}`, file });
+      } else if (e.isDirectory) {
+        results.push(...await traverseFolder(e as FileSystemDirectoryEntry, currentPath));
+      }
+    }
+    await readEntries();
   };
 
   await readEntries();
@@ -45,4 +44,26 @@ export function handleFolderDrop(items: DataTransferItemList): Promise<FolderEnt
     }
   }
   return Promise.all(files).then(arr => arr.flat());
+}
+
+/** Traverses dropped directory entries and returns files with relative paths. */
+export async function traverseDataTransferItems(items: readonly DataTransferItem[]): Promise<File[]> {
+  const entries = await handleFolderDrop(items as DataTransferItemList);
+  return entries.map(({ path, file }) => {
+    Object.defineProperty(file, "webkitRelativePath", { value: path, configurable: true });
+    return file;
+  });
+}
+
+/** Converts folder files to files whose names include their relative paths. */
+export function flattenFolderFiles(files: readonly File[]): File[] {
+  return files.map(file => {
+    const path = file.webkitRelativePath || file.name;
+    return path === file.name ? file : new File([file], path, { type: file.type, lastModified: file.lastModified });
+  });
+}
+
+/** Applies each file's relative path to its effective filename. */
+export function withRelativePath(files: readonly File[]): File[] {
+  return flattenFolderFiles(files);
 }

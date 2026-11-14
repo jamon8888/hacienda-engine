@@ -8,20 +8,22 @@ import { PseudonymGrid } from "@/components/pseudonyms/PseudonymGrid";
 export interface EditorLayoutProps {
   category: "INPUT" | "RED" | "EXT" | "CPR" | "GLN";
   onCategoryChange?: (c: string) => void;
+  readonly value?: string;
+  readonly findings?: ReadonlyArray<import("@/lib/pii-engine").PiiEntity>;
 }
 
-export function EditorLayout({ category, onCategoryChange }: EditorLayoutProps) {
+export function EditorLayout({ category, onCategoryChange, value = "", findings = [] }: EditorLayoutProps) {
   return (
     <PanelGroup direction="horizontal" className="h-full w-full">
       <Panel defaultSize={20} minSize={12} maxSize={34}>
         <ScrollArea className="h-full">
-          <CategorySidebar activeGroup={category} onChange={onCategoryChange} />
+          <CategorySidebar findings={findings} />
         </ScrollArea>
       </Panel>
       <PanelResizeHandle />
       <Panel defaultSize={40} minSize={25}>
         <ScrollArea className="h-full p-4">
-          <InteractiveEditor />
+          <InteractiveEditor value={value} findings={findings} onAddFinding={() => undefined} />
         </ScrollArea>
       </Panel>
       <PanelResizeHandle />

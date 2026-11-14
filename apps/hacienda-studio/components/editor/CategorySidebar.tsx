@@ -88,7 +88,7 @@ export function CategorySidebar({ findings, onRemove }: CategorySidebarProps) {
                         return (
                           <li key={idx} className="flex items-center justify-between gap-2 rounded-md bg-slate-50 px-2 py-1.5">
                             <div className="flex items-center gap-2">
-                              <Badge variant="outline" className="bg-cyan-50 text-cyan-700">CIE</Badge>
+                              <Badge variant="outline" className="bg-cyan-50 text-cyan-700">{f.category}</Badge>
                               <span className="text-xs text-green-700">{f.text}</span>
                             </div>
                             <span className="flex items-center gap-1">
