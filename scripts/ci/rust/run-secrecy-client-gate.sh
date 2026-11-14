@@ -30,6 +30,17 @@ run_gate() {
 # step; the final status is returned after all diagnostics have run.
 run_gate format cargo fmt --all -- --check
 
+# The Tauri app has an independent Cargo workspace, so the repository-wide
+# formatter does not include it. Keep its manifest explicit for the same
+# reason as the focused workspace checks below.
+run_gate secrecy-client-format \
+    cargo fmt --manifest-path apps/hacienda-secrecy-client/src-tauri/Cargo.toml -- --check
+
+run_gate secrecy-client-npm-ci \
+    npm ci --prefix apps/hacienda-secrecy-client
+run_gate secrecy-client-check \
+    npm run check --prefix apps/hacienda-secrecy-client
+
 run_gate client-tests cargo test -p hacienda-client-core
 run_gate rag-tests cargo test -p hacienda-rag --features lancedb
 run_gate backend-tests cargo test -p hacienda-backend --all-targets
@@ -38,6 +49,10 @@ run_gate client-clippy cargo clippy -p hacienda-client-core --all-targets -- -D 
 run_gate core-clippy cargo clippy -p hacienda-core --all-targets -- -D warnings
 run_gate rag-clippy cargo clippy -p hacienda-rag --features lancedb --all-targets -- -D warnings
 run_gate backend-clippy cargo clippy -p hacienda-backend --all-targets -- -D warnings
+
+run_gate secrecy-client-clippy \
+    cargo clippy --manifest-path apps/hacienda-secrecy-client/src-tauri/Cargo.toml \
+        --all-targets -- -D warnings
 
 # This module test serializes the complete editor envelope and asserts that
 # fixture plaintext from body, title, subject, filename, attachment, and keyword
