@@ -3077,6 +3077,7 @@ mod tests {
             speaker_notes: Some(format!("presenter note: {P7_CORPUS_EMAIL}")),
             section_name: None,
             sheet_name: None,
+            ..Default::default()
         };
 
         let annotation = xberg::PdfAnnotation {
@@ -3084,6 +3085,7 @@ mod tests {
             content: Some(format!("comment: {P7_CORPUS_EMAIL}")),
             page_number: 1,
             bounding_box: None,
+            ..Default::default()
         };
 
         let form_field = xberg::PdfFormField {

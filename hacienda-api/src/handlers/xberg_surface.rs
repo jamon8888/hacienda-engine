@@ -139,6 +139,7 @@ pub async fn cache_warm(
         | hacienda_core::xberg_surface::XbergSurfaceError::Cache(_)
         | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot
         | hacienda_core::xberg_surface::XbergSurfaceError::CacheBusy => ApiError::internal(),
+        hacienda_core::xberg_surface::XbergSurfaceError::MimeInputTooLarge => ApiError::invalid_request("input too large"),
     })?;
     tracing::info!(operation = "xberg_cache_warm", preset = %result.preset);
     Ok(Json(CacheWarmResponse {

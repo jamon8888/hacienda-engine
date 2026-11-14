@@ -119,25 +119,8 @@ pub fn clear_cache() -> Result<CacheClearResult, XbergSurfaceError> {
 }
 
 #[cfg(feature = "rag-embeddings")]
-pub async fn warm_embedding_preset(name: &str) -> Result<WarmResult, XbergSurfaceError> {
-    let _operation = cache_operation_lock().lock().await;
-    let name = name.trim();
-    if name.is_empty() || xberg::get_embedding_preset(name).is_none() {
-        return Err(XbergSurfaceError::WarmUnavailable);
-    }
-    let config = xberg::EmbeddingConfig {
-        model: xberg::EmbeddingModelType::Preset {
-            name: name.to_owned(),
-        },
-        ..xberg::EmbeddingConfig::default()
-    };
-    xberg::embed_texts_async(vec!["hacienda cache warm".to_owned()], &config)
-        .await
-        .map_err(XbergSurfaceError::Warm)?;
-    Ok(WarmResult {
-        preset: name.to_owned(),
-        already_loaded_or_downloaded: true,
-    })
+pub async fn warm_embedding_preset(_name: &str) -> Result<WarmResult, XbergSurfaceError> {
+    Err(XbergSurfaceError::WarmUnavailable)
 }
 
 #[cfg(not(feature = "rag-embeddings"))]

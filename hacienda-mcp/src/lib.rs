@@ -484,6 +484,9 @@ impl HaciendaMcp {
             | hacienda_core::xberg_surface::XbergSurfaceError::CacheBusy => {
                 rmcp::ErrorData::internal_error("embedding preset warm failed", None)
             }
+            hacienda_core::xberg_surface::XbergSurfaceError::MimeInputTooLarge => {
+                rmcp::ErrorData::invalid_params("input too large", None)
+            }
         })?;
         json_tool_result(&result)
     }
