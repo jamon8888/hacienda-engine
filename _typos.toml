@@ -89,5 +89,11 @@ appareil = "appareil"
 espace = "espace"
 convertis = "convertis"
 invalide = "invalide"
+tre = "tre"
+remplace = "remplace"
+reste = "reste"
+moteur = "moteur"
+individuels = "individuels"
+complet = "complet"
 
 [default.extend-identifiers]

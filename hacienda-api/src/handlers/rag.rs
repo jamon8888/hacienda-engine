@@ -747,11 +747,19 @@ async fn migrate_embeddings_work(
     collection: &str,
     to_source: &str,
 ) -> Result<(), String> {
+    #[cfg(feature = "rag-embeddings")]
     let (_, total) = store
         .list_documents(collection, 1, 0)
         .await
         .map_err(|e| format!("failed to read collection document count: {e}"))?;
 
+    #[cfg(not(feature = "rag-embeddings"))]
+    {
+        let _ = (jobs, tenant, job_id, to_source);
+        return Err("embedding migration requires the `rag-embeddings` feature".to_string());
+    }
+
+    #[cfg(feature = "rag-embeddings")]
     let config = xberg::EmbeddingConfig {
         model: xberg::EmbeddingModelType::Preset {
             name: to_source.to_string(),
@@ -759,9 +767,12 @@ async fn migrate_embeddings_work(
         ..Default::default()
     };
 
+    #[cfg(feature = "rag-embeddings")]
     let mut offset = 0u32;
+    #[cfg(feature = "rag-embeddings")]
     let mut done = 0u64;
 
+    #[cfg(feature = "rag-embeddings")]
     loop {
         let (page, _) = store
             .list_documents(collection, MIGRATE_PAGE_SIZE, offset)

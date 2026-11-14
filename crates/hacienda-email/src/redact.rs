@@ -197,7 +197,7 @@ fn message_to_rfc822(message: &EmailMessage) -> String {
     lines.push("MIME-Version: 1.0".to_string());
 
     if message.text_body.is_some() || message.html_body.is_some() {
-        lines.push("Content-Type: multipart/alternative; boundary="boundary123"".to_string());
+        lines.push("Content-Type: multipart/alternative; boundary=\"boundary123\"".to_string());
         lines.push("".to_string());
         lines.push("--boundary123".to_string());
 

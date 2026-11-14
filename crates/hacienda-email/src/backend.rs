@@ -436,6 +436,6 @@ mod tests {
     fn test_flag_serialization() {
         let flag = Flag::Seen;
         let json = serde_json::to_string(&flag).unwrap();
-        assert_eq!(json, ""Seen"");
+        assert_eq!(json, "\"Seen\"");
     }
 }
