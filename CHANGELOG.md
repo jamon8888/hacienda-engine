@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Added (Unreleased)
 
 - **GLiNER2 privacy taxonomy alignment** — hybrid 12-variant `PiiCategory` extension, 42-label alias table, comprehensive vertical with per-category thresholds, build-time model selection with digest pinning, and audit provenance `model` field with tagged-length chain hashing.
   - Added 12 new `PiiCategory` variants: `FirstName`, `MiddleName`, `LastName`, `StreetAddress`, `City`, `StateOrRegion`, `PostalCode`, `Country`, `GovernmentId`, `PaymentCard`, `CardExpiry`, `CardCvv`.
@@ -1169,7 +1169,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-07-28
 
-### Added
+### Added (Historical release)
 
 - First public release
 - GDPR/DORA/AI Act compliance features

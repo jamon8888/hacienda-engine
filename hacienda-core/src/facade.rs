@@ -3071,12 +3071,15 @@ mod tests {
             content: format!("page content: {P7_CORPUS_EMAIL}"),
             tables: vec![Arc::new(table.clone())],
             image_indices: Vec::new(),
+            image_preprocessing: None,
             hierarchy: None,
             is_blank: None,
             layout_regions: None,
             speaker_notes: Some(format!("presenter note: {P7_CORPUS_EMAIL}")),
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
+            native_content: None,
         };
 
         let annotation = xberg::PdfAnnotation {
@@ -3084,6 +3087,12 @@ mod tests {
             content: Some(format!("comment: {P7_CORPUS_EMAIL}")),
             page_number: 1,
             bounding_box: None,
+            author: None,
+            modified: None,
+            color: None,
+            subject: None,
+            quad_points: None,
+            marked_text: None,
         };
 
         let form_field = xberg::PdfFormField {
