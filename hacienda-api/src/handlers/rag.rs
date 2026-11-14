@@ -15,9 +15,10 @@ use axum::{
     http::{request::Parts, StatusCode},
     Json,
 };
-use hacienda_core::jobs::JobStatus;
 use hacienda_core::tenancy::TenantCtx;
+use hacienda_core::{auth::Caller, jobs::JobStatus, HaciendaFacade};
 use hacienda_rag::{CollectionSpec, DocumentId, RetrieveOutput, RetrieveQuery};
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::{
@@ -105,6 +106,97 @@ pub(crate) fn validate_collection_name(name: &str) -> Result<(), ApiError> {
     } else {
         Ok(())
     }
+}
+
+/// Redact one retrieval text surface before it can be put in an HTTP response.
+///
+/// `RagStore` predates the token-only editor contract and has no capability that proves a
+/// backend persisted a tokenized projection. The API therefore treats every returned text
+/// surface as untrusted and routes it through Hacienda. A missing or failing PII pipeline is
+/// an error, never a reason to return the store's value unchanged.
+async fn redact_retrieval_text(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    text: &str,
+) -> Result<String, ApiError> {
+    facade
+        .redact_text_with_auth(caller, text)
+        .await
+        .map(|result| result.redacted_text)
+        .map_err(ApiError::from)
+}
+
+fn json_contains_text(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Array(values) => values.iter().any(json_contains_text),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| !key.is_empty() || json_contains_text(value)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+/// Redact free-form metadata as one JSON string, then parse it back before serialization.
+///
+/// Redacting the serialized representation also covers object keys: metadata is caller/data
+/// plane shaped and a future backend must not be able to smuggle a raw value through a key
+/// while only sanitizing values. Hacienda's replacement tokens are JSON-safe, and a parse
+/// failure is deliberately fail-closed.
+async fn redact_retrieval_json(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    value: &mut Value,
+) -> Result<(), ApiError> {
+    if !json_contains_text(value) {
+        return Ok(());
+    }
+
+    let serialized = serde_json::to_string(value).map_err(|error| {
+        tracing::error!(error = %error, "failed to serialize RAG metadata for redaction");
+        ApiError::internal()
+    })?;
+    let redacted = redact_retrieval_text(facade, caller, &serialized).await?;
+    *value = serde_json::from_str(&redacted).map_err(|error| {
+        tracing::error!(error = %error, "Hacienda redaction produced invalid RAG metadata JSON");
+        ApiError::internal()
+    })?;
+    Ok(())
+}
+
+async fn redact_retrieval_output(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    mut output: RetrieveOutput,
+) -> Result<RetrieveOutput, ApiError> {
+    for chunk in &mut output.chunks {
+        if let Some(content) = &mut chunk.content {
+            *content = redact_retrieval_text(facade, caller, content).await?;
+        }
+        if let Some(external_id) = &mut chunk.external_id {
+            *external_id = redact_retrieval_text(facade, caller, external_id).await?;
+        }
+        redact_retrieval_json(facade, caller, &mut chunk.chunk_metadata).await?;
+
+        if let Some(document) = &mut chunk.document {
+            if let Some(external_id) = &mut document.external_id {
+                *external_id = redact_retrieval_text(facade, caller, external_id).await?;
+            }
+            if let Some(title) = &mut document.title {
+                *title = redact_retrieval_text(facade, caller, title).await?;
+            }
+            if let Some(mime) = &mut document.mime {
+                *mime = redact_retrieval_text(facade, caller, mime).await?;
+            }
+            for keyword in &mut document.keywords {
+                *keyword = redact_retrieval_text(facade, caller, keyword).await?;
+            }
+            redact_retrieval_json(facade, caller, &mut document.labels).await?;
+            redact_retrieval_json(facade, caller, &mut document.entities).await?;
+            redact_retrieval_json(facade, caller, &mut document.metadata).await?;
+        }
+    }
+    Ok(output)
 }
 
 /// Inverse of [`scope_collection_name`]: strip `ctx`'s tenant prefix from a name
@@ -416,6 +508,11 @@ pub async fn retrieve(
         .retrieve(&scoped_name, &query)
         .await
         .map_err(ApiError::from)?;
+    // The store contract predates the token-only editor projection and cannot prove that its
+    // rows are safe to expose. Sanitize every text-bearing retrieval field before `Json` gets
+    // a chance to serialize it; a missing PII pipeline aborts the request instead of leaking
+    // the backend's original content.
+    let output = redact_retrieval_output(&state.facade, caller, output).await?;
     Ok(Json(output))
 }
 
@@ -932,9 +1029,10 @@ mod tests {
     use super::*;
     use hacienda_core::auth::{authn::DevTokenResolver, AuthContext, AuthExtension, AuthState};
     use hacienda_core::jobs::InMemoryJobStore;
+    use hacienda_core::pii::PipelineConfig;
     use hacienda_core::tenancy::{ActorId, TenantId};
     use hacienda_core::{CapabilitySet, HaciendaConfig, HaciendaFacade};
-    use hacienda_rag::{InMemoryVectorStore, RagStore};
+    use hacienda_rag::{ChunkRecord, DocumentRecord, InMemoryVectorStore, RagStore};
 
     fn tenant_ctx(tenant: &str) -> TenantCtx {
         TenantCtx::new(TenantId::new(tenant), ActorId::new("test"))
@@ -988,6 +1086,15 @@ mod tests {
 
     fn state_with_rag() -> ApiState {
         let facade = Arc::new(HaciendaFacade::new(HaciendaConfig::default()).unwrap());
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
+        let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
+        ApiState::new(facade, jobs, auth, crate::state::ApiLimits::default()).with_rag_store(store)
+    }
+
+    fn state_with_rag_and_pii() -> ApiState {
+        let config = HaciendaConfig::default().with_pii(PipelineConfig::default());
+        let facade = Arc::new(HaciendaFacade::new(config).unwrap());
         let jobs = InMemoryJobStore::new().into_arc();
         let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
         let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
@@ -1126,6 +1233,103 @@ mod tests {
         .expect("list must succeed");
         assert_eq!(globex_list.total, 1);
         assert_eq!(globex_list.collections[0].name, "gamma");
+    }
+
+    #[tokio::test]
+    async fn retrieve_redacts_pii_before_returning_json_to_documents_process() {
+        let state = state_with_rag_and_pii();
+        let store = state.rag_store.as_ref().expect("RAG store");
+        store
+            .ensure_collection(&CollectionSpec::new("contracts", 3))
+            .await
+            .expect("collection must be created");
+        store
+            .upsert_document(
+                "contracts",
+                &DocumentRecord {
+                    title: Some("Alice alice@example.com".to_string()),
+                    full_text: "Alice alice@example.com".to_string(),
+                    metadata: serde_json::json!({"owner": "alice@example.com"}),
+                    ..Default::default()
+                },
+                &[ChunkRecord {
+                    external_id: Some("chunk-alice@example.com".to_string()),
+                    ordinal: 0,
+                    content: "Contact alice@example.com for the contract.".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::json!({"contact": "alice@example.com"}),
+                }],
+            )
+            .await
+            .expect("document must be stored");
+
+        let mut query = RetrieveQuery::vector(1);
+        query.query_vector = Some(vec![1.0, 0.0, 0.0]);
+        query.include_document = true;
+        let output = retrieve(
+            State(state),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path("contracts".to_string()),
+            SafeJson(query),
+        )
+        .await
+        .expect("retrieval must succeed through Hacienda redaction")
+        .0;
+
+        let serialized = serde_json::to_string(&output).expect("retrieval output serializes");
+        assert!(
+            !serialized.contains("alice@example.com"),
+            "raw PII leaked: {serialized}"
+        );
+        assert!(
+            serialized.contains("[EMAIL]"),
+            "redaction marker missing: {serialized}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_fails_closed_when_hacienda_redaction_is_unavailable() {
+        let state = state_with_rag();
+        let store = state.rag_store.as_ref().expect("RAG store");
+        store
+            .ensure_collection(&CollectionSpec::new("contracts", 3))
+            .await
+            .expect("collection must be created");
+        store
+            .upsert_document(
+                "contracts",
+                &DocumentRecord {
+                    full_text: "alice@example.com".to_string(),
+                    ..Default::default()
+                },
+                &[ChunkRecord {
+                    external_id: None,
+                    ordinal: 0,
+                    content: "alice@example.com".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::Value::Null,
+                }],
+            )
+            .await
+            .expect("document must be stored");
+
+        let mut query = RetrieveQuery::vector(1);
+        query.query_vector = Some(vec![1.0, 0.0, 0.0]);
+        let error = retrieve(
+            State(state),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path("contracts".to_string()),
+            SafeJson(query),
+        )
+        .await
+        .expect_err("raw retrieval must be refused without Hacienda redaction");
+
+        assert_eq!(error.code, crate::error::ApiErrorCode::InvalidRequest);
+        assert!(!error.message.contains("alice@example.com"));
     }
 
     #[tokio::test]
