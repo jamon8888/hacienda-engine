@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import time
 
 from hacienda_sdk import HaciendaClient
 from hacienda_sdk._generated.models.document_input import DocumentInput
@@ -18,7 +19,15 @@ def _submit_background_job(client: HaciendaClient) -> str:
 def test_get_job_result_matches_get_job_status(client: HaciendaClient) -> None:
     job_id = _submit_background_job(client)
 
+    # The two endpoints are independent snapshots. Wait for a terminal state so
+    # the job cannot legitimately advance between the status and result requests.
+    deadline = time.monotonic() + 10
     job = client.jobs.get_job(job_id)
+    while job.status not in {"succeeded", "failed"} and time.monotonic() < deadline:
+        time.sleep(0.02)
+        job = client.jobs.get_job(job_id)
+
+    assert job.status in {"succeeded", "failed"}
     result = client.jobs.get_job_result(job_id)
 
     assert result.status == job.status
