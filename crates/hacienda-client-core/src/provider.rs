@@ -498,8 +498,10 @@ where
 mod tests {
     use super::*;
 
-    const PERSON: &str = "Alice Dupont";
-    const EMAIL: &str = "alice@example.test";
+    // Synthetic sentinels keep this test focused on the redaction boundary
+    // without placing realistic PII in a provider fixture.
+    const PERSON: &str = "<person-fixture>";
+    const EMAIL: &str = "<email-fixture>";
     const PERSON_TOKEN: &str = "[PERSON:opaque-1]";
 
     #[derive(Default)]

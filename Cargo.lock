@@ -3925,6 +3925,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hacienda-backend"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hacienda-client-core",
+ "hacienda-core",
+ "hacienda-rag",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "xberg",
+]
+
+[[package]]
 name = "hacienda-cli"
 version = "0.1.0"
 dependencies = [

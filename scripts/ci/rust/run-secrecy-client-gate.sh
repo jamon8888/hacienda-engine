@@ -32,24 +32,22 @@ run_gate format cargo fmt --all -- --check
 
 run_gate client-tests cargo test -p hacienda-client-core
 run_gate rag-tests cargo test -p hacienda-rag --features lancedb
+run_gate backend-tests cargo test -p hacienda-backend --all-targets
 
 run_gate client-clippy cargo clippy -p hacienda-client-core --all-targets -- -D warnings
 run_gate core-clippy cargo clippy -p hacienda-core --all-targets -- -D warnings
 run_gate rag-clippy cargo clippy -p hacienda-rag --features lancedb --all-targets -- -D warnings
+run_gate backend-clippy cargo clippy -p hacienda-backend --all-targets -- -D warnings
 
 # This module test serializes the complete editor envelope and asserts that
 # fixture plaintext from body, title, subject, filename, attachment, and keyword
 # fields is absent while opaque token references remain present.
 run_gate token-only-negative-tests cargo test -p hacienda-core --lib editor_projection
 
-frontend_changed=0
-if git diff --name-only HEAD -- apps/hacienda-studio | grep -q .; then
-    frontend_changed=1
-elif git ls-files --others --exclude-standard -- apps/hacienda-studio | grep -q .; then
-    frontend_changed=1
-fi
-
-if (( frontend_changed )); then
+# The editor/viewer seam is part of this gate. Checking the package's presence
+# rather than `git diff HEAD` is intentional: CI checks a commit, so its tracked
+# frontend changes have no worktree diff at that point.
+if [[ -f apps/hacienda-studio/package.json ]]; then
     if command -v pnpm >/dev/null 2>&1; then
         run_gate studio-typecheck pnpm --dir apps/hacienda-studio run check
         run_gate studio-lint pnpm --dir apps/hacienda-studio run lint
