@@ -4,16 +4,20 @@
 //! rehydration returns references, never plaintext.
 
 use hacienda_client_core::{
-    ConfigurationError, InstallationConfig, RehydrationRequest, TokenizedText,
+    AuditReference, ConfigurationError, InstallationConfig, RehydrationCapability,
+    RehydrationRequest, TenantScope, TokenizedText, VaultId,
 };
+use hacienda_core::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
 use hacienda_core::editor_projection::{
-    project_document, EditorEnvelope, EditorProjectionOptions, SensitiveToken,
+    EditorEnvelope, EditorProjectionOptions, SensitiveToken, project_document,
 };
+use hacienda_core::redaction::{KeyId, KeyResolver, Pseudonymiser};
+use hacienda_core::tenancy::TenantId;
 use hacienda_rag::{
     ChunkRecord, CollectionSpec, DocumentId, DocumentRecord, RagError, RagResult, RagStore,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 /// Stable, profile-scoped addressing. A client never supplies a tenant to a store
@@ -83,16 +87,195 @@ pub struct RehydrationProvenance {
     pub tenant_scope: Option<String>,
 }
 
+/// A proof-carrying Xberg extraction. The inner extraction is private so callers cannot
+/// manufacture the seam from an arbitrary `ExtractedDocument`; it is only minted from a
+/// Hacienda result that completed the PII-enabled redaction pipeline.
+pub struct RedactedXbergDocument {
+    document: xberg::ExtractedDocument,
+    audit_references: Vec<AuditReference>,
+}
+
+impl RedactedXbergDocument {
+    /// Take one document from a completed Hacienda processing result. A result produced
+    /// without the PII pipeline is refused even when the input happened to contain no PII.
+    pub fn from_hacienda_result(
+        result: &hacienda_core::HaciendaResult,
+        index: usize,
+    ) -> Result<Self, BackendError> {
+        if !result.metadata.pii_enabled || result.pii.len() != result.extraction.results.len() {
+            return Err(BackendError::UnredactedDocument);
+        }
+        let document = result
+            .extraction
+            .results
+            .get(index)
+            .cloned()
+            .ok_or(BackendError::UnredactedDocument)?;
+        let audit_references = result
+            .audit_entries
+            .iter()
+            .map(|entry| AuditReference(entry.id.clone()))
+            .collect();
+        Ok(Self {
+            document,
+            audit_references,
+        })
+    }
+
+    fn audit_references(&self) -> &[AuditReference] {
+        &self.audit_references
+    }
+
+    #[cfg(test)]
+    fn test(document: xberg::ExtractedDocument) -> Self {
+        Self {
+            document,
+            audit_references: Vec::new(),
+        }
+    }
+}
+
 /// The token-only record produced from one already-redacted Xberg document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BackendDocument {
-    pub editor: EditorEnvelope,
-    pub rag_document: DocumentRecord,
-    pub chunks: Vec<ChunkRecord>,
-    pub token_references: Vec<OpaqueTokenReference>,
-    pub tenant_scope: Option<String>,
-    pub dossier_id: String,
-    pub source_hash: String,
+    editor: EditorEnvelope,
+    rag_document: DocumentRecord,
+    chunks: Vec<ChunkRecord>,
+    token_references: Vec<OpaqueTokenReference>,
+    tenant_scope: Option<String>,
+    dossier_id: String,
+    source_hash: String,
+}
+
+impl BackendDocument {
+    pub fn editor(&self) -> &EditorEnvelope {
+        &self.editor
+    }
+    pub fn rag_document(&self) -> &DocumentRecord {
+        &self.rag_document
+    }
+    pub fn chunks(&self) -> &[ChunkRecord] {
+        &self.chunks
+    }
+    pub fn tenant_scope(&self) -> Option<&str> {
+        self.tenant_scope.as_deref()
+    }
+    pub fn source_hash(&self) -> &str {
+        &self.source_hash
+    }
+}
+
+/// Plaintext returned only in memory to an authorized human viewer. This type deliberately
+/// has no `Serialize`, `Debug`, or `Display` implementation, and zeroizes on drop.
+pub struct EphemeralPlaintext {
+    value: zeroize::Zeroizing<String>,
+    audit_references: Vec<AuditReference>,
+}
+
+impl EphemeralPlaintext {
+    pub fn as_str(&self) -> &str {
+        self.value.as_str()
+    }
+    pub fn audit_references(&self) -> &[AuditReference] {
+        &self.audit_references
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum VaultError {
+    #[error("rehydration capability is not valid for this vault")]
+    Denied,
+    #[error("token is not a Hacienda pseudonym")]
+    InvalidToken,
+    #[error("key resolution failed")]
+    KeyResolution,
+    #[error("audit append failed")]
+    Audit,
+}
+
+/// Local vault bridge. It accepts only the profile's explicit vault capability, resolves
+/// keys through Hacienda's tenant-scoped `KeyResolver`, and records a digest-only Reveal
+/// audit entry before returning the ephemeral viewer value.
+pub struct VaultRehydrationAdapter {
+    vault: VaultId,
+    resolver: std::sync::Arc<dyn KeyResolver>,
+    audit: std::sync::Arc<dyn AuditStore>,
+}
+
+impl VaultRehydrationAdapter {
+    pub fn new(
+        vault: VaultId,
+        resolver: std::sync::Arc<dyn KeyResolver>,
+        audit: std::sync::Arc<dyn AuditStore>,
+    ) -> Self {
+        Self {
+            vault,
+            resolver,
+            audit,
+        }
+    }
+
+    pub async fn reveal(
+        &self,
+        capability: &RehydrationCapability,
+        tenant: &TenantScope,
+        token: &str,
+    ) -> Result<EphemeralPlaintext, VaultError> {
+        let RehydrationCapability::LocalEncryptedVault { vault } = capability else {
+            return Err(VaultError::Denied);
+        };
+        if vault != &self.vault {
+            return Err(VaultError::Denied);
+        }
+        let (category, key_id) = parse_token_header(token).ok_or(VaultError::InvalidToken)?;
+        let tenant = TenantId::new(tenant.0.clone());
+        let key_id = KeyId::new(key_id).map_err(|_| VaultError::InvalidToken)?;
+        let pseudonymiser =
+            Pseudonymiser::with_active(self.resolver.as_ref(), &tenant, key_id, &[])
+                .map_err(|_| VaultError::KeyResolution)?;
+        let plaintext = pseudonymiser
+            .reveal(token)
+            .map_err(|_| VaultError::InvalidToken)?;
+        let input = AuditEntryInput {
+            id: uuid::Uuid::new_v4().to_string(),
+            category: category.to_owned(),
+            action: RedactionAction::Reveal,
+            span_hash: blake3::hash(plaintext.as_bytes()).to_hex().to_string(),
+            span_length: plaintext.len() as u32,
+            confidence: None,
+            source: EntitySource::Regex,
+            pipeline_version: "hacienda-backend-vault-v1".to_owned(),
+            config_hash: String::new(),
+            principal: None,
+            vertical: None,
+            model: None,
+        };
+        let entry = self
+            .audit
+            .append(&tenant, vec![input])
+            .await
+            .map_err(|_| VaultError::Audit)?
+            .into_iter()
+            .next()
+            .ok_or(VaultError::Audit)?;
+        Ok(EphemeralPlaintext {
+            value: zeroize::Zeroizing::new(plaintext),
+            audit_references: vec![AuditReference(entry.id)],
+        })
+    }
+}
+
+fn parse_token_header(token: &str) -> Option<(&str, &str)> {
+    let inner = token.strip_prefix('[')?.strip_suffix(']')?;
+    let mut fields = inner.split(':');
+    let category = fields.next()?;
+    let key_id = fields.next()?;
+    let body = fields.next()?;
+    if category.is_empty() || key_id.is_empty() || body.is_empty() || fields.next().is_some() {
+        None
+    } else {
+        Some((category, key_id))
+    }
 }
 
 /// Profile-aware backend integration. Construction validates the client topology and
@@ -111,6 +294,8 @@ pub enum BackendError {
     InvalidScope,
     #[error("invalid collection name")]
     InvalidCollection,
+    #[error("TeamOnPremise LanceDB access must come from the authenticated gateway")]
+    DirectLanceDbAccess,
     #[error("document is not a supported redacted extraction")]
     UnredactedDocument,
     #[error("rehydration authorization failed")]
@@ -151,7 +336,7 @@ impl Backend {
     /// cannot bypass the editor boundary.
     pub fn project(
         &self,
-        document: &xberg::ExtractedDocument,
+        document: &RedactedXbergDocument,
         dossier_id: impl Into<String>,
         document_id: impl Into<String>,
         version_id: impl Into<String>,
@@ -166,7 +351,7 @@ impl Backend {
             return Err(BackendError::InvalidScope);
         }
         let options = EditorProjectionOptions::new(document_id.clone(), version_id.clone());
-        let editor = project_document(document, &options);
+        let editor = project_document(&document.document, &options);
         let token_references = editor
             .search
             .tokens
@@ -179,10 +364,10 @@ impl Backend {
             .collect::<Vec<_>>();
         let metadata = serde_json::to_value(&editor.metadata)?;
         let title = token_text(&editor.metadata.title);
-        let full_text = document.content.clone();
+        let full_text = document.document.content.clone();
         let source_hash = blake3::hash(full_text.as_bytes()).to_hex().to_string();
         let format_kind = editor.metadata.legal.format_kind.clone().or_else(|| {
-            let mime = document.mime_type.as_ref();
+            let mime = document.document.mime_type.as_ref();
             if mime == "application/pdf" {
                 Some("pdf".into())
             } else if mime.starts_with("application/vnd.openxmlformats-officedocument.")
@@ -198,7 +383,7 @@ impl Backend {
         let rag_document = DocumentRecord {
             external_id: Some(format!("{document_id}:{version_id}")),
             title,
-            mime: Some(document.mime_type.to_string()),
+            mime: Some(document.document.mime_type.to_string()),
             source_uri: None,
             full_text: full_text.clone(),
             keywords: editor
@@ -218,6 +403,7 @@ impl Backend {
                 "source_hash": source_hash.clone(),
                 "editor_schema": editor.schema.clone(),
                 "format_kind": format_kind,
+                "audit_references": document.audit_references(),
             }),
             metadata: serde_json::to_value(&editor.provenance)?,
         };
@@ -310,6 +496,11 @@ impl Backend {
         requested_collection: &str,
         document: &BackendDocument,
     ) -> RagResult<DocumentId> {
+        if document.tenant_scope != self.tenant_scope() {
+            return Err(RagError::InvalidQuery(
+                "document tenant scope mismatch".into(),
+            ));
+        }
         let collection = self
             .collection_name(requested_collection)
             .map_err(|error| RagError::InvalidQuery(error.to_string()))?;
@@ -414,16 +605,23 @@ mod tests {
         ] {
             let backend = Backend::new(local()).unwrap();
             let record = backend
-                .project(&document(mime), "case", "doc", "v1")
+                .project(
+                    &RedactedXbergDocument::test(document(mime)),
+                    "case",
+                    "doc",
+                    "v1",
+                )
                 .unwrap();
-            assert_eq!(record.rag_document.labels["format_kind"], kind);
+            assert_eq!(record.rag_document().labels["format_kind"], kind);
             assert_eq!(
-                record.rag_document.title.as_deref(),
+                record.rag_document().title.as_deref(),
                 Some("[TITLE:k1:IFBEG]")
             );
-            assert!(!serde_json::to_string(&record.rag_document)
-                .unwrap()
-                .contains("PERSON_RAW"));
+            assert!(
+                !serde_json::to_string(record.rag_document())
+                    .unwrap()
+                    .contains("PERSON_RAW")
+            );
         }
     }
 
@@ -446,7 +644,12 @@ mod tests {
     fn rehydration_fails_closed_without_matching_capability() {
         let backend = Backend::new(local()).unwrap();
         let record = backend
-            .project(&document("text/plain"), "case", "doc", "v1")
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
             .unwrap();
         let request = RehydrationRequest {
             document_ids: vec!["doc:v1".into()],
@@ -456,7 +659,7 @@ mod tests {
             },
         };
         assert!(matches!(
-            backend.rehydrate(&request, &record, record.rag_document.full_text.as_str()),
+            backend.rehydrate(&request, &record, record.rag_document().full_text.as_str()),
             Err(BackendError::RehydrationDenied)
         ));
 
@@ -467,19 +670,26 @@ mod tests {
             ..request
         };
         let response = backend
-            .rehydrate(&authorized, &record, &record.rag_document.full_text)
+            .rehydrate(&authorized, &record, &record.rag_document().full_text)
             .unwrap();
         assert_eq!(response.references[0].token_id, "[PERSON:k1:IFBEGRCF]");
-        assert!(backend
-            .rehydrate(&authorized, &record, "raw plaintext")
-            .is_err());
+        assert!(
+            backend
+                .rehydrate(&authorized, &record, "raw plaintext")
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn persistence_is_idempotent_and_provider_content_is_tokenized() {
         let backend = Backend::new(local()).unwrap();
         let record = backend
-            .project(&document("text/plain"), "case", "doc", "v1")
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
             .unwrap();
         let store = InMemoryVectorStore::default();
         let first = backend
@@ -501,7 +711,7 @@ mod tests {
         );
         assert_eq!(
             backend.provider_prompt(&record).text,
-            record.rag_document.full_text
+            record.rag_document().full_text
         );
     }
 }
@@ -523,6 +733,9 @@ impl Backend {
         uri: &str,
     ) -> Result<(Self, hacienda_rag::backends::lancedb::LanceDbStore), BackendError> {
         let backend = Self::new(profile)?;
+        if matches!(backend.profile, InstallationConfig::TeamOnPremise(_)) {
+            return Err(BackendError::DirectLanceDbAccess);
+        }
         let store = hacienda_rag::backends::lancedb::LanceDbStore::connect(uri).await?;
         Ok((backend, store))
     }
