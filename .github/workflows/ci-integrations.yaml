@@ -40,6 +40,9 @@ jobs:
       - name: Sync
         working-directory: integrations/${{ matrix.package }}
         run: uv sync --all-extras --prerelease=allow
+      - name: Generate SDK
+        working-directory: sdks/python
+        run: bash scripts/generate.sh
       - name: Test
         working-directory: integrations/${{ matrix.package }}
         run: uv run pytest -q
@@ -60,6 +63,10 @@ jobs:
         with:
           node-version: "20"
           cache: 'npm'
+      - name: Build SDK
+        run: |
+          npm ci
+          npm run build --workspace=sdks/typescript
       - name: Install
         working-directory: integrations/${{ matrix.package }}
         run: npm ci

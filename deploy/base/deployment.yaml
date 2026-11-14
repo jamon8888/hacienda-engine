@@ -36,7 +36,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: hacienda-api
-          image: ghcr.io/jamon8888/hacienda:latest
+          image: ghcr.io/jamon8888/hacienda:v0.1.0
           imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
