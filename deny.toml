@@ -22,6 +22,10 @@ ignore = [
   "RUSTSEC-2026-0195",
   "RUSTSEC-2026-0192",
   "RUSTSEC-2026-0206",
+  # xberg 1.3.10 pins calamine 0.36.x, while the fix is only available in
+  # calamine 0.38.0; keep the xberg document-extraction feature enabled until
+  # its dependency can be upgraded without changing the PR's supported formats.
+  "RUSTSEC-2026-0436",
 ]
 
 [licenses]
