@@ -101,27 +101,6 @@ chain evidence for **its own** result.
 
 ## Anthropic Messages gateway
 
-`POST /v1/messages` implements a restricted Anthropic Messages gateway for callers that attach a
-`ClaudeMessagesProvider` to `ApiState`. It is disabled by default, including in the standard
-server state until that provider is configured. The route always requires an authenticated
-principal with `documents:process`, even when the general API auth middleware is disabled.
-Tenant routing comes from the authenticated principal; callers cannot select a tenant in the
-request body.
-
-Requests must use `stream: true` and the supported Messages schema. Inspectable text in messages,
-system content, tool definitions, tool results, and the supported metadata field is redacted
-before the provider call. Unknown fields and blocks, images, files, and other unsupported
-non-text content fail closed. Only the documented Anthropic routing headers are forwarded.
-Provider events must match the validated event contract; text deltas and error messages are
-redacted before they are exposed. Failures return generic client-visible errors.
-
-The response uses SSE framing, but the current adapter collects and validates the provider's
-complete event stream before returning it. It does not yet provide incremental end-to-end
-delivery. Configure a Claude Code client only when that limitation is acceptable; incremental
-relay remains an implementation requirement for production streaming.
-
-## Anthropic Messages gateway
-
 `POST /v1/messages` is the Anthropic-compatible gateway used by the Hacienda secrecy client and
 Claude Code. It is disabled unless an application attaches a `ClaudeMessagesProvider` to
 `ApiState`. The route always requires an authenticated principal with `documents:process`, even
@@ -145,8 +124,10 @@ are forwarded. Provider responses must follow the validated Anthropic event cont
 text and error messages pass through redaction before they are exposed. Authentication, invalid
 request, provider, and redaction failures use generic client-visible errors.
 
-The current HTTP response uses SSE framing, but the provider adapter collects and validates the
-complete provider event stream before returning it. It therefore does **not** yet guarantee
-incremental end-to-end delivery. Do not configure Claude Code against this route when progressive
-streaming is required until the incremental relay is implemented. This boundary does not apply to
-the Tauri client's direct provider transport.
+The response is relayed incrementally as SSE. The gateway buffers at most the active content
+block (up to 1 MiB), redacts the complete text or tool-argument value so PII split across deltas
+cannot escape, then forwards that block. It does not buffer the entire provider response. Unknown
+provider events are forwarded only when their payload satisfies the token-only contract; malformed
+events fail closed. A provider error before streaming begins returns a generic API error; a
+validation failure after the stream begins terminates the stream without exposing the rejected
+payload. This bounded block relay can add latency until a content block closes.
