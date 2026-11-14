@@ -2,13 +2,13 @@
 
 use futures::executor::block_on;
 use hacienda_core::{
-    pii::{PiiPipeline, PipelineConfig},
+    pii::{PiiCategory, PiiPipeline, PipelineConfig},
     redaction::{KeyId, KeyResolver, PseudonymKey, Pseudonymiser, RedactionMode, KEY_BYTES},
     tenancy::TenantId,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -16,6 +16,7 @@ use std::{
 };
 #[cfg(not(test))]
 use tauri::Manager;
+use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
@@ -116,31 +117,36 @@ impl KeyResolver for LocalKeyResolver {
     }
 }
 
-/// Rust-only, short-lived, one-shot viewer capability. It is intentionally neither
-/// serializable nor part of provider/MCP commands. The current Tauri config has only a
-/// default renderer window and no isolated viewer origin, so production has no issuer
-/// and no reveal IPC command until that boundary exists.
+const MAIN_WINDOW_LABEL: &str = "main";
+const LOCAL_VIEWER_PREFIX: &str = "local-viewer-";
+const VIEWER_SESSION_TTL: Duration = Duration::from_secs(60);
+const MAX_VIEWER_AUDIT_ENTRIES: usize = 256;
+
+/// Rust-only one-shot authority minted after the caller window, session, and token
+/// membership have been checked. It is never serialized or accepted from a renderer.
 pub struct ViewerCapability {
+    viewer_label: String,
+    token: String,
     expires_at: Instant,
     consumed: bool,
 }
 
 impl ViewerCapability {
-    #[cfg(test)]
-    fn issued_for_test() -> Self {
-        Self::issue()
-    }
-
-    #[cfg(test)]
-    fn issue() -> Self {
+    fn issue(viewer_label: &str, token: &str, expires_at: Instant) -> Self {
         Self {
-            expires_at: Instant::now() + Duration::from_secs(30),
+            viewer_label: viewer_label.to_owned(),
+            token: token.to_owned(),
+            expires_at,
             consumed: false,
         }
     }
 
-    fn consume(&mut self) -> Result<(), RedactionError> {
-        if self.consumed || Instant::now() >= self.expires_at {
+    fn consume(&mut self, viewer_label: &str, token: &str) -> Result<(), RedactionError> {
+        if self.consumed
+            || Instant::now() >= self.expires_at
+            || self.viewer_label != viewer_label
+            || self.token != token
+        {
             return Err(RedactionError::Rejected);
         }
         self.consumed = true;
@@ -159,7 +165,8 @@ struct ViewerRevealAudit {
 struct HaciendaLocalRedactor {
     pipeline: PiiPipeline,
     pseudonymiser: Arc<Pseudonymiser>,
-    reveal_audit: Mutex<Vec<ViewerRevealAudit>>,
+    reveal_audit: Mutex<VecDeque<ViewerRevealAudit>>,
+    pii_detection_complete: bool,
 }
 
 impl HaciendaLocalRedactor {
@@ -178,12 +185,14 @@ impl HaciendaLocalRedactor {
         );
         let mut config = PipelineConfig::default();
         config.redaction.mode = RedactionMode::Pseudonymize;
+        let pii_detection_complete = config.model.enabled;
         let pipeline = PiiPipeline::with_pseudonymiser(config, Some(pseudonymiser.clone()))
             .map_err(|_| RedactionError::Rejected)?;
         Ok(Self {
             pipeline,
             pseudonymiser,
-            reveal_audit: Mutex::new(Vec::new()),
+            reveal_audit: Mutex::new(VecDeque::new()),
+            pii_detection_complete,
         })
     }
 
@@ -196,9 +205,10 @@ impl HaciendaLocalRedactor {
     fn reveal(
         &self,
         token: &str,
-        capability: Option<&mut ViewerCapability>,
+        viewer_label: &str,
+        capability: &mut ViewerCapability,
     ) -> Result<Zeroizing<String>, RedactionError> {
-        capability.ok_or(RedactionError::Rejected)?.consume()?;
+        capability.consume(viewer_label, token)?;
         let revealed = self
             .pseudonymiser
             .reveal(token)
@@ -208,10 +218,14 @@ impl HaciendaLocalRedactor {
             token_digest: *blake3::hash(token.as_bytes()).as_bytes(),
             value_digest: *blake3::hash(revealed.as_bytes()).as_bytes(),
         };
-        self.reveal_audit
+        let mut reveal_audit = self
+            .reveal_audit
             .lock()
-            .map_err(|_| RedactionError::Rejected)?
-            .push(audit);
+            .map_err(|_| RedactionError::Rejected)?;
+        if reveal_audit.len() == MAX_VIEWER_AUDIT_ENTRIES {
+            reveal_audit.pop_front();
+        }
+        reveal_audit.push_back(audit);
         Ok(revealed)
     }
 }
@@ -242,6 +256,299 @@ fn emitted_token_references(
         remaining = &candidate[end + 1..];
     }
     references
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenLocalViewerRequest {
+    tokenized: TokenizedText,
+    references: Vec<OpaqueTokenReference>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct OpenLocalViewerResponse {
+    opened: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LocalViewerContentResponse {
+    tokenized: TokenizedText,
+    references: Vec<OpaqueTokenReference>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ViewerCommandError {
+    Unauthorized,
+    InvalidTokenizedPayload,
+    InvalidCategory,
+    EmptyValue,
+    Expired,
+    Replayed,
+    TokenNotInSession,
+    Unavailable,
+    WindowOpenFailed,
+}
+
+struct ViewerSession {
+    tokenized: TokenizedText,
+    references: HashSet<OpaqueTokenReference>,
+    expires_at: Instant,
+    consumed_tokens: HashSet<String>,
+}
+
+struct LocalViewerState {
+    redactor: Option<Arc<HaciendaLocalRedactor>>,
+    sessions: Mutex<HashMap<String, ViewerSession>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LocalPiiStatusResponse {
+    provider_send_enabled: bool,
+    detector: &'static str,
+}
+
+impl LocalViewerState {
+    fn new(redactor: Option<Arc<HaciendaLocalRedactor>>) -> Self {
+        Self {
+            redactor,
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn fail_closed() -> Self {
+        Self::new(None)
+    }
+
+    fn pii_status(&self) -> LocalPiiStatusResponse {
+        let complete = self
+            .redactor
+            .as_ref()
+            .is_some_and(|redactor| redactor.pii_detection_complete);
+        LocalPiiStatusResponse {
+            provider_send_enabled: complete,
+            detector: if complete {
+                "local_model"
+            } else {
+                "regex_only"
+            },
+        }
+    }
+
+    fn open_session(
+        &self,
+        caller_label: &str,
+        request: OpenLocalViewerRequest,
+    ) -> Result<String, ViewerCommandError> {
+        if caller_label != MAIN_WINDOW_LABEL {
+            return Err(ViewerCommandError::Unauthorized);
+        }
+        let redactor = self
+            .redactor
+            .as_ref()
+            .ok_or(ViewerCommandError::Unavailable)?;
+        let validated = validate_viewer_payload(redactor, request)?;
+        let label = new_viewer_label()?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| ViewerCommandError::Unavailable)?;
+        sessions.retain(|_, session| session.expires_at > Instant::now());
+        sessions.insert(
+            label.clone(),
+            ViewerSession {
+                tokenized: validated.tokenized,
+                references: validated.references,
+                expires_at: Instant::now() + VIEWER_SESSION_TTL,
+                consumed_tokens: HashSet::new(),
+            },
+        );
+        Ok(label)
+    }
+
+    #[cfg(test)]
+    fn open_expired_session_for_test(
+        &self,
+        request: OpenLocalViewerRequest,
+    ) -> Result<String, ViewerCommandError> {
+        let redactor = self
+            .redactor
+            .as_ref()
+            .ok_or(ViewerCommandError::Unavailable)?;
+        let validated = validate_viewer_payload(redactor, request)?;
+        let label = new_viewer_label()?;
+        self.sessions
+            .lock()
+            .map_err(|_| ViewerCommandError::Unavailable)?
+            .insert(
+                label.clone(),
+                ViewerSession {
+                    tokenized: validated.tokenized,
+                    references: validated.references,
+                    expires_at: Instant::now() - Duration::from_secs(1),
+                    consumed_tokens: HashSet::new(),
+                },
+            );
+        Ok(label)
+    }
+
+    fn content_for_viewer(
+        &self,
+        viewer_label: &str,
+    ) -> Result<LocalViewerContentResponse, ViewerCommandError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| ViewerCommandError::Unavailable)?;
+        let session = checked_session_mut(&mut sessions, viewer_label)?;
+        Ok(LocalViewerContentResponse {
+            tokenized: session.tokenized.clone(),
+            references: session.references.iter().cloned().collect(),
+        })
+    }
+
+    fn reveal_for_viewer(
+        &self,
+        viewer_label: &str,
+        token: &str,
+    ) -> Result<Zeroizing<String>, ViewerCommandError> {
+        let redactor = self
+            .redactor
+            .as_ref()
+            .ok_or(ViewerCommandError::Unavailable)?;
+        let mut capability = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| ViewerCommandError::Unavailable)?;
+            let session = checked_session_mut(&mut sessions, viewer_label)?;
+            if !session
+                .references
+                .iter()
+                .any(|reference| reference.token == token)
+            {
+                return Err(ViewerCommandError::TokenNotInSession);
+            }
+            if !session.consumed_tokens.insert(token.to_owned()) {
+                return Err(ViewerCommandError::Replayed);
+            }
+            ViewerCapability::issue(viewer_label, token, session.expires_at)
+        };
+        redactor
+            .reveal(token, viewer_label, &mut capability)
+            .map_err(|_| ViewerCommandError::Unavailable)
+    }
+
+    fn close_session(&self, viewer_label: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(viewer_label);
+        }
+    }
+
+    fn pseudonymize_selection(
+        &self,
+        request: ManualPseudonymRequest,
+    ) -> Result<TokenizedText, ViewerCommandError> {
+        let value = Zeroizing::new(request.value);
+        if value.trim().is_empty() {
+            return Err(ViewerCommandError::EmptyValue);
+        }
+        let category = parse_manual_category(&request.category)?;
+        let redactor = self
+            .redactor
+            .as_ref()
+            .ok_or(ViewerCommandError::Unavailable)?;
+        let token = redactor
+            .pseudonymiser
+            .token(&category, value.as_str())
+            .map_err(|_| ViewerCommandError::InvalidCategory)?;
+        let reference =
+            OpaqueTokenReference::new(token.clone(), category.to_string().to_uppercase());
+        Ok(TokenizedText::new(token, vec![reference]))
+    }
+}
+
+struct ValidatedViewerPayload {
+    tokenized: TokenizedText,
+    references: HashSet<OpaqueTokenReference>,
+}
+
+fn validate_viewer_payload(
+    redactor: &HaciendaLocalRedactor,
+    request: OpenLocalViewerRequest,
+) -> Result<ValidatedViewerPayload, ViewerCommandError> {
+    let sanitized = redactor
+        .tokenize(&request.tokenized.text)
+        .map_err(|_| ViewerCommandError::InvalidTokenizedPayload)?;
+    let supplied: HashSet<_> = request.references.iter().cloned().collect();
+    let annotated: HashSet<_> = request.tokenized.references.iter().cloned().collect();
+    let authenticated: HashSet<_> = sanitized.references.iter().cloned().collect();
+    if sanitized.text != request.tokenized.text
+        || supplied.len() != request.references.len()
+        || annotated.len() != request.tokenized.references.len()
+        || supplied != annotated
+        || supplied != authenticated
+    {
+        return Err(ViewerCommandError::InvalidTokenizedPayload);
+    }
+    Ok(ValidatedViewerPayload {
+        tokenized: request.tokenized,
+        references: supplied,
+    })
+}
+
+fn checked_session_mut<'a>(
+    sessions: &'a mut HashMap<String, ViewerSession>,
+    viewer_label: &str,
+) -> Result<&'a mut ViewerSession, ViewerCommandError> {
+    if !viewer_label.starts_with(LOCAL_VIEWER_PREFIX) {
+        return Err(ViewerCommandError::Unauthorized);
+    }
+    let expired = sessions
+        .get(viewer_label)
+        .map(|session| session.expires_at <= Instant::now())
+        .unwrap_or(false);
+    if expired {
+        sessions.remove(viewer_label);
+        return Err(ViewerCommandError::Expired);
+    }
+    sessions
+        .get_mut(viewer_label)
+        .ok_or(ViewerCommandError::Unauthorized)
+}
+
+fn new_viewer_label() -> Result<String, ViewerCommandError> {
+    let mut nonce = [0_u8; 32];
+    getrandom::fill(&mut nonce).map_err(|_| ViewerCommandError::Unavailable)?;
+    let mut label = String::with_capacity(LOCAL_VIEWER_PREFIX.len() + nonce.len() * 2);
+    label.push_str(LOCAL_VIEWER_PREFIX);
+    for byte in nonce {
+        use std::fmt::Write as _;
+        write!(label, "{byte:02x}").map_err(|_| ViewerCommandError::Unavailable)?;
+    }
+    Ok(label)
+}
+
+#[derive(Deserialize)]
+struct ManualPseudonymRequest {
+    category: String,
+    value: String,
+}
+
+fn parse_manual_category(value: &str) -> Result<PiiCategory, ViewerCommandError> {
+    if let Some(custom) = value.strip_prefix("custom:") {
+        let valid = !custom.is_empty()
+            && custom.len() <= 48
+            && custom.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit() && index > 0
+                    || byte == b'_' && index > 0
+            });
+        return valid
+            .then(|| PiiCategory::Custom(custom.to_owned()))
+            .ok_or(ViewerCommandError::InvalidCategory);
+    }
+    serde_json::from_value(serde_json::Value::String(value.to_ascii_lowercase()))
+        .map_err(|_| ViewerCommandError::InvalidCategory)
 }
 
 impl RedactionAdapter for HaciendaLocalRedactor {
@@ -281,6 +588,18 @@ impl RedactionAdapter for HaciendaLocalRedactor {
 
     fn redact_text(&self, text: &str) -> Result<TokenizedText, RedactionError> {
         self.tokenize(text)
+    }
+}
+
+struct SharedHaciendaRedactor(Arc<HaciendaLocalRedactor>);
+
+impl RedactionAdapter for SharedHaciendaRedactor {
+    fn redact(&self, request: &ProviderRequest) -> Result<RedactedProviderRequest, RedactionError> {
+        self.0.redact(request)
+    }
+
+    fn redact_text(&self, text: &str) -> Result<TokenizedText, RedactionError> {
+        self.0.redact_text(text)
     }
 }
 
@@ -446,6 +765,7 @@ fn open_original(
 pub struct ProviderCommandState {
     transport: Mutex<Box<dyn ProviderTransport + Send>>,
     redactor: Mutex<Option<Box<dyn RedactionAdapter + Send + Sync>>>,
+    pii_detection_ready: bool,
 }
 
 impl ProviderCommandState {
@@ -462,7 +782,13 @@ impl ProviderCommandState {
                 redactor
                     .map(|redactor| Box::new(redactor) as Box<dyn RedactionAdapter + Send + Sync>),
             ),
+            pii_detection_ready: false,
         }
+    }
+
+    fn with_complete_pii_detector(mut self) -> Self {
+        self.pii_detection_ready = true;
+        self
     }
 
     /// Construct the default desktop state. No provider call is possible until
@@ -475,6 +801,16 @@ impl ProviderCommandState {
     /// Missing or malformed configuration intentionally returns an error so the
     /// caller can install the fail-closed state instead.
     pub fn from_environment() -> Result<Self, String> {
+        let redactor = Arc::new(
+            HaciendaLocalRedactor::new()
+                .map_err(|_| "Hacienda local redactor is unavailable".to_owned())?,
+        );
+        Self::from_environment_with_redactor(Some(redactor))
+    }
+
+    fn from_environment_with_redactor(
+        redactor: Option<Arc<HaciendaLocalRedactor>>,
+    ) -> Result<Self, String> {
         let endpoint = env::var("HACIENDA_GATEWAY_URL")
             .or_else(|_| env::var("HACIENDA_PROVIDER_ENDPOINT"))
             .map_err(|_| "Hacienda gateway is not configured".to_owned())?;
@@ -491,9 +827,13 @@ impl ProviderCommandState {
                 endpoint, model, max_tokens, credential,
             ))
             .map_err(|_| "Hacienda gateway transport is invalid".to_owned())?;
-        let redactor = HaciendaLocalRedactor::new()
-            .map_err(|_| "Hacienda local redactor is unavailable".to_owned())?;
-        Ok(Self::new(transport, Some(redactor)))
+        let redactor =
+            redactor.ok_or_else(|| "Hacienda local redactor is unavailable".to_owned())?;
+        if !redactor.pii_detection_complete {
+            return Err("complete local PII detector is unavailable".to_owned());
+        }
+        Ok(Self::new(transport, Some(SharedHaciendaRedactor(redactor)))
+            .with_complete_pii_detector())
     }
 
     /// Install the configured runtime when possible, otherwise preserve the
@@ -502,8 +842,19 @@ impl ProviderCommandState {
         Self::from_environment().unwrap_or_else(|_| Self::fail_closed())
     }
 
+    fn runtime_with_viewer() -> (Self, LocalViewerState) {
+        let redactor = HaciendaLocalRedactor::new().ok().map(Arc::new);
+        let viewer = LocalViewerState::new(redactor.clone());
+        let provider =
+            Self::from_environment_with_redactor(redactor).unwrap_or_else(|_| Self::fail_closed());
+        (provider, viewer)
+    }
+
     /// Redact first, then stream through the injected token-only transport.
     pub fn stream(&self, request: &ProviderRequest) -> Result<ProviderResponse, ClientError> {
+        if !self.pii_detection_ready {
+            return Err(ClientError::RedactionUnavailable);
+        }
         let safe_request = {
             let redactor = self
                 .redactor
@@ -640,10 +991,76 @@ fn stream_codex(
     }
 }
 
+/// Opens a local-only viewer from already-tokenized content. The caller cannot supply
+/// an original document or a reveal capability; the session is bound to the new window.
+#[tauri::command(rename = "open-local-viewer")]
+async fn open_local_viewer(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, LocalViewerState>,
+    request: OpenLocalViewerRequest,
+) -> Result<OpenLocalViewerResponse, ViewerCommandError> {
+    let viewer_label = state.open_session(window.label(), request)?;
+    let builder = WebviewWindowBuilder::new(
+        &app,
+        viewer_label.clone(),
+        WebviewUrl::App("index.html?viewer=local".into()),
+    )
+    .title("Hacienda Viewer");
+    if builder.build().is_err() {
+        state.close_session(&viewer_label);
+        return Err(ViewerCommandError::WindowOpenFailed);
+    }
+    Ok(OpenLocalViewerResponse { opened: true })
+}
+
+/// Returns the token-only payload bound to the calling viewer window.
+#[tauri::command(rename = "local-viewer-content")]
+fn local_viewer_content(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalViewerState>,
+) -> Result<LocalViewerContentResponse, ViewerCommandError> {
+    state.content_for_viewer(window.label())
+}
+
+/// Reveals one token owned by the calling viewer window's live session.
+#[tauri::command(rename = "reveal-local-token")]
+fn reveal_local_token(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalViewerState>,
+    token: String,
+) -> Result<String, ViewerCommandError> {
+    state
+        .reveal_for_viewer(window.label(), &token)
+        .map(|revealed| revealed.to_string())
+}
+
+/// Tiptap's manual-sensitive action passes the selected value only across this local
+/// IPC seam. The response contains the Hacienda token, never the submitted value.
+#[tauri::command(rename = "pseudonymize-selection")]
+fn pseudonymize_selection(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalViewerState>,
+    request: ManualPseudonymRequest,
+) -> Result<TokenizedText, ViewerCommandError> {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err(ViewerCommandError::Unauthorized);
+    }
+    state.pseudonymize_selection(request)
+}
+
+/// Reports whether this build/runtime has a complete local detector for provider egress.
+#[tauri::command(rename = "local-pii-status")]
+fn local_pii_status(state: tauri::State<'_, LocalViewerState>) -> LocalPiiStatusResponse {
+    state.pii_status()
+}
+
 #[cfg(not(test))]
 fn main() {
+    let (provider_state, viewer_state) = ProviderCommandState::runtime_with_viewer();
     tauri::Builder::default()
-        .manage(ProviderCommandState::runtime())
+        .manage(provider_state)
+        .manage(viewer_state)
         .setup(|app| {
             app.manage(OriginalViewerCommandState::native(app.handle().clone()));
             Ok(())
@@ -652,7 +1069,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_original,
             stream_claude,
-            stream_codex
+            stream_codex,
+            open_local_viewer,
+            local_viewer_content,
+            reveal_local_token,
+            pseudonymize_selection,
+            local_pii_status
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Hacienda Secrecy Client");
@@ -679,6 +1101,13 @@ mod tests {
         }
     }
 
+    fn open_viewer_request(tokenized: TokenizedText) -> OpenLocalViewerRequest {
+        OpenLocalViewerRequest {
+            references: tokenized.references.clone(),
+            tokenized,
+        }
+    }
+
     #[test]
     fn local_full_emits_stable_reversible_hacienda_tokens_across_reopen() {
         let store = Arc::new(TestKeyStore::default());
@@ -695,13 +1124,24 @@ mod tests {
             .redact_text("Contact alice@example.com")
             .expect("redacts");
         assert_eq!(again.references[0].token, token);
-        let mut capability = ViewerCapability::issued_for_test();
-        let revealed = reopened
-            .reveal(&token, Some(&mut capability))
+        let redactor = Arc::new(reopened);
+        let viewer = LocalViewerState::new(Some(redactor.clone()));
+        let label = viewer
+            .open_session("main", open_viewer_request(again))
+            .expect("main window opens viewer");
+        assert!(matches!(
+            viewer.reveal_for_viewer("main", &token),
+            Err(ViewerCommandError::Unauthorized)
+        ));
+        let revealed = viewer
+            .reveal_for_viewer(&label, &token)
             .expect("viewer reveals");
         assert_eq!(&*revealed, "alice@example.com");
-        assert!(reopened.reveal(&token, Some(&mut capability)).is_err());
-        let audit = reopened.reveal_audit.lock().expect("audit lock");
+        assert!(matches!(
+            viewer.reveal_for_viewer(&label, &token),
+            Err(ViewerCommandError::Replayed)
+        ));
+        let audit = redactor.reveal_audit.lock().expect("audit lock");
         assert_eq!(audit.len(), 1);
         assert_eq!(
             audit[0].token_digest,
@@ -714,16 +1154,75 @@ mod tests {
     }
 
     #[test]
-    fn rehydration_requires_an_explicit_viewer_capability() {
-        let redactor = HaciendaLocalRedactor::from_key_store(Arc::new(TestKeyStore::default()))
-            .expect("vault opens");
-        let token = redactor
+    fn viewer_session_rejects_main_expiry_replay_and_foreign_tokens() {
+        let redactor = Arc::new(
+            HaciendaLocalRedactor::from_key_store(Arc::new(TestKeyStore::default()))
+                .expect("vault opens"),
+        );
+        let viewer = LocalViewerState::new(Some(redactor.clone()));
+        let first = redactor
             .redact_text("alice@example.com")
-            .unwrap()
+            .expect("tokenizes");
+        let token = first.references[0].token.clone();
+        assert_eq!(
+            viewer.open_session("other-window", open_viewer_request(first.clone())),
+            Err(ViewerCommandError::Unauthorized)
+        );
+
+        let expired_label = viewer
+            .open_expired_session_for_test(open_viewer_request(first.clone()))
+            .expect("expired test session");
+        assert!(matches!(
+            viewer.reveal_for_viewer(&expired_label, &token),
+            Err(ViewerCommandError::Expired)
+        ));
+
+        let label = viewer
+            .open_session("main", open_viewer_request(first))
+            .expect("main opens viewer");
+        let foreign = redactor
+            .redact_text("bob@example.com")
+            .expect("tokenizes foreign value")
             .references[0]
             .token
             .clone();
-        assert!(redactor.reveal(&token, None).is_err());
+        assert!(matches!(
+            viewer.reveal_for_viewer(&label, &foreign),
+            Err(ViewerCommandError::TokenNotInSession)
+        ));
+        assert!(viewer.reveal_for_viewer(&label, &token).is_ok());
+        assert!(matches!(
+            viewer.reveal_for_viewer(&label, &token),
+            Err(ViewerCommandError::Replayed)
+        ));
+    }
+
+    #[test]
+    fn manual_custom_pii_returns_only_a_reversible_token() {
+        let redactor = Arc::new(
+            HaciendaLocalRedactor::from_key_store(Arc::new(TestKeyStore::default()))
+                .expect("vault opens"),
+        );
+        let viewer = LocalViewerState::new(Some(redactor));
+        let tokenized = viewer
+            .pseudonymize_selection(ManualPseudonymRequest {
+                category: "custom:project_code".into(),
+                value: "Project-Z9".into(),
+            })
+            .expect("manual pseudonymization");
+        let serialized = serde_json::to_string(&tokenized).expect("serialize tokenized output");
+        assert!(tokenized.text.starts_with("[PROJECT_CODE:local:"));
+        assert!(!serialized.contains("Project-Z9"));
+
+        let label = viewer
+            .open_session("main", open_viewer_request(tokenized.clone()))
+            .expect("viewer session");
+        assert_eq!(
+            &*viewer
+                .reveal_for_viewer(&label, &tokenized.references[0].token)
+                .expect("authorized reveal"),
+            "project-z9"
+        );
     }
 
     #[test]
@@ -758,6 +1257,28 @@ mod tests {
         let payload = serde_json::to_string(&safe).expect("serializes provider payload");
         assert!(payload.contains("[EMAIL:local:"), "{payload}");
         assert!(!payload.contains("alice@example.com"), "{payload}");
+    }
+
+    #[test]
+    fn regex_only_detector_cannot_authorize_provider_send() {
+        let redactor = Arc::new(
+            HaciendaLocalRedactor::from_key_store(Arc::new(TestKeyStore::default()))
+                .expect("vault opens"),
+        );
+        let status = LocalViewerState::new(Some(redactor.clone())).pii_status();
+        assert!(!status.provider_send_enabled);
+        assert_eq!(status.detector, "regex_only");
+        let state =
+            ProviderCommandState::new(FailClosedTransport, Some(SharedHaciendaRedactor(redactor)));
+        let request = ProviderRequest::ClaudeDesktop(ClaudeDesktopRequest::new(
+            hacienda_client_core::ConversationId::new("conversation-1"),
+            hacienda_client_core::ContextId::new("context-1"),
+            "safe-looking text",
+        ));
+        assert!(matches!(
+            state.stream(&request),
+            Err(ClientError::RedactionUnavailable)
+        ));
     }
 
     struct RecordingOpener(Mutex<Option<PathBuf>>);
