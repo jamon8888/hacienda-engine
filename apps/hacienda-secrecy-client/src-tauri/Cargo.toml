@@ -7,15 +7,18 @@ publish = false
 [workspace]
 
 [features]
-default = []
-# Opt-in because loading GLiNER2 weights is expensive, but production LocalFull
-# ingestion refuses to run until this feature and a real model directory are present.
+default = ["ner-candle"]
+# The desktop package enables Candle by default because LocalFull requires the
+# real detector. The hacienda-core feature itself is target-gated by
+# hacienda-core, so wasm builds never compile Candle or load a filesystem
+# checkpoint.
 ner-candle = ["hacienda-core/ner-candle"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+async-trait = "0.1"
 blake3 = "1"
 hacienda-core = { path = "../../../hacienda-core" }
 hacienda-client-core = { path = "../../../crates/hacienda-client-core" }
@@ -26,6 +29,7 @@ getrandom = "0.3"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["sync"] }
 xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd", default-features = false, features = [

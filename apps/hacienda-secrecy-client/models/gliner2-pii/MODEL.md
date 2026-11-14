@@ -19,3 +19,20 @@ intended domain; never treat a missed span as evidence that text is safe.
 The installer fetches files only when explicitly invoked with `--download`.
 Runtime code must use an already-installed directory and must not download a
 checkpoint implicitly.
+
+The desktop Tauri runtime looks first at the explicit
+`HACIENDA_NER_MODEL_DIR` environment variable. When it is unset, install the
+allowlisted files under the app-local data directory at
+`models/gliner2-pii` (for example, `<app-local-data>/models/gliner2-pii`).
+The runtime verifies every file size and SHA-256 digest pinned by
+`manifest.json`, and also checks the GLiNER2 span/extractor and DeBERTa-v2 architecture before
+loading Candle. A missing, altered, or GLiNER2.5 boundary checkpoint leaves
+provider egress disabled; it never triggers a download or reports the model
+path in status.
+
+The desktop Tauri package enables its `ner-candle` feature by default. Loading
+the model is intentionally eager at startup and may consume roughly 1.2 GiB
+of disk-read bandwidth plus the Candle model's resident memory; the remaining
+runtime smoke test is to launch the packaged desktop app with the installed
+checkpoint and confirm the status reports `local_model` and provider redaction
+still emits reversible tokens.

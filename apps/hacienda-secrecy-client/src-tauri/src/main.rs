@@ -13,9 +13,12 @@ use hacienda_core::{
     HaciendaConfig,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
+    fs::File,
+    io::{BufReader, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -106,6 +109,171 @@ struct SaveDocumentResponse {
 
 const LOCAL_KEYRING_SERVICE: &str = "org.hacienda.secrecy-client";
 const LOCAL_KEYRING_USER: &str = "local-full-pseudonym-key-v1";
+const NER_MODEL_DIR_ENV: &str = "HACIENDA_NER_MODEL_DIR";
+const NER_MODEL_APP_DATA_RELATIVE_DIR: &str = "models/gliner2-pii";
+const PINNED_NER_MODEL_ID: &str = "fastino/gliner2-privacy-filter-PII-multi";
+const PINNED_NER_MODEL_REVISION: &str = "1cb4166094dc58fa8d836429f060d6c95f62b495";
+
+#[derive(Clone, Copy)]
+struct PinnedModelAsset {
+    relative_path: &'static str,
+    size: u64,
+    sha256: &'static str,
+}
+
+// Keep this allowlist in sync with models/gliner2-pii/manifest.json. Runtime
+// validation deliberately does not trust a model-provided manifest.
+const PINNED_NER_MODEL_ASSETS: &[PinnedModelAsset] = &[
+    PinnedModelAsset {
+        relative_path: "config.json",
+        size: 252,
+        sha256: "164f17362bcf9d114067d3465e7374bfdd79ce6b605acb745de5a49dabb9595c",
+    },
+    PinnedModelAsset {
+        relative_path: "encoder_config/config.json",
+        size: 895,
+        sha256: "f27dd63cc43a248d2566f0b6ad7a115db353676ce0561dcbca45bac766464c1a",
+    },
+    PinnedModelAsset {
+        relative_path: "model.safetensors",
+        size: 1_228_421_964,
+        sha256: "0280f6f39f6012da50b6640bad438d9b7e763a1b0102094115d1b710c4dd79b6",
+    },
+    PinnedModelAsset {
+        relative_path: "tokenizer.json",
+        size: 16_020_604,
+        sha256: "f6df10ec83bea993035b2dd7c39345a3d4fcf23421c2adb6cb4ffc1e6d1bc4b5",
+    },
+    PinnedModelAsset {
+        relative_path: "tokenizer_config.json",
+        size: 711,
+        sha256: "233beed1f1095cccfc7907cde31a8d90c0a6aa4fdfaf6493f8e55fd162e81ae6",
+    },
+];
+
+#[derive(Debug)]
+enum NerModelError {
+    Unavailable,
+    Invalid,
+}
+
+fn resolve_ner_model_dir(app_data_dir: Option<&Path>) -> Result<PathBuf, NerModelError> {
+    if let Some(path) = env::var_os(NER_MODEL_DIR_ENV) {
+        let path = PathBuf::from(path);
+        return (!path.as_os_str().is_empty())
+            .then_some(path)
+            .ok_or(NerModelError::Unavailable);
+    }
+    app_data_dir
+        .map(|root| root.join(NER_MODEL_APP_DATA_RELATIVE_DIR))
+        .ok_or(NerModelError::Unavailable)
+}
+
+fn validate_ner_model_assets(model_dir: &Path) -> Result<(), NerModelError> {
+    if !model_dir.is_dir() {
+        return Err(NerModelError::Unavailable);
+    }
+    validate_optional_manifest_identity(model_dir)?;
+    for asset in PINNED_NER_MODEL_ASSETS {
+        let path = model_dir.join(asset.relative_path);
+        let metadata = path.metadata().map_err(|_| NerModelError::Invalid)?;
+        if !metadata.is_file() || metadata.len() != asset.size {
+            return Err(NerModelError::Invalid);
+        }
+        let file = File::open(path).map_err(|_| NerModelError::Invalid)?;
+        let mut reader = BufReader::new(file);
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 1024 * 1024];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|_| NerModelError::Invalid)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        if format!("{:x}", digest.finalize()) != asset.sha256 {
+            return Err(NerModelError::Invalid);
+        }
+    }
+
+    validate_ner_model_architecture(model_dir)
+}
+
+fn validate_optional_manifest_identity(model_dir: &Path) -> Result<(), NerModelError> {
+    let path = model_dir.join("manifest.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let manifest = serde_json::from_slice::<serde_json::Value>(
+        &std::fs::read(path).map_err(|_| NerModelError::Invalid)?,
+    )
+    .map_err(|_| NerModelError::Invalid)?;
+    if manifest.get("model_id").and_then(serde_json::Value::as_str) != Some(PINNED_NER_MODEL_ID)
+        || manifest.get("revision").and_then(serde_json::Value::as_str)
+            != Some(PINNED_NER_MODEL_REVISION)
+    {
+        return Err(NerModelError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_ner_model_architecture(model_dir: &Path) -> Result<(), NerModelError> {
+    let config = read_json_asset(model_dir, "config.json")?;
+    if config.get("model_type").and_then(serde_json::Value::as_str) != Some("extractor")
+        || config
+            .get("counting_layer")
+            .and_then(serde_json::Value::as_str)
+            != Some("count_lstm")
+        || config.get("max_width").and_then(serde_json::Value::as_u64) != Some(8)
+        || config
+            .get("token_pooling")
+            .and_then(serde_json::Value::as_str)
+            != Some("first")
+        || config.get("model_name").and_then(serde_json::Value::as_str)
+            != Some("microsoft/mdeberta-v3-base")
+    {
+        return Err(NerModelError::Invalid);
+    }
+    let encoder = read_json_asset(model_dir, "encoder_config/config.json")?;
+    if encoder
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        != Some("deberta-v2")
+        || encoder
+            .get("hidden_size")
+            .and_then(serde_json::Value::as_u64)
+            != Some(768)
+        || encoder
+            .get("num_hidden_layers")
+            .and_then(serde_json::Value::as_u64)
+            != Some(12)
+        || encoder
+            .get("vocab_size")
+            .and_then(serde_json::Value::as_u64)
+            != Some(250_112)
+    {
+        return Err(NerModelError::Invalid);
+    }
+    let tokenizer = read_json_asset(model_dir, "tokenizer_config.json")?;
+    if tokenizer
+        .get("tokenizer_class")
+        .and_then(serde_json::Value::as_str)
+        != Some("DebertaV2Tokenizer")
+    {
+        return Err(NerModelError::Invalid);
+    }
+    Ok(())
+}
+
+fn read_json_asset(
+    model_dir: &Path,
+    relative_path: &str,
+) -> Result<serde_json::Value, NerModelError> {
+    let bytes = std::fs::read(model_dir.join(relative_path)).map_err(|_| NerModelError::Invalid)?;
+    serde_json::from_slice(&bytes).map_err(|_| NerModelError::Invalid)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VaultError {
@@ -204,16 +372,14 @@ fn local_full_profile(lancedb_path: &Path) -> InstallationConfig {
     })
 }
 
-#[cfg(feature = "ner-candle")]
+#[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
 fn configured_document_runtime(
     key: &Zeroizing<[u8; KEY_BYTES]>,
+    app_data_dir: &Path,
 ) -> Result<(hacienda_core::HaciendaFacade, TrustedEditorRevisionIssuer), String> {
-    let model_dir = env::var_os("HACIENDA_GLINER_MODEL_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| "LocalFull PII model is not configured".to_owned())?;
-    if !model_dir.is_dir() {
-        return Err("LocalFull PII model directory is unavailable".to_owned());
-    }
+    let model_dir = resolve_ner_model_dir(Some(app_data_dir))
+        .and_then(|path| validate_ner_model_assets(&path).map(|()| path))
+        .map_err(|_| "LocalFull PII model is unavailable".to_owned())?;
     let mut pipeline_config = PipelineConfig::default();
     pipeline_config.redaction.mode = RedactionMode::Pseudonymize;
     pipeline_config.model.enabled = true;
@@ -239,9 +405,10 @@ fn configured_document_runtime(
     Ok((facade, issuer))
 }
 
-#[cfg(not(feature = "ner-candle"))]
+#[cfg(any(not(feature = "ner-candle"), target_arch = "wasm32"))]
 fn configured_document_runtime(
     _key: &Zeroizing<[u8; KEY_BYTES]>,
+    _app_data_dir: &Path,
 ) -> Result<(hacienda_core::HaciendaFacade, TrustedEditorRevisionIssuer), String> {
     Err("LocalFull document ingestion requires the real NER model feature".to_owned())
 }
@@ -266,7 +433,7 @@ impl LocalFullDocumentService {
         let key = OsCredentialKeyStore
             .load_or_create()
             .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
-        let (facade, issuer) = configured_document_runtime(&key)?;
+        let (facade, issuer) = configured_document_runtime(&key, root)?;
         let profile = local_full_profile(&root.join("lancedb"));
         let (backend, store) = Backend::connect_configured_lancedb(profile)
             .await
@@ -534,10 +701,23 @@ struct HaciendaLocalRedactor {
 
 impl HaciendaLocalRedactor {
     fn new() -> Result<Self, RedactionError> {
-        Self::from_key_store(Arc::new(OsCredentialKeyStore))
+        Self::from_key_store_at(Arc::new(OsCredentialKeyStore), None)
     }
 
+    fn new_with_app_data_dir(app_data_dir: &Path) -> Result<Self, RedactionError> {
+        Self::from_key_store_at(Arc::new(OsCredentialKeyStore), Some(app_data_dir))
+    }
+
+    /// Test-only compatibility seam for viewer/token tests that do not exercise
+    /// provider egress. Production construction goes through `new` and requires
+    /// a validated, loaded local model before it can authorize egress.
     fn from_key_store(store: Arc<dyn LocalPseudonymKeyStore>) -> Result<Self, RedactionError> {
+        Self::from_key_store_without_model(store)
+    }
+
+    fn from_key_store_without_model(
+        store: Arc<dyn LocalPseudonymKeyStore>,
+    ) -> Result<Self, RedactionError> {
         let key = store
             .load_or_create()
             .map_err(|_| RedactionError::Rejected)?;
@@ -558,6 +738,62 @@ impl HaciendaLocalRedactor {
             pseudonymiser,
             reveal_audit: Mutex::new(VecDeque::new()),
             pii_detection_complete,
+        })
+    }
+
+    fn from_key_store_at(
+        store: Arc<dyn LocalPseudonymKeyStore>,
+        app_data_dir: Option<&Path>,
+    ) -> Result<Self, RedactionError> {
+        let model_dir =
+            resolve_ner_model_dir(app_data_dir).map_err(|_| RedactionError::Rejected)?;
+        Self::from_key_store_with_runtime(
+            store,
+            &model_dir,
+            validate_ner_model_assets,
+            |config, pseudonymiser| PiiPipeline::with_pseudonymiser(config, Some(pseudonymiser)),
+        )
+    }
+
+    fn from_key_store_with_runtime<Validate, Build>(
+        store: Arc<dyn LocalPseudonymKeyStore>,
+        model_dir: &Path,
+        validate: Validate,
+        build: Build,
+    ) -> Result<Self, RedactionError>
+    where
+        Validate: FnOnce(&Path) -> Result<(), NerModelError>,
+        Build: FnOnce(
+            PipelineConfig,
+            Arc<Pseudonymiser>,
+        ) -> Result<PiiPipeline, hacienda_core::pii::PiiError>,
+    {
+        validate(model_dir).map_err(|_| RedactionError::Rejected)?;
+        let key = store
+            .load_or_create()
+            .map_err(|_| RedactionError::Rejected)?;
+        let resolver = Arc::new(LocalKeyResolver(key));
+        let pseudonymiser = Arc::new(
+            Pseudonymiser::new(resolver.as_ref(), &TenantId::default_tenant(), &[])
+                .map_err(|_| RedactionError::Rejected)?,
+        );
+        let mut config = PipelineConfig::default();
+        config.redaction.mode = RedactionMode::Pseudonymize;
+        config.model.enabled = true;
+        config.model.model_dir = Some(model_dir.to_owned());
+        let pipeline =
+            build(config, Arc::clone(&pseudonymiser)).map_err(|_| RedactionError::Rejected)?;
+        let ready = pipeline.config().model.enabled
+            && pipeline.config().model.model_dir.is_some()
+            && pipeline.config().redaction.mode == RedactionMode::Pseudonymize;
+        if !ready {
+            return Err(RedactionError::Rejected);
+        }
+        Ok(Self {
+            pipeline,
+            pseudonymiser,
+            reveal_audit: Mutex::new(VecDeque::new()),
+            pii_detection_complete: true,
         })
     }
 
@@ -1333,8 +1569,12 @@ impl ProviderCommandState {
         Self::from_environment().unwrap_or_else(|_| Self::fail_closed())
     }
 
-    fn runtime_with_viewer() -> (Self, LocalViewerState) {
-        let redactor = HaciendaLocalRedactor::new().ok().map(Arc::new);
+    fn runtime_with_viewer(app_data_dir: Option<&Path>) -> (Self, LocalViewerState) {
+        let redactor = app_data_dir
+            .map(HaciendaLocalRedactor::new_with_app_data_dir)
+            .unwrap_or_else(HaciendaLocalRedactor::new)
+            .ok()
+            .map(Arc::new);
         let viewer = LocalViewerState::new(redactor.clone());
         let provider =
             Self::from_environment_with_redactor(redactor).unwrap_or_else(|_| Self::fail_closed());
@@ -1688,10 +1928,15 @@ async fn save_document(
 
 #[cfg(not(test))]
 fn main() {
-    let (provider_state, viewer_state) = ProviderCommandState::runtime_with_viewer();
     tauri::Builder::default()
-        .manage(provider_state)
         .setup(|app| {
+            let app_data_dir = app
+                .path()
+                .app_local_data_dir()
+                .map_err(|_| "LocalFull storage path is unavailable")?;
+            let (provider_state, viewer_state) =
+                ProviderCommandState::runtime_with_viewer(Some(&app_data_dir));
+            app.manage(provider_state);
             let audit_store = app
                 .path()
                 .app_local_data_dir()
@@ -1710,12 +1955,8 @@ fn main() {
                 None => viewer_state,
             };
             app.manage(viewer_state);
-            let root = app
-                .path()
-                .app_local_data_dir()
-                .map_err(|_| "LocalFull storage path is unavailable")?;
             app.manage(LocalFullDocumentState::new(
-                root.clone(),
+                app_data_dir,
                 audit_store.as_ref().map(Arc::clone),
             ));
             if let Some(store) = audit_store {
@@ -1749,6 +1990,22 @@ fn main() {}
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use xberg::text::ner::NerBackend;
+    use xberg::types::entity::{Entity, EntityCategory};
+    use xberg::Result as XbergResult;
+
+    struct InjectedNerBackend;
+
+    #[async_trait::async_trait]
+    impl NerBackend for InjectedNerBackend {
+        async fn detect(
+            &self,
+            _text: &str,
+            _categories: &[EntityCategory],
+        ) -> XbergResult<Vec<Entity>> {
+            Ok(Vec::new())
+        }
+    }
 
     #[derive(Default)]
     struct TestKeyStore(Mutex<Option<[u8; hacienda_core::redaction::KEY_BYTES]>>);
@@ -2028,6 +2285,72 @@ mod tests {
             }
         }
         assert!(HaciendaLocalRedactor::from_key_store(Arc::new(LockedKeyStore)).is_err());
+    }
+
+    fn test_model_dir(name: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "hacienda-secrecy-client-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).expect("test model directory");
+        path
+    }
+
+    #[test]
+    fn missing_model_fails_closed_before_detector_initialization() {
+        let missing = env::temp_dir().join(format!(
+            "hacienda-secrecy-client-missing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let result = HaciendaLocalRedactor::from_key_store_with_runtime(
+            Arc::new(TestKeyStore::default()),
+            &missing,
+            validate_ner_model_assets,
+            |_config, _pseudonymiser| panic!("detector loader must not run"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn incompatible_boundary_model_fails_closed() {
+        let model_dir = test_model_dir("boundary");
+        std::fs::write(
+            model_dir.join("config.json"),
+            br#"{"model_type":"gliner2.5","counting_layer":"boundary"}"#,
+        )
+        .expect("incompatible config");
+        let result = HaciendaLocalRedactor::from_key_store_with_runtime(
+            Arc::new(TestKeyStore::default()),
+            &model_dir,
+            validate_ner_model_architecture,
+            |_config, _pseudonymiser| panic!("detector loader must not run"),
+        );
+        let _ = std::fs::remove_dir_all(&model_dir);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn injected_detector_loader_marks_reversible_runtime_ready() {
+        let model_dir = test_model_dir("ready");
+        let redactor = HaciendaLocalRedactor::from_key_store_with_runtime(
+            Arc::new(TestKeyStore::default()),
+            &model_dir,
+            |_| Ok(()),
+            |config, pseudonymiser| {
+                PiiPipeline::with_detector_and_pseudonymiser(
+                    config,
+                    Some(hacienda_core::pii::NerDetector::new(Arc::new(
+                        InjectedNerBackend,
+                    ))),
+                    Some(pseudonymiser),
+                )
+            },
+        )
+        .expect("injected detector loader");
+        let status = LocalViewerState::new(Some(Arc::new(redactor))).pii_status();
+        let _ = std::fs::remove_dir_all(&model_dir);
+        assert!(status.provider_send_enabled);
+        assert_eq!(status.detector, "local_model");
     }
 
     #[test]
