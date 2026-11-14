@@ -7,12 +7,20 @@ const DB_VERSION = 1;
 const MODEL_STORE = "models";
 const TESSDATA_STORE = "tessdata";
 
-const MODEL_ID = (import.meta.env.VITE_GLINER_MODEL_ID as string | undefined) ?? "jamon8888/gliner2-guardrails-pii-f16";
-const MODEL_BASE_URL = import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingface.co/${MODEL_ID}/resolve/main`;
+const DEFAULT_MODEL_ID = "jamon8888/gliner2-guardrails-pii-f16";
+const rawModelId = import.meta.env.VITE_GLINER_MODEL_ID;
+const MODEL_ID = rawModelId === undefined ? DEFAULT_MODEL_ID : rawModelId;
+const rawModelBaseUrl = import.meta.env.VITE_MODEL_BASE_URL;
+const MODEL_BASE_URL =
+  rawModelBaseUrl === undefined
+    ? `https://huggingface.co/${MODEL_ID}/resolve/main`
+    : rawModelBaseUrl;
 
-// # ponytail: simple regex validation replaces zod; upgrade to zod when dependency added
-function validateModelConfig(modelId: string, baseUrl: string): string | null {
-  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(modelId)) return "VITE_GLINER_MODEL_ID must be owner/repo";
+function validateModelConfig(modelId: unknown, baseUrl: unknown): string | null {
+  if (typeof modelId !== "string" || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(modelId)) {
+    return "VITE_GLINER_MODEL_ID must be owner/repo";
+  }
+  if (typeof baseUrl !== "string") return "VITE_MODEL_BASE_URL must be a valid HTTP(S) URL";
   try {
     const url = new URL(baseUrl);
     if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error();
