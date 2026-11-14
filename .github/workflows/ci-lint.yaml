@@ -67,4 +67,11 @@ jobs:
 
       - name: Check Rust docs coverage
         if: steps.deps.outcome == 'success'
-        run: cargo rustdoc --workspace --all-targets --features "ner-candle" -- -D missing_docs
+        run: |
+          cargo rustdoc -p hacienda-core --all-targets --features ner-candle -- -D missing_docs
+          cargo rustdoc -p hacienda-api --all-targets -- -D missing_docs
+          cargo rustdoc -p hacienda-cli --all-targets -- -D missing_docs
+          cargo rustdoc -p hacienda-mcp --all-targets -- -D missing_docs
+          cargo rustdoc -p hacienda-rag --all-targets -- -D missing_docs
+          cargo rustdoc -p hacienda --all-targets -- -D missing_docs
+          cargo rustdoc -p hacienda-wasm --all-targets --features ner-candle-wasm --target wasm32-unknown-unknown -- -D missing_docs

@@ -16,6 +16,8 @@ const PROVENANCE_DIGEST_LEN: usize = 8;
 /// case-insensitively duplicates one of these asks the model for the same concept
 /// twice under two different category representations.
 const BASE_CATEGORY_NAMES: [&str; 5] = ["person", "organization", "location", "email", "phone"];
+const PERSON_THRESHOLD: f32 = 0.65;
+const CONTACT_THRESHOLD: f32 = 0.48;
 
 /// Effective configuration for one [`crate::pii::PiiPipeline`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,12 +90,12 @@ impl PipelineConfig {
             | PiiCategory::FullName
             | PiiCategory::FirstName
             | PiiCategory::MiddleName
-            | PiiCategory::LastName => 0.65,
+            | PiiCategory::LastName => PERSON_THRESHOLD,
             PiiCategory::Email
             | PiiCategory::PhoneNumber
             | PiiCategory::Iban
             | PiiCategory::IpAddress
-            | PiiCategory::CreditCard => 0.48,
+            | PiiCategory::CreditCard => CONTACT_THRESHOLD,
             _ => self.model_threshold_default,
         }
     }

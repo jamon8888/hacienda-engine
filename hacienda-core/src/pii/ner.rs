@@ -105,7 +105,7 @@ impl NerDetector {
     ///
     /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded.
     #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
-/// from_candle_local function
+    /// from_candle_local function
     pub fn from_candle_local(
         model_dir: &std::path::Path,
         lora_adapter_dir: Option<&std::path::Path>,
@@ -129,7 +129,7 @@ impl NerDetector {
     ///
     /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded.
     #[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
-/// from_candle_bytes function
+    /// from_candle_bytes function
     pub fn from_candle_bytes(
         weights: &[u8],
         tokenizer_json: &[u8],
@@ -186,7 +186,7 @@ fn to_model_entity(entity: Entity) -> ModelEntity {
     }
 }
 
-/// Map an xberg entity category onto the PII taxonomy.
+/// Map an xberg [`EntityCategory`] reference onto the corresponding PII taxonomy.
 ///
 /// Categories with no PII counterpart (Money, Percent, Date, Time) are carried through
 /// as `Custom` rather than dropped, so a caller redacting everything still sees them.
@@ -223,8 +223,11 @@ pub fn to_pii_category(category: &EntityCategory) -> PiiCategory {
             "country" => PiiCategory::Country,
             "government_id" => PiiCategory::GovernmentId,
             "national_id_number" => PiiCategory::NationalId,
+            "national_id" => PiiCategory::NationalId,
             "drivers_license_number" | "license_number" => PiiCategory::DriversLicense,
+            "drivers_license" => PiiCategory::DriversLicense,
             "tax_id" | "tax_number" => PiiCategory::TaxId,
+            "eu_vat" => PiiCategory::EuVat,
             "bank_account" | "account_number" => PiiCategory::BankAccount,
             "routing_number" => PiiCategory::RoutingNumber,
             "payment_card" => PiiCategory::PaymentCard,

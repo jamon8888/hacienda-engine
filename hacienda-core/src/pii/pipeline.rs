@@ -164,7 +164,7 @@ impl PiiPipeline {
         })
     }
 
-/// config function
+    /// config function
     pub fn config(&self) -> &PipelineConfig {
         &self.config
     }
@@ -239,7 +239,16 @@ impl PiiPipeline {
 
         let model_start = Instant::now();
         let model_entities = match &self.ner_detector {
-            Some(detector) => detector.detect(text).await?,
+            Some(detector) => detector
+                .detect(text)
+                .await?
+                .into_iter()
+                .filter(|entity| {
+                    entity.confidence.is_none_or(|confidence| {
+                        confidence >= self.config.effective_threshold(&entity.category)
+                    })
+                })
+                .collect(),
             None => Vec::new(),
         };
         metrics.model_ms = model_start.elapsed().as_millis() as u64;
@@ -394,7 +403,7 @@ fn load_detector(config: &PipelineConfig) -> Result<NerDetector, PiiError> {
     })?;
     let mut detector =
         NerDetector::from_candle_local(model_dir, config.model.lora_adapter_dir.as_deref())?
-            .with_threshold(config.model_threshold_default);
+            .with_threshold(0.0);
     if let Some(vertical) = &config.vertical {
         // Extend, not replace: a finance vertical must still find people. See
         // `ner::categories_with_vertical`.
