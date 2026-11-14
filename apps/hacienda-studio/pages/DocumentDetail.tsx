@@ -42,6 +42,7 @@ import { PDFViewer } from "@/components/extend/pdf-viewer";
 import { renderAnnotatedMarkdown } from "@/lib/annotate";
 import { getViewerKind } from "@/lib/viewer-kind";
 import { getViewerPlan } from "@/lib/viewer-fallback";
+import { createRendererBridge } from "@/lib/renderer-bridge";
 import { computeContentHash } from "@/lib/content-hash";
 import { saveTokenizedEnvelope } from "@/lib/redaction-store";
 import {
@@ -92,6 +93,7 @@ export function DocumentDetail({
     TokenizedEditorDocument | undefined
   >(undefined);
   const [activeTab, setActiveTab] = useState<DetailTab>("redacted");
+  const rendererBridge = useMemo(() => createRendererBridge(), []);
 
   const modeResult = useMemo(
     () => applyRedactionMode(findings, mode),
@@ -224,7 +226,26 @@ export function DocumentDetail({
   const fallbackMarkdown = tokenizedDocument
     ? textFromTokenizedDocument(tokenizedDocument)
     : (redactedBody ?? result.markdown);
-  const viewerPlan = getViewerPlan(result.frontmatter.source, fallbackMarkdown);
+  const viewerPlan = getViewerPlan(
+    result.frontmatter.source,
+    fallbackMarkdown,
+    {
+      canOpenOriginal: rendererBridge.canOpenOriginal,
+    },
+  );
+
+  function openOriginal() {
+    void rendererBridge
+      .openOriginal({
+        documentRef: tokenizedEnvelope.document_id,
+        originalRef: tokenizedEnvelope.source.original_ref,
+        viewerRef: tokenizedEnvelope.source.viewer_ref,
+        capabilityRef: tokenizedEnvelope.source.viewer_ref,
+      })
+      .catch(() => {
+        toast.error("Le visualiseur original est indisponible");
+      });
+  }
 
   const isPseudonymizeActive = mode === "pseudonymize";
   const modeButtonClass = (value: RedactionMode) =>
@@ -398,6 +419,7 @@ export function DocumentDetail({
                   <button
                     type="button"
                     disabled={!viewerPlan.originalLink.available}
+                    onClick={openOriginal}
                     className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {viewerPlan.originalLink.label}
