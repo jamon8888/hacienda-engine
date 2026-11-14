@@ -92,10 +92,21 @@ resource "google_storage_bucket_iam_member" "sts_source_viewer" {
   role = "roles/storage.objectViewer"
   member = "serviceAccount:${data.google_storage_transfer_project_service_account.sts.email}"
 }
+resource "google_storage_bucket_iam_member" "sts_source_legacy_reader" {
+  bucket = google_storage_bucket.hacienda.name
+  role = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${data.google_storage_transfer_project_service_account.sts.email}"
+}
 resource "google_storage_bucket_iam_member" "sts_dr_user" {
   count = var.environment == "prod" ? 1 : 0
   bucket = google_storage_bucket.hacienda_dr[0].name
-  role = "roles/storage.objectUser"
+  role = "roles/storage.objectAdmin"
+  member = "serviceAccount:${data.google_storage_transfer_project_service_account.sts.email}"
+}
+resource "google_storage_bucket_iam_member" "sts_dr_legacy_writer" {
+  count = var.environment == "prod" ? 1 : 0
+  bucket = google_storage_bucket.hacienda_dr[0].name
+  role = "roles/storage.legacyBucketWriter"
   member = "serviceAccount:${data.google_storage_transfer_project_service_account.sts.email}"
 }
 resource "google_project_iam_member" "sts_pubsub_editor" {
@@ -113,6 +124,13 @@ resource "google_storage_transfer_job" "hacienda_crr" {
     object_conditions { include_prefixes = [""] }
     transfer_options { overwrite_objects_already_existing_in_sink = false }
   }
+  depends_on = [
+    google_storage_bucket_iam_member.sts_source_viewer,
+    google_storage_bucket_iam_member.sts_source_legacy_reader,
+    google_storage_bucket_iam_member.sts_dr_user,
+    google_storage_bucket_iam_member.sts_dr_legacy_writer,
+    google_project_iam_member.sts_pubsub_editor,
+  ]
 }
 
 # Service Account for hacienda API

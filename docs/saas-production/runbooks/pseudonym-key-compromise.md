@@ -76,6 +76,10 @@ that unsafe partial operation.
 
 ```bash
 # 1. Generate new keys for ALL tenants
+if [ "${TENANT_RUNTIME_MAPPING_CONFIRMED:-}" != "true" ]; then
+  echo "ERROR: tenant runtime mapping is not provisioned; refusing unsafe tenant rotation" >&2
+  exit 1
+fi
 for tenant in $(kubectl exec -n hacienda-prod <pg-pod> -- psql -t -c "SELECT id FROM tenants;"); do
   NEW_KEY=$(openssl rand -hex 32)
   vault kv patch secret/hacienda/prod/pseudonym/tenant_${tenant} active_key=key_2 key_2=$NEW_KEY
