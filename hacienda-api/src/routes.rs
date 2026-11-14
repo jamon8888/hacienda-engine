@@ -21,6 +21,8 @@ use hacienda_core::{
     auth::authz::AuthRouterBuilder,
     auth::{authz::auth_middleware, AuthState, Capability, CapabilitySet},
 };
+use prometheus::{Encoder, HistogramVec, TextEncoder};
+use std::time::Instant;
 
 use crate::{
     handlers::{
@@ -76,6 +78,11 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/openapi.json",
         access: Access::Public,
         make_router: || get(openapi::openapi),
+    },
+    RouteSpec {
+        path: "/metrics",
+        access: Access::Public,
+        make_router: || get(metrics),
     },
     // ── documents:process endpoints ───────────────────────────────────────────
     RouteSpec {
@@ -431,9 +438,48 @@ pub fn build_router(state: ApiState) -> Router {
 
     router
         .layer(DefaultBodyLimit::max(state.limits.max_body_bytes))
+        .layer(middleware::from_fn(record_request_duration))
         .layer(middleware::from_fn_with_state(quota, quota_middleware))
         .layer(middleware::from_fn_with_state(auth, auth_middleware))
         .with_state(state)
+}
+
+async fn record_request_duration(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_owned();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    request_duration()
+        .with_label_values(&[&method, &path, response.status().as_str()])
+        .observe(started.elapsed().as_secs_f64());
+    response
+}
+
+fn request_duration() -> &'static HistogramVec {
+    static HISTOGRAM: std::sync::OnceLock<HistogramVec> = std::sync::OnceLock::new();
+    HISTOGRAM.get_or_init(|| {
+        prometheus::register_histogram_vec!(
+            "http_request_duration_seconds",
+            "HTTP request duration",
+            &["method", "path", "status"]
+        )
+        .expect("request duration metric registration")
+    })
+}
+
+async fn metrics() -> axum::response::Response {
+    let metric_families = prometheus::gather();
+    let mut output = Vec::new();
+    TextEncoder::new()
+        .encode(&metric_families, &mut output)
+        .expect("encode metrics");
+    axum::response::Response::builder()
+        .header("content-type", TextEncoder::new().format_type())
+        .body(axum::body::Body::from(output))
+        .expect("metrics response")
 }
 
 #[cfg(test)]

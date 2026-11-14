@@ -3,6 +3,7 @@
 resource "google_storage_bucket" "hacienda" {
   name          = "hacienda-${var.environment}"
   location      = var.region
+  rpo           = var.environment == "prod" ? "ASYNC_TURBO" : "DEFAULT"
   project       = var.project_id
   force_destroy = var.environment != "prod"
 
@@ -87,7 +88,7 @@ resource "google_storage_transfer_job" "hacienda_crr" {
   count = var.environment == "prod" ? 1 : 0
   description = "Replicate Hacienda production objects to DR"
   project = var.project_id
-  transfer_spec {
+  replication_spec {
     gcs_data_source { bucket_name = google_storage_bucket.hacienda.name }
     gcs_data_sink { bucket_name = google_storage_bucket.hacienda_dr[0].name }
     object_conditions { include_prefixes = [""] }

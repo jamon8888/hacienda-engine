@@ -27,6 +27,7 @@ hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres", "s3
 hacienda-rag = { path = "../crates/hacienda-rag", features = ["streaming", "chunking"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+prometheus = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

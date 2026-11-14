@@ -33,7 +33,7 @@ NEW_KEY=$(openssl rand -hex 32)
 echo "Generated new key"
 
 # 4. Update active key (same path consumed by ExternalSecret)
-vault kv put "secret/hacienda/prod/pseudonym" active_key="$NEW_KEY"
+vault kv patch "secret/hacienda/prod/pseudonym" active_key="key_1" key_1="$NEW_KEY"
 echo "Updated active_key"
 
 # 5. Force ExternalSecrets sync
@@ -73,11 +73,19 @@ for tenant in $(kubectl exec -n hacienda-prod <pg-pod> -- psql -t -c "SELECT id 
 done
 
 # 2. Update global active_key as well
-vault kv put secret/hacienda/prod/pseudonym active_key="$(openssl rand -hex 32)"
+NEW_ACTIVE_KEY=$(openssl rand -hex 32)
+vault kv patch secret/hacienda/prod/pseudonym active_key="key_1" key_1="$NEW_ACTIVE_KEY"
 
 # 4. Force ExternalSecrets sync & restart
 kubectl annotate externalsecret hacienda-secrets -n hacienda-prod force-sync=$(date +%s) --overwrite
-kubectl rollout restart deployment/hacienda-api -n hacienda-prod
+for attempt in $(seq 1 12); do
+  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "key_1"; then
+    kubectl rollout restart deployment/hacienda-api -n hacienda-prod
+    break
+  fi
+  [ "$attempt" -eq 12 ] && { echo "ERROR: rendered secret not updated; refusing restart" >&2; exit 1; }
+  sleep 5
+done
 
 # 5. Re-pseudonymize all existing data (BACKGROUND JOB)
 # This is expensive - schedule during low traffic

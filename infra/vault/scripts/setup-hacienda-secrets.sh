@@ -71,7 +71,7 @@ create_secret hacienda/prod/database \
 
 create_secret hacienda/prod/pseudonym \
   active_key="key_1" \
-  key_1="$(openssl rand -hex 32)" \
+  active_key_material="$(openssl rand -hex 32)" \
   fpe_key="$(openssl rand -hex 32)"
 
 create_secret hacienda/prod/s3 \
@@ -102,7 +102,7 @@ create_secret hacienda/staging/database \
 
 create_secret hacienda/staging/pseudonym \
   active_key="key_1" \
-  key_1="$(openssl rand -hex 32)" \
+  active_key_material="$(openssl rand -hex 32)" \
   fpe_key="$(openssl rand -hex 32)"
 
 create_secret hacienda/staging/s3 \
@@ -125,7 +125,8 @@ create_secret hacienda/dev/database \
   url="postgresql://hacienda:devpass@localhost:5432/hacienda?sslmode=disable"
 
 create_secret hacienda/dev/pseudonym \
-  active_key="$(openssl rand -hex 32)" \
+  active_key="key_1" \
+  key_1="$(openssl rand -hex 32)" \
   fpe_key="$(openssl rand -hex 32)"
 
 create_secret hacienda/dev/s3 \

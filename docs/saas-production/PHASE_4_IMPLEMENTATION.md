@@ -97,8 +97,16 @@
 kubectl annotate externalsecret hacienda-secrets -n hacienda-prod force-sync=$(date +%s)
 
 # 2. Test rate limiting
-for i in {1..150}; do curl -s -w "%{http_code}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" https://api.example.com/v1/pii/scan -d '{"text":"test"}'; done
-# Should get 200 for first N requests, then 429 after tier limit
+ALLOWANCE=$(curl --fail-with-body -sS -H "Authorization: Bearer $TOKEN" https://api.example.com/v1/auth/me | jq -er '.rate_limit.requests_per_window')
+MULTIPLIER=2
+ALLOWED=$((ALLOWANCE / MULTIPLIER))
+[ "$ALLOWED" -gt 0 ] || { echo "invalid allowance" >&2; exit 1; }
+for i in $(seq 1 "$ALLOWED"); do
+  code=$(curl --fail-with-body -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" https://api.example.com/v1/pii/scan -d '{"text":"test"}')
+  [ "$code" = 200 ] || { echo "expected 200 on request $i, got $code" >&2; exit 1; }
+done
+code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" https://api.example.com/v1/pii/scan -d '{"text":"test"}')
+[ "$code" = 429 ] || { echo "expected 429 after allowance, got $code" >&2; exit 1; }
 
 # 3. Test input validation
 # Oversized file -> 413
