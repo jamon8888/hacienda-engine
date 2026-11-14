@@ -101,7 +101,7 @@ xberg = { workspace = true }
 # `docs/superpowers/plans/2026-07-30-hacienda-program-plan.md`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
-xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd", default-features = false, features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "d926382a0c124dcac4562c7c61a5086d71a3aa68", default-features = false, features = [
     "ner",
 ] }
 # `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"
