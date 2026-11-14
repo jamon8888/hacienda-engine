@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-
 - **Tenant-name sanitisation for pseudonym keys was still not injective after the
   previous fix — `acme` and `Acme` could resolve the same key.** `scoped_var_name`
   accepted `[A-Za-z0-9_]` and uppercased the result unconditionally, so two tenant ids
