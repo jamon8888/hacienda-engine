@@ -7,12 +7,14 @@
 //! [`pipeline::PiiPipeline`] runs the whole sequence including redaction.
 
 pub mod config;
+pub mod context;
 pub mod engine;
 pub mod merge;
 pub mod ner;
 pub mod patterns;
 pub mod pipeline;
 pub mod types;
+pub mod validators;
 
 pub use config::{CliOverrides, ModelConfig, PipelineConfig, VerticalConfig};
 pub use engine::RegexEngine;

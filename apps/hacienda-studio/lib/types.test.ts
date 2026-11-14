@@ -29,8 +29,21 @@ describe("NER category vocabulary", () => {
       "email",
       "phone",
       "url",
+      "first_name",
+      "middle_name",
+      "last_name",
+      "street_address",
+      "city",
+      "state_or_region",
+      "postal_code",
+      "country",
     ];
-    expect(new Set([...mirrored, "custom"])).toEqual(ENGINE_CATEGORIES);
+    // Engine categories are a subset of NerCategory; NerCategory is extended for GLiNER custom labels
+    for (const cat of ENGINE_CATEGORIES) {
+      expect(mirrored).toContain(cat);
+    }
+    // Custom may still be used via customLabels
+    expect(mirrored).toContain("person");
   });
 
   it("defaults to categories the engine accepts", () => {

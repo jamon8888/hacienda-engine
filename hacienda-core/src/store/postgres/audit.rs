@@ -936,6 +936,7 @@ mod tests {
             config_hash: config_hash.to_owned(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 
