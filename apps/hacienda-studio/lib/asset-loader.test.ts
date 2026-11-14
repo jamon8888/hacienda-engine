@@ -369,7 +369,7 @@ describe("loadNerModel storage-quota preflight", () => {
     vi.stubGlobal("crypto", {
       subtle: {
         digest: vi.fn(async (_algorithm: string, bytes: Uint8Array) => {
-          const prefixes = ["53c73fff", "ab12abcd", "cd34ef56"];
+          const prefixes = ["53c73fff", "ab12abcd", "f27dd63c"];
           const prefix = prefixes[bytes[0] - 1] ?? "00000000";
           return Uint8Array.from(prefix.match(/../g)!.concat(Array(28).fill("00")), (hex) => parseInt(hex, 16)).buffer;
         }),

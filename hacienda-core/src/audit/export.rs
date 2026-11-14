@@ -202,15 +202,15 @@ mod tests {
             config_hash: String::new(),
             principal: None,
             vertical: Some("finance@3f9a1c02".into()),
-            model: None,
+            model: Some("gliner2@53c73fff".into()),
         });
 
         let bytes = export_csv(&chain).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         let row = text.lines().nth(1).unwrap();
         assert!(
-            row.ends_with(",finance@3f9a1c02"),
-            "expected the vertical value as the last CSV field, got row {row:?}"
+            row.ends_with(",finance@3f9a1c02,gliner2@53c73fff"),
+            "expected vertical and model as the last CSV fields, got row {row:?}"
         );
     }
 
@@ -220,8 +220,8 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         let row = text.lines().nth(1).unwrap();
         assert!(
-            row.ends_with(','),
-            "an absent vertical must export as an empty trailing field, got row {row:?}"
+            row.ends_with(",,"),
+            "absent vertical and model must export as empty trailing fields, got row {row:?}"
         );
     }
 }
