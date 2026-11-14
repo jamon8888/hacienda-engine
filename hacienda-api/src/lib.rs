@@ -37,7 +37,8 @@ mod state;
 
 pub use error::{ApiError, ApiErrorCode};
 pub use handlers::claude_messages::{
-    AnthropicMessagesProvider, ClaudeMessagesProvider, ClaudeMessagesProviderRequest,
+    AnthropicMessagesProvider, ClaudeMessagesEventStream, ClaudeMessagesProvider,
+    ClaudeMessagesProviderRequest, ClaudeMessagesProviderResponse, ClaudeMessagesProviderStream,
     ProviderGatewayError,
 };
 pub use hacienda_client_core::ProviderSseEvent;
