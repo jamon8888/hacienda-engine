@@ -1483,10 +1483,10 @@ fn check_bind_policy(bind: SocketAddr, auth: &AuthConfig) -> Result<()> {
 ///
 /// Builds the facade the same way `run_extract`/`run_scan` do: a key resolver is wired
 /// in only when the configured default redaction mode is `pseudonymize` (see
-/// `build_facade`'s own doc comment for why this is conditional). A deployment that
-/// never configures pseudonymisation still gets every other tool; `pii_reveal` alone
-/// returns the facade's `PiiDisabled` error, mapped the same way `hacienda pii reveal`
-/// maps it.
+/// `build_facade`'s own doc comment for why this is conditional). The MCP server
+/// intentionally exposes no pseudonym rehydration tool because agent context is not an
+/// authorized human review surface; rehydration remains in the authenticated, audited
+/// Tauri viewer.
 ///
 /// Unlike `run_extract`/`run_scan`, this facade is long-lived — one MCP session can make
 /// many tool calls — so there is no `close_after` here; `hacienda-mcp::HaciendaMcp`

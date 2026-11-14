@@ -21,18 +21,17 @@
 //!
 //! # Trust boundary
 //!
-//! [`HaciendaMcp`] always calls the facade with `Caller::Trusted` — the same precedent
-//! `hacienda-cli`'s `serve` and `pii reveal` already document: the process boundary is the
-//! trust boundary. This matches the **stdio** transport this crate implements today
-//! (M1a): a local MCP client (Claude Desktop, a local agent) launches `hacienda mcp serve`
-//! as a child process, exactly as it would launch any other local MCP server. An HTTP/SSE
-//! transport (M1b) would need to authenticate each call through the same capability
-//! checks `hacienda-api`'s `auth_middleware` already enforces — that transport is not
-//! implemented in this crate yet.
+//! [`HaciendaMcp`] calls its facade methods with `Caller::Trusted`, so the process
+//! boundary is not sufficient to treat an agent as a human reviewer. In particular, the
+//! MCP tool inventory deliberately excludes pseudonym rehydration: `pii_reveal` would
+//! return plaintext into Claude/Codex context. Human rehydration belongs in the
+//! authenticated and audited Tauri viewer. This crate implements **stdio** (M1a): a local
+//! MCP client launches `hacienda mcp serve` as a child process. An HTTP/SSE transport
+//! (M1b) is not implemented here.
 //!
 //! # Tool inventory
 //!
-//! Eight tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
+//! Seven tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
 //! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands:
 //!
 //! | Tool | Facade method | Mirrors |
@@ -40,7 +39,6 @@
 //! | `documents_process` | `process_batch_with_auth` | `POST /v1/documents`, `hacienda extract` |
 //! | `pii_scan` | `scan_text_with_auth` | `POST /v1/pii/scan` |
 //! | `pii_redact` | `redact_text_with_auth` | `POST /v1/pii/redact` |
-//! | `pii_reveal` | `reveal_token_with_auth` | `POST /v1/pii/reveal`, `hacienda pii reveal` |
 //! | `audit_verify` | `verify_audit_with_auth` | `GET /v1/audit/verify` |
 //! | `audit_entries` | `audit_history_with_auth` | `GET /v1/audit/entries` |
 //! | `compliance_report` | `compliance_report_with_auth` | `GET /v1/compliance/report` |
@@ -52,7 +50,7 @@ use std::sync::Arc;
 
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};
-use params::{AuditEntriesParams, DocumentsProcessParams, EmptyParams, RevealParams, TextParams};
+use params::{AuditEntriesParams, DocumentsProcessParams, EmptyParams, TextParams};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
@@ -177,43 +175,6 @@ impl HaciendaMcp {
             .await
             .map_err(map_hacienda_error)?;
         json_tool_result(&result)
-    }
-
-    /// Reverse a pseudonym token to its plaintext.
-    #[tool(
-        description = "Reverse a pseudonym token (e.g. `[EMAIL:k1:base32...]`) to its \
-            original plaintext. Requires the server to be configured with a pseudonymisation \
-            key. Records a `Reveal` audit entry. Mirrors `POST /v1/pii/reveal` and `hacienda \
-            pii reveal`.",
-        annotations(
-            title = "Reveal Pseudonym",
-            read_only_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn pii_reveal(
-        &self,
-        Parameters(params): Parameters<RevealParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // Collapsed, mirroring `hacienda-api/src/error.rs`'s `PseudonymError` mapping and
-        // `hacienda-cli`'s `run_pii_reveal_inner`: never let the specific variant reach the
-        // caller, so a probing client cannot use error text to guess at a token or key.
-        let plaintext = match self
-            .facade
-            .reveal_token_with_auth(Caller::Trusted, &params.token)
-            .await
-        {
-            Ok(text) => text,
-            Err(hacienda::HaciendaError::Pseudonym(_) | hacienda::HaciendaError::PiiDisabled) => {
-                return Err(rmcp::ErrorData::invalid_params(
-                    "invalid pseudonym token",
-                    None,
-                ))
-            }
-            Err(other) => return Err(map_hacienda_error(other)),
-        };
-        let tip = self.facade.audit_tip().await.map_err(map_hacienda_error)?;
-        json_tool_result(&serde_json::json!({ "plaintext": plaintext, "audit_chain_tip": tip }))
     }
 
     /// Verify the audit chain has not been tampered with.
@@ -371,13 +332,14 @@ impl ServerHandler for HaciendaMcp {
         InitializeResult::new(capabilities)
             .with_server_info(server_info)
             .with_instructions(
-                "Every tool here redacts PII before returning document content and \
-                 records what it did in an append-only, blake3-hash-chained audit log. \
+                "Tools redact PII before returning document content and record what they \
+                 do in an append-only, blake3-hash-chained audit log. Pseudonym \
+                 rehydration is intentionally unavailable to agent clients; use the \
+                 authenticated, audited Tauri viewer for human review. \
                  Use `documents_process` to extract and redact whole documents, \
-                 `pii_scan`/`pii_redact` for raw text, `pii_reveal` to reverse a \
-                 pseudonym token (requires the server to be configured with a \
-                 pseudonymisation key), `audit_verify`/`audit_entries` to inspect the \
-                 chain, and `compliance_report` for the DPIA/model-card/DORA artefacts.",
+                 `pii_scan`/`pii_redact` for raw text, `audit_verify`/`audit_entries` \
+                 to inspect the chain, and `compliance_report` for the \
+                 DPIA/model-card/DORA artefacts.",
             )
     }
 }
@@ -396,8 +358,8 @@ fn json_tool_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, rm
 
 /// Map a [`hacienda::HaciendaError`] onto an MCP tool error.
 ///
-/// Every branch keeps the facade's own message — none of these are the pseudonym-reveal
-/// collapse `pii_reveal` handles separately, so there is nothing here that needs hiding.
+/// Every branch keeps the facade's own message; sensitive pseudonym reveal is not exposed
+/// through this agent-facing server.
 ///
 /// The split between `invalid_params` and `internal_error` matters to an MCP client the
 /// same way a 4xx/5xx split matters to an HTTP one: `Extraction` (malformed or unsupported
@@ -561,7 +523,6 @@ mod tests {
             "documents_process",
             "get_version",
             "pii_redact",
-            "pii_reveal",
             "pii_scan",
         ];
         expected.sort_unstable();
