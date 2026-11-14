@@ -10,7 +10,6 @@ import {
   XbergEngine,
   WasmExtractInput,
   WasmExtractionConfig,
-  WasmOutputFormat,
   WasmChunkingConfig,
   WasmOcrConfig,
   WasmNerConfig,
@@ -19,12 +18,6 @@ import {
   WasmSecurityLimits,
 } from "@xberg-io/xberg-wasm";
 import initWasm from "@xberg-io/xberg-wasm";
-// Let the bundler resolve and emit the binary. The previous absolute
-// "/node_modules/@xberg-io/…/xberg_wasm_bg.wasm" only ever existed on a dev
-// server: in production that path is answered by the SPA fallback with
-// index.html, and WebAssembly rejects it as "expected magic word 00 61 73 6d,
-// found 3c 21 64 6f".
-import xbergWasmUrl from "@xberg-io/xberg-wasm/pkg/web/xberg_wasm_bg.wasm?url";
 import {
   extractEntities,
   isBridgeEntityArray,
@@ -653,7 +646,10 @@ function buildGlossary(entities: Entity[], docPath: string): string {
 
 async function initEngine(): Promise<void> {
   await Promise.all([
-    initWasm({ module_or_path: fetch(xbergWasmUrl) }),
+    // The official package owns the wasm URL and exposes initialization from its
+    // package root. Do not import its generated binary through a private subpath:
+    // the published package intentionally exports only `@xberg-io/xberg-wasm`.
+    initWasm(),
     initPiiEngine(),
   ]);
   // NER model loading is deliberately not awaited here. On a fresh/uncached browser it is a
@@ -789,7 +785,7 @@ async function processFile(
       );
 
       const extractConfig = WasmExtractionConfig.default();
-      extractConfig.outputFormat = WasmOutputFormat.Markdown;
+      extractConfig.outputFormat = "markdown";
       extractConfig.chunking = WasmChunkingConfig.default();
       extractConfig.chunking.maxCharacters = config.chunkSize;
       extractConfig.ocr = WasmOcrConfig.default();
@@ -920,6 +916,15 @@ async function processFile(
     JSON.stringify(xbergEntities, null, 2),
   );
 
+  // The NER call accepts both the closed vocabulary and zero-shot custom labels. Keep the
+  // same union when converting its result into glossary entities and PII model entities;
+  // filtering against `nerCategories` alone silently discarded every label enabled by the
+  // Settings screen's "PII exhaustif" option.
+  const enabledNerCategories = new Set(
+    [...config.nerCategories, ...config.nerCustomLabels].map((category) =>
+      category.toLowerCase(),
+    ),
+  );
   const entities: Entity[] = [];
   for (const e of xbergEntities) {
     if (!isRawNerEntity(e)) {
@@ -929,7 +934,7 @@ async function processFile(
     // `e.category` is a runtime string from an external WASM bridge, not
     // necessarily a valid `NerCategory` — compare as plain strings rather than
     // asserting it into that narrower type.
-    if (!(config.nerCategories as string[]).includes(e.category.toLowerCase())) continue;
+    if (!enabledNerCategories.has(e.category.toLowerCase())) continue;
     entities.push({
       name: e.text,
       type: e.category.toLowerCase(),
@@ -971,7 +976,7 @@ async function processFile(
       // This eliminates the duplicate GLiNER2 inference pass (Tier 1.1)
       const modelEntities = xbergEntities
         .filter((e): e is RawNerEntity => isRawNerEntity(e))
-        .filter((e) => (config.nerCategories as string[]).includes(e.category.toLowerCase()))
+        .filter((e) => enabledNerCategories.has(e.category.toLowerCase()))
         .map((e) => ({
           category: nerCategoryToPiiCategory(e.category),
           text: e.text,

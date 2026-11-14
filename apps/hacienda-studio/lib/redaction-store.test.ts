@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect } from "vitest";
-import { saveDraft, loadDraft, deleteDraft, pruneDrafts } from "./redaction-store";
+import { saveDraft, loadDraft, deleteDraft, pruneDrafts, clearDrafts } from "./redaction-store";
 
 /**
  * Each test uses its own content-hash key rather than deleting/clearing the DB between
@@ -52,5 +52,15 @@ describe("redaction-store", () => {
     } finally {
       Date.now = originalNow;
     }
+  });
+
+  it("clearDrafts removes every saved draft", async () => {
+    await saveDraft("one", "first");
+    await saveDraft("two", "second");
+
+    await clearDrafts();
+
+    await expect(loadDraft("one")).resolves.toBeUndefined();
+    await expect(loadDraft("two")).resolves.toBeUndefined();
   });
 });

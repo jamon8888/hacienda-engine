@@ -256,6 +256,9 @@ mod audit_handle {
                         // surface exists in the browser today), so no vertical is ever
                         // configured here either.
                         vertical: None,
+                        // Studio's model provenance is carried by the JS result today;
+                        // the WASM audit bridge has no model identifier parameter.
+                        model: None,
                     })
                     .collect();
 
@@ -320,6 +323,7 @@ mod audit_handle {
                 config_hash: String::new(),
                 principal: None,
                 vertical: None,
+                model: None,
             };
 
             self.store
