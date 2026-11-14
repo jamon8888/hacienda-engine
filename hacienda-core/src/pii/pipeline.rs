@@ -244,9 +244,7 @@ impl PiiPipeline {
                 .await?
                 .into_iter()
                 .filter(|entity| {
-                    entity.confidence.is_none_or(|confidence| {
-                        confidence >= self.config.effective_threshold(&entity.category)
-                    })
+                    entity.confidence >= self.config.effective_threshold(&entity.category)
                 })
                 .collect(),
             None => Vec::new(),

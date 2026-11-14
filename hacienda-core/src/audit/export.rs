@@ -182,8 +182,8 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         let header = text.lines().next().unwrap();
         assert!(
-            header.ends_with(",vertical"),
-            "vertical must be the last CSV column, got header {header:?}"
+            header.ends_with(",vertical,model"),
+            "vertical and model must be the last CSV columns, got header {header:?}"
         );
     }
 
