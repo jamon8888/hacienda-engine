@@ -13,7 +13,7 @@
 //! deltas cannot escape.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fmt,
     sync::{Arc, Mutex},
 };
@@ -35,10 +35,7 @@ use hacienda_core::{HaciendaError, HaciendaFacade, auth::Caller};
 use serde_json::{Map, Value};
 
 use crate::{
-    error::ApiError,
-    extract::Json as SafeJson,
-    handlers::{caller_from_arc, extract_auth_context},
-    state::ApiState,
+    error::ApiError, extract::Json as SafeJson, handlers::extract_auth_context, state::ApiState,
 };
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -200,8 +197,8 @@ pub async fn messages(
     headers: HeaderMap,
     SafeJson(mut body): SafeJson<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let auth_context = extract_auth_context(&parts);
-    let caller = caller_from_arc(&auth_context);
+    let auth_context = extract_auth_context(&parts).ok_or_else(ApiError::unauthenticated)?;
+    let caller = Caller::Principal(auth_context.as_ref());
     caller
         .require(hacienda_core::auth::Capability::DocumentsProcess)
         .map_err(HaciendaError::from)
@@ -326,10 +323,16 @@ fn validate_and_collect_text_paths(body: &Value) -> Result<Vec<String>, ()> {
     if let Some(system) = object.get("system") {
         collect_content(system, vec!["system".into()], &mut paths)?;
     }
+    if let Some(metadata) = object.get("metadata") {
+        collect_metadata(metadata, vec!["metadata".into()], &mut paths)?;
+    }
+    if let Some(tools) = object.get("tools") {
+        collect_tools(tools, vec!["tools".into()], &mut paths)?;
+    }
+    if let Some(tool_choice) = object.get("tool_choice") {
+        collect_tool_choice(tool_choice, vec!["tool_choice".into()], &mut paths)?;
+    }
     for key in [
-        "metadata",
-        "tools",
-        "tool_choice",
         "thinking",
         "output_config",
         "container",
@@ -342,6 +345,65 @@ fn validate_and_collect_text_paths(body: &Value) -> Result<Vec<String>, ()> {
         }
     }
     Ok(paths)
+}
+
+fn collect_metadata(value: &Value, path: Vec<String>, paths: &mut Vec<String>) -> Result<(), ()> {
+    let object = value.as_object().ok_or(())?;
+    reject_unknown_keys(object, &["user_id"])?;
+    if object.contains_key("user_id") {
+        require_string(object, "user_id")?;
+        paths.push(path_value(&path_with(&path, "user_id")));
+    }
+    Ok(())
+}
+
+fn collect_tools(value: &Value, path: Vec<String>, paths: &mut Vec<String>) -> Result<(), ()> {
+    let tools = value.as_array().ok_or(())?;
+    for (index, tool) in tools.iter().enumerate() {
+        let tool = tool.as_object().ok_or(())?;
+        reject_unknown_keys(
+            tool,
+            &["name", "description", "input_schema", "cache_control"],
+        )?;
+        let tool_path = path_with(&path, &index.to_string());
+        require_string(tool, "name")?;
+        paths.push(path_value(&path_with(&tool_path, "name")));
+        if let Some(description) = tool.get("description") {
+            if !description.is_string() {
+                return Err(());
+            }
+            paths.push(path_value(&path_with(&tool_path, "description")));
+        }
+        let input_schema = tool.get("input_schema").ok_or(())?;
+        if !input_schema.is_object() {
+            return Err(());
+        }
+        collect_all_strings(input_schema, path_with(&tool_path, "input_schema"), paths)?;
+        if let Some(cache_control) = tool.get("cache_control") {
+            validate_cache_control(cache_control)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_tool_choice(
+    value: &Value,
+    path: Vec<String>,
+    paths: &mut Vec<String>,
+) -> Result<(), ()> {
+    match value {
+        Value::String(choice) if matches!(choice.as_str(), "auto" | "any" | "none") => Ok(()),
+        Value::Object(object) => {
+            reject_unknown_keys(object, &["type", "name"])?;
+            if require_string(object, "type")? != "tool" {
+                return Err(());
+            }
+            require_string(object, "name")?;
+            paths.push(path_value(&path_with(&path, "name")));
+            Ok(())
+        }
+        _ => Err(()),
+    }
 }
 
 fn collect_content(
@@ -511,6 +573,10 @@ fn pointer(path: &[&str]) -> String {
         })
 }
 
+fn path_value(path: &[String]) -> String {
+    pointer(&path.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 async fn redact_paths(
     body: &mut Value,
     paths: &[String],
@@ -544,24 +610,50 @@ async fn redact_and_validate_provider_events(
 ) -> Result<Vec<ProviderSseEvent>, ApiError> {
     validate_provider_events(events).map_err(|_| ApiError::internal())?;
     let mut output = events.to_vec();
-    let mut text_slots = Vec::new();
-    let mut joined = String::new();
+    let mut delta_slots: BTreeMap<u64, Vec<(usize, &'static str)>> = BTreeMap::new();
+    let mut error_slots = Vec::new();
     for (index, event) in output.iter().enumerate() {
-        let pointer = match event.event.as_deref() {
-            Some("content_block_delta") => "/delta/text",
-            Some("error") => "/error/message",
-            _ => continue,
-        };
-        let value: Value = serde_json::from_str(&event.data).map_err(|_| ApiError::internal())?;
+        match event.event.as_deref() {
+            Some("content_block_delta") => {
+                let value: Value =
+                    serde_json::from_str(&event.data).map_err(|_| ApiError::internal())?;
+                let block_index = value
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(ApiError::internal)?;
+                delta_slots
+                    .entry(block_index)
+                    .or_default()
+                    .push((index, "/delta/text"));
+            }
+            Some("error") => error_slots.push((index, "/error/message")),
+            _ => {}
+        }
+    }
+    for slots in delta_slots.values() {
+        redact_text_slots(&mut output, slots, facade, caller).await?;
+    }
+    for slot in error_slots {
+        redact_text_slots(&mut output, &[slot], facade, caller).await?;
+    }
+    Ok(output)
+}
+
+async fn redact_text_slots(
+    output: &mut [ProviderSseEvent],
+    slots: &[(usize, &'static str)],
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+) -> Result<(), ApiError> {
+    let mut joined = String::new();
+    for (index, pointer) in slots {
+        let value: Value =
+            serde_json::from_str(&output[*index].data).map_err(|_| ApiError::internal())?;
         let text = value
             .pointer(pointer)
             .and_then(Value::as_str)
             .ok_or_else(ApiError::internal)?;
         joined.push_str(text);
-        text_slots.push((index, pointer.to_owned()));
-    }
-    if text_slots.is_empty() {
-        return Ok(output);
     }
     let redacted = facade
         .redact_text_with_auth(caller, &joined)
@@ -569,33 +661,29 @@ async fn redact_and_validate_provider_events(
         .map_err(ApiError::from)?
         .redacted_text;
     if redacted == joined {
-        return Ok(output);
+        return Ok(());
     }
-    for (index, pointer) in &text_slots {
+    for (index, pointer) in slots {
         let mut value: Value =
             serde_json::from_str(&output[*index].data).map_err(|_| ApiError::internal())?;
         *value.pointer_mut(pointer).ok_or_else(ApiError::internal)? = Value::String(String::new());
         output[*index].data = serde_json::to_string(&value).map_err(|_| ApiError::internal())?;
     }
-    let (index, pointer) = text_slots.last().ok_or_else(ApiError::internal)?;
+    let (index, pointer) = slots.last().ok_or_else(ApiError::internal)?;
     let mut value: Value =
         serde_json::from_str(&output[*index].data).map_err(|_| ApiError::internal())?;
     *value.pointer_mut(pointer).ok_or_else(ApiError::internal)? = Value::String(redacted);
     output[*index].data = serde_json::to_string(&value).map_err(|_| ApiError::internal())?;
-    Ok(output)
+    Ok(())
 }
 
 fn validate_provider_events(events: &[ProviderSseEvent]) -> Result<(), ()> {
-    if events.is_empty()
-        || !matches!(
-            events.last().and_then(|event| event.event.as_deref()),
-            Some("message_stop" | "error")
-        )
-    {
+    if events.is_empty() {
         return Err(());
     }
+    let mut phase = ResponsePhase::AwaitMessageStart;
     for event in events {
-        if event.comment.is_some() || event.id.as_deref().is_some_and(|id| id.contains('\0')) {
+        if event.comment.is_some() || event.id.is_some() {
             return Err(());
         }
         let kind = event.event.as_deref().ok_or(())?;
@@ -604,9 +692,22 @@ fn validate_provider_events(events: &[ProviderSseEvent]) -> Result<(), ()> {
             return Err(());
         }
         match kind {
-            "ping" | "content_block_stop" | "message_stop" => {}
+            "ping" => {
+                if phase == ResponsePhase::Done {
+                    return Err(());
+                }
+                reject_unknown_keys(value.as_object().ok_or(())?, &["type"])?;
+            }
             "content_block_delta" => {
+                if phase != ResponsePhase::InBlock {
+                    return Err(());
+                }
+                reject_unknown_keys(value.as_object().ok_or(())?, &["type", "index", "delta"])?;
+                if value.get("index").and_then(Value::as_u64).is_none() {
+                    return Err(());
+                }
                 let delta = value.get("delta").and_then(Value::as_object).ok_or(())?;
+                reject_unknown_keys(delta, &["type", "text"])?;
                 if delta.get("type").and_then(Value::as_str) != Some("text_delta")
                     || !delta.get("text").is_some_and(Value::is_string)
                 {
@@ -614,37 +715,141 @@ fn validate_provider_events(events: &[ProviderSseEvent]) -> Result<(), ()> {
                 }
             }
             "content_block_start" => {
+                if phase != ResponsePhase::ReadyForBlock {
+                    return Err(());
+                }
+                reject_unknown_keys(
+                    value.as_object().ok_or(())?,
+                    &["type", "index", "content_block"],
+                )?;
+                if value.get("index").and_then(Value::as_u64).is_none() {
+                    return Err(());
+                }
                 let block = value
                     .get("content_block")
                     .and_then(Value::as_object)
                     .ok_or(())?;
+                reject_unknown_keys(block, &["type", "text"])?;
                 if block.get("type").and_then(Value::as_str) != Some("text")
                     || block.get("text").and_then(Value::as_str) != Some("")
                 {
                     return Err(());
                 }
+                phase = ResponsePhase::InBlock;
+            }
+            "content_block_stop" => {
+                if phase != ResponsePhase::InBlock {
+                    return Err(());
+                }
+                reject_unknown_keys(value.as_object().ok_or(())?, &["type", "index"])?;
+                if value.get("index").and_then(Value::as_u64).is_none() {
+                    return Err(());
+                }
+                phase = ResponsePhase::ReadyForBlock;
             }
             "message_start" => {
+                if phase != ResponsePhase::AwaitMessageStart {
+                    return Err(());
+                }
+                reject_unknown_keys(value.as_object().ok_or(())?, &["type", "message"])?;
                 let message = value.get("message").and_then(Value::as_object).ok_or(())?;
+                reject_unknown_keys(
+                    message,
+                    &[
+                        "id",
+                        "type",
+                        "role",
+                        "model",
+                        "content",
+                        "stop_reason",
+                        "stop_sequence",
+                        "usage",
+                    ],
+                )?;
                 if !message
                     .get("content")
                     .is_some_and(|value| value.as_array().is_some_and(Vec::is_empty))
                 {
                     return Err(());
                 }
+                validate_usage(message.get("usage").ok_or(())?)?;
+                phase = ResponsePhase::ReadyForBlock;
             }
             "message_delta" => {
-                if value.get("delta").and_then(Value::as_object).is_none() {
+                if phase != ResponsePhase::ReadyForBlock {
                     return Err(());
                 }
+                reject_unknown_keys(value.as_object().ok_or(())?, &["type", "delta", "usage"])?;
+                let delta = value.get("delta").and_then(Value::as_object).ok_or(())?;
+                reject_unknown_keys(delta, &["stop_reason", "stop_sequence"])?;
+                validate_usage(value.get("usage").ok_or(())?)?;
+                phase = ResponsePhase::AfterMessageDelta;
+            }
+            "message_stop" => {
+                if phase != ResponsePhase::AfterMessageDelta {
+                    return Err(());
+                }
+                reject_unknown_keys(value.as_object().ok_or(())?, &["type"])?;
+                phase = ResponsePhase::Done;
             }
             "error" => {
+                if phase == ResponsePhase::Done {
+                    return Err(());
+                }
+                reject_unknown_keys(value.as_object().ok_or(())?, &["type", "error"])?;
                 let error = value.get("error").and_then(Value::as_object).ok_or(())?;
+                reject_unknown_keys(error, &["type", "message"])?;
                 if !error.get("message").is_some_and(Value::is_string) {
                     return Err(());
                 }
+                phase = ResponsePhase::Done;
             }
             _ => return Err(()),
+        }
+    }
+    (phase == ResponsePhase::Done).then_some(()).ok_or(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponsePhase {
+    AwaitMessageStart,
+    ReadyForBlock,
+    InBlock,
+    AfterMessageDelta,
+    Done,
+}
+
+fn validate_usage(value: &Value) -> Result<(), ()> {
+    const USAGE_FIELDS: &[&str] = &[
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation",
+        "server_tool_use",
+        "service_tier",
+    ];
+    let object = value.as_object().ok_or(())?;
+    reject_unknown_keys(object, USAGE_FIELDS)?;
+    if object.values().any(|field| {
+        !(field.is_number() || field.is_null() || field.is_object() || field.is_string())
+    }) {
+        return Err(());
+    }
+    for key in ["cache_creation", "server_tool_use"] {
+        if let Some(nested) = value.get(key) {
+            let nested = nested.as_object().ok_or(())?;
+            reject_unknown_keys(
+                nested,
+                &[
+                    "ephemeral_5m_input_tokens",
+                    "ephemeral_1h_input_tokens",
+                    "web_search_requests",
+                ],
+            )?;
+            if !nested.values().all(Value::is_number) {
+                return Err(());
+            }
         }
     }
     Ok(())
@@ -718,11 +923,93 @@ impl SseDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::Request;
     use hacienda_core::{HaciendaConfig, auth::Caller, pii::PipelineConfig};
 
     fn pii_facade() -> HaciendaFacade {
         HaciendaFacade::new(HaciendaConfig::default().with_pii(PipelineConfig::default()))
             .expect("PII facade")
+    }
+
+    fn valid_response_events() -> Vec<ProviderSseEvent> {
+        vec![
+            ProviderSseEvent::new(
+                Some("message_start".into()),
+                None,
+                serde_json::json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-code",
+                        "content": [],
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": {"input_tokens": 1, "output_tokens": 0}
+                    }
+                })
+                .to_string(),
+            ),
+            ProviderSseEvent::new(
+                Some("content_block_start".into()),
+                None,
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""}
+                })
+                .to_string(),
+            ),
+            ProviderSseEvent::new(
+                Some("content_block_delta".into()),
+                None,
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "hello"}
+                })
+                .to_string(),
+            ),
+            ProviderSseEvent::new(
+                Some("content_block_stop".into()),
+                None,
+                serde_json::json!({"type": "content_block_stop", "index": 0}).to_string(),
+            ),
+            ProviderSseEvent::new(
+                Some("message_delta".into()),
+                None,
+                serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                    "usage": {"output_tokens": 1}
+                })
+                .to_string(),
+            ),
+            ProviderSseEvent::new(
+                Some("message_stop".into()),
+                None,
+                serde_json::json!({"type": "message_stop"}).to_string(),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn messages_requires_an_authenticated_identity_when_auth_is_disabled() {
+        let (parts, _) = Request::new(()).into_parts();
+        let result = messages(
+            State(crate::routes::tests::test_state_no_auth()),
+            parts,
+            HeaderMap::new(),
+            SafeJson(serde_json::json!({})),
+        )
+        .await;
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the gateway must not accept a trusted fallback caller"),
+        };
+        assert_eq!(error.code, crate::error::ApiErrorCode::Unauthenticated);
     }
 
     #[test]
@@ -763,40 +1050,94 @@ mod tests {
         assert!(validate_and_collect_text_paths(&body).is_err());
     }
 
+    #[test]
+    fn request_tool_and_metadata_fields_are_strictly_allowlisted() {
+        let metadata = serde_json::json!({
+            "model": "claude-code", "max_tokens": 32, "stream": true,
+            "metadata": {"unexpected": "value"},
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        assert!(validate_and_collect_text_paths(&metadata).is_err());
+
+        let tool = serde_json::json!({
+            "model": "claude-code", "max_tokens": 32, "stream": true,
+            "tools": [{
+                "name": "lookup", "input_schema": {}, "unexpected": "value"
+            }],
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        assert!(validate_and_collect_text_paths(&tool).is_err());
+    }
+
     #[tokio::test]
     async fn provider_text_is_redacted_without_losing_sse_frame_order() {
-        let events = vec![
-            ProviderSseEvent::new(
-                Some("content_block_start".into()),
-                None,
-                serde_json::json!({
-                    "type": "content_block_start", "index": 0,
-                    "content_block": {"type": "text", "text": ""}
-                })
-                .to_string(),
-            ),
-            ProviderSseEvent::new(
-                Some("content_block_delta".into()),
-                None,
-                serde_json::json!({
-                    "type": "content_block_delta", "index": 0,
-                    "delta": {"type": "text_delta", "text": "bob@example.com"}
-                })
-                .to_string(),
-            ),
-            ProviderSseEvent::new(
-                Some("message_stop".into()),
-                None,
-                serde_json::json!({"type": "message_stop"}).to_string(),
-            ),
-        ];
+        let mut events = valid_response_events();
+        events[2].data = serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": "bob@example.com"}
+        })
+        .to_string();
         let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
             .await
             .expect("provider response redaction");
-        let payload = safe[1].data.clone();
+        let payload = safe[2].data.clone();
         assert!(!payload.contains("bob@example.com"));
-        assert_eq!(safe[0].event.as_deref(), Some("content_block_start"));
-        assert_eq!(safe[2].event.as_deref(), Some("message_stop"));
+        assert_eq!(safe[0].event.as_deref(), Some("message_start"));
+        assert_eq!(safe[5].event.as_deref(), Some("message_stop"));
+    }
+
+    #[test]
+    fn provider_unknown_fields_and_sse_ids_fail_closed() {
+        let mut unknown = valid_response_events();
+        unknown[2].data = serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": "hello", "debug": "value"}
+        })
+        .to_string();
+        assert!(validate_provider_events(&unknown).is_err());
+
+        let mut with_id = valid_response_events();
+        with_id[0].id = Some("provider-id".into());
+        assert!(validate_provider_events(&with_id).is_err());
+    }
+
+    #[test]
+    fn provider_events_must_follow_the_message_lifecycle() {
+        let mut out_of_order = valid_response_events();
+        out_of_order.swap(0, 1);
+        assert!(validate_provider_events(&out_of_order).is_err());
+
+        let mut duplicate_terminal = valid_response_events();
+        let terminal = duplicate_terminal[5].clone();
+        duplicate_terminal.push(terminal);
+        assert!(validate_provider_events(&duplicate_terminal).is_err());
+    }
+
+    #[tokio::test]
+    async fn response_redaction_does_not_move_content_into_error_events() {
+        let mut events = valid_response_events();
+        events.truncate(3);
+        events.push(ProviderSseEvent::new(
+            Some("error".into()),
+            None,
+            serde_json::json!({
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "provider failed"}
+            })
+            .to_string(),
+        ));
+        let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
+            .await
+            .expect("provider error response redaction");
+        let delta: Value = serde_json::from_str(&safe[2].data).unwrap();
+        let error: Value = serde_json::from_str(&safe[3].data).unwrap();
+        assert!(
+            !delta["delta"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("bob@example.com")
+        );
+        assert_eq!(error["error"]["message"], "provider failed");
     }
 
     #[test]
