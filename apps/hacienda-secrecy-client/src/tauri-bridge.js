@@ -10,8 +10,9 @@
 /** @typedef {{ documentRef: string, versionRef: string, originalRef: string, viewerRef: string, capabilityRef: string }} OpenOriginalReferences */
 /** @typedef {{ tokenized: TokenizedText, references: OpaqueTokenReference[] }} OpenLocalViewerRequest */
 /** @typedef {{ provider_send_enabled: boolean, detector: "local_model" | "regex_only" }} LocalPiiStatus */
-/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } } | { token: string }} InvokePayload */
-/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
+/** @typedef {{ schema_version: string, document_id: string, version_id: string, source: { mime_type: string, original_ref: string, viewer_ref: string, capability_ref: string }, metadata_token_only: Record<string, unknown>, editor: Record<string, unknown>, search_projection: Record<string, unknown>, provenance: Record<string, unknown> }} DocumentProjection */
+/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } } | { token: string }} InvokePayload */
+/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "load-document" | "save-document", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
 /** @typedef {{ sequence: number, text: string, references: OpaqueTokenReference[] }} TokenizedChunk */
 
 const PROVIDER_COMMANDS = Object.freeze({
@@ -127,6 +128,51 @@ function isOpaqueTokenReferences(value) {
       typeof reference.class === "string" &&
       reference.class.trim().length > 0,
   );
+}
+
+/** @param {unknown} value @returns {value is string} */
+function isOpaqueReference(value) {
+  return typeof value === "string" && value.trim().length > 0 &&
+    !value.includes("/") && !value.includes("\\") && !value.includes("file:");
+}
+
+/** @param {unknown} value @returns {value is DocumentProjection} */
+function isDocumentProjection(value) {
+  if (!isRecord(value) || typeof value.schema_version !== "string" ||
+      !isOpaqueReference(value.document_id) || !isOpaqueReference(value.version_id) ||
+      !isRecord(value.source) || typeof value.source.mime_type !== "string" ||
+      !isOpaqueReference(value.source.original_ref) || !isOpaqueReference(value.source.viewer_ref) ||
+      !isOpaqueReference(value.source.capability_ref) ||
+      !isRecord(value.metadata_token_only) || !isRecord(value.editor) ||
+      value.editor.type !== "doc" || !isRecord(value.search_projection) || !isRecord(value.provenance)) {
+    return false;
+  }
+  return true;
+}
+
+/** @param {unknown} response @returns {DocumentProjection} */
+function readDocumentProjection(response) {
+  if (!isDocumentProjection(response)) throw new Error("Invalid token-only document projection");
+  const projection = /** @type {DocumentProjection} */ (response);
+  const editor = JSON.parse(JSON.stringify(projection.editor));
+  /** @param {any} node */
+  const normalize = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node.marks)) {
+      node.marks = node.marks.map(/** @param {any} mark */ (mark) => mark?.type === "sensitive"
+        ? { ...mark, type: "haciendaSensitive", attrs: {
+          tokenClass: mark.attrs?.tokenClass ?? "sensitive",
+          tokenId: mark.attrs?.tokenId ?? "manual",
+          mode: mark.attrs?.mode ?? "pseudonymize",
+          source: mark.attrs?.source ?? "hacienda",
+          disclosure: mark.attrs?.disclosureState ?? "viewer-only",
+        } }
+        : mark);
+    }
+    if (Array.isArray(node.content)) node.content.forEach(normalize);
+  };
+  normalize(editor);
+  return { ...projection, editor };
 }
 
 /**
@@ -286,6 +332,9 @@ export function tokenizedTextToDocument(tokenizedText) {
  *   revealLocalToken: (token: string) => Promise<string>,
  *   pseudonymizeSelection: (request: { category: string, value: string }) => Promise<TokenizedText>,
  *   localPiiStatus: () => Promise<LocalPiiStatus>,
+ *   pickDocument: () => Promise<DocumentProjection>,
+ *   loadDocument: (request: { documentRef: string, versionRef: string }) => Promise<DocumentProjection>,
+ *   saveDocument: (request: { documentRef: string, versionRef: string, editor: Record<string, unknown> }) => Promise<{ document_id: string, version_id: string, parent_version_id: string, idempotent: boolean }>,
  * }}
  */
 export function createRendererBridge(invoke) {
@@ -311,6 +360,15 @@ export function createRendererBridge(invoke) {
       },
       localPiiStatus: async () => {
         throw new Error("Local PII status unavailable");
+      },
+      pickDocument: async () => {
+        throw new Error("Local document picker is unavailable");
+      },
+      loadDocument: async () => {
+        throw new Error("Local document loading is unavailable");
+      },
+      saveDocument: async () => {
+        throw new Error("Local document saving is unavailable");
       },
     };
   }
@@ -367,6 +425,32 @@ export function createRendererBridge(invoke) {
     },
     async localPiiStatus() {
       return readLocalPiiStatus(await invoke("local-pii-status"));
+    },
+    async pickDocument() {
+      return readDocumentProjection(await invoke("pick-document"));
+    },
+    async loadDocument({ documentRef, versionRef }) {
+      if (!isOpaqueReference(documentRef) || !isOpaqueReference(versionRef)) {
+        throw new Error("Invalid document reference");
+      }
+      return readDocumentProjection(await invoke("load-document", {
+        request: { document_ref: documentRef, version_ref: versionRef },
+      }));
+    },
+    async saveDocument({ documentRef, versionRef, editor }) {
+      if (!isOpaqueReference(documentRef) || !isOpaqueReference(versionRef) ||
+          !isRecord(editor) || editor.type !== "doc") {
+        throw new Error("Invalid document save request");
+      }
+      const response = await invoke("save-document", {
+        request: { document_ref: documentRef, version_ref: versionRef, editor },
+      });
+      if (!isRecord(response) || !isOpaqueReference(response.document_id) ||
+          !isOpaqueReference(response.version_id) || !isOpaqueReference(response.parent_version_id) ||
+          typeof response.idempotent !== "boolean") {
+        throw new Error("Invalid document save response");
+      }
+      return /** @type {{ document_id: string, version_id: string, parent_version_id: string, idempotent: boolean }} */ (/** @type {unknown} */ (response));
     },
   };
 }

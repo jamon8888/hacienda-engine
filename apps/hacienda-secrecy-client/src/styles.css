@@ -26,6 +26,14 @@ h1 { margin-bottom: 0; font-size: 19px; font-weight: 600; letter-spacing: -.03em
 .session-badge { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 99px; color: #55645a; font-size: 11px; }
 .session-dot { width: 7px; height: 7px; border-radius: 50%; background: #52855f; }
 .workspace { margin-top: 23px; padding: 25px 28px 22px; border: 1px solid var(--line); border-radius: 15px; background: #fff; box-shadow: 0 10px 35px #283a2b0b; }
+.document-workspace { margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.document-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.document-actions button { padding: 7px 10px; font-size: 10px; }
+.document-meta { margin: -12px 0 10px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 10px; }
+.document-editor-frame { min-height: 150px; padding: 13px; border: 1px solid #e2e6e0; border-radius: 8px; background: #fff; }
+.document-editor { min-height: 120px; outline: none; color: var(--ink); font-size: 13px; line-height: 1.65; }
+.document-editor p { margin: 0 0 8px; }
+.document-editor p:last-child { margin-bottom: 0; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
 h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.025em; }
 .provider-picker { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }

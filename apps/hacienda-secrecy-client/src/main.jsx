@@ -153,6 +153,101 @@ function ManualPseudonymizationPanel({ category, onCategoryChange, disabled, onP
   );
 }
 
+function LocalDocumentWorkspace({ bridge }) {
+  const [projection, setProjection] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const editor = useEditor({
+    extensions: [StarterKit.configure({ history: true }), SensitiveMark],
+    content: { type: "doc", content: [{ type: "paragraph" }] },
+    editorProps: {
+      attributes: { class: "document-editor", "aria-label": "Document tokenisé éditable" },
+    },
+  });
+
+  useEffect(() => {
+    if (projection && editor) editor.commands.setContent(projection.editor, false);
+  }, [projection, editor]);
+
+  async function pick() {
+    if (busy) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      const next = await bridge.pickDocument();
+      setProjection(next);
+      setStatus("Document tokenisé chargé localement.");
+    } catch (error) {
+      setStatus(error?.message === "Document selection was cancelled" ? "Sélection annulée." : "Échec fermé de l’ingestion locale.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save() {
+    if (!projection || !editor || busy) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      const saved = await bridge.saveDocument({
+        documentRef: projection.document_id,
+        versionRef: projection.version_id,
+        editor: editor.getJSON(),
+      });
+      const next = await bridge.loadDocument({
+        documentRef: saved.document_id,
+        versionRef: saved.version_id,
+      });
+      setProjection(next);
+      setStatus(saved.idempotent ? "Version déjà enregistrée." : "Nouvelle version tokenisée enregistrée.");
+    } catch {
+      setStatus("Échec fermé : la version n’a pas été enregistrée.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openOriginal() {
+    if (!projection || busy) return;
+    try {
+      await bridge.openOriginal({
+        documentRef: projection.document_id,
+        versionRef: projection.version_id,
+        originalRef: projection.source.original_ref,
+        viewerRef: projection.source.viewer_ref,
+        capabilityRef: projection.source.capability_ref,
+      });
+      setStatus("Original ouvert dans le viewer natif autorisé.");
+    } catch {
+      setStatus("Viewer natif indisponible ou autorisation expirée.");
+    }
+  }
+
+  return (
+    <section className="document-workspace" aria-label="Dossier LocalFull tokenisé">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">LOCAL FULL · LANCEDB EMBEDDED</p>
+          <h2>Document tokenisé</h2>
+        </div>
+        <div className="document-actions">
+          <button type="button" onClick={() => void pick()} disabled={busy}>{busy ? "Traitement…" : "Choisir un fichier"}</button>
+          <button type="button" onClick={() => void save()} disabled={busy || !projection || !editor}>Enregistrer une version</button>
+          <button type="button" onClick={() => void openOriginal()} disabled={busy || !projection}>Viewer natif</button>
+        </div>
+      </div>
+      {projection && (
+        <>
+          <p className="document-meta">{projection.source.mime_type} · version opaque {projection.version_id}</p>
+          <div className="document-editor-frame"><EditorContent editor={editor} /></div>
+        </>
+      )}
+      {status && <p className="status" role="status">{status}</p>}
+      {!projection && <p className="empty-history">Choisissez un document : seuls sa projection Tiptap tokenisée et ses références opaques entreront dans le renderer.</p>}
+    </section>
+  );
+}
+
 const VIEWER_TTL_MS = 59_000;
 
 async function closeViewerWindow() {
@@ -417,6 +512,7 @@ function App() {
       </header>
 
       <section className="workspace" aria-label="Conversation sécurisée">
+        <LocalDocumentWorkspace bridge={bridge} />
         <div className="section-title">
           <div>
             <p className="eyebrow">ESPACE DE TRAVAIL</p>

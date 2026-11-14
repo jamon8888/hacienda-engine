@@ -1,9 +1,9 @@
 //! Token-only projections for the redacted document editor.
 //!
 //! The projection is deliberately a separate boundary from `ExtractedDocument`: Xberg
-//! carries rich extractor metadata, and some of that metadata is not redacted by the
-//! Hacienda structured-field walk (for example title, subject, and `additional`). This
-//! module copies only the already-redacted body plus opaque token references from those
+//! carries rich extractor metadata, and the Hacienda structured-field walk must cover
+//! metadata such as title, subject, and `additional` before this module runs. This module
+//! copies only the already-redacted body plus opaque token references from those
 //! fields. It never attempts to recover or re-run source offsets after redaction.
 
 use crate::pii::EntitySource;

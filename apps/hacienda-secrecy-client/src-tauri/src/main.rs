@@ -1,18 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use futures::executor::block_on;
+use hacienda_backend::{
+    Backend, BackendDocument, RedactedXbergDocument, TrustedEditorRevisionIssuer,
+};
 use hacienda_core::{
     audit::{AuditEntryInput, AuditStore, EntitySource, FileAuditStore, NodeId, RedactionAction},
+    editor_projection::EditorEnvelope,
     pii::{PiiCategory, PiiPipeline, PipelineConfig},
     redaction::{KeyId, KeyResolver, PseudonymKey, Pseudonymiser, RedactionMode, KEY_BYTES},
     tenancy::TenantId,
+    HaciendaConfig,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::path::{Path, PathBuf};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -28,6 +32,11 @@ use hacienda_client_core::{
     RedactedContext, RedactedProviderRequest, RedactionAdapter, RedactionError, SecretReference,
     TokenizedText, TransportError,
 };
+use hacienda_client_core::{
+    ClientSurface, EncryptedLocalVault, GatewayId, LanceDbTopology, LocalFullConfig,
+    LocalStorageTopology, ProviderRoute, ServiceEndpoint, StoragePath, TrustBoundary, VaultId,
+};
+use hacienda_rag::{LanceDbStore, RagStore};
 
 /// Opaque references are resolved inside the desktop process.  The renderer is
 /// intentionally unable to send source bytes or extracted content here.
@@ -43,6 +52,56 @@ struct OpenOriginalRequest {
 #[derive(Debug, Serialize)]
 struct OpenOriginalResponse {
     opened: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct OriginalBinding {
+    document_ref: String,
+    version_ref: String,
+    original_ref: String,
+    viewer_ref: String,
+    capability_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoadDocumentRequest {
+    document_ref: String,
+    version_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveDocumentRequest {
+    document_ref: String,
+    version_ref: String,
+    editor: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DocumentSourceResponse {
+    mime_type: String,
+    original_ref: String,
+    viewer_ref: String,
+    capability_ref: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DocumentProjectionResponse {
+    schema_version: String,
+    document_id: String,
+    version_id: String,
+    source: DocumentSourceResponse,
+    metadata_token_only: serde_json::Value,
+    editor: serde_json::Value,
+    search_projection: serde_json::Value,
+    provenance: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SaveDocumentResponse {
+    document_id: String,
+    version_id: String,
+    parent_version_id: String,
+    idempotent: bool,
 }
 
 const LOCAL_KEYRING_SERVICE: &str = "org.hacienda.secrecy-client";
@@ -116,6 +175,308 @@ impl KeyResolver for LocalKeyResolver {
             });
         }
         self.active(_tenant)
+    }
+}
+
+fn local_full_profile(lancedb_path: &Path) -> InstallationConfig {
+    InstallationConfig::LocalFull(LocalFullConfig {
+        client: ClientSurface::LocalTauri,
+        trust_boundary: TrustBoundary::LocalProcess,
+        hacienda: Some(ServiceEndpoint::new("http://127.0.0.1:0")),
+        xberg: Some(ServiceEndpoint::new("http://127.0.0.1:0")),
+        gateway: Some(GatewayConfig::Local {
+            id: GatewayId("local-full".into()),
+            endpoint: ServiceEndpoint::new("http://127.0.0.1:0"),
+        }),
+        storage: LocalStorageTopology {
+            vault: Some(EncryptedLocalVault {
+                id: VaultId("local-full-vault".into()),
+                path: StoragePath("<native-vault>".into()),
+                key_reference: SecretReference("os-keychain:local-full".into()),
+            }),
+            lancedb: LanceDbTopology::LocalEmbedded {
+                path: StoragePath(lancedb_path.to_string_lossy().into_owned()),
+            },
+        },
+        provider_route: ProviderRoute::RedactedViaGateway {
+            gateway: GatewayId("local-full".into()),
+        },
+    })
+}
+
+#[cfg(feature = "ner-candle")]
+fn configured_document_runtime(
+    key: &Zeroizing<[u8; KEY_BYTES]>,
+) -> Result<(hacienda_core::HaciendaFacade, TrustedEditorRevisionIssuer), String> {
+    let model_dir = env::var_os("HACIENDA_GLINER_MODEL_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LocalFull PII model is not configured".to_owned())?;
+    if !model_dir.is_dir() {
+        return Err("LocalFull PII model directory is unavailable".to_owned());
+    }
+    let mut pipeline_config = PipelineConfig::default();
+    pipeline_config.redaction.mode = RedactionMode::Pseudonymize;
+    pipeline_config.model.enabled = true;
+    pipeline_config.model.model_dir = Some(model_dir);
+    let resolver = Arc::new(LocalKeyResolver(Zeroizing::new(*key.as_ref())));
+    let facade = HaciendaConfig::default().with_pii(pipeline_config.clone());
+    let facade = hacienda_core::HaciendaFacade::with_key_resolver(
+        facade,
+        Arc::clone(&resolver) as Arc<dyn KeyResolver>,
+        &[],
+    )
+    .map_err(|_| "LocalFull Hacienda/Xberg runtime is unavailable".to_owned())?;
+    let pseudonymiser = Arc::new(
+        Pseudonymiser::new(resolver.as_ref(), &TenantId::default_tenant(), &[])
+            .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?,
+    );
+    let pipeline = Arc::new(
+        PiiPipeline::with_pseudonymiser(pipeline_config, Some(pseudonymiser))
+            .map_err(|_| "LocalFull PII pipeline is unavailable".to_owned())?,
+    );
+    let issuer = TrustedEditorRevisionIssuer::new(pipeline)
+        .map_err(|_| "LocalFull editor pipeline is unavailable".to_owned())?;
+    Ok((facade, issuer))
+}
+
+#[cfg(not(feature = "ner-candle"))]
+fn configured_document_runtime(
+    _key: &Zeroizing<[u8; KEY_BYTES]>,
+) -> Result<(hacienda_core::HaciendaFacade, TrustedEditorRevisionIssuer), String> {
+    Err("LocalFull document ingestion requires the real NER model feature".to_owned())
+}
+
+struct StoredLocalDocument {
+    backend_document: BackendDocument,
+    binding: OriginalBinding,
+    original_path: PathBuf,
+}
+
+struct LocalFullDocumentService {
+    backend: Backend,
+    store: Arc<LanceDbStore>,
+    audit: Arc<dyn AuditStore>,
+    facade: hacienda_core::HaciendaFacade,
+    issuer: TrustedEditorRevisionIssuer,
+    documents: HashMap<String, StoredLocalDocument>,
+}
+
+impl LocalFullDocumentService {
+    async fn new(root: &Path, audit: Arc<dyn AuditStore>) -> Result<Self, String> {
+        let key = OsCredentialKeyStore
+            .load_or_create()
+            .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
+        let (facade, issuer) = configured_document_runtime(&key)?;
+        let profile = local_full_profile(&root.join("lancedb"));
+        let (backend, store) = Backend::connect_configured_lancedb(profile)
+            .await
+            .map_err(|_| "LocalFull LanceDB is unavailable".to_owned())?;
+        Ok(Self {
+            backend,
+            store: Arc::new(store),
+            audit,
+            facade,
+            issuer,
+            documents: HashMap::new(),
+        })
+    }
+
+    async fn ingest_path(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<(DocumentProjectionResponse, OriginalBinding, PathBuf), String> {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Selected document filename is invalid".to_owned())?
+            .to_owned();
+        let mime_type = mime_type_for_filename(&filename);
+        let bytes =
+            std::fs::read(&path).map_err(|_| "Selected document could not be read".to_owned())?;
+        let result = self
+            .facade
+            .process(xberg::ExtractInput::from_bytes(
+                bytes,
+                mime_type,
+                Some(filename),
+            ))
+            .await
+            .map_err(|_| "LocalFull extraction or redaction failed closed".to_owned())?;
+        let redacted = RedactedXbergDocument::from_hacienda_result(&result, 0)
+            .map_err(|_| "LocalFull extraction did not produce a redacted document".to_owned())?;
+        let document_ref = opaque_reference("doc");
+        let version_ref = opaque_reference("ver");
+        let document = self
+            .backend
+            .project(
+                &redacted,
+                "local",
+                document_ref.clone(),
+                version_ref.clone(),
+            )
+            .map_err(|_| "Token-only document projection failed".to_owned())?;
+        self.backend
+            .persist_to(self.store.as_ref(), "documents", &document)
+            .await
+            .map_err(|_| "Token-only document persistence failed".to_owned())?;
+        let binding = OriginalBinding {
+            document_ref: document_ref.clone(),
+            version_ref: version_ref.clone(),
+            original_ref: opaque_reference("orig"),
+            viewer_ref: opaque_reference("viewer"),
+            capability_ref: opaque_reference("cap"),
+        };
+        let projection = document_projection(&document.editor(), &binding)?;
+        self.documents.insert(
+            document_ref,
+            StoredLocalDocument {
+                backend_document: document,
+                binding: binding.clone(),
+                original_path: path.clone(),
+            },
+        );
+        Ok((projection, binding, path))
+    }
+
+    fn load(&self, request: &LoadDocumentRequest) -> Result<DocumentProjectionResponse, String> {
+        let stored = self
+            .documents
+            .get(&request.document_ref)
+            .ok_or_else(|| "Document is not loaded in this LocalFull session".to_owned())?;
+        if stored.backend_document.editor().version_ref != request.version_ref {
+            return Err("Document version is not available".to_owned());
+        }
+        document_projection(stored.backend_document.editor(), &stored.binding)
+    }
+
+    fn binding_for(&self, document_ref: &str) -> Result<(OriginalBinding, PathBuf), String> {
+        let stored = self
+            .documents
+            .get(document_ref)
+            .ok_or_else(|| "Document is not loaded in this LocalFull session".to_owned())?;
+        Ok((stored.binding.clone(), stored.original_path.clone()))
+    }
+
+    async fn save(&mut self, request: SaveDocumentRequest) -> Result<SaveDocumentResponse, String> {
+        let base = self
+            .documents
+            .get(&request.document_ref)
+            .ok_or_else(|| "Document is not loaded in this LocalFull session".to_owned())?;
+        if base.backend_document.editor().version_ref != request.version_ref {
+            return Err("Document version is stale".to_owned());
+        }
+        let base_document = base.backend_document.clone();
+        let revision = self
+            .issuer
+            .issue(&base_document, &request.editor)
+            .await
+            .map_err(|_| "Editor save failed closed at the PII pipeline".to_owned())?;
+        let saved = self
+            .backend
+            .append_editor_revision(
+                self.audit.as_ref(),
+                self.store.as_ref(),
+                "documents",
+                &base_document,
+                &revision,
+            )
+            .await
+            .map_err(|_| "Editor version could not be appended".to_owned())?;
+        let next_document = self
+            .backend
+            .document_for_editor_revision(&base_document, &revision, &saved.version_id)
+            .map_err(|_| "Saved version projection failed".to_owned())?;
+        if let Some(stored) = self.documents.get_mut(&request.document_ref) {
+            stored.backend_document = next_document;
+            stored.binding.version_ref = saved.version_id.clone();
+            stored.binding.capability_ref = opaque_reference("cap");
+        }
+        Ok(SaveDocumentResponse {
+            document_id: saved.document_id,
+            version_id: saved.version_id,
+            parent_version_id: request.version_ref,
+            idempotent: saved.idempotent,
+        })
+    }
+}
+
+fn opaque_reference(prefix: &str) -> String {
+    let digest = blake3::hash(format!("{prefix}:{}", uuid::Uuid::new_v4()).as_bytes()).to_hex();
+    format!("{prefix}_{}", &digest[..24])
+}
+
+fn mime_type_for_filename(filename: &str) -> String {
+    match filename
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "txt" | "md" | "markdown" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
+    .to_owned()
+}
+
+fn document_projection(
+    editor: &EditorEnvelope,
+    binding: &OriginalBinding,
+) -> Result<DocumentProjectionResponse, String> {
+    Ok(DocumentProjectionResponse {
+        schema_version: editor.schema.clone(),
+        document_id: editor.document_ref.clone(),
+        version_id: editor.version_ref.clone(),
+        source: DocumentSourceResponse {
+            mime_type: editor.metadata.legal.mime_type.clone(),
+            original_ref: binding.original_ref.clone(),
+            viewer_ref: binding.viewer_ref.clone(),
+            capability_ref: binding.capability_ref.clone(),
+        },
+        metadata_token_only: serde_json::to_value(&editor.metadata)
+            .map_err(|_| "Metadata projection is invalid".to_owned())?,
+        editor: editor.editor.clone(),
+        search_projection: serde_json::to_value(&editor.search)
+            .map_err(|_| "Search projection is invalid".to_owned())?,
+        provenance: serde_json::to_value(&editor.provenance)
+            .map_err(|_| "Provenance projection is invalid".to_owned())?,
+    })
+}
+
+struct LocalFullDocumentState {
+    root: PathBuf,
+    audit: Option<Arc<dyn AuditStore>>,
+    service: tokio::sync::Mutex<Option<LocalFullDocumentService>>,
+}
+
+impl LocalFullDocumentState {
+    fn new(root: PathBuf, audit: Option<Arc<dyn AuditStore>>) -> Self {
+        Self {
+            root,
+            audit,
+            service: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    async fn service(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<LocalFullDocumentService>>, String> {
+        let mut service = self.service.lock().await;
+        if service.is_none() {
+            let audit = self
+                .audit
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or_else(|| "LocalFull audit store is unavailable".to_owned())?;
+            *service = Some(LocalFullDocumentService::new(&self.root, audit).await?);
+        }
+        Ok(service)
     }
 }
 
@@ -670,17 +1031,6 @@ impl RedactionAdapter for SharedHaciendaRedactor {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg(test)]
-struct OriginalBinding {
-    document_ref: String,
-    version_ref: String,
-    original_ref: String,
-    viewer_ref: String,
-    capability_ref: String,
-}
-
-#[cfg(test)]
 impl From<&OpenOriginalRequest> for OriginalBinding {
     fn from(request: &OpenOriginalRequest) -> Self {
         Self {
@@ -714,18 +1064,42 @@ impl std::fmt::Display for OriginalViewerError {
     }
 }
 
-#[cfg(test)]
 trait DesktopOpener: Send + Sync {
     fn open(&self, path: &Path) -> Result<(), ()>;
 }
 
-#[cfg(test)]
+struct SystemDesktopOpener;
+
+impl DesktopOpener for SystemDesktopOpener {
+    fn open(&self, path: &Path) -> Result<(), ()> {
+        #[cfg(target_os = "macos")]
+        let status = std::process::Command::new("open").arg(path).status();
+        #[cfg(target_os = "linux")]
+        let status = std::process::Command::new("xdg-open").arg(path).status();
+        #[cfg(target_os = "windows")]
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .status();
+        status
+            .map(|value| value.success())
+            .map_err(|_| ())?
+            .then_some(())
+            .ok_or(())
+    }
+}
+
+struct OriginalBindingEntry {
+    path: PathBuf,
+    expires_at: Instant,
+    consumed: bool,
+}
+
 struct NativeOriginalViewer {
-    bindings: Mutex<HashMap<OriginalBinding, PathBuf>>,
+    bindings: Mutex<HashMap<OriginalBinding, OriginalBindingEntry>>,
     opener: Arc<dyn DesktopOpener>,
 }
 
-#[cfg(test)]
 impl NativeOriginalViewer {
     fn new(opener: Arc<dyn DesktopOpener>) -> Self {
         Self {
@@ -734,20 +1108,23 @@ impl NativeOriginalViewer {
         }
     }
 
-    #[cfg(test)]
     fn register(&self, binding: OriginalBinding, path: PathBuf) {
-        self.bindings
-            .lock()
-            .expect("binding lock")
-            .insert(binding, path);
+        self.bindings.lock().expect("binding lock").insert(
+            binding,
+            OriginalBindingEntry {
+                path,
+                expires_at: Instant::now() + Duration::from_secs(300),
+                consumed: false,
+            },
+        );
     }
 }
 
 trait OriginalViewerAdapter: Send + Sync {
     fn open_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError>;
+    fn register_original(&self, binding: OriginalBinding, path: PathBuf);
 }
 
-#[cfg(test)]
 impl OriginalViewerAdapter for NativeOriginalViewer {
     fn open_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError> {
         let refs = [
@@ -760,19 +1137,35 @@ impl OriginalViewerAdapter for NativeOriginalViewer {
         if refs.iter().any(|reference| reference.trim().is_empty()) {
             return Err(OriginalViewerError::InvalidRequest);
         }
-        let path = self
+        let binding = OriginalBinding::from(request);
+        let mut bindings = self
             .bindings
             .lock()
-            .map_err(|_| OriginalViewerError::Unavailable)?
-            .get(&OriginalBinding::from(request))
-            .cloned()
+            .map_err(|_| OriginalViewerError::Unavailable)?;
+        let invalid = bindings
+            .get(&binding)
+            .map(|entry| entry.consumed || entry.expires_at <= Instant::now())
+            .unwrap_or(true);
+        if invalid {
+            bindings.remove(&binding);
+            return Err(OriginalViewerError::Unauthorized);
+        }
+        let entry = bindings
+            .get_mut(&binding)
             .ok_or(OriginalViewerError::Unauthorized)?;
+        let path = entry.path.clone();
         if !path.is_file() {
             return Err(OriginalViewerError::Unavailable);
         }
         self.opener
             .open(&path)
-            .map_err(|_| OriginalViewerError::OpenFailed)
+            .map_err(|_| OriginalViewerError::OpenFailed)?;
+        entry.consumed = true;
+        Ok(())
+    }
+
+    fn register_original(&self, binding: OriginalBinding, path: PathBuf) {
+        self.register(binding, path);
     }
 }
 
@@ -782,28 +1175,37 @@ impl OriginalViewerAdapter for FailClosedOriginalViewer {
     fn open_original(&self, _request: &OpenOriginalRequest) -> Result<(), OriginalViewerError> {
         Err(OriginalViewerError::Unavailable)
     }
+
+    fn register_original(&self, _binding: OriginalBinding, _path: PathBuf) {}
 }
 
 struct OriginalViewerCommandState {
     adapter: Box<dyn OriginalViewerAdapter>,
+    audit_store: Option<Arc<dyn AuditStore>>,
 }
 
 impl OriginalViewerCommandState {
     fn fail_closed() -> Self {
         Self {
             adapter: Box::new(FailClosedOriginalViewer),
+            audit_store: None,
         }
     }
 
-    /// Production stays fail-closed until a native file picker and trusted
-    /// ingestion command can register the selected path with an opaque binding.
-    fn unavailable() -> Self {
-        Self::fail_closed()
+    fn native(audit_store: Arc<dyn AuditStore>) -> Self {
+        Self {
+            adapter: Box::new(NativeOriginalViewer::new(Arc::new(SystemDesktopOpener))),
+            audit_store: Some(audit_store),
+        }
+    }
+
+    fn register_original(&self, binding: OriginalBinding, path: PathBuf) {
+        self.adapter.register_original(binding, path);
     }
 }
 
 #[tauri::command(rename = "open-original")]
-fn open_original(
+async fn open_original(
     state: tauri::State<'_, OriginalViewerCommandState>,
     request: OpenOriginalRequest,
 ) -> Result<OpenOriginalResponse, String> {
@@ -811,6 +1213,41 @@ fn open_original(
         .adapter
         .open_original(&request)
         .map_err(|error| error.to_string())?;
+    if let Some(audit) = &state.audit_store {
+        let digest = blake3::hash(
+            format!(
+                "{}:{}:{}:{}:{}",
+                request.document_ref,
+                request.version_ref,
+                request.original_ref,
+                request.viewer_ref,
+                request.capability_ref
+            )
+            .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        audit
+            .append(
+                &TenantId::new("local-full"),
+                vec![AuditEntryInput {
+                    id: opaque_reference("audit"),
+                    category: "original_viewer".into(),
+                    action: RedactionAction::Reveal,
+                    span_hash: digest,
+                    span_length: 0,
+                    confidence: None,
+                    source: EntitySource::Manual,
+                    pipeline_version: "hacienda-secrecy-client-viewer-v1".into(),
+                    config_hash: LOCAL_AUDIT_CONFIG_HASH.into(),
+                    principal: None,
+                    vertical: None,
+                    model: None,
+                }],
+            )
+            .await
+            .map_err(|_| "Original viewer audit failed closed".to_owned())?;
+    }
     Ok(OpenOriginalResponse { opened: true })
 }
 
@@ -1209,6 +1646,46 @@ fn local_pii_status(state: tauri::State<'_, LocalViewerState>) -> LocalPiiStatus
     state.pii_status()
 }
 
+/// The picker runs in the native process. Only the redacted projection crosses IPC;
+/// the selected path and bytes remain inside the LocalFull runtime.
+#[tauri::command(rename = "pick-document")]
+async fn pick_document(
+    state: tauri::State<'_, LocalFullDocumentState>,
+    originals: tauri::State<'_, OriginalViewerCommandState>,
+) -> Result<DocumentProjectionResponse, String> {
+    let Some(file) = rfd::AsyncFileDialog::new().pick_file().await else {
+        return Err("Document selection was cancelled".to_owned());
+    };
+    let path = file.path().to_path_buf();
+    let mut service = state.service().await?;
+    let (projection, binding, original_path) = service.ingest_path(path).await?;
+    originals.register_original(binding, original_path);
+    Ok(projection)
+}
+
+#[tauri::command(rename = "load-document")]
+async fn load_document(
+    state: tauri::State<'_, LocalFullDocumentState>,
+    request: LoadDocumentRequest,
+) -> Result<DocumentProjectionResponse, String> {
+    let service = state.service().await?;
+    service.load(&request)
+}
+
+#[tauri::command(rename = "save-document")]
+async fn save_document(
+    state: tauri::State<'_, LocalFullDocumentState>,
+    originals: tauri::State<'_, OriginalViewerCommandState>,
+    request: SaveDocumentRequest,
+) -> Result<SaveDocumentResponse, String> {
+    let mut service = state.service().await?;
+    let document_ref = request.document_ref.clone();
+    let saved = service.save(request).await?;
+    let (binding, path) = service.binding_for(&document_ref)?;
+    originals.register_original(binding, path);
+    Ok(saved)
+}
+
 #[cfg(not(test))]
 fn main() {
     let (provider_state, viewer_state) = ProviderCommandState::runtime_with_viewer();
@@ -1228,12 +1705,24 @@ fn main() {
                     .ok()
                 })
                 .map(|store| Arc::new(store) as Arc<dyn AuditStore>);
-            let viewer_state = match audit_store {
-                Some(store) => viewer_state.with_audit_store(store),
+            let viewer_state = match &audit_store {
+                Some(store) => viewer_state.with_audit_store(Arc::clone(store)),
                 None => viewer_state,
             };
             app.manage(viewer_state);
-            app.manage(OriginalViewerCommandState::unavailable());
+            let root = app
+                .path()
+                .app_local_data_dir()
+                .map_err(|_| "LocalFull storage path is unavailable")?;
+            app.manage(LocalFullDocumentState::new(
+                root.clone(),
+                audit_store.as_ref().map(Arc::clone),
+            ));
+            if let Some(store) = audit_store {
+                app.manage(OriginalViewerCommandState::native(store));
+            } else {
+                app.manage(OriginalViewerCommandState::fail_closed());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1244,7 +1733,10 @@ fn main() {
             local_viewer_content,
             reveal_local_token,
             pseudonymize_selection,
-            local_pii_status
+            local_pii_status,
+            pick_document,
+            load_document,
+            save_document
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Hacienda Secrecy Client");
@@ -1601,7 +2093,7 @@ mod tests {
 
     #[test]
     fn fail_closed_runtime_never_opens_or_returns_a_path() {
-        let state = OriginalViewerCommandState::unavailable();
+        let state = OriginalViewerCommandState::fail_closed();
         let error = state.adapter.open_original(&request()).unwrap_err();
         assert_eq!(error, OriginalViewerError::Unavailable);
         assert!(!error.to_string().contains('/'));

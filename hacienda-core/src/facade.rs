@@ -1553,10 +1553,9 @@ impl HaciendaFacade {
     /// and `summary.text` (an extractive summary is built from sentences lifted straight
     /// out of `.content`, so anything detectable there can resurface here verbatim).
     ///
-    /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
-    /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
-    /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
-    /// silently included by half-measure. Also not covered: fields gated behind
+    /// `metadata.additional` is covered recursively because it is an open `HashMap<_, JSON
+    /// Value>` of postprocessor-specific fields, including source file paths. Also not covered:
+    /// fields gated behind
     /// extraction-config flags or Cargo features this workspace does not yet enable
     /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
     /// `chunks`, `translation`, `page_classifications`, `structured_output`,
@@ -1623,10 +1622,9 @@ impl HaciendaFacade {
     /// and `summary.text` (an extractive summary is built from sentences lifted straight
     /// out of `.content`, so anything detectable there can resurface here verbatim).
     ///
-    /// Deliberately not exhaustive yet: `metadata.additional` (an open `HashMap<_, JSON
-    /// Value>` of postprocessor-specific fields, e.g. source file paths) is not covered —
-    /// scoped out explicitly in P7 §2 as a separate, lower-severity follow-up rather than
-    /// silently included by half-measure. Also not covered: fields gated behind
+    /// `metadata.additional` is covered recursively because it is an open `HashMap<_, JSON
+    /// Value>` of postprocessor-specific fields, including source file paths. Also not covered:
+    /// fields gated behind
     /// extraction-config flags or Cargo features this workspace does not yet enable
     /// (`elements`, `document`'s structure tree, `ocr_elements`, `djot_content`,
     /// `chunks`, `translation`, `page_classifications`, `structured_output`,
@@ -1700,6 +1698,19 @@ impl HaciendaFacade {
                 self.redact_string_field(author, pipeline, audit_log)
                     .await?;
             }
+        }
+        // Titles, subjects, and extractor-provided additional metadata are document
+        // surfaces too. They are copied into the editor/LanceDB projection, so leaving
+        // them untouched would let a filename or matter name bypass the content guard.
+        if let Some(title) = &mut document.metadata.title {
+            self.redact_string_field(title, pipeline, audit_log).await?;
+        }
+        if let Some(subject) = &mut document.metadata.subject {
+            self.redact_string_field(subject, pipeline, audit_log)
+                .await?;
+        }
+        for value in document.metadata.additional.values_mut() {
+            self.redact_string_field(value, pipeline, audit_log).await?;
         }
         if let Some(created_by) = &mut document.metadata.created_by {
             self.redact_string_field(created_by, pipeline, audit_log)
@@ -3170,6 +3181,12 @@ mod tests {
 
         let mut document = base_document().await;
         document.content = "top-level content, redacted separately by the outer loop".to_string();
+        document.metadata.title = Some(format!("title: {P7_CORPUS_EMAIL}"));
+        document.metadata.subject = Some(format!("subject: {P7_CORPUS_EMAIL}"));
+        document.metadata.additional.insert(
+            "filename".into(),
+            serde_json::json!({"display": format!("filename: {P7_CORPUS_EMAIL}")}),
+        );
         document.metadata.authors = Some(vec![P7_CORPUS_EMAIL.to_string()]);
         document.metadata.created_by = Some(P7_CORPUS_EMAIL.to_string());
         document.metadata.modified_by = Some(P7_CORPUS_EMAIL.to_string());
@@ -3255,6 +3272,18 @@ mod tests {
         for author in authors {
             assert_field_redacted("metadata.authors", author);
         }
+        assert_field_redacted(
+            "metadata.title",
+            document.metadata.title.as_deref().unwrap_or(""),
+        );
+        assert_field_redacted(
+            "metadata.subject",
+            document.metadata.subject.as_deref().unwrap_or(""),
+        );
+        assert_field_redacted(
+            "metadata.additional",
+            &serde_json::to_string(&document.metadata.additional).expect("metadata serializes"),
+        );
         assert_field_redacted(
             "metadata.created_by",
             document.metadata.created_by.as_deref().unwrap_or(""),

@@ -99,6 +99,40 @@ test("open-original forwards opaque reference names without a reveal payload", a
   }]);
 });
 
+test("document bridge accepts token-only projections and appends editor versions", async () => {
+  const calls = [];
+  const projection = {
+    schema_version: "hacienda.editor.v1",
+    document_id: "doc_opaque",
+    version_id: "ver_opaque",
+    source: {
+      mime_type: "application/pdf",
+      original_ref: "orig_opaque",
+      viewer_ref: "viewer_opaque",
+      capability_ref: "cap_opaque",
+    },
+    metadata_token_only: { title: [] },
+    editor: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "[PERSON:k1:ABC]" }] }] },
+    search_projection: { tokens: [] },
+    provenance: { offsets_are_source_only: true },
+  };
+  const bridge = createRendererBridge(async (...args) => {
+    calls.push(args);
+    if (args[0] === "pick-document" || args[0] === "load-document") return projection;
+    return { document_id: "doc_opaque", version_id: "ver_next", parent_version_id: "ver_opaque", idempotent: false };
+  });
+  assert.equal((await bridge.pickDocument()).source.original_ref, "orig_opaque");
+  await bridge.saveDocument({ documentRef: "doc_opaque", versionRef: "ver_opaque", editor: projection.editor });
+  assert.deepEqual(calls[0], ["pick-document"]);
+  assert.deepEqual(calls[1], ["save-document", {
+    request: { document_ref: "doc_opaque", version_ref: "ver_opaque", editor: projection.editor },
+  }]);
+  await assert.rejects(
+    bridge.saveDocument({ documentRef: "/private/path", versionRef: "ver_opaque", editor: projection.editor }),
+    /Invalid document save request/,
+  );
+});
+
 test("local viewer opens only with validated tokenized DTOs and opaque references", async () => {
   let call;
   const bridge = createRendererBridge(async (...args) => {

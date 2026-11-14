@@ -6,6 +6,12 @@ publish = false
 
 [workspace]
 
+[features]
+default = []
+# Opt-in because loading GLiNER2 weights is expensive, but production LocalFull
+# ingestion refuses to run until this feature and a real model directory are present.
+ner-candle = ["hacienda-core/ner-candle"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -13,11 +19,30 @@ tauri-build = { version = "2", features = [] }
 blake3 = "1"
 hacienda-core = { path = "../../../hacienda-core" }
 hacienda-client-core = { path = "../../../crates/hacienda-client-core" }
+hacienda-backend = { path = "../../../crates/hacienda-backend", features = ["lancedb"] }
+hacienda-rag = { path = "../../../crates/hacienda-rag", features = ["lancedb"] }
 futures = "0.3"
 getrandom = "0.3"
+rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["sync"] }
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd", default-features = false, features = [
+    "tokio-runtime",
+    "pdf",
+    "office",
+    "excel",
+    "email",
+    "hwp",
+    "hwpx",
+    "iwork",
+    "archives",
+    "keywords",
+    "summarization",
+    "qr-codes",
+] }
+uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]

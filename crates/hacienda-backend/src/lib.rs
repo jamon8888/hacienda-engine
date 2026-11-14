@@ -510,6 +510,25 @@ pub trait AuthenticatedTenantGateway: Send + Sync {
 }
 
 impl Backend {
+    /// Materialize the immutable token-only record written by an editor revision.
+    ///
+    /// This is intentionally exposed as a projection helper rather than a general
+    /// document constructor: callers can only advance a record with a revision that
+    /// was issued by [`TrustedEditorRevisionIssuer`] and a backend-allocated version id.
+    pub fn document_for_editor_revision(
+        &self,
+        base: &BackendDocument,
+        revision: &PipelineAttestedEditorRevision,
+        version_id: &str,
+    ) -> Result<BackendDocument, BackendError> {
+        if version_id.trim().is_empty() {
+            return Err(BackendError::InvalidEditorRevision(
+                "revision version id is empty".into(),
+            ));
+        }
+        build_editor_revision_document(self, base, revision, version_id)
+    }
+
     pub fn new(profile: InstallationConfig) -> Result<Self, BackendError> {
         profile.validate()?;
         let scope = match &profile {
