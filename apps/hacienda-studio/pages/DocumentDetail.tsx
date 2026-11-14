@@ -163,6 +163,9 @@ export function DocumentDetail({
           ? `original-${contentHash}`
           : "original-session",
         viewerRef: "viewer-session-capability",
+        capabilityRef: contentHash
+          ? `capability-${contentHash}`
+          : "capability-session",
         metadata: { title: result.name, filename: result.frontmatter.source },
         markdown: result.rawMarkdown,
         findings,
@@ -238,9 +241,10 @@ export function DocumentDetail({
     void rendererBridge
       .openOriginal({
         documentRef: tokenizedEnvelope.document_id,
+        versionRef: tokenizedEnvelope.version_id,
         originalRef: tokenizedEnvelope.source.original_ref,
         viewerRef: tokenizedEnvelope.source.viewer_ref,
-        capabilityRef: tokenizedEnvelope.source.viewer_ref,
+        capabilityRef: tokenizedEnvelope.source.capability_ref,
       })
       .catch(() => {
         toast.error("Le visualiseur original est indisponible");

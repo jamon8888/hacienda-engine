@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The minimal desktop capability set for the secrecy client.",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:allow-open-path"]
+}

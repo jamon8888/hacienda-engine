@@ -1,7 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+#[cfg(not(test))]
+use tauri::Manager;
+use tauri_plugin_opener::OpenerExt;
 
 use hacienda_client_core::{
     ClaudeDesktopRequest, ClaudeDesktopResponse, ClientError, CodexRequest, CodexResponse,
@@ -14,6 +21,7 @@ use hacienda_client_core::{
 #[derive(Debug, Deserialize)]
 struct OpenOriginalRequest {
     document_ref: String,
+    version_ref: String,
     original_ref: String,
     viewer_ref: String,
     capability_ref: String,
@@ -24,25 +32,161 @@ struct OpenOriginalResponse {
     opened: bool,
 }
 
-#[tauri::command(rename = "open-original")]
-fn open_original(request: OpenOriginalRequest) -> Result<OpenOriginalResponse, String> {
-    let refs_are_present = [
-        request.document_ref,
-        request.original_ref,
-        request.viewer_ref,
-        request.capability_ref,
-    ]
-    .iter()
-    .all(|reference| !reference.is_empty());
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct OriginalBinding {
+    document_ref: String,
+    version_ref: String,
+    original_ref: String,
+    viewer_ref: String,
+    capability_ref: String,
+}
 
-    if !refs_are_present {
-        return Err("original viewer capability is unavailable".to_owned());
+impl From<&OpenOriginalRequest> for OriginalBinding {
+    fn from(request: &OpenOriginalRequest) -> Self {
+        Self {
+            document_ref: request.document_ref.clone(),
+            version_ref: request.version_ref.clone(),
+            original_ref: request.original_ref.clone(),
+            viewer_ref: request.viewer_ref.clone(),
+            capability_ref: request.capability_ref.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OriginalViewerError {
+    Unavailable,
+    InvalidRequest,
+    Unauthorized,
+    OpenFailed,
+}
+
+impl std::fmt::Display for OriginalViewerError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable => "original viewer is unavailable",
+            Self::InvalidRequest => "original viewer request is invalid",
+            Self::Unauthorized => "original viewer capability is unavailable",
+            Self::OpenFailed => "original viewer could not open the document",
+        })
+    }
+}
+
+trait DesktopOpener: Send + Sync {
+    fn open(&self, path: &Path) -> Result<(), ()>;
+}
+
+struct TauriDesktopOpener {
+    _app: tauri::AppHandle,
+}
+
+impl TauriDesktopOpener {
+    fn new(app: tauri::AppHandle) -> Self {
+        Self { _app: app }
+    }
+}
+
+impl DesktopOpener for TauriDesktopOpener {
+    fn open(&self, path: &Path) -> Result<(), ()> {
+        self._app
+            .opener()
+            .open_path(path.to_string_lossy().to_string(), None::<String>)
+            .map_err(|_| ())
+    }
+}
+
+struct NativeOriginalViewer {
+    bindings: Mutex<HashMap<OriginalBinding, PathBuf>>,
+    opener: Arc<dyn DesktopOpener>,
+}
+
+impl NativeOriginalViewer {
+    fn new(opener: Arc<dyn DesktopOpener>) -> Self {
+        Self {
+            bindings: Mutex::new(HashMap::new()),
+            opener,
+        }
     }
 
-    // The local vault/viewer adapter will resolve these refs in a later desktop
-    // integration.  Keeping the command explicit now gives web and Tauri
-    // renderers the same fail-closed contract without transporting content.
-    Err("original viewer adapter is unavailable".to_owned())
+    #[cfg(test)]
+    fn register(&self, binding: OriginalBinding, path: PathBuf) {
+        self.bindings
+            .lock()
+            .expect("binding lock")
+            .insert(binding, path);
+    }
+}
+
+trait OriginalViewerAdapter: Send + Sync {
+    fn open_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError>;
+}
+
+impl OriginalViewerAdapter for NativeOriginalViewer {
+    fn open_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError> {
+        let refs = [
+            &request.document_ref,
+            &request.version_ref,
+            &request.original_ref,
+            &request.viewer_ref,
+            &request.capability_ref,
+        ];
+        if refs.iter().any(|reference| reference.trim().is_empty()) {
+            return Err(OriginalViewerError::InvalidRequest);
+        }
+        let path = self
+            .bindings
+            .lock()
+            .map_err(|_| OriginalViewerError::Unavailable)?
+            .get(&OriginalBinding::from(request))
+            .cloned()
+            .ok_or(OriginalViewerError::Unauthorized)?;
+        if !path.is_file() {
+            return Err(OriginalViewerError::Unavailable);
+        }
+        self.opener
+            .open(&path)
+            .map_err(|_| OriginalViewerError::OpenFailed)
+    }
+}
+
+struct FailClosedOriginalViewer;
+
+impl OriginalViewerAdapter for FailClosedOriginalViewer {
+    fn open_original(&self, _request: &OpenOriginalRequest) -> Result<(), OriginalViewerError> {
+        Err(OriginalViewerError::Unavailable)
+    }
+}
+
+struct OriginalViewerCommandState {
+    adapter: Box<dyn OriginalViewerAdapter>,
+}
+
+impl OriginalViewerCommandState {
+    fn fail_closed() -> Self {
+        Self {
+            adapter: Box::new(FailClosedOriginalViewer),
+        }
+    }
+
+    fn native(app: tauri::AppHandle) -> Self {
+        Self {
+            adapter: Box::new(NativeOriginalViewer::new(Arc::new(
+                TauriDesktopOpener::new(app),
+            ))),
+        }
+    }
+}
+
+#[tauri::command(rename = "open-original")]
+fn open_original(
+    state: tauri::State<'_, OriginalViewerCommandState>,
+    request: OpenOriginalRequest,
+) -> Result<OpenOriginalResponse, String> {
+    state
+        .adapter
+        .open_original(&request)
+        .map_err(|error| error.to_string())?;
+    Ok(OpenOriginalResponse { opened: true })
 }
 
 /// Tauri state for the transient provider path. Both adapters are injected so
@@ -170,9 +314,15 @@ fn stream_codex(
     }
 }
 
+#[cfg(not(test))]
 fn main() {
     tauri::Builder::default()
         .manage(ProviderCommandState::fail_closed())
+        .setup(|app| {
+            app.manage(OriginalViewerCommandState::native(app.handle().clone()));
+            Ok(())
+        })
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             open_original,
             stream_claude,
@@ -180,4 +330,75 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Hacienda Secrecy Client");
+}
+
+#[cfg(test)]
+fn main() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct RecordingOpener(Mutex<Option<PathBuf>>);
+
+    impl DesktopOpener for RecordingOpener {
+        fn open(&self, path: &Path) -> Result<(), ()> {
+            *self.0.lock().expect("opener lock") = Some(path.to_path_buf());
+            Ok(())
+        }
+    }
+
+    fn request() -> OpenOriginalRequest {
+        OpenOriginalRequest {
+            document_ref: "doc-opaque".into(),
+            version_ref: "version-opaque".into(),
+            original_ref: "original-opaque".into(),
+            viewer_ref: "viewer-opaque".into(),
+            capability_ref: "capability-opaque".into(),
+        }
+    }
+
+    #[test]
+    fn fail_closed_runtime_never_opens_or_returns_a_path() {
+        let state = OriginalViewerCommandState::fail_closed();
+        let error = state.adapter.open_original(&request()).unwrap_err();
+        assert_eq!(error, OriginalViewerError::Unavailable);
+        assert!(!error.to_string().contains('/'));
+    }
+
+    #[test]
+    fn native_viewer_requires_exact_document_version_and_capability_binding() {
+        let opener = Arc::new(RecordingOpener(Mutex::new(None)));
+        let viewer = NativeOriginalViewer::new(opener.clone());
+        let path = std::env::temp_dir().join("hacienda-original-viewer-test.txt");
+        std::fs::write(&path, "synthetic PII must stay outside renderer").expect("fixture");
+        viewer.register(OriginalBinding::from(&request()), path.clone());
+
+        let mut wrong_version = request();
+        wrong_version.version_ref = "version-other".into();
+        assert_eq!(
+            viewer.open_original(&wrong_version),
+            Err(OriginalViewerError::Unauthorized)
+        );
+
+        viewer.open_original(&request()).expect("authorized open");
+        assert_eq!(opener.0.lock().expect("opener lock").as_ref(), Some(&path));
+        let response = serde_json::to_string(&OpenOriginalResponse { opened: true })
+            .expect("response serializes");
+        assert_eq!(response, "{\"opened\":true}");
+        assert!(!response.contains(path.to_string_lossy().as_ref()));
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn native_viewer_rejects_empty_refs_before_resolution() {
+        let viewer = NativeOriginalViewer::new(Arc::new(RecordingOpener(Mutex::new(None))));
+        let mut request = request();
+        request.capability_ref.clear();
+        assert_eq!(
+            viewer.open_original(&request),
+            Err(OriginalViewerError::InvalidRequest)
+        );
+    }
 }

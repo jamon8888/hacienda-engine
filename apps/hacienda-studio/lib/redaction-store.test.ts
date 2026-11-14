@@ -27,6 +27,7 @@ describe("redaction-store", () => {
       mime_type: "application/pdf",
       original_ref: "orig_opaque",
       viewer_ref: "viewer_opaque",
+      capability_ref: "capability_opaque",
     },
     metadata_token_only: {
       title: "[TITLE:title-opaque]",

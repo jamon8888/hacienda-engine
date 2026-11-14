@@ -9,6 +9,7 @@ export const OPEN_ORIGINAL_COMMAND = "open-original" as const;
 
 export interface OpenOriginalReferences {
   documentRef: string;
+  versionRef: string;
   originalRef: string;
   viewerRef: string;
   capabilityRef: string;
@@ -17,6 +18,7 @@ export interface OpenOriginalReferences {
 /** Wire shape consumed by Tauri's `open-original` command. */
 export interface OpenOriginalInvokePayload {
   document_ref: string;
+  version_ref: string;
   original_ref: string;
   viewer_ref: string;
   capability_ref: string;
@@ -44,6 +46,7 @@ export function toOpenOriginalInvokePayload(
 ): OpenOriginalInvokePayload {
   return {
     document_ref: references.documentRef,
+    version_ref: references.versionRef,
     original_ref: references.originalRef,
     viewer_ref: references.viewerRef,
     capability_ref: references.capabilityRef,

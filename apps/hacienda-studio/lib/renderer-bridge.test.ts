@@ -8,6 +8,7 @@ import {
 
 const references: OpenOriginalReferences = {
   documentRef: "doc-opaque-1",
+  versionRef: "version-opaque-1",
   originalRef: "original-opaque-1",
   viewerRef: "viewer-opaque-1",
   capabilityRef: "capability-opaque-1",
@@ -22,6 +23,7 @@ describe("desktop renderer bridge", () => {
 
     expect(invoke).toHaveBeenCalledWith("open-original", {
       document_ref: "doc-opaque-1",
+      version_ref: "version-opaque-1",
       original_ref: "original-opaque-1",
       viewer_ref: "viewer-opaque-1",
       capability_ref: "capability-opaque-1",

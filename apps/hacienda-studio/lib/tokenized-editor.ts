@@ -43,6 +43,7 @@ export interface TokenizedEditorEnvelope {
     mime_type: string;
     original_ref: string;
     viewer_ref: string;
+    capability_ref: string;
   };
   metadata_token_only: TokenizedMetadata;
   editor: TokenizedEditorDocument;
@@ -312,6 +313,7 @@ export function buildTokenizedEditorEnvelope({
   mimeType: string;
   originalRef: string;
   viewerRef: string;
+  capabilityRef: string;
   metadata: Parameters<typeof redactMetadata>[0];
   markdown: string;
   findings: PiiEntity[];
@@ -328,6 +330,7 @@ export function buildTokenizedEditorEnvelope({
       mime_type: mimeType,
       original_ref: originalRef,
       viewer_ref: viewerRef,
+      capability_ref: capabilityRef,
     },
     metadata_token_only: redactMetadata(metadata, issueToken),
     editor,
