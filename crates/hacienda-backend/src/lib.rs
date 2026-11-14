@@ -13,10 +13,11 @@ use hacienda_core::editor_projection::{
     EditorEnvelope, EditorProjectionOptions, SearchToken, SensitiveToken, project_document,
 };
 use hacienda_core::pii::PiiPipeline;
-use hacienda_core::redaction::{KeyId, KeyResolver, Pseudonymiser};
+use hacienda_core::redaction::{KeyId, KeyResolver, Pseudonymiser, RedactionMode};
 use hacienda_core::tenancy::TenantId;
 use hacienda_rag::{
-    ChunkRecord, CollectionSpec, DocumentId, DocumentRecord, RagError, RagResult, RagStore,
+    ChunkRecord, CollectionSpec, DocumentId, DocumentRecord, EmbeddingError, RagError, RagResult,
+    RagStore, TokenOnlyText, TokenTextEmbedder, validate_batch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -220,6 +221,10 @@ impl TrustedEditorRevisionIssuer {
     /// The pipeline version is derived from its serialized configuration, never supplied by
     /// the UI.
     pub fn new(pipeline: Arc<PiiPipeline>) -> Result<Self, BackendError> {
+        if !pipeline.has_model() || pipeline.config().redaction.mode != RedactionMode::Pseudonymize
+        {
+            return Err(BackendError::PipelineNotReady);
+        }
         let config = serde_json::to_vec(pipeline.config())?;
         let pipeline_version = format!(
             "hacienda-pii-pipeline-v1:{}",
@@ -478,6 +483,14 @@ pub enum BackendError {
     Audit(#[from] hacienda_core::audit::AuditError),
     #[error("editor pipeline failed: {0}")]
     Pipeline(#[from] hacienda_core::pii::PiiError),
+    #[error(
+        "editor pipeline is not ready: a loaded NER detector and reversible pseudonymization are required"
+    )]
+    PipelineNotReady,
+    #[error("token-only embedding failed: {0}")]
+    Embedding(#[from] EmbeddingError),
+    #[error("embedding collection provenance does not match the configured embedder")]
+    EmbeddingProvenanceMismatch,
     #[error("rehydration authorization failed")]
     RehydrationDenied,
     #[error("RAG store error: {0}")]
@@ -714,6 +727,55 @@ impl Backend {
             .await
     }
 
+    /// Persist a token-only document with real dense vectors from the configured embedder.
+    /// This is intentionally separate from [`Self::persist_to`], which is the full-text-only
+    /// path and creates a zero-dimensional collection.
+    pub async fn persist_to_with_embedder(
+        &self,
+        store: &dyn RagStore,
+        requested_collection: &str,
+        document: &BackendDocument,
+        embedder: &dyn TokenTextEmbedder,
+    ) -> Result<DocumentId, BackendError> {
+        let embedded = embed_backend_document(document, embedder).await?;
+        self.persist_embedded_to(store, requested_collection, &embedded, embedder)
+            .await
+    }
+
+    async fn persist_embedded_to(
+        &self,
+        store: &dyn RagStore,
+        requested_collection: &str,
+        document: &BackendDocument,
+        embedder: &dyn TokenTextEmbedder,
+    ) -> Result<DocumentId, BackendError> {
+        if document.tenant_scope != self.tenant_scope() {
+            return Err(BackendError::InvalidScope);
+        }
+        let collection = self.collection_name(requested_collection)?;
+        let metadata = embedder.metadata();
+        let spec = metadata.collection_spec(collection.clone());
+        if let Some(existing) = store.get_collection(&collection).await? {
+            if existing.embedding_dim != spec.embedding_dim
+                || existing.embedding_source.as_deref().is_some_and(|source| {
+                    source != spec.embedding_source.as_deref().unwrap_or_default()
+                })
+                || (existing.embedding_source.is_some()
+                    && existing.embedding_version != spec.embedding_version)
+            {
+                return Err(BackendError::EmbeddingProvenanceMismatch);
+            }
+        }
+        store.ensure_collection(&spec).await?;
+        let id = store
+            .upsert_document(&collection, &document.rag_document, &document.chunks)
+            .await?;
+        store
+            .set_embedding_provenance(&collection, metadata.source(), metadata.version())
+            .await?;
+        Ok(id)
+    }
+
     /// Persist through an authenticated TeamOnPremise gateway. The gateway supplies
     /// the tenant-scoped store; callers cannot inject a raw LanceDB connection here.
     pub async fn persist_via_gateway<G: AuthenticatedTenantGateway>(
@@ -737,6 +799,26 @@ impl Backend {
             .await
     }
 
+    /// Persist vectors through an authenticated TeamOnPremise gateway. The embedder is a
+    /// server-side dependency; the client still cannot inject a LanceDB connection.
+    pub async fn persist_via_gateway_with_embedder<G: AuthenticatedTenantGateway>(
+        &self,
+        gateway: &G,
+        requested_collection: &str,
+        document: &BackendDocument,
+        embedder: &dyn TokenTextEmbedder,
+    ) -> Result<DocumentId, BackendError> {
+        let expected = self
+            .tenant_scope()
+            .ok_or_else(|| BackendError::InvalidScope)?;
+        if gateway.tenant_scope().0 != expected {
+            return Err(BackendError::TenantScopeMismatch);
+        }
+        let store = gateway.rag_store().await?;
+        self.persist_to_with_embedder(store.as_ref(), requested_collection, document, embedder)
+            .await
+    }
+
     /// Append a pipeline-attested Tiptap revision to a LocalFull store.
     ///
     /// `base` is server-side state, not a client claim: its tenant, dossier, document and
@@ -752,8 +834,38 @@ impl Backend {
         base: &BackendDocument,
         revision: &PipelineAttestedEditorRevision,
     ) -> Result<EditorRevisionSave, BackendError> {
-        self.append_editor_revision_to_store(audit, store, requested_collection, base, revision)
-            .await
+        self.append_editor_revision_to_store(
+            audit,
+            store,
+            requested_collection,
+            base,
+            revision,
+            None,
+        )
+        .await
+    }
+
+    /// Append a pipeline-attested revision with real dense vectors. The full-text-only
+    /// [`Self::append_editor_revision`] remains available for deployments without an
+    /// embedding service.
+    pub async fn append_editor_revision_with_embedder(
+        &self,
+        audit: &dyn AuditStore,
+        store: &dyn RagStore,
+        requested_collection: &str,
+        base: &BackendDocument,
+        revision: &PipelineAttestedEditorRevision,
+        embedder: &dyn TokenTextEmbedder,
+    ) -> Result<EditorRevisionSave, BackendError> {
+        self.append_editor_revision_to_store(
+            audit,
+            store,
+            requested_collection,
+            base,
+            revision,
+            Some(embedder),
+        )
+        .await
     }
 
     /// Append a pipeline-attested Tiptap revision through an authenticated tenant gateway.
@@ -779,6 +891,35 @@ impl Backend {
             requested_collection,
             base,
             revision,
+            None,
+        )
+        .await
+    }
+
+    /// Append a revision with real vectors through an authenticated TeamOnPremise gateway.
+    pub async fn append_editor_revision_via_gateway_with_embedder<G: AuthenticatedTenantGateway>(
+        &self,
+        audit: &dyn AuditStore,
+        gateway: &G,
+        requested_collection: &str,
+        base: &BackendDocument,
+        revision: &PipelineAttestedEditorRevision,
+        embedder: &dyn TokenTextEmbedder,
+    ) -> Result<EditorRevisionSave, BackendError> {
+        let expected = self
+            .tenant_scope()
+            .ok_or_else(|| BackendError::InvalidScope)?;
+        if gateway.tenant_scope().0 != expected {
+            return Err(BackendError::TenantScopeMismatch);
+        }
+        let store = gateway.rag_store().await?;
+        self.append_editor_revision_to_store(
+            audit,
+            store.as_ref(),
+            requested_collection,
+            base,
+            revision,
+            Some(embedder),
         )
         .await
     }
@@ -790,6 +931,7 @@ impl Backend {
         requested_collection: &str,
         base: &BackendDocument,
         revision: &PipelineAttestedEditorRevision,
+        embedder: Option<&dyn TokenTextEmbedder>,
     ) -> Result<EditorRevisionSave, BackendError> {
         let _guard = self.revision_lock.lock().await;
         if base.tenant_scope != self.tenant_scope()
@@ -818,12 +960,20 @@ impl Backend {
             .get_document_chunks(&collection, &DocumentId(base_id))
             .await?
             .ok_or(BackendError::RevisionBaseMissing)?;
-        if stored_base.0 != base.rag_document || stored_base.1 != base.chunks {
+        let expected_base_chunks = match embedder {
+            Some(embedder) => embed_backend_document(base, embedder).await?.chunks,
+            None => base.chunks.clone(),
+        };
+        if stored_base.0 != base.rag_document || stored_base.1 != expected_base_chunks {
             return Err(BackendError::RevisionBaseMismatch);
         }
 
         let version_id = revision_version_id(base, revision)?;
         let candidate = build_editor_revision_document(self, base, revision, &version_id)?;
+        let candidate = match embedder {
+            Some(embedder) => embed_backend_document(&candidate, embedder).await?,
+            None => candidate,
+        };
         let candidate_id = DocumentId(
             candidate
                 .rag_document
@@ -883,9 +1033,34 @@ impl Backend {
         // plus the serialized equality check above prevents ordinary overwrites; the lock
         // closes races between saves through this Backend instance. A store-level
         // create-only primitive is still required to make this atomic across processes.
+        if let Some(embedder) = embedder {
+            let metadata = embedder.metadata();
+            let spec = metadata.collection_spec(collection.clone());
+            if let Some(existing) = store.get_collection(&collection).await?
+                && (existing.embedding_dim != spec.embedding_dim
+                    || existing.embedding_source.as_deref().is_some_and(|source| {
+                        source != spec.embedding_source.as_deref().unwrap_or_default()
+                    })
+                    || (existing.embedding_source.is_some()
+                        && existing.embedding_version != spec.embedding_version))
+            {
+                return Err(BackendError::EmbeddingProvenanceMismatch);
+            }
+            store.ensure_collection(&spec).await?;
+        } else {
+            store
+                .ensure_collection(&CollectionSpec::new(&collection, 0))
+                .await?;
+        }
         let rag_document_id = store
             .upsert_document(&collection, &candidate.rag_document, &candidate.chunks)
             .await?;
+        if let Some(embedder) = embedder {
+            let metadata = embedder.metadata();
+            store
+                .set_embedding_provenance(&collection, metadata.source(), metadata.version())
+                .await?;
+        }
         let audit_references = vec![AuditReference(audit_entry.id)];
         Ok(EditorRevisionSave {
             document_id: base.editor.document_ref.clone(),
@@ -1223,6 +1398,136 @@ mod tests {
         );
     }
 
+    struct TestEmbedder {
+        metadata: hacienda_rag::EmbeddingMetadata,
+    }
+
+    impl TestEmbedder {
+        fn new() -> Self {
+            Self {
+                metadata: hacienda_rag::EmbeddingMetadata::new("test:token-only", 4, 3, 8).unwrap(),
+            }
+        }
+    }
+
+    struct EmptyNer;
+
+    #[async_trait]
+    impl xberg::text::ner::NerBackend for EmptyNer {
+        async fn detect(
+            &self,
+            _text: &str,
+            _categories: &[xberg::types::entity::EntityCategory],
+        ) -> xberg::Result<Vec<xberg::types::entity::Entity>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn ready_pipeline() -> Arc<PiiPipeline> {
+        let resolver = hacienda_core::redaction::EnvKeyResolver::with_lookup(|name| match name {
+            hacienda_core::redaction::ACTIVE_KEY_VAR => Some("k1".into()),
+            "HACIENDA_PSEUDONYM_KEY_K1" => Some("07".repeat(hacienda_core::redaction::KEY_BYTES)),
+            _ => None,
+        });
+        let pseudonymiser =
+            Pseudonymiser::new(&resolver, &TenantId::default_tenant(), &[]).unwrap();
+        let config = hacienda_core::pii::PipelineConfig {
+            redaction: hacienda_core::redaction::RedactionConfig {
+                mode: RedactionMode::Pseudonymize,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let detector = hacienda_core::pii::NerDetector::new(Arc::new(EmptyNer));
+        Arc::new(
+            PiiPipeline::with_detector_and_pseudonymiser(
+                config,
+                Some(detector),
+                Some(Arc::new(pseudonymiser)),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[async_trait]
+    impl TokenTextEmbedder for TestEmbedder {
+        fn metadata(&self) -> &hacienda_rag::EmbeddingMetadata {
+            &self.metadata
+        }
+
+        async fn embed_batch(
+            &self,
+            inputs: &[TokenOnlyText],
+        ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            Ok(inputs
+                .iter()
+                .enumerate()
+                .map(|(index, _)| vec![index as f32, 1.0, 2.0])
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_persistence_derives_collection_provenance_and_vectors() {
+        let backend = Backend::new(local()).unwrap();
+        let record = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let store = InMemoryVectorStore::default();
+        let embedder = TestEmbedder::new();
+        let id = backend
+            .persist_to_with_embedder(&store, "contracts", &record, &embedder)
+            .await
+            .unwrap();
+        let spec = store
+            .get_collection("local:contracts")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.embedding_dim, 3);
+        assert_eq!(spec.embedding_source.as_deref(), Some("test:token-only"));
+        assert_eq!(spec.embedding_version, 4);
+        let (_, chunks) = store
+            .get_document_chunks("local:contracts", &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunks[0].embedding, vec![0.0, 1.0, 2.0]);
+        assert!(!serde_json::to_string(&chunks).unwrap().contains("Jane Doe"));
+    }
+
+    #[test]
+    fn editor_issuer_fails_closed_without_model_and_reversible_mode() {
+        let regex_only = Arc::new(
+            PiiPipeline::with_detector(hacienda_core::pii::PipelineConfig::default(), None)
+                .unwrap(),
+        );
+        assert!(matches!(
+            TrustedEditorRevisionIssuer::new(regex_only),
+            Err(BackendError::PipelineNotReady)
+        ));
+        let model_mask = Arc::new(
+            PiiPipeline::with_detector(
+                hacienda_core::pii::PipelineConfig::default(),
+                Some(hacienda_core::pii::NerDetector::new(Arc::new(EmptyNer))),
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            TrustedEditorRevisionIssuer::new(model_mask),
+            Err(BackendError::PipelineNotReady)
+        ));
+        let ready = ready_pipeline();
+        assert!(ready.has_model());
+        assert_eq!(ready.config().redaction.mode, RedactionMode::Pseudonymize);
+        assert!(TrustedEditorRevisionIssuer::new(ready).is_ok());
+    }
+
     #[tokio::test]
     async fn editor_revision_is_audited_before_append_and_retries_are_idempotent() {
         let backend = Backend::new(local()).unwrap();
@@ -1235,27 +1540,36 @@ mod tests {
             )
             .unwrap();
         let store = InMemoryVectorStore::default();
+        let embedder = TestEmbedder::new();
         backend
-            .persist_to(&store, "contracts", &base)
+            .persist_to_with_embedder(&store, "contracts", &base, &embedder)
             .await
             .unwrap();
         let audit = InMemoryAuditStore::new("default");
-        let pipeline = Arc::new(
-            hacienda_core::pii::PiiPipeline::with_detector(
-                hacienda_core::pii::PipelineConfig::default(),
-                None,
-            )
-            .unwrap(),
-        );
+        let pipeline = ready_pipeline();
         let issuer = TrustedEditorRevisionIssuer::new(pipeline).unwrap();
         let revision = issuer.issue(&base, &base.editor().editor).await.unwrap();
 
         let first = backend
-            .append_editor_revision(&audit, &store, "contracts", &base, &revision)
+            .append_editor_revision_with_embedder(
+                &audit,
+                &store,
+                "contracts",
+                &base,
+                &revision,
+                &embedder,
+            )
             .await
             .unwrap();
         let second = backend
-            .append_editor_revision(&audit, &store, "contracts", &base, &revision)
+            .append_editor_revision_with_embedder(
+                &audit,
+                &store,
+                "contracts",
+                &base,
+                &revision,
+                &embedder,
+            )
             .await
             .unwrap();
         assert!(!first.idempotent);
@@ -1284,6 +1598,7 @@ mod tests {
         assert_eq!(persisted.0.labels["dossier_id"], "case");
         assert_eq!(persisted.0.labels["document_id"], "doc");
         assert_eq!(persisted.0.labels["version_id"], first.version_id);
+        assert_eq!(persisted.1[0].embedding.len(), 3);
     }
 
     #[tokio::test]
@@ -1301,18 +1616,12 @@ mod tests {
         editor.editor["content"][0]["content"] = serde_json::json!([
             {"type": "text", "text": "Email bob@example.com"}
         ]);
-        let pipeline = Arc::new(
-            hacienda_core::pii::PiiPipeline::with_detector(
-                hacienda_core::pii::PipelineConfig::default(),
-                None,
-            )
-            .unwrap(),
-        );
+        let pipeline = ready_pipeline();
         let issuer = TrustedEditorRevisionIssuer::new(pipeline).unwrap();
         let revision = issuer.issue(&base, &editor.editor).await.unwrap();
         let serialized = serde_json::to_string(revision.editor()).unwrap();
         assert!(!serialized.contains("bob@example.com"));
-        assert!(serialized.contains("[EMAIL]"));
+        assert!(serialized.contains("[EMAIL:"));
 
         editor.editor["content"][0]["content"] = serde_json::json!([
             {"type": "text", "text": "Forged [PERSON:k9:IFBEGRCF]"}
@@ -1476,6 +1785,24 @@ fn revision_version_id(
         &revision.pipeline_digest,
     ))?;
     Ok(format!("v-{}", blake3::hash(&payload).to_hex()))
+}
+
+async fn embed_backend_document(
+    document: &BackendDocument,
+    embedder: &dyn TokenTextEmbedder,
+) -> Result<BackendDocument, BackendError> {
+    let inputs = document
+        .chunks
+        .iter()
+        .map(|chunk| TokenOnlyText::from_token_only(chunk.content.clone()))
+        .collect::<Vec<_>>();
+    let vectors = embedder.embed(&inputs).await?;
+    validate_batch(inputs.len(), embedder.metadata().dimension(), &vectors)?;
+    let mut embedded = document.clone();
+    for (chunk, vector) in embedded.chunks.iter_mut().zip(vectors) {
+        chunk.embedding = vector;
+    }
+    Ok(embedded)
 }
 
 fn build_editor_revision_document(
