@@ -41,7 +41,7 @@ patches:
 
 images:
   - name: ghcr.io/jamon8888/hacienda
-    newTag: "latest"
+    newTag: "v0.1.0"
 
 commonLabels:
   environment: staging

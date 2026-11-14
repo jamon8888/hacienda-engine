@@ -15,8 +15,7 @@ resource "google_sql_database_instance" "hacienda" {
     disk_size               = var.environment == "prod" ? 100 : 10
     disk_autoresize         = true
     disk_type               = "PD_SSD"
-    storage_auto_resize     = true
-    storage_auto_resize_limit = 500
+    disk_autoresize_limit   = 500
 
     # Backups
     backup_configuration {
@@ -68,7 +67,7 @@ resource "google_sql_database_instance" "hacienda" {
       private_network         = var.network
       require_ssl             = true
       authorized_networks     = []
-      allocate_ip_range       = true
+      allocated_ip_range     = "google-managed-services-default"
       enable_private_path_for_google_cloud_services = true
     }
 
