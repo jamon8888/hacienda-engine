@@ -1,13 +1,13 @@
 # hacienda Elixir NIF Dockerfile (musl)
 # syntax = docker/dockerfile:1.7
 
-FROM rust:1.78-slim AS planner
+FROM rust:1.99-slim AS planner
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY . .
 RUN cargo chef prepare --workspace --recipe-path recipe.json
 
-FROM rust:1.78-slim AS builder
+FROM rust:1.99-slim AS builder
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
