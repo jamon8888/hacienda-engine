@@ -34,6 +34,10 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.025em; }
 .history { display: grid; gap: 13px; margin: 0 0 20px; padding: 0; list-style: none; }
 .history-turn { padding: 14px 15px; border: 1px solid #e8ebe6; border-radius: 10px; background: #fcfdfa; }
 .turn-heading { display: flex; justify-content: space-between; margin-bottom: 9px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.turn-heading .viewer-button { padding: 5px 8px; border: 1px solid var(--line); background: #fff; color: #435248; font-size: 9px; text-transform: none; }
+.detector-status { margin: -9px 0 18px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; font-size: 10px; }
+.detector-status.ready { border-color: #b9cfbd; background: #f4f8f3; color: #34543b; }
+.detector-status.blocked { border-color: #d7c1a5; background: #fbf8f3; color: #6a5538; }
 .token-history-editor { color: #344138; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .token-history-editor p { margin: 0 0 7px; }
 .token-history-editor p:last-child { margin-bottom: 0; }
@@ -75,6 +79,15 @@ button:disabled { cursor: not-allowed; opacity: .46; }
 .manual-controls button { padding: 8px 12px; font-size: 10px; }
 .manual-panel > p { margin: 0 !important; color: var(--muted) !important; font-size: 10px !important; line-height: 1.5; }
 .status { margin: 9px 0 0 !important; color: #47564a !important; }
+.viewer-status { padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: #fbfcfa; }
+.local-viewer-shell .workspace { display: grid; gap: 16px; }
+.close-viewer { margin-left: auto; }
+.viewer-references { display: grid; gap: 10px; padding-top: 15px; border-top: 1px solid var(--line); }
+.viewer-references h3 { margin: 0; font-size: 12px; }
+.viewer-reference { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 9px; border: 1px solid #e8ebe6; border-radius: 8px; }
+.viewer-reference button { padding: 7px 10px; font-size: 10px; }
+.revealed-value { flex-basis: 100%; margin: 2px 0 0; padding: 10px; border-left: 3px solid var(--green); background: #f5f8f4; color: var(--ink); font-family: "DM Mono", monospace; font-size: 12px; overflow-wrap: anywhere; }
+.viewer-disclosure { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .footer-note { padding: 14px 3px 0; color: var(--muted); font-size: 10px; text-align: center; }
 
 @media (max-width: 640px) {

@@ -1,9 +1,31 @@
+// @ts-check
+
+/** @typedef {{ label: string, content: string }} PromptContext */
+/** @typedef {{ conversation_id: string, context_id: string, prompt: string, context: PromptContext[] }} ProviderRequest */
+/** @typedef {{ token: string, class: string }} OpaqueTokenReference */
+/** @typedef {{ text: string, references: OpaqueTokenReference[] }} TokenizedText */
+/** @typedef {{ conversation_id: string, context_id: string, sequence: number, content: TokenizedText }} ProviderStreamChunk */
+/** @typedef {{ conversation_id: string, context_id: string, chunks: ProviderStreamChunk[] }} ProviderResponse */
+/** @typedef {{ document_ref: string, version_ref: string, original_ref: string, viewer_ref: string, capability_ref: string }} OpenOriginalRequest */
+/** @typedef {{ documentRef: string, versionRef: string, originalRef: string, viewerRef: string, capabilityRef: string }} OpenOriginalReferences */
+/** @typedef {{ tokenized: TokenizedText, references: OpaqueTokenReference[] }} OpenLocalViewerRequest */
+/** @typedef {{ provider_send_enabled: boolean, detector: "local_model" | "regex_only" }} LocalPiiStatus */
+/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } } | { token: string }} InvokePayload */
+/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
+/** @typedef {{ sequence: number, text: string, references: OpaqueTokenReference[] }} TokenizedChunk */
+
 const PROVIDER_COMMANDS = Object.freeze({
   claude: "stream-claude",
   codex: "stream-codex",
 });
 
 const unavailable = () => new Error("Desktop provider is unavailable");
+const invalidTokenizedResponse = () => new Error("Invalid tokenized response");
+
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
 
 const PII_CLASS_ALIASES = Object.freeze({
   person: "person",
@@ -57,15 +79,20 @@ const PII_CLASS_ALIASES = Object.freeze({
   url: "network",
 });
 
+/** @param {string} value */
 export function normalizePiiClass(value) {
   if (typeof value !== "string") return "sensitive";
   const key = value
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
-  return PII_CLASS_ALIASES[key] ?? "sensitive";
+  return /** @type {Record<string, string>} */ (PII_CLASS_ALIASES)[key] ?? "sensitive";
 }
 
+/**
+ * @param {{ conversationId: string, contextId: string, prompt: string, context?: PromptContext[] }} input
+ * @returns {ProviderRequest}
+ */
 export function createTurnRequest({ conversationId, contextId, prompt, context = [] }) {
   return {
     conversation_id: conversationId,
@@ -75,61 +102,135 @@ export function createTurnRequest({ conversationId, contextId, prompt, context =
   };
 }
 
-export function readTokenizedChunks(response, conversationId, contextId) {
+/** @param {unknown} value @returns {value is TokenizedText} */
+function isTokenizedText(value) {
+  if (!isRecord(value) || typeof value.text !== "string" || !Array.isArray(value.references)) {
+    return false;
+  }
+  return value.references.every(
+      (reference) =>
+        isRecord(reference) &&
+        typeof reference.token === "string" &&
+        reference.token.trim().length > 0 &&
+        typeof reference.class === "string" &&
+        reference.class.trim().length > 0,
+  );
+}
+
+/** @param {unknown} value @returns {value is OpaqueTokenReference[]} */
+function isOpaqueTokenReferences(value) {
+  return Array.isArray(value) && value.every(
+    (reference) =>
+      isRecord(reference) &&
+      typeof reference.token === "string" &&
+      reference.token.trim().length > 0 &&
+      typeof reference.class === "string" &&
+      reference.class.trim().length > 0,
+  );
+}
+
+/**
+ * @param {unknown} response
+ * @param {string} conversationId
+ * @param {string} contextId
+ * @returns {asserts response is ProviderResponse}
+ */
+function assertTokenizedResponse(response, conversationId, contextId) {
   if (
-    !response ||
+    !isRecord(response) ||
     response.conversation_id !== conversationId ||
     response.context_id !== contextId ||
     !Array.isArray(response.chunks)
   ) {
-    throw new Error("Invalid tokenized response");
+    throw invalidTokenizedResponse();
   }
 
-  return response.chunks.map((chunk) => {
+  for (const chunk of response.chunks) {
     if (
-      !chunk ||
+      !isRecord(chunk) ||
       chunk.conversation_id !== conversationId ||
       chunk.context_id !== contextId ||
       !Number.isSafeInteger(chunk.sequence) ||
-      !chunk.content ||
-      typeof chunk.content.text !== "string" ||
-      !Array.isArray(chunk.content.references) ||
-      chunk.content.references.some(
-        (reference) =>
-          !reference ||
-          typeof reference.token !== "string" ||
-          typeof reference.class !== "string",
-      )
+      !isTokenizedText(chunk.content)
     ) {
-      throw new Error("Invalid tokenized response");
+      throw invalidTokenizedResponse();
     }
-
-    return {
-      sequence: chunk.sequence,
-      text: chunk.content.text,
-      references: chunk.content.references.map(({ token, class: tokenClass }) => ({
-        token,
-        class: tokenClass,
-      })),
-    };
-  });
+  }
 }
 
-export function tokenizedTextToDocument(tokenizedText) {
-  if (
-    !tokenizedText ||
-    typeof tokenizedText.text !== "string" ||
-    !Array.isArray(tokenizedText.references) ||
-    tokenizedText.references.some(
-      (reference) =>
-        !reference ||
-        typeof reference.token !== "string" ||
-        reference.token.length === 0 ||
-        typeof reference.class !== "string",
-    )
-  ) {
-    throw new Error("Invalid tokenized response");
+/** @param {TokenizedText} tokenized @param {OpaqueTokenReference[]} references */
+function assertLocalViewerPayload(tokenized, references) {
+  if (!isTokenizedText(tokenized) || !Array.isArray(references)) {
+    throw invalidTokenizedResponse();
   }
+  const expected = new Set(tokenized.references.map((reference) => `${reference.token}\u0000${reference.class}`));
+  const supplied = new Set();
+  for (const reference of references) {
+    if (
+      !reference ||
+      typeof reference.token !== "string" ||
+      reference.token.trim().length === 0 ||
+      typeof reference.class !== "string" ||
+      reference.class.trim().length === 0 ||
+      !tokenized.text.includes(reference.token)
+    ) {
+      throw invalidTokenizedResponse();
+    }
+    supplied.add(`${reference.token}\u0000${reference.class}`);
+  }
+  if (expected.size !== tokenized.references.length || supplied.size !== references.length ||
+      expected.size !== supplied.size || [...expected].some((reference) => !supplied.has(reference))) {
+    throw invalidTokenizedResponse();
+  }
+}
+
+/** @param {unknown} response @returns {LocalPiiStatus} */
+function readLocalPiiStatus(response) {
+  if (
+    !isRecord(response) ||
+    typeof response.provider_send_enabled !== "boolean" ||
+    (response.detector !== "local_model" && response.detector !== "regex_only")
+  ) {
+    throw new Error("Local PII status unavailable");
+  }
+  return /** @type {LocalPiiStatus} */ (response);
+}
+
+/** @param {unknown} response */
+function readLocalViewerContent(response) {
+  if (!isRecord(response) || !isTokenizedText(response.tokenized) || !isOpaqueTokenReferences(response.references)) {
+    throw invalidTokenizedResponse();
+  }
+  assertLocalViewerPayload(response.tokenized, response.references);
+  return { tokenized: response.tokenized, references: response.references };
+}
+
+/** Provider egress follows the backend's explicit capability flag. @param {LocalPiiStatus | null | undefined} status */
+export function canSendToProvider(status) {
+  return status?.provider_send_enabled === true;
+}
+
+/**
+ * @param {unknown} response
+ * @param {string} conversationId
+ * @param {string} contextId
+ * @returns {TokenizedChunk[]}
+ */
+export function readTokenizedChunks(response, conversationId, contextId) {
+  assertTokenizedResponse(response, conversationId, contextId);
+  return response.chunks.map((chunk) => ({
+    sequence: chunk.sequence,
+    text: chunk.content.text,
+    references: chunk.content.references.map(({ token, class: tokenClass }) => ({
+      token,
+      class: tokenClass,
+    })),
+  }));
+}
+
+/** @param {unknown} tokenizedText */
+export function tokenizedTextToDocument(tokenizedText) {
+  if (!isTokenizedText(tokenizedText)) throw invalidTokenizedResponse();
 
   const references = [...tokenizedText.references].sort(
     (left, right) => right.token.length - left.token.length,
@@ -151,6 +252,7 @@ export function tokenizedTextToDocument(tokenizedText) {
         nodes.push({ type: "text", text: line.slice(cursor) });
         break;
       }
+      if (!match) throw invalidTokenizedResponse();
       if (nextIndex > cursor) nodes.push({ type: "text", text: line.slice(cursor, nextIndex) });
       nodes.push({
         type: "text",
@@ -161,7 +263,7 @@ export function tokenizedTextToDocument(tokenizedText) {
             tokenId: match.token,
             tokenClass: match.class,
             mode: "pseudonymize",
-            source: "provider",
+            source: "regex",
             disclosure: "viewer-only",
           },
         }],
@@ -174,6 +276,18 @@ export function tokenizedTextToDocument(tokenizedText) {
   return { type: "doc", content };
 }
 
+/**
+ * @param {RendererInvoke | undefined} invoke
+ * @returns {{
+ *   stream: (provider: "claude" | "codex", request: ProviderRequest) => Promise<ProviderResponse>,
+ *   openOriginal: (references: OpenOriginalReferences) => Promise<void>,
+ *   openLocalViewer: (tokenized: TokenizedText, references: OpaqueTokenReference[]) => Promise<void>,
+ *   localViewerContent: () => Promise<{ tokenized: TokenizedText, references: OpaqueTokenReference[] }>,
+ *   revealLocalToken: (token: string) => Promise<string>,
+ *   pseudonymizeSelection: (request: { category: string, value: string }) => Promise<TokenizedText>,
+ *   localPiiStatus: () => Promise<LocalPiiStatus>,
+ * }}
+ */
 export function createRendererBridge(invoke) {
   if (typeof invoke !== "function") {
     return {
@@ -183,6 +297,21 @@ export function createRendererBridge(invoke) {
       openOriginal: async () => {
         throw new Error("Original viewer is unavailable");
       },
+      openLocalViewer: async () => {
+        throw new Error("Local viewer is unavailable");
+      },
+      localViewerContent: async () => {
+        throw new Error("Local viewer is unavailable");
+      },
+      revealLocalToken: async () => {
+        throw new Error("Local viewer is unavailable");
+      },
+      pseudonymizeSelection: async () => {
+        throw new Error("Local pseudonymization is unavailable");
+      },
+      localPiiStatus: async () => {
+        throw new Error("Local PII status unavailable");
+      },
     };
   }
 
@@ -190,7 +319,9 @@ export function createRendererBridge(invoke) {
     async stream(provider, request) {
       const command = PROVIDER_COMMANDS[provider];
       if (!command) throw new Error("Unsupported provider");
-      return invoke(command, { request });
+      const response = await invoke(command, { request });
+      assertTokenizedResponse(response, request.conversation_id, request.context_id);
+      return response;
     },
     async openOriginal(references) {
       await invoke("open-original", {
@@ -202,6 +333,40 @@ export function createRendererBridge(invoke) {
           capability_ref: references.capabilityRef,
         },
       });
+    },
+    async openLocalViewer(tokenized, references) {
+      assertLocalViewerPayload(tokenized, references);
+      const response = await invoke("open-local-viewer", { request: { tokenized, references } });
+      if (!isRecord(response) || response.opened !== true) {
+        throw new Error("Local viewer is unavailable");
+      }
+    },
+    async localViewerContent() {
+      return readLocalViewerContent(await invoke("local-viewer-content"));
+    },
+    async revealLocalToken(token) {
+      if (typeof token !== "string" || token.trim().length === 0) {
+        throw new Error("Invalid local viewer token");
+      }
+      const value = await invoke("reveal-local-token", { token });
+      if (typeof value !== "string" || value.length === 0) {
+        throw new Error("Local viewer session is unavailable");
+      }
+      return value;
+    },
+    async pseudonymizeSelection(request) {
+      const response = await invoke("pseudonymize-selection", { request });
+      if (
+        !isTokenizedText(response) ||
+        response.references.length !== 1 ||
+        response.text !== response.references[0].token
+      ) {
+        throw new Error("Local pseudonymization failed closed");
+      }
+      return response;
+    },
+    async localPiiStatus() {
+      return readLocalPiiStatus(await invoke("local-pii-status"));
     },
   };
 }

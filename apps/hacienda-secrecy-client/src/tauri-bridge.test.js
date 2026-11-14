@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createRendererBridge,
   createTurnRequest,
+  canSendToProvider,
   normalizePiiClass,
   readTokenizedChunks,
   tokenizedTextToDocument,
@@ -98,6 +99,85 @@ test("open-original forwards opaque reference names without a reveal payload", a
   }]);
 });
 
+test("local viewer opens only with validated tokenized DTOs and opaque references", async () => {
+  let call;
+  const bridge = createRendererBridge(async (...args) => {
+    call = args;
+    return { opened: true };
+  });
+  const tokenized = {
+    text: "[PERSON:session:opaque]",
+    references: [{ token: "[PERSON:session:opaque]", class: "PERSON" }],
+  };
+  await bridge.openLocalViewer(tokenized, tokenized.references);
+  assert.deepEqual(call, ["open-local-viewer", { request: { tokenized, references: tokenized.references } }]);
+  await assert.rejects(bridge.openLocalViewer(tokenized, []), /Invalid tokenized response/);
+});
+
+test("local viewer reads token-only DTOs and reveals only on explicit token request", async () => {
+  const calls = [];
+  const bridge = createRendererBridge(async (...args) => {
+    calls.push(args);
+    if (args[0] === "local-viewer-content") {
+      return {
+        tokenized: { text: "[PERSON:session:opaque]", references: [{ token: "[PERSON:session:opaque]", class: "PERSON" }] },
+        references: [{ token: "[PERSON:session:opaque]", class: "PERSON" }],
+      };
+    }
+    return "private value";
+  });
+  assert.deepEqual(await bridge.localViewerContent(), {
+    tokenized: { text: "[PERSON:session:opaque]", references: [{ token: "[PERSON:session:opaque]", class: "PERSON" }] },
+    references: [{ token: "[PERSON:session:opaque]", class: "PERSON" }],
+  });
+  assert.equal(await bridge.revealLocalToken("[PERSON:session:opaque]"), "private value");
+  assert.deepEqual(calls, [
+    ["local-viewer-content"],
+    ["reveal-local-token", { token: "[PERSON:session:opaque]" }],
+  ]);
+
+  const malformedViewer = createRendererBridge(async () => ({
+    tokenized: { text: "[PERSON:opaque]", references: [{ token: "[PERSON:opaque]", class: "PERSON" }] },
+    references: [{ token: "", class: "PERSON" }],
+  }));
+  await assert.rejects(malformedViewer.localViewerContent(), /Invalid tokenized response/);
+});
+
+test("manual pseudonymization uses the Tauri request and accepts only one returned token", async () => {
+  let call;
+  const bridge = createRendererBridge(async (...args) => {
+    call = args;
+    return { text: "[PERSON:session:opaque]", references: [{ token: "[PERSON:session:opaque]", class: "PERSON" }] };
+  });
+  const tokenized = await bridge.pseudonymizeSelection({ category: "person", value: "private value" });
+  assert.deepEqual(call, ["pseudonymize-selection", { request: { category: "person", value: "private value" } }]);
+  assert.equal(tokenized.text, tokenized.references[0].token);
+
+  const malformed = createRendererBridge(async () => ({
+    text: "plaintext",
+    references: [{ token: "[PERSON:session:opaque]", class: "PERSON" }],
+  }));
+  await assert.rejects(malformed.pseudonymizeSelection({ category: "person", value: "private value" }), /Local pseudonymization failed closed/);
+});
+
+test("provider send is enabled only by a complete local model status", async () => {
+  assert.equal(canSendToProvider({ provider_send_enabled: true, detector: "local_model" }), true);
+  assert.equal(canSendToProvider({ provider_send_enabled: false, detector: "local_model" }), false);
+  assert.equal(canSendToProvider({ provider_send_enabled: false, detector: "regex_only" }), false);
+  assert.equal(canSendToProvider(undefined), false);
+
+  let call;
+  const bridge = createRendererBridge(async (...args) => {
+    call = args;
+    return { provider_send_enabled: false, detector: "regex_only" };
+  });
+  assert.deepEqual(await bridge.localPiiStatus(), { provider_send_enabled: false, detector: "regex_only" });
+  assert.deepEqual(call, ["local-pii-status"]);
+
+  const malformedStatus = createRendererBridge(async () => ({ provider_send_enabled: "true", detector: "local_model" }));
+  await assert.rejects(malformedStatus.localPiiStatus(), /Local PII status unavailable/);
+});
+
 test("malformed provider responses fail closed before any chunks are rendered", () => {
   assert.deepEqual(readTokenizedChunks({
     conversation_id: "c",
@@ -119,6 +199,34 @@ test("malformed provider responses fail closed before any chunks are rendered", 
     context_id: "x",
     chunks: [{ content: { text: "plaintext", references: [] } }],
   }, "c", "x"), /Invalid tokenized response/);
+});
+
+test("empty or malformed token references are rejected at the bridge boundary", async () => {
+  const malformedReferences = [
+    { token: "", class: "person" },
+    { token: "   ", class: "person" },
+    { token: "[PERSON_1]", class: "" },
+    { token: "[PERSON_1]", class: "  " },
+    { class: "person" },
+    { token: "[PERSON_1]" },
+  ];
+
+  for (const reference of malformedReferences) {
+    const bridge = createRendererBridge(async () => ({
+      conversation_id: "c",
+      context_id: "x",
+      chunks: [{
+        conversation_id: "c",
+        context_id: "x",
+        sequence: 0,
+        content: { text: "Private response", references: [reference] },
+      }],
+    }));
+    await assert.rejects(
+      bridge.stream("claude", createTurnRequest({ conversationId: "c", contextId: "x", prompt: "hello" })),
+      (error) => error.message === "Invalid tokenized response" && !error.message.includes("Private response"),
+    );
+  }
 });
 
 test("PII category names from the Rust DTO retain meaningful classes", () => {
@@ -143,7 +251,7 @@ test("tokenized response content becomes canonical Tiptap JSON with sensitive ma
         content: [
           { type: "text", text: "Bonjour " },
           { type: "text", text: "[PERSON_1]", marks: [{ type: "haciendaSensitive", attrs: {
-            tokenId: "[PERSON_1]", tokenClass: "Person", mode: "pseudonymize", source: "provider", disclosure: "viewer-only",
+            tokenId: "[PERSON_1]", tokenClass: "Person", mode: "pseudonymize", source: "regex", disclosure: "viewer-only",
           } }] },
         ],
       },
@@ -152,7 +260,7 @@ test("tokenized response content becomes canonical Tiptap JSON with sensitive ma
         content: [
           { type: "text", text: "Contact " },
           { type: "text", text: "[EMAIL_1]", marks: [{ type: "haciendaSensitive", attrs: {
-            tokenId: "[EMAIL_1]", tokenClass: "Email", mode: "pseudonymize", source: "provider", disclosure: "viewer-only",
+            tokenId: "[EMAIL_1]", tokenClass: "Email", mode: "pseudonymize", source: "regex", disclosure: "viewer-only",
           } }] },
         ],
       },

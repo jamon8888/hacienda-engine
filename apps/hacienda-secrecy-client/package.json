@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "vite build",
-    "check": "node --check src/tauri-bridge.js && node --test src/tauri-bridge.test.js",
+    "check": "tsc --project tsconfig.json && node --check src/tauri-bridge.js && node --test src/tauri-bridge.test.js",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },
@@ -20,6 +20,7 @@
     "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.2.7"
+    "@tauri-apps/cli": "2.2.7",
+    "typescript": "5.9.3"
   }
 }

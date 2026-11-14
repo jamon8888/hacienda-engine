@@ -1,14 +1,6 @@
 import type { PiiEntity } from "./pii-engine";
-
-export type SensitiveMode = "pseudonymize" | "manual-mask" | "delete";
-
-export interface SensitiveMarkAttrs {
-  tokenClass: string;
-  tokenId: string;
-  mode: SensitiveMode;
-  source: "xberg_metadata" | "gliner" | "manual";
-  disclosure: "viewer-only";
-}
+import type { SensitiveMarkAttrs, SensitiveMode } from "./sensitive-mark";
+export type { SensitiveMarkAttrs, SensitiveMarkSource, SensitiveMode } from "./sensitive-mark";
 
 export interface TokenizedEditorTextNode {
   type: "text";
