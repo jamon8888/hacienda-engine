@@ -105,7 +105,7 @@ uuid = { workspace = true, features = ["js"] }
 # Cargo.toml's `xberg` entry — see that entry's comment for why. Must stay in sync with
 # it (same `rev`) or cargo refuses to build with "different source paths depending on
 # the build target".
-xberg = { git = "https://github.com/jamon8888/xberg.git", rev = "9bfbc10acca5c1648547a4d861153d2f5c363340", default-features = false, features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd", default-features = false, features = [
     "ner",
 ] }
 # `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"

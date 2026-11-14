@@ -51,7 +51,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
     // instead of reindexing every column after this one. This is still a breaking
     // change to an unversioned format — see CHANGELOG.md.
     output.extend_from_slice(
-        b"id,timestamp,category,action,span_hash,span_length,confidence,source,pipeline_version,config_hash,chain_hash,vertical\n",
+        b"id,timestamp,category,action,span_hash,span_length,confidence,source,pipeline_version,config_hash,chain_hash,vertical,model\n",
     );
 
     for entry in chain.entries() {
@@ -60,6 +60,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
         let span_length = entry.span_length.to_string();
         let source = entry.source.to_string();
         let vertical = entry.vertical.clone().unwrap_or_default();
+        let model = entry.model.clone().unwrap_or_default();
 
         write_csv_row(
             &mut output,
@@ -76,6 +77,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
                 &entry.config_hash,
                 &entry.chain_hash,
                 &vertical,
+                &model,
             ],
         );
     }
@@ -180,8 +182,8 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         let header = text.lines().next().unwrap();
         assert!(
-            header.ends_with(",vertical"),
-            "vertical must be the last CSV column, got header {header:?}"
+            header.ends_with(",vertical,model"),
+            "vertical and model must be the final CSV columns, got header {header:?}"
         );
     }
 
@@ -207,8 +209,8 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         let row = text.lines().nth(1).unwrap();
         assert!(
-            row.ends_with(",finance@3f9a1c02"),
-            "expected the vertical value as the last CSV field, got row {row:?}"
+            row.ends_with(",finance@3f9a1c02,"),
+            "expected the vertical value followed by an empty model field, got row {row:?}"
         );
     }
 
@@ -218,8 +220,22 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         let row = text.lines().nth(1).unwrap();
         assert!(
-            row.ends_with(','),
-            "an absent vertical must export as an empty trailing field, got row {row:?}"
+            row.ends_with(",,"),
+            "absent vertical and model must export as empty trailing fields, got row {row:?}"
         );
+    }
+
+    #[test]
+    fn should_export_model_provenance_in_csv() {
+        let mut chain = AuditChain::new("cfg");
+        chain.push(AuditEntryInput {
+            id: "id-0".into(), category: "Email".into(), action: RedactionAction::Mask,
+            span_hash: "abc".into(), span_length: 10, confidence: Some(0.9),
+            source: EntitySource::Model, pipeline_version: "1.0".into(),
+            config_hash: String::new(), principal: None, vertical: None,
+            model: Some("gliner2@deadbeef".into()),
+        });
+        let text = String::from_utf8(export_csv(&chain).unwrap()).unwrap();
+        assert!(text.lines().nth(1).unwrap().ends_with(",,gliner2@deadbeef"));
     }
 }
