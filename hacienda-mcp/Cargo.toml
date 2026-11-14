@@ -5,9 +5,6 @@ edition.workspace = true
 description = "MCP (Model Context Protocol) server exposing HaciendaFacade to AI agents"
 license.workspace = true
 
-[features]
-rag-embeddings = ["hacienda-core/rag-embeddings"]
-
 [dependencies]
 # The guarded facade — every tool in this crate calls through it, never through `xberg`
 # directly. See the crate's module doc for why: xberg ships its own MCP server behind its
