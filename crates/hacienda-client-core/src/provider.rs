@@ -726,6 +726,12 @@ impl<H> AnthropicProviderTransport<H> {
             },
         )?;
         decoder.finish(&mut events)?;
+        if !matches!(
+            events.last().and_then(|event| event.event.as_deref()),
+            Some("message_stop" | "error")
+        ) {
+            return Err(TransportError::Failed);
+        }
         let metadata = response_metadata.ok_or(TransportError::Failed)?;
         if !(200..300).contains(&metadata.status) {
             return Err(TransportError::Failed);
@@ -1995,6 +2001,27 @@ mod tests {
             .collect::<String>();
         assert!(!joined.contains(PERSON));
         assert!(joined.contains(PERSON_TOKEN));
+    }
+
+    #[test]
+    fn public_claude_event_api_rejects_clean_eof_without_terminal_event() {
+        let wire = "event: ping\ndata: {\"type\":\"ping\"}\n\n";
+        let mut transport = AnthropicProviderTransport::new(
+            ChunkedHttpFixture {
+                chunks: vec![wire.as_bytes().to_vec()],
+            },
+            ProviderTransportConfig::new("https://gateway.invalid/messages", "claude", 32, "key"),
+        );
+        let mut delivered = Vec::new();
+        assert_eq!(
+            transport.collect_redacted_events(
+                &redacted_request(ProviderKind::ClaudeDesktop),
+                &TestRedactor,
+                |event| delivered.push(event),
+            ),
+            Err(TransportError::Failed)
+        );
+        assert!(delivered.is_empty());
     }
 
     #[derive(Clone)]
