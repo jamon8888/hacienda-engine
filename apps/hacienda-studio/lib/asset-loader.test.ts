@@ -362,6 +362,20 @@ describe("loadNerModel storage-quota preflight", () => {
     await db.put("models", new Uint8Array([3]), "gliner2-guardrails-pii-config");
     db.close();
 
+    // The fixture bytes are intentionally tiny; make the digest verifier model the
+    // trusted production prefixes so this test exercises legacy-key migration rather
+    // than failing on the unrelated size of the fixture.
+    const originalCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", {
+      subtle: {
+        digest: vi.fn(async (_algorithm: string, bytes: Uint8Array) => {
+          const prefixes = ["53c73fff", "ab12abcd", "cd34ef56"];
+          const prefix = prefixes[bytes[0] - 1] ?? "00000000";
+          return Uint8Array.from(prefix.match(/../g)!.concat(Array(28).fill("00")), (hex) => parseInt(hex, 16)).buffer;
+        }),
+      },
+    });
+
     // Quota deliberately reports far too little space — if the preflight ran before the
     // cache lookup, this alone would fail the call despite nothing needing to be written.
     stubQuota(1, 0);
@@ -375,5 +389,6 @@ describe("loadNerModel storage-quota preflight", () => {
       expect(result.assets.model).toEqual(new Uint8Array([1]));
     }
     expect(fetchMock).not.toHaveBeenCalled();
+    vi.stubGlobal("crypto", originalCrypto);
   });
 });

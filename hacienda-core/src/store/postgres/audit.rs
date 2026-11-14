@@ -944,6 +944,31 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn should_persist_model_provenance_round_trip() {
+        test_support::block_on_shared(async {
+            let store = test_store().await;
+            let config_hash = format!("cfg-{}", Uuid::new_v4());
+            let id = unique_id("model");
+            let mut input = test_input(&id, &config_hash);
+            input.source = EntitySource::Model;
+            input.model = Some("gliner2-guardrails-pii-f16".to_owned());
+
+            let appended = store.append(&t(), vec![input]).await.expect("append");
+            assert_eq!(appended[0].model.as_deref(), Some("gliner2-guardrails-pii-f16"));
+
+            let persisted = store
+                .entries(&t())
+                .await
+                .expect("read persisted entries")
+                .into_iter()
+                .find(|entry| entry.id == id)
+                .expect("round-tripped entry");
+            assert_eq!(persisted.model.as_deref(), Some("gliner2-guardrails-pii-f16"));
+        });
+    }
+
     /// Two tenants, neither of which is the shared `t()` this whole module's other
     /// tests race on (see the module doc's "one shared open segment" caveat) — each
     /// gets its own fresh, UUID-suffixed id so this test cannot inherit contamination
