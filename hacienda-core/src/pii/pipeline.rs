@@ -40,7 +40,8 @@ pub struct PipelineResult {
     pub metrics: PipelineMetrics,
 }
 
-/// Per-stage timings and counts for one `process` call.
+/// Per-stage timings and counts for one pipeline operation. The metrics cover the process,
+/// scan, `process_with_model_entities`, and `scan_with_model_entities` paths.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// PipelineMetrics struct
 pub struct PipelineMetrics {

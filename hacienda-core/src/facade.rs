@@ -106,7 +106,8 @@ pub struct HaciendaResult {
     /// The extraction envelope. When PII is enabled, every document's `content` has
     /// already been redacted — the raw text never leaves this call.
     pub extraction: ExtractionResult,
-    /// One detection result per extracted document, in the same order.
+    /// One detection result per extracted document, in order, when PII processing is enabled;
+    /// otherwise this may be empty.
     pub pii: Vec<PipelineResult>,
     /// compliance field
     pub compliance: Option<ComplianceReport>,
@@ -173,8 +174,9 @@ pub struct TextScanResult {
 
 /// Result of a text-mode redaction via [`HaciendaFacade::redact_text_with_auth`].
 ///
-/// The `entities` field never carries span text — returning the plaintext of a
-/// span the caller just had redacted would be self-defeating.
+/// The `entities` field never carries span text: detected entities' returned text is always
+/// cleared, because returning the plaintext of a span the caller just had redacted would be
+/// self-defeating.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// TextRedactResult struct
 pub struct TextRedactResult {

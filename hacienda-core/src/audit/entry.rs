@@ -14,9 +14,13 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 /// RedactionAction enum
 pub enum RedactionAction {
+    /// Replace the span with its category template.
     Mask,
+    /// Replace the span with a digest.
     Hash,
+    /// Replace the span with a reversible pseudonym.
     Pseudonymize,
+    /// Remove the span entirely.
     Remove,
     /// Span text was returned to an authorised caller in plaintext form.
     ///
@@ -78,7 +82,9 @@ impl std::str::FromStr for RedactionAction {
 #[serde(rename_all = "snake_case")]
 /// EntitySource enum
 pub enum EntitySource {
+    /// The deterministic regex detector.
     Regex,
+    /// The statistical model detector.
     Model,
 }
 
@@ -118,15 +124,25 @@ impl From<crate::pii::types::EntitySource> for EntitySource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// AuditEntry struct
 pub struct AuditEntry {
+    /// Stable identifier for this entry.
     pub id: String,
+    /// RFC 3339 timestamp when the entry was created.
     pub timestamp: String,
+    /// PII category associated with the entry.
     pub category: String,
+    /// Redaction or reveal action that was applied.
     pub action: RedactionAction,
+    /// Digest of the original span.
     pub span_hash: String,
+    /// Length of the original span in bytes.
     pub span_length: u32,
+    /// Detector confidence, when available.
     pub confidence: Option<f32>,
+    /// Detector that produced the entity.
     pub source: EntitySource,
+    /// Version of the processing pipeline.
     pub pipeline_version: String,
+    /// Digest of the active configuration.
     pub config_hash: String,
     /// The authenticated principal this entry is attributable to, or `None` for an
     /// in-process caller ([`Caller::Trusted`](crate::auth::Caller::Trusted)).
@@ -168,14 +184,23 @@ pub struct AuditEntry {
 #[derive(Debug, Clone)]
 /// AuditEntryInput struct
 pub struct AuditEntryInput {
+    /// Stable identifier for this entry.
     pub id: String,
+    /// PII category associated with the entry.
     pub category: String,
+    /// Redaction or reveal action that was applied.
     pub action: RedactionAction,
+    /// Digest of the original span.
     pub span_hash: String,
+    /// Length of the original span in bytes.
     pub span_length: u32,
+    /// Detector confidence, when available.
     pub confidence: Option<f32>,
+    /// Detector that produced the entity.
     pub source: EntitySource,
+    /// Version of the processing pipeline.
     pub pipeline_version: String,
+    /// Digest of the active configuration.
     pub config_hash: String,
     /// See [`AuditEntry::principal`].
     pub principal: Option<String>,
