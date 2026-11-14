@@ -342,7 +342,7 @@ pub fn run_formats(args: FormatsArgs) -> Result<()> {
 }
 
 pub fn run_mime(args: MimeArgs) -> Result<()> {
-    let mut file = std::fs::File::open(&args.path)
+    let file = std::fs::File::open(&args.path)
         .with_context(|| format!("reading MIME input {}", args.path.display()))?;
     let mut bytes = Vec::with_capacity(hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES + 1);
     file.take((hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES + 1) as u64)

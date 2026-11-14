@@ -632,8 +632,10 @@ mod tests {
 
     #[test]
     fn should_apply_per_category_threshold_offsets() {
-        let mut config = PipelineConfig::default();
-        config.model_threshold_default = 0.5;
+        let mut config = PipelineConfig {
+            model_threshold_default: 0.5,
+            ..Default::default()
+        };
         // Person family gets boosted
         assert_eq!(config.effective_threshold(&PiiCategory::Person), 0.65);
         assert_eq!(config.effective_threshold(&PiiCategory::FirstName), 0.65);
