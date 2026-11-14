@@ -322,9 +322,9 @@ function useAppStateProvider() {
         toast.warning(message);
       });
       pool.setBatchCompleteHandler(() => {
-        setTimeout(() => {
-          setProgress(new Map());
-        }, 1000);
+        // Keep terminal progress entries. `isProcessing` uses these entries to
+        // distinguish completed files from files that are still running; clearing
+        // the map would make the state ambiguous for the append-only `files` list.
       });
 
       setWorkerReady(true);
