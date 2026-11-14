@@ -98,3 +98,46 @@ early without knowing.
 `tip` is deliberately the exception. It is an opaque hash that reveals nothing about the entries
 behind it, and gating it would stop a caller holding `documents:process` from obtaining the
 chain evidence for **its own** result.
+
+## Anthropic Messages gateway
+
+`POST /v1/messages` implements a restricted Anthropic Messages gateway for callers that attach a
+`ClaudeMessagesProvider` to `ApiState`. It is disabled by default, including in the standard
+server state until that provider is configured. The route always requires an authenticated
+principal with `documents:process`, even when the general API auth middleware is disabled.
+Tenant routing comes from the authenticated principal; callers cannot select a tenant in the
+request body.
+
+Requests must use `stream: true` and the supported Messages schema. Inspectable text in messages,
+system content, tool definitions, tool results, and the supported metadata field is redacted
+before the provider call. Unknown fields and blocks, images, files, and other unsupported
+non-text content fail closed. Only the documented Anthropic routing headers are forwarded.
+Provider events must match the validated event contract; text deltas and error messages are
+redacted before they are exposed. Failures return generic client-visible errors.
+
+The response uses SSE framing, but the current adapter collects and validates the provider's
+complete event stream before returning it. It does not yet provide incremental end-to-end
+delivery. Configure a Claude Code client only when that limitation is acceptable; incremental
+relay remains an implementation requirement for production streaming.
+
+## Anthropic Messages gateway
+
+`POST /v1/messages` is the Anthropic-compatible gateway used by the Hacienda secrecy client and
+Claude Code. It is disabled unless an application attaches a `ClaudeMessagesProvider` to
+`ApiState`. The route always requires an authenticated principal with `documents:process`, even
+when the API's general authentication middleware is disabled. Tenant routing comes from that
+principal; the request body cannot select a tenant.
+
+The gateway accepts streaming requests (`stream: true`) with a supported subset of the Messages
+schema. It redacts text in user and system content, tool definitions and tool results, and
+metadata before calling the configured provider. Images, files, unknown content blocks, unknown
+fields, and unsupported non-text payloads fail closed. Only selected Anthropic routing headers
+are forwarded. Provider responses must follow the validated Anthropic event contract; response
+text and error messages pass through redaction before they are exposed. Authentication, invalid
+request, provider, and redaction failures use generic client-visible errors.
+
+The current HTTP response uses SSE framing, but the provider adapter collects and validates the
+complete provider event stream before returning it. It therefore does **not** yet guarantee
+incremental end-to-end delivery. Do not configure Claude Code against this route when progressive
+streaming is required until the incremental relay is implemented. This boundary does not apply to
+the Tauri client's direct provider transport.
