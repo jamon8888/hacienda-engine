@@ -93,6 +93,20 @@ pub(crate) fn scope_collection_name(ctx: &TenantCtx, name: &str) -> String {
     }
 }
 
+/// Reject caller-facing collection names that could be mistaken for an internal
+/// tenant-scoped name. The colon is reserved for the tenant prefix added by this
+/// module; accepting it would let a default-tenant caller address another tenant's
+/// already-prefixed collection directly.
+pub(crate) fn validate_collection_name(name: &str) -> Result<(), ApiError> {
+    if name.contains(':') {
+        Err(ApiError::invalid_request(
+            "collection names must not contain ':'",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Inverse of [`scope_collection_name`]: strip `ctx`'s tenant prefix from a name
 /// read back from the store, returning `None` if `scoped_name` does not belong to
 /// this tenant (used to filter `RagStore::list_collections`, which has no
@@ -104,8 +118,8 @@ pub(crate) fn scope_collection_name(ctx: &TenantCtx, name: &str) -> String {
 /// literally named with a `:` in it is the one edge case this cannot distinguish from
 /// another tenant's scoped name — accepted for the same reason
 /// `redaction::pseudonym::sanitize_env_suffix` accepts a narrower case-only collision:
-/// a full reserved-character validation on collection names is a larger, separate
-/// change.
+/// caller-facing collection names reject `:` before reaching any store operation,
+/// so this ambiguity cannot be introduced through the API.
 fn strip_tenant_prefix(ctx: &TenantCtx, scoped_name: &str) -> Option<String> {
     if ctx.tenant.as_str() == hacienda_core::tenancy::DEFAULT_TENANT {
         if scoped_name.contains(':') {
@@ -138,6 +152,7 @@ pub async fn create_collection(
     parts: Parts,
     SafeJson(spec): SafeJson<CollectionSpec>,
 ) -> Result<(StatusCode, Json<CollectionSpec>), ApiError> {
+    validate_collection_name(&spec.name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -171,6 +186,7 @@ pub async fn get_collection(
     parts: Parts,
     Path(name): Path<String>,
 ) -> Result<Json<CollectionSpec>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -203,6 +219,7 @@ pub async fn delete_collection(
     parts: Parts,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -242,6 +259,7 @@ pub async fn upsert_document(
     Path(name): Path<String>,
     SafeJson(body): SafeJson<UpsertDocumentRequest>,
 ) -> Result<(StatusCode, Json<UpsertDocumentResponse>), ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -316,6 +334,7 @@ pub async fn reindex_document(
     parts: Parts,
     Path((name, id)): Path<(String, String)>,
 ) -> Result<Json<UpsertDocumentResponse>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -380,6 +399,7 @@ pub async fn retrieve(
     Path(name): Path<String>,
     SafeJson(query): SafeJson<RetrieveQuery>,
 ) -> Result<Json<RetrieveOutput>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -508,6 +528,7 @@ pub async fn list_documents(
     Path(name): Path<String>,
     Query(query): Query<RagListQuery>,
 ) -> Result<Json<ListDocumentsResponse>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -576,6 +597,7 @@ pub async fn migrate_embeddings(
     Path(name): Path<String>,
     SafeJson(body): SafeJson<MigrateEmbeddingsRequest>,
 ) -> Result<(StatusCode, Json<MigrateEmbeddingsResponse>), ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -863,8 +885,9 @@ async fn migrate_embeddings_work(
 pub async fn get_migrate_status(
     State(state): State<ApiState>,
     parts: Parts,
-    Path((_name, job_id)): Path<(String, String)>,
+    Path((name, job_id)): Path<(String, String)>,
 ) -> Result<Json<MigrateStatusResponse>, ApiError> {
+    validate_collection_name(&name)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let tenant = caller.tenant_ctx().tenant;
@@ -973,10 +996,7 @@ mod tests {
 
     /// Build `Parts` carrying an `AuthContext` scoped to `tenant`, the way the real auth
     /// middleware would attach one via `AuthExtension` — bypasses the token resolver
-    /// pipeline entirely so the test can exercise two different tenants without needing
-    /// `authn::Token`/`ApiKeyTokenResolver` to thread tenant identity (a separate,
-    /// pre-existing gap: today every resolved token lands on the default tenant via
-    /// `AuthContext::new` — out of scope for this RAG-collection-scoping task).
+    /// pipeline entirely so the test can exercise two different tenants directly.
     fn parts_for(tenant: &str) -> Parts {
         let ctx = AuthContext::with_tenant(
             "test-principal",
@@ -1106,5 +1126,65 @@ mod tests {
         .expect("list must succeed");
         assert_eq!(globex_list.total, 1);
         assert_eq!(globex_list.collections[0].name, "gamma");
+    }
+
+    #[tokio::test]
+    async fn default_tenant_rejects_colon_prefixed_collection_names_before_store_access() {
+        let state = state_with_rag();
+        let other_tenant_name = "acme:contracts".to_string();
+        create_collection(
+            State(state.clone()),
+            parts_for("acme"),
+            SafeJson(CollectionSpec::new("contracts", 3)),
+        )
+        .await
+        .expect("other tenant's collection must exist for the regression");
+
+        let get_error = get_collection(
+            State(state.clone()),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(get_error.code, crate::error::ApiErrorCode::InvalidRequest);
+
+        let write_error = upsert_document(
+            State(state.clone()),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name.clone()),
+            SafeJson(UpsertDocumentRequest {
+                document: hacienda_rag::DocumentRecord::default(),
+                chunks: Vec::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(write_error.code, crate::error::ApiErrorCode::InvalidRequest);
+
+        let delete_error = delete_collection(
+            State(state.clone()),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            delete_error.code,
+            crate::error::ApiErrorCode::InvalidRequest
+        );
+
+        let retrieve_error = retrieve(
+            State(state),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name),
+            SafeJson(RetrieveQuery::vector(1)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            retrieve_error.code,
+            crate::error::ApiErrorCode::InvalidRequest
+        );
     }
 }

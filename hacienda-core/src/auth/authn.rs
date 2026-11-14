@@ -2,6 +2,7 @@
 
 use crate::auth::keys;
 use crate::auth::{ApiKeyStore, AuthContext, AuthzError, Capability, CapabilitySet};
+use crate::tenancy::TenantId;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +20,9 @@ pub struct Token {
     pub principal_name: Option<String>,
     /// Capabilities granted by this token.
     pub capabilities: CapabilitySet,
+    /// The tenant this token is scoped to.
+    #[serde(default = "default_tenant")]
+    pub tenant: TenantId,
     /// Optional expiry (Unix timestamp).
     pub expires_at: Option<u64>,
     /// Additional metadata.
@@ -37,9 +41,16 @@ impl Token {
             principal_id: principal_id.into(),
             principal_name: None,
             capabilities,
+            tenant: default_tenant(),
             expires_at: None,
             metadata: serde_json::Value::Null,
         }
+    }
+
+    /// Set the tenant scope for this token.
+    pub fn with_tenant(mut self, tenant: TenantId) -> Self {
+        self.tenant = tenant;
+        self
     }
 
     /// Set the expiry time (Unix timestamp).
@@ -78,7 +89,11 @@ impl Token {
         if self.is_expired() {
             return Err(AuthzError::TokenExpired);
         }
-        let mut ctx = AuthContext::new(&self.principal_id, self.capabilities.clone());
+        let mut ctx = AuthContext::with_tenant(
+            &self.principal_id,
+            self.tenant.clone(),
+            self.capabilities.clone(),
+        );
         ctx.principal_name = self.principal_name.clone();
         ctx.metadata = self.metadata.clone();
         Ok(ctx)
@@ -270,12 +285,15 @@ impl TokenResolver for ApiKeyTokenResolver {
                 AuthzError::InvalidToken(format!("stored capabilities are malformed: {e}"))
             })?;
 
-        Ok(Some(Token::new(
-            api_key.id.to_string(),
-            api_key.owner,
-            capabilities,
-        )))
+        Ok(Some(
+            Token::new(api_key.id.to_string(), api_key.owner, capabilities)
+                .with_tenant(TenantId::new(api_key.tenant_id)),
+        ))
     }
+}
+
+fn default_tenant() -> TenantId {
+    TenantId::default_tenant()
 }
 
 /// Configuration for authentication.
@@ -555,6 +573,32 @@ mod tests {
             token.to_auth_context(),
             Err(AuthzError::TokenExpired)
         ));
+    }
+
+    #[tokio::test]
+    async fn api_key_token_to_auth_context_preserves_the_key_tenant() {
+        let store = Arc::new(crate::auth::InMemoryApiKeyStore::new());
+        let pair = keys::generate_key().unwrap();
+        let tenant = crate::tenancy::TenantCtx::new(
+            crate::tenancy::TenantId::new("acme"),
+            crate::tenancy::ActorId::new("issuer"),
+        );
+        store
+            .create(
+                &tenant,
+                &pair.key_hash,
+                &pair.lookup_hash,
+                "owner-1",
+                vec![Capability::DocumentsProcess],
+            )
+            .await
+            .unwrap();
+
+        let resolver = ApiKeyTokenResolver::new(store);
+        let token = resolver.resolve(&pair.raw_key).await.unwrap().unwrap();
+        let context = token.to_auth_context().unwrap();
+
+        assert_eq!(context.tenant, crate::tenancy::TenantId::new("acme"));
     }
 
     /// An unparseable capability in config is an operator error. Silently
