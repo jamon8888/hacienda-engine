@@ -24,7 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, documents, info, jobs, keys, openapi, pii, presets, rag,
+        audit, audit_review, auth, claude_messages, documents, info, jobs, keys, openapi, pii,
+        presets, rag,
         rag_stream, uploads, usage, versions,
     },
     quota::quota_middleware,
@@ -382,6 +383,15 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/keys",
         access: Access::Capability(Capability::AuditRead),
         make_router: || get(keys::list_keys),
+    },
+    // Claude Code's Anthropic-compatible provider gateway. The same
+    // `documents:process` capability used by redaction-bearing endpoints is
+    // deliberately required here: no provider request may be made without a
+    // caller-derived tenant and Hacienda redaction pass.
+    RouteSpec {
+        path: "/v1/messages",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(claude_messages::messages),
     },
 ];
 

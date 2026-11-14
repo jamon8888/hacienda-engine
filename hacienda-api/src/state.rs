@@ -9,6 +9,7 @@ use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::RagStore;
 use std::sync::Arc;
 
+use crate::handlers::claude_messages::ClaudeMessagesProvider;
 use crate::quota::InMemoryQuotaStore;
 
 /// Body / batch limits applied uniformly to every request.
@@ -77,6 +78,9 @@ pub struct ApiState {
     /// before `DefaultBodyLimit`/any body decode. `None` means quotas are not enforced —
     /// today's behaviour, and opt-in the same way every other store above is.
     pub(crate) quota_store: Option<Arc<InMemoryQuotaStore>>,
+    /// Anthropic Messages provider used by the authenticated Claude Code gateway.
+    /// `None` keeps the route registered but disabled, which is the safe default.
+    pub(crate) claude_messages_provider: Option<Arc<dyn ClaudeMessagesProvider>>,
 }
 
 impl ApiState {
@@ -97,6 +101,7 @@ impl ApiState {
             object_store: None,
             usage_store: None,
             quota_store: None,
+            claude_messages_provider: None,
         }
     }
 
@@ -148,6 +153,16 @@ impl ApiState {
     #[must_use]
     pub fn with_quota_store(mut self, quota_store: Arc<InMemoryQuotaStore>) -> Self {
         self.quota_store = Some(quota_store);
+        self
+    }
+
+    /// Enable the authenticated Claude Code Messages gateway.
+    #[must_use]
+    pub fn with_claude_messages_provider(
+        mut self,
+        provider: Arc<dyn ClaudeMessagesProvider>,
+    ) -> Self {
+        self.claude_messages_provider = Some(provider);
         self
     }
 }

@@ -3911,6 +3911,7 @@ dependencies = [
  "chrono",
  "data-encoding",
  "futures",
+ "hacienda-client-core",
  "hacienda-core",
  "hacienda-rag",
  "serde",
