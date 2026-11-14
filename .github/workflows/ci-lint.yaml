@@ -69,4 +69,10 @@ jobs:
         if: steps.deps.outcome == 'success'
         env:
           RUSTDOCFLAGS: -D missing_docs
-        run: cargo doc --workspace --features "ner-candle" --no-deps
+        run: |
+          # Check each workspace feature surface: default features, no default
+          # features, and the union of every package feature. A single feature
+          # selection can hide public APIs behind cfg gates in another package.
+          cargo doc --workspace --no-deps
+          cargo doc --workspace --no-default-features --no-deps
+          cargo doc --workspace --all-features --no-deps

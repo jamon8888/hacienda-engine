@@ -30,11 +30,11 @@ pub enum AuditError {
 
     /// Config mismatch
     #[error("audit entry was minted under config '{actual}' but this chain uses '{expected}'")]
-    ConfigMismatch { 
+    ConfigMismatch {
         /// Expected config
-        expected: String, 
+        expected: String,
         /// Actual config
-        actual: String 
+        actual: String,
     },
 
     /// A segment's recorded `seal_hash` does not match the hash recomputed from its
@@ -91,9 +91,9 @@ pub enum AuditError {
     /// simply used the store after shutting it down. Reporting a closed store as a broken
     /// chain would raise a tamper alarm for what is only a lifecycle mistake.
     #[error("the audit store is closed and cannot accept '{operation}'")]
-    StoreClosed { 
+    StoreClosed {
         /// Operation name
-        operation: &'static str 
+        operation: &'static str,
     },
 
     /// A pagination cursor could not be resolved to a position in this history.
@@ -104,11 +104,11 @@ pub enum AuditError {
     /// would then record every entry it already had a second time, and could not tell the
     /// duplicate run from new activity.
     #[error("audit cursor '{cursor}' is not a position in this history: {reason}")]
-    UnresolvableCursor { 
+    UnresolvableCursor {
         /// Cursor value
-        cursor: String, 
+        cursor: String,
         /// Reason
-        reason: String 
+        reason: String,
     },
 
     /// A non-file persistence backend failed. `Io` is file-specific (it carries a

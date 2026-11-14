@@ -116,7 +116,9 @@ impl FileState {
     /// the not-found-not-forbidden property (D-S1b-1) fall out of the lookup itself
     /// rather than needing a second branch at every call site to enforce it.
     fn get_mut_for_tenant(&mut self, tenant: &TenantId, id: &str) -> Option<&mut ReviewQueueItem> {
-        self.by_id.get_mut(id).filter(|item| item.tenant_id == tenant.as_str())
+        self.by_id
+            .get_mut(id)
+            .filter(|item| item.tenant_id == tenant.as_str())
     }
 
     fn insert(&mut self, item: ReviewQueueItem) {

@@ -105,7 +105,7 @@ impl NerDetector {
     ///
     /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded.
     #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
-/// from_candle_local function
+    /// from_candle_local function
     pub fn from_candle_local(
         model_dir: &std::path::Path,
         lora_adapter_dir: Option<&std::path::Path>,
@@ -129,7 +129,7 @@ impl NerDetector {
     ///
     /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded.
     #[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
-/// from_candle_bytes function
+    /// from_candle_bytes function
     pub fn from_candle_bytes(
         weights: &[u8],
         tokenizer_json: &[u8],

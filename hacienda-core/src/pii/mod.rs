@@ -107,11 +107,11 @@ pub enum PiiError {
         "entity label '{label}' cannot be used with Pseudonymize mode: {reason} \
          (labels must not contain '[', ':', or ']')"
     )]
-    InvalidEntityLabel { 
+    InvalidEntityLabel {
         /// Label
-        label: String, 
+        label: String,
         /// Reason
-        reason: String 
+        reason: String,
     },
 
     /// A configured [`config::VerticalConfig`] is malformed: an empty id, an empty
@@ -124,11 +124,11 @@ pub enum PiiError {
     /// Task 2.2 for why: validating inside `load_detector` would silently accept a
     /// malformed vertical everywhere that function is not reached.
     #[error("vertical '{id}' is invalid: {reason}")]
-    InvalidVertical { 
+    InvalidVertical {
         /// ID
-        id: String, 
+        id: String,
         /// Reason
-        reason: String 
+        reason: String,
     },
 
     /// A caller-supplied [`crate::pii::types::ModelEntity`] (the

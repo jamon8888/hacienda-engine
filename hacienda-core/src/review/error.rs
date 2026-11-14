@@ -13,11 +13,11 @@ pub enum ReviewError {
 
     /// Invalid status transition
     #[error("invalid review status transition from {from} to {to}")]
-    InvalidTransition { 
+    InvalidTransition {
         /// From status
-        from: String, 
+        from: String,
         /// To status
-        to: String 
+        to: String,
     },
 
     /// Returned by [`FileReviewStore`] when a file operation fails.

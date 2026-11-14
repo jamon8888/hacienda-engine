@@ -164,7 +164,7 @@ impl PiiPipeline {
         })
     }
 
-/// config function
+    /// config function
     pub fn config(&self) -> &PipelineConfig {
         &self.config
     }

@@ -79,7 +79,7 @@ pub struct PostgresUsageStore {
 }
 
 impl PostgresUsageStore {
-/// new function
+    /// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

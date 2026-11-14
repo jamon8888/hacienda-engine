@@ -80,7 +80,7 @@ pub struct ComplianceGenerator {
 }
 
 impl ComplianceGenerator {
-/// new function
+    /// new function
     pub fn new(config: ComplianceConfig) -> Self {
         let dpia_generator = DpiaGenerator::new(&config.model_name);
         Self {
@@ -109,22 +109,22 @@ impl ComplianceGenerator {
         }
     }
 
-/// model_card function
+    /// model_card function
     pub fn model_card(&self) -> ModelCard {
         generate_model_card(&self.config.model_name)
     }
 
-/// dpia function
+    /// dpia function
     pub fn dpia(&self) -> DpiaDocument {
         self.dpia_generator.generate()
     }
 
-/// dora_report function
+    /// dora_report function
     pub fn dora_report(&self, incident: &PiiIncident) -> DoraReport {
         generate_report(incident)
     }
 
-/// checklist function
+    /// checklist function
     pub fn checklist(&self) -> ComplianceChecklist {
         generate_checklist()
     }

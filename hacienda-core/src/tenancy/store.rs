@@ -51,7 +51,7 @@ pub struct InMemoryTenantStore {
 }
 
 impl InMemoryTenantStore {
-/// new function
+    /// new function
     pub fn new() -> Self {
         Self::default()
     }

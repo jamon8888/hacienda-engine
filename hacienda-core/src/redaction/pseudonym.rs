@@ -31,9 +31,9 @@ pub enum PseudonymError {
         "invalid pseudonym key id '{id}': expected 1-16 characters from [a-z0-9_] \
          (lowercase, no ':' or ']', usable as an environment variable suffix)"
     )]
-    InvalidKeyId { 
+    InvalidKeyId {
         /// Key ID
-        id: String 
+        id: String,
     },
 
     /// Key not found
@@ -41,11 +41,11 @@ pub enum PseudonymError {
         "no pseudonym key is configured for id '{id}' \
          (expected environment variable {variable})"
     )]
-    KeyNotFound { 
+    KeyNotFound {
         /// Key ID
-        id: String, 
+        id: String,
         /// Variable name
-        variable: String 
+        variable: String,
     },
 
     #[error(
@@ -57,18 +57,18 @@ pub enum PseudonymError {
 
     /// Malformed key material
     #[error("pseudonym key '{id}' is not {KEY_BYTES}-byte lowercase hex")]
-    MalformedKeyMaterial { 
+    MalformedKeyMaterial {
         /// Key ID
-        id: String 
+        id: String,
     },
 
     /// Wrong key length
     #[error("pseudonym key '{id}' is {actual} bytes, expected {KEY_BYTES}")]
-    WrongKeyLength { 
+    WrongKeyLength {
         /// Key ID
-        id: String, 
+        id: String,
         /// Actual length
-        actual: usize 
+        actual: usize,
     },
 
     #[error("not a pseudonym token: expected [CATEGORY:key_id:data]")]
@@ -84,11 +84,11 @@ pub enum PseudonymError {
 
     /// Unsupported category
     #[error("category '{category}' cannot appear in a pseudonym token: {reason}")]
-    UnsupportedCategory { 
+    UnsupportedCategory {
         /// Category
-        category: String, 
+        category: String,
         /// Reason
-        reason: String 
+        reason: String,
     },
 
     /// A non-default tenant id contains characters outside `[a-z0-9_]` — lowercase only.
@@ -109,9 +109,9 @@ pub enum PseudonymError {
          expected characters from [a-z0-9_] so that no two tenant ids map to the \
          same environment variable name"
     )]
-    UnsupportedTenantId { 
+    UnsupportedTenantId {
         /// Tenant
-        tenant: String 
+        tenant: String,
     },
 }
 
@@ -257,7 +257,7 @@ impl KeyId {
         }
     }
 
-/// as_str function
+    /// as_str function
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -330,7 +330,7 @@ impl PseudonymKey {
         })
     }
 
-/// id function
+    /// id function
     pub fn id(&self) -> &KeyId {
         &self.id
     }
@@ -788,7 +788,7 @@ pub struct TenantPseudonymiserRegistry {
 }
 
 impl TenantPseudonymiserRegistry {
-/// new function
+    /// new function
     pub fn new() -> Self {
         Self::default()
     }

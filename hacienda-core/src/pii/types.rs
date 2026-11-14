@@ -140,7 +140,7 @@ pub struct RegexEntity {
 }
 
 impl RegexEntity {
-/// new function
+    /// new function
     pub fn new(category: PiiCategory, start: u32, end: u32) -> Self {
         let redact_template = format!("[{category:?}]").to_uppercase();
         Self {

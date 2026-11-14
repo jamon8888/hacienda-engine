@@ -94,12 +94,12 @@ impl FileSink {
         })
     }
 
-/// chain function
+    /// chain function
     pub fn chain(&self) -> &AuditChain {
         &self.chain
     }
 
-/// chain_mut function
+    /// chain_mut function
     pub fn chain_mut(&mut self) -> &mut AuditChain {
         &mut self.chain
     }

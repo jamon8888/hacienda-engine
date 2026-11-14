@@ -96,7 +96,7 @@ pub struct PostgresDocumentVersionStore {
 }
 
 impl PostgresDocumentVersionStore {
-/// new function
+    /// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

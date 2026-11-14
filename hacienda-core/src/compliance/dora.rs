@@ -92,7 +92,7 @@ pub struct CommunicationLog {
 pub struct DoraIncidentReporter;
 
 impl DoraIncidentReporter {
-/// generate_report function
+    /// generate_report function
     pub fn generate_report(incident: &PiiIncident) -> DoraReport {
         let sanitized = incident.detected_at.replace(['-', ':', 'T'], "");
         let timestamp_part = sanitized.get(..13).unwrap_or(&sanitized);
