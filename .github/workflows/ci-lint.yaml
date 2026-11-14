@@ -24,6 +24,11 @@ jobs:
           toolchain: nightly-2026-08-06
           components: rustfmt, clippy
 
+      # Run the focused secrecy-client gate before generic repository linting so
+      # token-boundary and clippy failures remain attributable to this surface.
+      - name: Verify secrecy-client foundation
+        run: bash scripts/ci/rust/run-secrecy-client-gate.sh
+
       - name: Install rumdl
         run: cargo install rumdl --locked
 
