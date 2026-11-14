@@ -10,6 +10,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod provider;
+
+pub use provider::*;
+
 /// A serialized configuration for one supported installation profile.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallationConfig {

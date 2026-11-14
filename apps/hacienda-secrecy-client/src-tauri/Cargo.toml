@@ -1,0 +1,14 @@
+[package]
+name = "hacienda-secrecy-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hacienda-client-core = { path = "../../../crates/hacienda-client-core" }
+tauri = { version = "2", features = [] }
