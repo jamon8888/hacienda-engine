@@ -165,6 +165,64 @@ impl BackendDocument {
     pub fn source_hash(&self) -> &str {
         &self.source_hash
     }
+
+    pub fn dossier_id(&self) -> &str {
+        &self.dossier_id
+    }
+}
+
+/// A Tiptap revision that has crossed the redaction pipeline boundary.
+///
+/// The constructor is intentionally explicit about the evidence it requires. A caller
+/// cannot turn a plain editor JSON value into this type without naming a pipeline version
+/// and at least one existing Hacienda audit reference. The backend still validates the
+/// token shape before accepting it and never treats this type as proof that a caller is
+/// allowed to write to another tenant.
+#[derive(Debug, Clone)]
+pub struct PipelineAttestedEditorRevision {
+    editor: EditorEnvelope,
+    pipeline_version: String,
+    audit_references: Vec<AuditReference>,
+}
+
+impl PipelineAttestedEditorRevision {
+    /// Construct a revision only from a completed pipeline result.
+    ///
+    /// This is the narrow hand-off for a Tiptap re-redaction service. It rejects the
+    /// shape used by the unaudited manual-mask path and requires an audit reference; a
+    /// client should not construct it directly from edited JSON.
+    pub(crate) fn from_pipeline(
+        editor: EditorEnvelope,
+        pipeline_version: impl Into<String>,
+        audit_references: Vec<AuditReference>,
+    ) -> Result<Self, BackendError> {
+        let pipeline_version = pipeline_version.into();
+        validate_editor_envelope(&editor)?;
+        if pipeline_version.trim().is_empty() || audit_references.is_empty() {
+            return Err(BackendError::PipelineAttestationRequired);
+        }
+        Ok(Self {
+            editor,
+            pipeline_version,
+            audit_references,
+        })
+    }
+
+    pub fn editor(&self) -> &EditorEnvelope {
+        &self.editor
+    }
+}
+
+/// Result of an append-only editor save. `version_id` is allocated by the backend and
+/// is never taken from the editor/client payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorRevisionSave {
+    pub document_id: String,
+    pub dossier_id: String,
+    pub version_id: String,
+    pub rag_document_id: DocumentId,
+    pub audit_references: Vec<AuditReference>,
+    pub idempotent: bool,
 }
 
 /// Plaintext returned only in memory to an authorized human viewer. This type deliberately
@@ -286,6 +344,7 @@ fn parse_token_header(token: &str) -> Option<(&str, &str)> {
 pub struct Backend {
     profile: InstallationConfig,
     scope: CollectionScope,
+    revision_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Error)]
@@ -308,6 +367,18 @@ pub enum BackendError {
     UnconfiguredLanceDbPath,
     #[error("document is not a supported redacted extraction")]
     UnredactedDocument,
+    #[error("editor revision is not a valid Hacienda token-only projection: {0}")]
+    InvalidEditorRevision(String),
+    #[error("editor revision is missing a pipeline version or audit reference")]
+    PipelineAttestationRequired,
+    #[error("editor revision base version does not match the stored document")]
+    RevisionBaseMismatch,
+    #[error("editor revision base document is not present in the target collection")]
+    RevisionBaseMissing,
+    #[error("immutable editor version already exists with different content")]
+    ImmutableVersionConflict,
+    #[error("audit append failed: {0}")]
+    Audit(#[from] hacienda_core::audit::AuditError),
     #[error("rehydration authorization failed")]
     RehydrationDenied,
     #[error("RAG store error: {0}")]
@@ -340,7 +411,11 @@ impl Backend {
                     .clone(),
             )?,
         };
-        Ok(Self { profile, scope })
+        Ok(Self {
+            profile,
+            scope,
+            revision_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     pub fn profile(&self) -> &InstallationConfig {
@@ -563,6 +638,167 @@ impl Backend {
             .await
     }
 
+    /// Append a pipeline-attested Tiptap revision to a LocalFull store.
+    ///
+    /// `base` is server-side state, not a client claim: its tenant, dossier, document and
+    /// version are checked against the stored record before the revision is accepted. A
+    /// deterministic version id makes retries idempotent, while a different payload for
+    /// the same version is rejected instead of being overwritten. The audit event is
+    /// appended before the RAG write.
+    pub async fn append_editor_revision(
+        &self,
+        audit: &dyn AuditStore,
+        store: &dyn RagStore,
+        requested_collection: &str,
+        base: &BackendDocument,
+        revision: &PipelineAttestedEditorRevision,
+    ) -> Result<EditorRevisionSave, BackendError> {
+        self.append_editor_revision_to_store(audit, store, requested_collection, base, revision)
+            .await
+    }
+
+    /// Append a pipeline-attested Tiptap revision through an authenticated tenant gateway.
+    /// The gateway, rather than any client field, establishes the tenant scope.
+    pub async fn append_editor_revision_via_gateway<G: AuthenticatedTenantGateway>(
+        &self,
+        audit: &dyn AuditStore,
+        gateway: &G,
+        requested_collection: &str,
+        base: &BackendDocument,
+        revision: &PipelineAttestedEditorRevision,
+    ) -> Result<EditorRevisionSave, BackendError> {
+        let expected = self
+            .tenant_scope()
+            .ok_or_else(|| BackendError::InvalidScope)?;
+        if gateway.tenant_scope().0 != expected {
+            return Err(BackendError::TenantScopeMismatch);
+        }
+        let store = gateway.rag_store().await?;
+        self.append_editor_revision_to_store(
+            audit,
+            store.as_ref(),
+            requested_collection,
+            base,
+            revision,
+        )
+        .await
+    }
+
+    async fn append_editor_revision_to_store(
+        &self,
+        audit: &dyn AuditStore,
+        store: &dyn RagStore,
+        requested_collection: &str,
+        base: &BackendDocument,
+        revision: &PipelineAttestedEditorRevision,
+    ) -> Result<EditorRevisionSave, BackendError> {
+        let _guard = self.revision_lock.lock().await;
+        if base.tenant_scope != self.tenant_scope()
+            || base.dossier_id.trim().is_empty()
+            || base.editor.document_ref.trim().is_empty()
+            || base.editor.version_ref.trim().is_empty()
+        {
+            return Err(BackendError::RevisionBaseMismatch);
+        }
+        if revision.editor.document_ref != base.editor.document_ref
+            || revision.editor.version_ref != base.editor.version_ref
+        {
+            return Err(BackendError::RevisionBaseMismatch);
+        }
+        validate_editor_envelope(&revision.editor)?;
+
+        let collection = self
+            .collection_name(requested_collection)
+            .map_err(|error| BackendError::InvalidEditorRevision(error.to_string()))?;
+        let base_id = base
+            .rag_document
+            .external_id
+            .clone()
+            .ok_or(BackendError::RevisionBaseMissing)?;
+        let stored_base = store
+            .get_document_chunks(&collection, &DocumentId(base_id))
+            .await?
+            .ok_or(BackendError::RevisionBaseMissing)?;
+        if stored_base.0 != base.rag_document || stored_base.1 != base.chunks {
+            return Err(BackendError::RevisionBaseMismatch);
+        }
+
+        let version_id = revision_version_id(base, revision)?;
+        let candidate = build_editor_revision_document(self, base, revision, &version_id)?;
+        let candidate_id = DocumentId(
+            candidate
+                .rag_document
+                .external_id
+                .clone()
+                .ok_or(BackendError::ImmutableVersionConflict)?,
+        );
+
+        // The only permitted repeat is an exact replay of the same immutable version. The
+        // preflight also avoids producing a second audit event for a retry.
+        if let Some(existing) = store
+            .get_document_chunks(&collection, &candidate_id)
+            .await?
+        {
+            if existing.0 == candidate.rag_document && existing.1 == candidate.chunks {
+                return Ok(EditorRevisionSave {
+                    document_id: base.editor.document_ref.clone(),
+                    dossier_id: base.dossier_id.clone(),
+                    version_id,
+                    rag_document_id: candidate_id,
+                    audit_references: revision.audit_references.clone(),
+                    idempotent: true,
+                });
+            }
+            return Err(BackendError::ImmutableVersionConflict);
+        }
+
+        let tenant = TenantId::new(self.tenant_scope().unwrap_or_else(|| "local".into()));
+        let audit_entry = audit
+            .append(
+                &tenant,
+                vec![AuditEntryInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    category: "editor_revision".into(),
+                    action: RedactionAction::Custom("pipeline_attested_save".into()),
+                    span_hash: candidate.source_hash.clone(),
+                    span_length: candidate.rag_document.full_text.chars().count() as u32,
+                    confidence: None,
+                    source: EntitySource::Model,
+                    pipeline_version: revision.pipeline_version.clone(),
+                    config_hash: candidate.source_hash.clone(),
+                    principal: None,
+                    vertical: None,
+                    model: None,
+                }],
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                BackendError::Audit(hacienda_core::audit::AuditError::Backend(
+                    "audit store returned no entry".into(),
+                ))
+            })?;
+
+        // RagStore only exposes upsert today. The immutable, content-addressed version id
+        // plus the serialized equality check above prevents ordinary overwrites; the lock
+        // closes races between saves through this Backend instance. A store-level
+        // create-only primitive is still required to make this atomic across processes.
+        let rag_document_id = store
+            .upsert_document(&collection, &candidate.rag_document, &candidate.chunks)
+            .await?;
+        let mut audit_references = revision.audit_references.clone();
+        audit_references.push(AuditReference(audit_entry.id));
+        Ok(EditorRevisionSave {
+            document_id: base.editor.document_ref.clone(),
+            dossier_id: base.dossier_id.clone(),
+            version_id,
+            rag_document_id,
+            audit_references,
+            idempotent: false,
+        })
+    }
+
     fn tenant_scope(&self) -> Option<String> {
         match &self.profile {
             InstallationConfig::LocalFull(_) => None,
@@ -581,6 +817,7 @@ mod tests {
         LocalFullConfig, ProviderRoute, RehydrationCapability, SecretReference, ServiceEndpoint,
         StoragePath, TeamOnPremiseConfig, TenantScope, TrustBoundary, VaultId,
     };
+    use hacienda_core::audit::InMemoryAuditStore;
     use hacienda_rag::{InMemoryVectorStore, RagStore};
     use std::sync::Arc;
 
@@ -888,6 +1125,90 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn editor_revision_is_audited_before_append_and_retries_are_idempotent() {
+        let backend = Backend::new(local()).unwrap();
+        let base = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let store = InMemoryVectorStore::default();
+        backend
+            .persist_to(&store, "contracts", &base)
+            .await
+            .unwrap();
+        let audit = InMemoryAuditStore::new("default");
+        let revision = PipelineAttestedEditorRevision::from_pipeline(
+            base.editor().clone(),
+            "hacienda-editor-pipeline-v1",
+            vec![AuditReference("redaction-audit-1".into())],
+        )
+        .unwrap();
+
+        let first = backend
+            .append_editor_revision(&audit, &store, "contracts", &base, &revision)
+            .await
+            .unwrap();
+        let second = backend
+            .append_editor_revision(&audit, &store, "contracts", &base, &revision)
+            .await
+            .unwrap();
+        assert!(!first.idempotent);
+        assert!(second.idempotent);
+        assert_eq!(first.version_id, second.version_id);
+        assert_eq!(
+            store
+                .collection_stats("local:contracts")
+                .await
+                .unwrap()
+                .documents,
+            2
+        );
+        assert_eq!(
+            audit.entries(&TenantId::new("local")).await.unwrap().len(),
+            1
+        );
+        let persisted = store
+            .get_document_chunks("local:contracts", &first.rag_document_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let serialized = serde_json::to_string(&persisted).unwrap();
+        assert!(!serialized.contains("Jane Doe"));
+        assert!(serialized.contains("[PERSON:k1:IFBEGRCF]"));
+        assert_eq!(persisted.0.labels["dossier_id"], "case");
+        assert_eq!(persisted.0.labels["document_id"], "doc");
+        assert_eq!(persisted.0.labels["version_id"], first.version_id);
+    }
+
+    #[test]
+    fn editor_revision_rejects_unaudited_manual_marks() {
+        let backend = Backend::new(local()).unwrap();
+        let base = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let mut editor = base.editor().clone();
+        editor.editor["content"][0]["content"][1]["marks"][0]["attrs"]["source"] =
+            Value::String("manual".into());
+        assert!(matches!(
+            PipelineAttestedEditorRevision::from_pipeline(
+                editor,
+                "hacienda-editor-pipeline-v1",
+                vec![AuditReference("redaction-audit-1".into())],
+            ),
+            Err(BackendError::InvalidEditorRevision(_))
+        ));
+    }
+
     struct TestGateway {
         tenant: TenantScope,
         store: Arc<dyn RagStore>,
@@ -1027,6 +1348,354 @@ mod tests {
             1
         );
     }
+}
+
+fn revision_version_id(
+    base: &BackendDocument,
+    revision: &PipelineAttestedEditorRevision,
+) -> Result<String, BackendError> {
+    let payload = serde_json::to_vec(&(
+        base.editor.document_ref.as_str(),
+        base.editor.version_ref.as_str(),
+        &revision.editor,
+        &revision.pipeline_version,
+        &revision.audit_references,
+    ))?;
+    Ok(format!("v-{}", blake3::hash(&payload).to_hex()))
+}
+
+fn build_editor_revision_document(
+    backend: &Backend,
+    base: &BackendDocument,
+    revision: &PipelineAttestedEditorRevision,
+    version_id: &str,
+) -> Result<BackendDocument, BackendError> {
+    let mut editor = revision.editor.clone();
+    editor.version_ref = version_id.to_owned();
+    let full_text = editor_text(&editor.editor)?;
+    let metadata = serde_json::to_value(&editor.metadata)?;
+    let mut rag_metadata = serde_json::to_value(&editor.provenance)?;
+    if let Value::Object(fields) = &mut rag_metadata {
+        fields.insert("token_only".to_owned(), metadata.clone());
+        fields.insert(
+            "pipeline_version".to_owned(),
+            Value::String(revision.pipeline_version.clone()),
+        );
+        fields.insert(
+            "pipeline_audit_references".to_owned(),
+            serde_json::to_value(&revision.audit_references)?,
+        );
+    }
+    let source_hash = blake3::hash(full_text.as_bytes()).to_hex().to_string();
+    let format_kind = editor.metadata.legal.format_kind.clone();
+    let rag_document = DocumentRecord {
+        external_id: Some(format!("{}:{}", base.editor.document_ref, version_id)),
+        title: token_text(&editor.metadata.title),
+        mime: Some(editor.metadata.legal.mime_type.clone()),
+        source_uri: None,
+        full_text: full_text.clone(),
+        keywords: editor
+            .metadata
+            .keywords
+            .iter()
+            .flatten()
+            .map(|token| token.token_id.clone())
+            .collect(),
+        entities: Value::Null,
+        labels: json!({
+            "tenant_scope": backend.tenant_scope(),
+            "dossier_id": base.dossier_id.clone(),
+            "document_id": base.editor.document_ref.clone(),
+            "version_id": version_id,
+            "metadata_token_only": metadata,
+            "source_hash": source_hash.clone(),
+            "editor_schema": editor.schema.clone(),
+            "format_kind": format_kind,
+            "pipeline_audit_references": revision.audit_references.clone(),
+        }),
+        metadata: rag_metadata,
+    };
+    let chunks = full_text
+        .split('\n')
+        .enumerate()
+        .map(|(ordinal, content)| ChunkRecord {
+            external_id: Some(format!(
+                "{}:{}:{}",
+                base.editor.document_ref, version_id, ordinal
+            )),
+            ordinal: ordinal as u32,
+            content: content.to_owned(),
+            embedding: Vec::new(),
+            sparse_embedding: None,
+            multi_vector: None,
+            chunk_metadata: json!({
+                "tenant_scope": backend.tenant_scope(),
+                "dossier_id": base.dossier_id.clone(),
+                "document_id": base.editor.document_ref.clone(),
+                "version_id": version_id,
+                "source_hash": source_hash.clone(),
+            }),
+        })
+        .collect::<Vec<_>>();
+    let token_references = editor
+        .search
+        .tokens
+        .iter()
+        .map(|token| OpaqueTokenReference {
+            token_id: token.token_id.clone(),
+            token_class: token.token_class.clone(),
+            source: token.source.clone(),
+        })
+        .collect();
+    Ok(BackendDocument {
+        editor,
+        rag_document,
+        chunks,
+        token_references,
+        tenant_scope: backend.tenant_scope(),
+        dossier_id: base.dossier_id.clone(),
+        source_hash,
+    })
+}
+
+fn editor_text(editor: &Value) -> Result<String, BackendError> {
+    let Some(blocks) = editor.get("content").and_then(Value::as_array) else {
+        return Err(BackendError::InvalidEditorRevision(
+            "editor root must contain a content array".into(),
+        ));
+    };
+    let mut paragraphs = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let mut text = String::new();
+        collect_text(block, &mut text)?;
+        paragraphs.push(text);
+    }
+    Ok(paragraphs.join("\n"))
+}
+
+fn collect_text(value: &Value, output: &mut String) -> Result<(), BackendError> {
+    if let Some(text) = value.get("text") {
+        let Some(text) = text.as_str() else {
+            return Err(BackendError::InvalidEditorRevision(
+                "editor text node is not a string".into(),
+            ));
+        };
+        output.push_str(text);
+    }
+    if let Some(children) = value.get("content") {
+        let Some(children) = children.as_array() else {
+            return Err(BackendError::InvalidEditorRevision(
+                "editor content must be an array".into(),
+            ));
+        };
+        for child in children {
+            collect_text(child, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_editor_envelope(editor: &EditorEnvelope) -> Result<(), BackendError> {
+    if editor.schema != "hacienda.editor.v1" || editor.projection_version != 1 {
+        return Err(BackendError::InvalidEditorRevision(
+            "unsupported editor schema".into(),
+        ));
+    }
+    if editor.document_ref.trim().is_empty() || editor.version_ref.trim().is_empty() {
+        return Err(BackendError::InvalidEditorRevision(
+            "document and version references are required".into(),
+        ));
+    }
+    if editor.provenance.redactor != "hacienda" || !editor.provenance.offsets_are_source_only {
+        return Err(BackendError::InvalidEditorRevision(
+            "editor provenance is not a Hacienda source-only projection".into(),
+        ));
+    }
+    if editor.editor.get("type").and_then(Value::as_str) != Some("doc") {
+        return Err(BackendError::InvalidEditorRevision(
+            "editor root is not a ProseMirror doc".into(),
+        ));
+    }
+    let metadata = serde_json::to_value(&editor.metadata)?;
+    validate_token_values(&metadata)?;
+    let mut marked = std::collections::BTreeMap::<String, u32>::new();
+    validate_editor_node(&editor.editor, &mut marked)?;
+    collect_metadata_token_counts(&metadata, &mut marked);
+    let search = editor
+        .search
+        .tokens
+        .iter()
+        .map(|token| {
+            validate_token_id(&token.token_id)?;
+            if token.source == "manual" || token.mode == "manual-mask" {
+                return Err(BackendError::InvalidEditorRevision(
+                    "manual editor marks are not pipeline-attested".into(),
+                ));
+            }
+            Ok((token.token_id.clone(), token.occurrences))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, BackendError>>()?;
+    if marked != search {
+        return Err(BackendError::InvalidEditorRevision(
+            "search projection does not match editor token marks".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_token_values(value: &Value) -> Result<(), BackendError> {
+    match value {
+        Value::Array(values) => values.iter().try_for_each(validate_token_values),
+        Value::Object(fields) => {
+            if fields.contains_key("tokenId") || fields.contains_key("token_id") {
+                let id = fields
+                    .get("tokenId")
+                    .or_else(|| fields.get("token_id"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        BackendError::InvalidEditorRevision(
+                            "token metadata id is not a string".into(),
+                        )
+                    })?;
+                validate_token_id(id)?;
+                let source = fields
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let mode = fields
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if source == "manual" || mode == "manual-mask" {
+                    return Err(BackendError::InvalidEditorRevision(
+                        "manual token metadata is not pipeline-attested".into(),
+                    ));
+                }
+            }
+            fields.values().try_for_each(validate_token_values)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn collect_metadata_token_counts(
+    value: &Value,
+    counts: &mut std::collections::BTreeMap<String, u32>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_metadata_token_counts(value, counts);
+            }
+        }
+        Value::Object(fields) => {
+            if let Some(token_id) = fields
+                .get("tokenId")
+                .or_else(|| fields.get("token_id"))
+                .and_then(Value::as_str)
+            {
+                *counts.entry(token_id.to_owned()).or_default() += 1;
+            }
+            for value in fields.values() {
+                collect_metadata_token_counts(value, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_editor_node(
+    value: &Value,
+    marked: &mut std::collections::BTreeMap<String, u32>,
+) -> Result<(), BackendError> {
+    if value.get("type").and_then(Value::as_str) == Some("text") {
+        let text = value
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BackendError::InvalidEditorRevision("text node has no text".into()))?;
+        let marks = value
+            .get("marks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let sensitive = marks
+            .iter()
+            .find(|mark| mark.get("type").and_then(Value::as_str) == Some("sensitive"));
+        if let Some(mark) = sensitive {
+            let attrs = mark.get("attrs").ok_or_else(|| {
+                BackendError::InvalidEditorRevision("sensitive mark has no attrs".into())
+            })?;
+            let token_id = attrs
+                .get("tokenId")
+                .or_else(|| attrs.get("token_id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    BackendError::InvalidEditorRevision("sensitive mark has no token id".into())
+                })?;
+            validate_token_id(token_id)?;
+            let source = attrs
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mode = attrs
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if source == "manual" || mode == "manual-mask" || text != token_id {
+                return Err(BackendError::InvalidEditorRevision(
+                    "sensitive text is not a pipeline token".into(),
+                ));
+            }
+            *marked.entry(token_id.to_owned()).or_default() += 1;
+        } else if contains_hacienda_token(text) {
+            return Err(BackendError::InvalidEditorRevision(
+                "token-shaped text must carry a sensitive mark".into(),
+            ));
+        }
+    }
+    if let Some(children) = value.get("content") {
+        let children = children.as_array().ok_or_else(|| {
+            BackendError::InvalidEditorRevision("editor content must be an array".into())
+        })?;
+        for child in children {
+            validate_editor_node(child, marked)?;
+        }
+    }
+    Ok(())
+}
+
+fn contains_hacienda_token(text: &str) -> bool {
+    text.split_whitespace()
+        .any(|word| word.starts_with('[') && word.ends_with(']') && validate_token_id(word).is_ok())
+}
+
+fn validate_token_id(token: &str) -> Result<(), BackendError> {
+    let inner = token.strip_prefix('[').and_then(|v| v.strip_suffix(']'));
+    let Some(inner) = inner else {
+        return Err(BackendError::InvalidEditorRevision(
+            "token is not bracketed".into(),
+        ));
+    };
+    let fields = inner.split(':').collect::<Vec<_>>();
+    if fields.len() != 3
+        || fields[0].is_empty()
+        || !fields[0]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        || fields[1].is_empty()
+        || !fields[1]
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        || fields[2].is_empty()
+        || !fields[2]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || (b'2'..=b'7').contains(&byte))
+    {
+        return Err(BackendError::InvalidEditorRevision(
+            "token is not a Hacienda pseudonym".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn token_text(tokens: &[SensitiveToken]) -> Option<String> {
