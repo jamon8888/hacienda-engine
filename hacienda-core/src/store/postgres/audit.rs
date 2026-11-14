@@ -523,6 +523,9 @@ fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
         // does not persist vertical provenance. Tracked separately from this fix, which
         // only restores compilation after `AuditEntry` gained the field.
         vertical: None,
+        // The postgres schema currently has no model column, so legacy rows have
+        // no model provenance to recover.
+        model: None,
         chain_hash: row.chain_hash,
     })
 }
