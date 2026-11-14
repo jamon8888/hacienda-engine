@@ -11,4 +11,5 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 hacienda-client-core = { path = "../../../crates/hacienda-client-core" }
+serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }

@@ -8,6 +8,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 /// A stable conversation identifier shared by a client and its provider session.
@@ -68,7 +69,7 @@ pub enum ProviderKind {
 }
 
 /// Raw context supplied by the UI before it crosses the redaction adapter.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PromptContext {
     pub label: String,
     pub content: String,
@@ -96,7 +97,7 @@ impl fmt::Debug for PromptContext {
 }
 
 /// Raw Claude Desktop request. It exists only until [`RedactionAdapter::redact`].
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ClaudeDesktopRequest {
     pub conversation_id: ConversationId,
     pub context_id: ContextId,
@@ -141,7 +142,7 @@ impl fmt::Debug for ClaudeDesktopRequest {
 }
 
 /// Raw Codex request. It exists only until [`RedactionAdapter::redact`].
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CodexRequest {
     pub conversation_id: ConversationId,
     pub context_id: ContextId,
@@ -186,7 +187,7 @@ impl fmt::Debug for CodexRequest {
 }
 
 /// Provider-specific raw request at the public seam.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ProviderRequest {
     ClaudeDesktop(ClaudeDesktopRequest),
     Codex(CodexRequest),
@@ -377,28 +378,28 @@ impl fmt::Debug for DisplayChunk {
 }
 
 /// Redaction failures are intentionally content-free and safe to log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error, Serialize)]
 pub enum RedactionError {
     #[error("redaction adapter rejected the request")]
     Rejected,
 }
 
 /// Provider transport failures are intentionally content-free and safe to log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error, Serialize)]
 pub enum TransportError {
     #[error("provider transport failed")]
     Failed,
 }
 
 /// Human display rehydration failures are intentionally content-free and safe to log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error, Serialize)]
 pub enum RehydrationError {
     #[error("display rehydration failed")]
     Failed,
 }
 
 /// Errors from the small client interface. No variant contains user content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error, Serialize)]
 pub enum ClientError {
     #[error("redaction capability is unavailable")]
     RedactionUnavailable,
@@ -425,6 +426,416 @@ pub trait ProviderTransport {
         &mut self,
         request: &RedactedProviderRequest,
     ) -> Result<ProviderResponse, TransportError>;
+}
+
+/// An outbound request at the provider HTTP seam. The body and headers are kept
+/// private to the transport implementation and are never rendered by `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderHttpRequest {
+    method: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl ProviderHttpRequest {
+    /// Construct an HTTP request for an injected provider client.
+    #[must_use]
+    pub fn new(
+        method: impl Into<String>,
+        url: impl Into<String>,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            method: method.into(),
+            url: url.into(),
+            headers,
+            body,
+        }
+    }
+
+    /// Inspect the method in a test seam without exposing payloads in formatting.
+    #[must_use]
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// Inspect the destination in an injected HTTP implementation.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Inspect headers only inside the injected HTTP implementation.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// Inspect the serialized body only inside the injected HTTP implementation.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl fmt::Debug for ProviderHttpRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderHttpRequest")
+            .field("method", &self.method)
+            .field("url", &"<opaque>")
+            .field("headers", &"<redacted>")
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
+/// A response from the injected HTTP seam. The body is consumed by a provider
+/// adapter and is never included in `Debug` or a transport error.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderHttpResponse {
+    status: u16,
+    body: String,
+}
+
+impl ProviderHttpResponse {
+    /// Construct a response fixture or an HTTP implementation result.
+    #[must_use]
+    pub fn new(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+        }
+    }
+
+    /// Return the status code for adapter validation.
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Borrow the raw body only while mapping it to tokenized chunks.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+impl fmt::Debug for ProviderHttpResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderHttpResponse")
+            .field("status", &self.status)
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Small, injected HTTP seam used by the provider adapters and their tests.
+pub trait ProviderHttpClient {
+    /// Send one request without logging or retaining its content.
+    fn send(
+        &mut self,
+        request: ProviderHttpRequest,
+    ) -> Result<ProviderHttpResponse, TransportError>;
+}
+
+/// Provider endpoint and authentication configuration. `Debug` intentionally
+/// redacts every value because endpoints may contain credentials in query strings.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderTransportConfig {
+    endpoint: String,
+    model: String,
+    max_tokens: u32,
+    credential: String,
+}
+
+impl ProviderTransportConfig {
+    /// Construct transport configuration from transient application settings.
+    #[must_use]
+    pub fn new(
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        max_tokens: u32,
+        credential: impl Into<String>,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            model: model.into(),
+            max_tokens,
+            credential: credential.into(),
+        }
+    }
+}
+
+impl fmt::Debug for ProviderTransportConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderTransportConfig")
+            .field("endpoint", &"<opaque>")
+            .field("model", &"<opaque>")
+            .field("max_tokens", &self.max_tokens)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Anthropic Messages adapter. It maps Anthropic SSE text deltas to token-only
+/// chunks while preserving the identifiers supplied by the redaction seam.
+pub struct AnthropicProviderTransport<H> {
+    http: H,
+    config: ProviderTransportConfig,
+}
+
+impl<H> AnthropicProviderTransport<H> {
+    /// Construct an adapter over an injected HTTP client.
+    #[must_use]
+    pub fn new(http: H, config: ProviderTransportConfig) -> Self {
+        Self { http, config }
+    }
+}
+
+impl<H> ProviderTransport for AnthropicProviderTransport<H>
+where
+    H: ProviderHttpClient,
+{
+    fn stream(
+        &mut self,
+        request: &RedactedProviderRequest,
+    ) -> Result<ProviderResponse, TransportError> {
+        if request.provider != ProviderKind::ClaudeDesktop {
+            return Err(TransportError::Failed);
+        }
+        let body = json!({
+            "model": self.config.model,
+            "max_tokens": self.config.max_tokens,
+            "stream": true,
+            "messages": [{"role": "user", "content": provider_input(request)}],
+            "metadata": {
+                "conversation_id": request.conversation_id.as_str(),
+                "context_id": request.context_id.as_str()
+            }
+        });
+        let response = self.http.send(ProviderHttpRequest::new(
+            "POST",
+            self.config.endpoint.clone(),
+            vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("x-api-key".to_owned(), self.config.credential.clone()),
+                ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+                (
+                    "x-hacienda-conversation-id".to_owned(),
+                    request.conversation_id.as_str().to_owned(),
+                ),
+                (
+                    "x-hacienda-context-id".to_owned(),
+                    request.context_id.as_str().to_owned(),
+                ),
+            ],
+            serde_json::to_vec(&body).map_err(|_| TransportError::Failed)?,
+        ))?;
+        map_provider_response(
+            request,
+            response,
+            ProviderKind::ClaudeDesktop,
+            anthropic_text,
+        )
+    }
+}
+
+/// OpenAI Chat Completions-compatible adapter for Codex transports.
+pub struct OpenAiProviderTransport<H> {
+    http: H,
+    config: ProviderTransportConfig,
+}
+
+impl<H> OpenAiProviderTransport<H> {
+    /// Construct an adapter over an injected HTTP client.
+    #[must_use]
+    pub fn new(http: H, config: ProviderTransportConfig) -> Self {
+        Self { http, config }
+    }
+}
+
+impl<H> ProviderTransport for OpenAiProviderTransport<H>
+where
+    H: ProviderHttpClient,
+{
+    fn stream(
+        &mut self,
+        request: &RedactedProviderRequest,
+    ) -> Result<ProviderResponse, TransportError> {
+        if request.provider != ProviderKind::Codex {
+            return Err(TransportError::Failed);
+        }
+        let body = json!({
+            "model": self.config.model,
+            "stream": true,
+            "messages": [{"role": "user", "content": provider_input(request)}],
+            "metadata": {
+                "conversation_id": request.conversation_id.as_str(),
+                "context_id": request.context_id.as_str()
+            }
+        });
+        let response = self.http.send(ProviderHttpRequest::new(
+            "POST",
+            self.config.endpoint.clone(),
+            vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                (
+                    "authorization".to_owned(),
+                    format!("Bearer {}", self.config.credential),
+                ),
+                (
+                    "x-hacienda-conversation-id".to_owned(),
+                    request.conversation_id.as_str().to_owned(),
+                ),
+                (
+                    "x-hacienda-context-id".to_owned(),
+                    request.context_id.as_str().to_owned(),
+                ),
+            ],
+            serde_json::to_vec(&body).map_err(|_| TransportError::Failed)?,
+        ))?;
+        map_provider_response(request, response, ProviderKind::Codex, openai_text)
+    }
+}
+
+fn provider_input(request: &RedactedProviderRequest) -> String {
+    request
+        .context
+        .iter()
+        .map(|item| item.content.text.as_str())
+        .chain(std::iter::once(request.prompt.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn known_references(request: &RedactedProviderRequest) -> Vec<OpaqueTokenReference> {
+    let mut references = Vec::new();
+    let mut add = |text: &TokenizedText| {
+        for reference in &text.references {
+            if !references
+                .iter()
+                .any(|known: &OpaqueTokenReference| known == reference)
+            {
+                references.push(reference.clone());
+            }
+        }
+    };
+    add(&request.prompt);
+    for context in &request.context {
+        add(&context.content);
+    }
+    references
+}
+
+fn map_provider_response(
+    request: &RedactedProviderRequest,
+    response: ProviderHttpResponse,
+    provider: ProviderKind,
+    extract_text: fn(&Value) -> Option<String>,
+) -> Result<ProviderResponse, TransportError> {
+    if !(200..300).contains(&response.status) {
+        return Err(TransportError::Failed);
+    }
+    let references = known_references(request);
+    let mut chunks = Vec::new();
+    for data in sse_data(response.body()) {
+        if data == "[DONE]" {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&data).map_err(|_| TransportError::Failed)?;
+        if value.get("error").is_some() {
+            return Err(TransportError::Failed);
+        }
+        if let Some(text) = extract_text(&value).filter(|text| !text.is_empty()) {
+            chunks.push(ProviderStreamChunk {
+                conversation_id: request.conversation_id.clone(),
+                context_id: request.context_id.clone(),
+                sequence: chunks.len() as u64,
+                content: TokenizedText::new(text, references.clone()),
+            });
+        }
+    }
+    let conversation_id = request.conversation_id.clone();
+    let context_id = request.context_id.clone();
+    Ok(match provider {
+        ProviderKind::ClaudeDesktop => ProviderResponse::ClaudeDesktop(ClaudeDesktopResponse {
+            conversation_id,
+            context_id,
+            chunks,
+        }),
+        ProviderKind::Codex => ProviderResponse::Codex(CodexResponse {
+            conversation_id,
+            context_id,
+            chunks,
+        }),
+    })
+}
+
+fn sse_data(body: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    let mut current = Vec::new();
+    let is_sse = body.lines().any(|line| line.starts_with("data:"));
+    if !is_sse {
+        return vec![body.to_owned()];
+    }
+    for line in body.lines() {
+        if let Some(data) = line.strip_prefix("data:") {
+            current.push(data.trim_start());
+        } else if line.trim().is_empty() && !current.is_empty() {
+            events.push(current.join("\n"));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        events.push(current.join("\n"));
+    }
+    events
+}
+
+fn anthropic_text(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) == Some("content_block_delta") {
+        return value
+            .pointer("/delta/text")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    if let Some(text) = value.get("completion").and_then(Value::as_str) {
+        return Some(text.to_owned());
+    }
+    value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|content| content.iter().find_map(|item| item.get("text")))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn openai_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("output_text").and_then(Value::as_str) {
+        return Some(text.to_owned());
+    }
+    if let Some(choice) = value.get("choices").and_then(Value::as_array)?.first() {
+        for pointer in ["/delta/content", "/message/content", "/text"] {
+            if let Some(text) = choice.pointer(pointer).and_then(Value::as_str) {
+                return Some(text.to_owned());
+            }
+        }
+    }
+    value
+        .get("output")
+        .and_then(Value::as_array)
+        .and_then(|output| {
+            output
+                .iter()
+                .find_map(|item| item.pointer("/content/0/text"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Adapter seam for explicit, authorized human display rehydration.
@@ -497,6 +908,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     // Synthetic sentinels keep this test focused on the redaction boundary
     // without placing realistic PII in a provider fixture.
@@ -678,5 +1090,112 @@ mod tests {
             .expect("authorized display succeeds");
         assert_eq!(display.text, format!("Hello {PERSON}"));
         assert_eq!(chunk.content.text, format!("Hello {PERSON_TOKEN}"));
+    }
+
+    #[derive(Clone)]
+    struct HttpFixture {
+        response: ProviderHttpResponse,
+        seen: Arc<Mutex<Option<ProviderHttpRequest>>>,
+    }
+
+    impl ProviderHttpClient for HttpFixture {
+        fn send(
+            &mut self,
+            request: ProviderHttpRequest,
+        ) -> Result<ProviderHttpResponse, TransportError> {
+            *self.seen.lock().expect("fixture lock") = Some(request);
+            Ok(self.response.clone())
+        }
+    }
+
+    fn redacted_request(provider: ProviderKind) -> RedactedProviderRequest {
+        RedactedProviderRequest {
+            provider,
+            conversation_id: ConversationId::new("conversation-stable"),
+            context_id: ContextId::new("context-stable"),
+            prompt: TokenizedText::new(
+                format!("Use {PERSON_TOKEN}"),
+                vec![OpaqueTokenReference::new(PERSON_TOKEN, "person")],
+            ),
+            context: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn anthropic_adapter_maps_sse_to_tokenized_chunks_without_raw_debug_values() {
+        let seen = Arc::new(Mutex::new(None));
+        let http = HttpFixture {
+            response: ProviderHttpResponse::new(
+                200,
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello [PERSON:opaque-1]\"}}\n\ndata: [DONE]\n\n",
+            ),
+            seen: Arc::clone(&seen),
+        };
+        let mut transport = AnthropicProviderTransport::new(
+            http,
+            ProviderTransportConfig::new(
+                "https://provider.invalid/v1/messages?api_key=secret-url",
+                "claude-test",
+                32,
+                "anthropic-secret",
+            ),
+        );
+        let response = transport
+            .stream(&redacted_request(ProviderKind::ClaudeDesktop))
+            .expect("Anthropic fixture succeeds");
+        let ProviderResponse::ClaudeDesktop(response) = response else {
+            panic!("expected Claude response");
+        };
+        assert_eq!(response.conversation_id.as_str(), "conversation-stable");
+        assert_eq!(response.context_id.as_str(), "context-stable");
+        assert_eq!(response.chunks[0].content.text, "Hello [PERSON:opaque-1]");
+        assert_eq!(response.chunks[0].content.references[0].token, PERSON_TOKEN);
+
+        let request = seen.lock().expect("fixture lock").take().expect("request");
+        let payload = String::from_utf8(request.body().to_vec()).expect("json body");
+        assert!(payload.contains("[PERSON:opaque-1]"));
+        assert!(!payload.contains(PERSON));
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("anthropic-secret"));
+        assert!(!debug.contains("[PERSON:opaque-1]"));
+        assert!(
+            !format!(
+                "{:?}",
+                ProviderHttpResponse::new(200, "raw-response-secret")
+            )
+            .contains("raw-response-secret")
+        );
+    }
+
+    #[test]
+    fn openai_adapter_maps_sse_and_keeps_response_token_references_stable() {
+        let http = HttpFixture {
+            response: ProviderHttpResponse::new(
+                200,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"A [PERSON:opaque-1]\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" continued\"}}]}\n\ndata: [DONE]\n\n",
+            ),
+            seen: Arc::new(Mutex::new(None)),
+        };
+        let mut transport = OpenAiProviderTransport::new(
+            http,
+            ProviderTransportConfig::new(
+                "https://provider.invalid/v1/chat/completions",
+                "codex-test",
+                32,
+                "openai-secret",
+            ),
+        );
+        let response = transport
+            .stream(&redacted_request(ProviderKind::Codex))
+            .expect("OpenAI fixture succeeds");
+        let ProviderResponse::Codex(response) = response else {
+            panic!("expected Codex response");
+        };
+        assert_eq!(response.chunks.len(), 2);
+        assert_eq!(response.chunks[0].sequence, 0);
+        assert_eq!(response.chunks[1].sequence, 1);
+        assert_eq!(response.chunks[1].content.references[0].token, PERSON_TOKEN);
+        assert!(format!("{response:?}").contains("<token-only>"));
+        assert!(!format!("{response:?}").contains("[PERSON:opaque-1]"));
     }
 }
