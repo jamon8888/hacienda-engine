@@ -3150,7 +3150,6 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
- "tauri-plugin-opener",
  "zeroize",
 ]
 
