@@ -89,5 +89,13 @@ appareil = "appareil"
 espace = "espace"
 convertis = "convertis"
 invalide = "invalide"
+# French UI copy in the localization branch; these are valid French words, not
+# English spelling errors.
+tre = "tre"
+remplace = "remplace"
+reste = "reste"
+moteur = "moteur"
+individuels = "individuels"
+complet = "complet"
 
 [default.extend-identifiers]
