@@ -103,7 +103,7 @@ xberg = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
 # Keep this target-specific dependency on the same public release as the workspace
 # dependency or cargo refuses to build with different source paths by target.
-xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.3.10", default-features = false, features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.4.0", default-features = false, features = [
     "ner",
 ] }
 # `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"

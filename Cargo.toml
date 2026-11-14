@@ -215,7 +215,7 @@ web-time = "1"
 #   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml
 #
 # Use the public upstream release: the former fork revision is no longer fetchable.
-xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.3.10", features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.4.0", features = [
     "redaction",
     "ner",
     "tokio-runtime",
