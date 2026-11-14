@@ -2479,6 +2479,7 @@ mod tests {
                 mode: RedactionMode::Mask,
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
@@ -2489,6 +2490,7 @@ mod tests {
                 key_id: key_id.map(str::to_string),
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
