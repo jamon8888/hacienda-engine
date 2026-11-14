@@ -23,7 +23,7 @@ export function InteractiveEditor({ value, findings, onAddFinding, onRemoveFindi
         <Button size="sm" variant="outline" disabled={pendingRemove === null || !onRemoveFinding} onClick={()=>{ if(pendingRemove!==null && onRemoveFinding) onRemoveFinding(pendingRemove); }}>Retirer</Button>
         <Button size="sm" variant="outline" onClick={()=>{ /* placeholder for extract up */ }}>Extraire vers le haut</Button>
       </div>
-      <MarkdownEditor value={value} findings={findings as PiiEntity[]} onAddFinding={(s,e,c)=>onAddFinding(s,e,c)} />
+      <MarkdownEditor value={value} findings={[...findings]} onAddFinding={(s,e,c)=>onAddFinding(s,e,c)} />
       <AddDetectionDialog open={dialogOpen} onOpenChange={setDialogOpen} onAdd={(s,e,c)=>onAddFinding(s,e,c)} />
     </div>
   );

@@ -7,6 +7,9 @@ export interface AppShellProps {
   readonly sessions?: Session[];
   readonly activeSession?: Session | null;
   readonly onNewSession?: () => void;
+  readonly activeTab?: string;
+  readonly onTabChange?: (tab: string) => void;
+  readonly onNavigate?: (label: string) => void;
   readonly children?: ReactNode;
 }
 
@@ -14,15 +17,15 @@ export function AppShell({
   sessions: _sessions = [],
   activeSession = null,
   onNewSession,
-  children,
+  children, activeTab, onTabChange, onNavigate,
 }: AppShellProps) {
   const sessionName = activeSession?.name ?? "Session du 26/08";
 
   return (
     <div className="flex min-h-screen flex-row bg-[#f8fafc]">
-      <Sidebar activeItem="Sessions" />
+      <Sidebar activeItem="Sessions" onNavigate={onNavigate} />
       <div className="flex min-h-screen flex-1 flex-col">
-        <Topbar sessionName={sessionName} onNewSession={onNewSession} />
+        <Topbar sessionName={sessionName} onNewSession={onNewSession} activeTab={activeTab} onTabChange={onTabChange} />
         <main className="flex-1 overflow-auto bg-[#f8fafc]">{children}</main>
       </div>
     </div>

@@ -12,6 +12,7 @@ import {
 
 interface SidebarProps {
   readonly activeItem?: string;
+  readonly onNavigate?: (label: string) => void;
 }
 
 const SECTION_HEADER_CLASS =
@@ -29,15 +30,17 @@ function NavItem({
   active,
   badge,
   disabled,
+  onClick,
 }: {
   readonly icon: typeof House;
   readonly label: string;
   readonly active?: boolean;
   readonly badge?: string;
   readonly disabled?: boolean;
+  readonly onClick?: () => void;
 }) {
   return (
-    <div
+    <button type="button" disabled={disabled} onClick={onClick}
       className={`${ITEM_BASE} ${active ? ITEM_ACTIVE : ITEM_INACTIVE} ${disabled ? "opacity-60" : ""}`}
       aria-current={active ? "page" : undefined}
       aria-disabled={disabled ? "true" : undefined}
@@ -49,11 +52,11 @@ function NavItem({
           {badge}
         </span>
       ) : null}
-    </div>
+    </button>
   );
 }
 
-export function Sidebar({ activeItem = "Sessions" }: SidebarProps) {
+export function Sidebar({ activeItem = "Sessions", onNavigate }: SidebarProps) {
   return (
     <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-[#e2e8f0] bg-[#ffffff]">
       {/* Logo */}
@@ -68,19 +71,19 @@ export function Sidebar({ activeItem = "Sessions" }: SidebarProps) {
       <div className="flex-1 overflow-y-auto px-2 py-2">
         {/* Accueil */}
         <nav aria-label="Navigation principale">
-          <div className={ITEM_BASE + " " + ITEM_INACTIVE}>
+          <button type="button" className={ITEM_BASE + " " + ITEM_INACTIVE} onClick={() => onNavigate?.("Accueil")}>
             <House size={16} className="text-[#64748b]" />
             <span>Accueil</span>
-          </div>
+          </button>
 
           {/* Anonymisation */}
           <div className={SECTION_HEADER_CLASS}>Anonymisation</div>
           <ul className="space-y-0.5">
             <li>
-              <NavItem icon={Files} label="Sessions" active={activeItem === "Sessions"} />
+              <NavItem icon={Files} label="Sessions" active={activeItem === "Sessions"} onClick={() => onNavigate?.("Sessions")} />
             </li>
             <li>
-              <NavItem icon={FileText} label="Texte simple" />
+              <NavItem icon={FileText} label="Texte simple" onClick={() => onNavigate?.("Texte simple")} />
             </li>
             <li>
               <NavItem icon={Archive} label="Archivage" badge="Bientôt disponible" disabled />
@@ -91,10 +94,10 @@ export function Sidebar({ activeItem = "Sessions" }: SidebarProps) {
           <div className={SECTION_HEADER_CLASS}>Intégrations</div>
           <ul className="space-y-0.5">
             <li>
-              <NavItem icon={Brain} label="Claude Cowork" />
+              <NavItem icon={Brain} label="Claude Cowork" onClick={() => onNavigate?.("Claude Cowork")} />
             </li>
             <li>
-              <NavItem icon={Code2} label="API" />
+              <NavItem icon={Code2} label="API" onClick={() => onNavigate?.("API")} />
             </li>
           </ul>
 
@@ -102,7 +105,7 @@ export function Sidebar({ activeItem = "Sessions" }: SidebarProps) {
           <div className={SECTION_HEADER_CLASS}>Préférences</div>
           <ul className="space-y-0.5">
             <li>
-              <NavItem icon={Clock} label="Conservation" />
+              <NavItem icon={Clock} label="Conservation" onClick={() => onNavigate?.("Conservation")} />
             </li>
           </ul>
         </nav>

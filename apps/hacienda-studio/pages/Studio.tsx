@@ -224,7 +224,7 @@ export function Studio({
 
           <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-3.5 py-2.5">
             <div className="min-w-0">
-              <p className="text-sm font-medium">Rédiger les PII dans la sortie</p>
+              <p className="text-sm font-medium">Masquer les PII dans la sortie</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 {!config.enablePiiDetection
                   ? "Nécessite la reconnaissance d'entités (désactivée dans les Paramètres) — sans elle, aucune PII n'est détectée à rédiger."
@@ -234,7 +234,7 @@ export function Studio({
               </p>
             </div>
             <Switch
-              aria-label="Rédiger les PII dans la sortie"
+                aria-label="Masquer les PII dans la sortie"
               checked={config.redactPiiInOutput}
               disabled={!config.enablePiiDetection}
               onCheckedChange={(checked) => onConfigChange({ ...config, redactPiiInOutput: checked })}

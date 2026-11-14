@@ -11,6 +11,8 @@
  */
 import type { OCREngine } from "tesseract-wasm";
 import type { LiteParse as LiteParseParser, OcrEngine, OcrResult } from "@llamaindex/liteparse-wasm";
+import { z } from "zod";
+const pageComplexityStatsSchema = z.array(z.object({ needsOcr: z.boolean() }).passthrough());
 
 /**
  * Above this page count, `extractPdfWithLiteParse` uses `openBatchSession()` instead of
@@ -105,7 +107,7 @@ export async function checkPdfNeedsOcr(bytes: Uint8Array): Promise<boolean> {
   const { LiteParse } = await import("@llamaindex/liteparse-wasm");
   const probe = new LiteParse({ ocrEnabled: false, quiet: true });
   try {
-    const pages = await probe.isComplex(bytes);
+    const pages = pageComplexityStatsSchema.parse(await probe.isComplex(bytes));
     return pages.some((p) => p.needsOcr);
   } finally {
     probe.free();
@@ -133,7 +135,7 @@ export async function extractPdfWithLiteParse(
   if (needsOcr) {
     const probe = new LiteParse({ ocrEnabled: false, quiet: true });
     try {
-      const pages = await probe.isComplex(bytes);
+      const pages = pageComplexityStatsSchema.parse(await probe.isComplex(bytes));
       needsOcr = pages.some((p) => p.needsOcr);
     } finally {
       probe.free();

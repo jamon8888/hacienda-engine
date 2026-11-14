@@ -9,6 +9,7 @@ import {
 import { Settings } from "@/pages/Settings";
 import { AppStateProvider, useAppState } from "@/lib/app-state";
 import { AppShell } from "@/components/layout/AppShell";
+import { useState } from "react";
 
 type RootSearch = { settings?: boolean };
 
@@ -29,6 +30,7 @@ function RootComponent() {
 
 function RootShell() {
   const navigate = useNavigate();
+  const [activeTab, setActiveTab] = useState("overview");
   const search = Route.useSearch();
   const state = useAppState();
 
@@ -40,7 +42,9 @@ function RootShell() {
   }
 
   return (
-    <AppShell onNewSession={() => navigate({ to: "/" })}>
+    <AppShell onNewSession={() => navigate({ to: "/" })} activeTab={activeTab} onTabChange={setActiveTab} onNavigate={(label) => {
+      if (label === "Accueil" || label === "Sessions") navigate({ to: "/" });
+    }}>
       {state.error && (
         <div
           className="error-banner flex items-center justify-between bg-destructive/15 px-6 py-3 text-destructive"

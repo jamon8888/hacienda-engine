@@ -10,14 +10,15 @@ export interface EditorLayoutProps {
   onCategoryChange?: (c: string) => void;
   readonly value?: string;
   readonly findings?: ReadonlyArray<import("@/lib/pii-engine").PiiEntity>;
+  readonly onAddDetection?: () => void;
 }
 
-export function EditorLayout({ category, onCategoryChange, value = "", findings = [] }: EditorLayoutProps) {
+export function EditorLayout({ category, onCategoryChange, value = "", findings = [], onAddDetection }: EditorLayoutProps) {
   return (
     <PanelGroup direction="horizontal" className="h-full w-full">
       <Panel defaultSize={20} minSize={12} maxSize={34}>
         <ScrollArea className="h-full">
-          <CategorySidebar findings={findings} />
+          <CategorySidebar findings={findings} onAddDetection={onAddDetection} />
         </ScrollArea>
       </Panel>
       <PanelResizeHandle />

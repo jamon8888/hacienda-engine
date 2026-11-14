@@ -9,12 +9,12 @@ interface TopbarProps {
   readonly onTabChange?: (tab: string) => void;
 }
 
-const TABS = [
+const TABS: Array<{ id: string; label: string }> = [
   { id: "overview", label: "Vue d'ensemble" },
   { id: "editor", label: "Éditeur" },
   { id: "pseudonyms", label: "Pseudonymes" },
   { id: "restore", label: "Restauration" },
-] as const;
+];
 
 export function Topbar({
   sessionName = "Session du 26/08",

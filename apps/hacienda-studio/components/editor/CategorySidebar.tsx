@@ -10,6 +10,7 @@ import type { PiiEntity } from "@/lib/pii-engine";
 export interface CategorySidebarProps {
   readonly findings: ReadonlyArray<PiiEntity>;
   readonly onRemove?: (index: number) => void;
+  readonly onAddDetection?: () => void;
 }
 
 function displayTitle(title: string): string {
@@ -40,18 +41,18 @@ function groupIcon(title: string) {
   }
 }
 
-export function CategorySidebar({ findings, onRemove }: CategorySidebarProps) {
+export function CategorySidebar({ findings, onRemove, onAddDetection }: CategorySidebarProps) {
   const [filter, setFilter] = React.useState("");
 
   const filteredFindings = findings.filter((f) => filter === "" || f.text.toLowerCase().includes(filter.toLowerCase()) || f.category.toLowerCase().includes(filter.toLowerCase()));
 
   // Extra group for Formats spécifiques : France (not in DETECTION_CATEGORIES but shown in screenshot)
-  const extraGroup = { title: "Formats spécifiques : France", categories: [] as const, findings: [] as PiiEntity[] };
+  const extraGroup: { title: string; categories: never[]; findings: PiiEntity[] } = { title: "Formats spécifiques : France", categories: [], findings: [] };
 
   return (
     <div className="flex h-full flex-col bg-white">
       <div className="p-3">
-        <Button variant="outline" size="sm" className="w-full justify-center gap-2">
+        <Button variant="outline" size="sm" className="w-full justify-center gap-2" onClick={onAddDetection}>
           <Plus size={14} /> Ajouter une détection
         </Button>
         <div className="relative mt-3">

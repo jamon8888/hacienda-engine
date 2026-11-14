@@ -674,7 +674,7 @@ function useAppStateProvider() {
   // (whether the sidebar should stay hidden) so they can't disagree.
   const isProcessing = files.some((f) => {
     const stage = progress.get(effectiveFileName(f))?.stage;
-    return stage !== "complete" && stage !== "error";
+    return stage !== undefined && stage !== "complete" && stage !== "error";
   });
 
   return {
