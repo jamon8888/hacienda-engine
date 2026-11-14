@@ -6,7 +6,8 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "~> 5.0"
+      # replication_spec on google_storage_transfer_job requires provider 6+.
+      version = ">= 6.0, < 7.0"
     }
 
     vault = {

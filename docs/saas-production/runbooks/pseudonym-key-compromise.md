@@ -43,7 +43,8 @@ kubectl annotate externalsecret hacienda-secrets -n hacienda-prod \
 
 # 6. Verify the rendered secret changed before restart
 for attempt in $(seq 1 12); do
-  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY_ID"; then
+  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY_ID" && \
+     kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_KEY_KEY_1}' | base64 -d | grep -qx "$NEW_KEY"; then
     echo "Secret verified with new key ID $NEW_KEY_ID"
     break
   fi
@@ -81,9 +82,10 @@ vault kv patch secret/hacienda/prod/pseudonym active_key="$NEW_ACTIVE_KEY_ID" "$
 # 4. Force ExternalSecrets sync
 kubectl annotate externalsecret hacienda-secrets -n hacienda-prod force-sync=$(date +%s) --overwrite
 
-# 5. Verify the rendered active key ID before restarting
+# 5. Verify the rendered active key ID and material before restarting
 for attempt in $(seq 1 12); do
-  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_ACTIVE_KEY_ID"; then
+  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_ACTIVE_KEY_ID" && \
+     kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_KEY_KEY_1}' | base64 -d | grep -qx "$NEW_ACTIVE_KEY"; then
     echo "Secret verified with new key ID $NEW_ACTIVE_KEY_ID"
     break
   fi
