@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+
 - **Tenant-name sanitisation for pseudonym keys was still not injective after the
   previous fix — `acme` and `Acme` could resolve the same key.** `scoped_var_name`
   accepted `[A-Za-z0-9_]` and uppercased the result unconditionally, so two tenant ids
@@ -288,7 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
   (no handler-level test exercised the two capabilities' distinction).
 
-### Added
+### Added (Historical)
 
 - **Five pure-Rust xberg enrichment capabilities were sitting in the dependency graph,
   unreachable, the same class of gap as the earlier extraction-format win (X1).** Enabled
@@ -1158,7 +1159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-07-28
 
-### Added
+### Added (Initial Release)
 
 - First public release
 - GDPR/DORA/AI Act compliance features
