@@ -385,7 +385,6 @@ impl HaciendaMcp {
         Parameters(_): Parameters<EmptyParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         json_tool_result(&serde_json::json!({
-            "xberg_version": env!("CARGO_PKG_VERSION"),
             "formats": hacienda_core::xberg_surface::supported_formats()
         }))
     }
@@ -466,7 +465,19 @@ impl HaciendaMcp {
         )
         .await
         .map_err(|_| rmcp::ErrorData::internal_error("cache warm timed out", None))?
-        .map_err(|_| rmcp::ErrorData::invalid_params("embedding preset unavailable", None))?;
+        .map_err(|error| match error {
+            hacienda_core::xberg_surface::XbergSurfaceError::WarmUnavailable => {
+                rmcp::ErrorData::invalid_params("embedding preset unavailable", None)
+            }
+            hacienda_core::xberg_surface::XbergSurfaceError::Warm(_) => {
+                rmcp::ErrorData::internal_error("embedding preset warm failed", None)
+            }
+            hacienda_core::xberg_surface::XbergSurfaceError::Mime(_)
+            | hacienda_core::xberg_surface::XbergSurfaceError::Cache(_)
+            | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot => {
+                rmcp::ErrorData::internal_error("embedding preset warm failed", None)
+            }
+        })?;
         json_tool_result(&result)
     }
 

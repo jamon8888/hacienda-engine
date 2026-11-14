@@ -721,9 +721,16 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["embedding_mode"], "presets_only");
-        assert_eq!(json["onnx_runtime"]["compiled"], false);
-        assert_eq!(json["onnx_runtime"]["runtime_ready"], false);
+        if cfg!(feature = "rag-embeddings") {
+            assert_eq!(json["embedding_mode"], "real");
+            assert_eq!(json["onnx_runtime"]["compiled"], true);
+        } else {
+            assert_eq!(json["embedding_mode"], "presets_only");
+            assert_eq!(json["onnx_runtime"]["compiled"], false);
+        }
+        if !cfg!(feature = "rag-embeddings") {
+            assert_eq!(json["onnx_runtime"]["runtime_ready"], false);
+        }
         assert_eq!(json["capabilities"][3]["runtime_ready"], false);
         assert!(json["capabilities"].as_array().unwrap().iter().any(|item| {
             item["name"] == "redaction" && item["compiled"] == true && item["runtime_ready"] == true

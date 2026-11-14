@@ -39,6 +39,9 @@ pub enum Capability {
     RawExtract,
     /// Manage the Xberg model and extraction cache.
     CacheManage,
+    /// Capability value introduced by a newer node; ignored for authorization on older nodes.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Capability {
@@ -68,6 +71,7 @@ impl std::fmt::Display for Capability {
             Self::AuthManage => write!(f, "auth:manage"),
             Self::RawExtract => write!(f, "raw:extract"),
             Self::CacheManage => write!(f, "cache:manage"),
+            Self::Unknown => write!(f, "unknown"),
         }
     }
 }

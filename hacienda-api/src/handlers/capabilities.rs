@@ -89,7 +89,15 @@ async fn probe_onnx_runtime_status() -> hacienda_core::capabilities::CapabilityS
             *guard = ProbeState::Idle;
             unavailable_status("runtime preflight could not start")
         }
-        Err(_) => unavailable_status("runtime preflight timed out"),
+        Err(_) => {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if matches!(*guard, ProbeState::Running) {
+                *guard = ProbeState::Idle;
+            }
+            unavailable_status("runtime preflight timed out")
+        }
     }
 }
 

@@ -382,7 +382,12 @@ pub async fn run_cache(command: CacheCommand) -> Result<()> {
             if !confirm {
                 anyhow::bail!("cache warm requires --confirm");
             }
-            let result = hacienda_core::xberg_surface::warm_embedding_preset(&preset).await?;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30 * 60),
+                hacienda_core::xberg_surface::warm_embedding_preset(&preset),
+            )
+            .await
+            .context("cache warm timed out after 30 minutes")??;
             println!("preset={}", result.preset);
             println!(
                 "already_loaded_or_downloaded={}",

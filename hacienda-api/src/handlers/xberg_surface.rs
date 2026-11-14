@@ -127,7 +127,15 @@ pub async fn cache_warm(
     )
     .await
     .map_err(|_| ApiError::internal())?
-    .map_err(|_| ApiError::invalid_request("The requested embedding preset is unavailable."))?;
+    .map_err(|error| match error {
+        hacienda_core::xberg_surface::XbergSurfaceError::WarmUnavailable => {
+            ApiError::invalid_request("The requested embedding preset is unavailable.")
+        }
+        hacienda_core::xberg_surface::XbergSurfaceError::Warm(_) => ApiError::internal(),
+        hacienda_core::xberg_surface::XbergSurfaceError::Mime(_)
+        | hacienda_core::xberg_surface::XbergSurfaceError::Cache(_)
+        | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot => ApiError::internal(),
+    })?;
     tracing::info!(operation = "xberg_cache_warm", preset = %result.preset);
     Ok(Json(CacheWarmResponse {
         preset: result.preset,
