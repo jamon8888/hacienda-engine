@@ -33,7 +33,8 @@ NEW_KEY=$(openssl rand -hex 32)
 echo "Generated new key"
 
 # 4. Update active key (same path consumed by ExternalSecret)
-vault kv patch "secret/hacienda/prod/pseudonym" active_key="key_1" key_1="$NEW_KEY"
+NEW_KEY_ID="key_1"
+vault kv patch "secret/hacienda/prod/pseudonym" active_key="$NEW_KEY_ID" "$NEW_KEY_ID"="$NEW_KEY"
 echo "Updated active_key"
 
 # 5. Force ExternalSecrets sync
@@ -42,7 +43,7 @@ kubectl annotate externalsecret hacienda-secrets -n hacienda-prod \
 
 # 6. Verify the rendered secret changed before restart
 for attempt in $(seq 1 12); do
-  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY"; then
+  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY_ID"; then
   echo "Secret verified with new key"
     break
   fi
@@ -73,13 +74,14 @@ for tenant in $(kubectl exec -n hacienda-prod <pg-pod> -- psql -t -c "SELECT id 
 done
 
 # 2. Update global active_key as well
+NEW_ACTIVE_KEY_ID="key_1"
 NEW_ACTIVE_KEY=$(openssl rand -hex 32)
-vault kv patch secret/hacienda/prod/pseudonym active_key="key_1" key_1="$NEW_ACTIVE_KEY"
+vault kv patch secret/hacienda/prod/pseudonym active_key="$NEW_ACTIVE_KEY_ID" "$NEW_ACTIVE_KEY_ID"="$NEW_ACTIVE_KEY"
 
 # 4. Force ExternalSecrets sync & restart
 kubectl annotate externalsecret hacienda-secrets -n hacienda-prod force-sync=$(date +%s) --overwrite
 for attempt in $(seq 1 12); do
-  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "key_1"; then
+  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_ACTIVE_KEY_ID"; then
     kubectl rollout restart deployment/hacienda-api -n hacienda-prod
     break
   fi

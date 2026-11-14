@@ -71,7 +71,7 @@ create_secret hacienda/prod/database \
 
 create_secret hacienda/prod/pseudonym \
   active_key="key_1" \
-  active_key_material="$(openssl rand -hex 32)" \
+  key_1="$(openssl rand -hex 32)" \
   fpe_key="$(openssl rand -hex 32)"
 
 create_secret hacienda/prod/s3 \
@@ -102,7 +102,7 @@ create_secret hacienda/staging/database \
 
 create_secret hacienda/staging/pseudonym \
   active_key="key_1" \
-  active_key_material="$(openssl rand -hex 32)" \
+  key_1="$(openssl rand -hex 32)" \
   fpe_key="$(openssl rand -hex 32)"
 
 create_secret hacienda/staging/s3 \
