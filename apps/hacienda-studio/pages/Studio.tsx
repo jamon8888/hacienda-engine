@@ -123,20 +123,20 @@ export function Studio({
         <div className="flex flex-col">
           <div className="mb-4 flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Add documents</h1>
-              <p className="mt-1 text-xs text-white/50 sm:text-sm">Files never leave this browser tab.</p>
+              <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Ajouter des documents</h1>
+              <p className="mt-1 text-xs text-white/50 sm:text-sm">Les fichiers ne quittent jamais cet onglet du navigateur.</p>
             </div>
             <div className="flex items-center gap-2">
-              {results.length > 0 && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-8 border-white/10 bg-white/[0.04] hover:bg-white/[0.08]"
-                  onClick={() => exportDocumentsZip(results.map((result) => ({ result })))}
-                >
-                  <Archive className="size-3.5" /> Download
-                </Button>
-              )}
+               {results.length > 0 && (
+                 <Button
+                   size="sm"
+                   variant="outline"
+                   className="h-8 border-white/10 bg-white/[0.04] hover:bg-white/[0.08]"
+                   onClick={() => exportDocumentsZip(results.map((result) => ({ result })))}
+                 >
+                   <Archive className="size-3.5" /> Télécharger
+                 </Button>
+               )}
             </div>
           </div>
 
@@ -150,25 +150,25 @@ export function Studio({
             showBorderBeam={workerReady}
             webkitdirectory={folderMode}
             accept={folderMode ? undefined : UPLOAD_ACCEPT}
-            inputAriaLabel={folderMode ? "Choose a folder" : "Choose files"}
+            inputAriaLabel={folderMode ? "Choisir un dossier" : "Choisir des fichiers"}
             title={
               workerReady
                 ? folderMode
-                  ? "Drop a folder here or click to browse"
-                  : "Drop files here or click to browse"
-                : "Starting the local engine…"
+                  ? "Déposez un dossier ici ou cliquez pour parcourir"
+                  : "Déposez des fichiers ici ou cliquez pour parcourir"
+                : "Démarrage du moteur local…"
             }
-            description="PDF, Office, Email, Images, Audio/Video, Subtitles, Code — up to 50MB each"
+            description="PDF, Office, E-mail, Images, Audio/Vidéo, Sous-titres, Code — jusqu'à 50 Mo chacun"
             onFilesAccepted={onFilesAccepted}
           />
-          <button
-            type="button"
-            className="mode-toggle mx-auto mt-3 block bg-transparent text-xs text-white/40 underline decoration-white/20 underline-offset-2 hover:text-white/70 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={!workerReady}
-            onClick={onToggleFolderMode}
-          >
-            {folderMode ? "or choose individual files" : "or choose a folder"}
-          </button>
+           <button
+             type="button"
+             className="mode-toggle mx-auto mt-3 block bg-transparent text-xs text-white/40 underline decoration-white/20 underline-offset-2 hover:text-white/70 disabled:cursor-not-allowed disabled:opacity-60"
+             disabled={!workerReady}
+             onClick={onToggleFolderMode}
+           >
+             {folderMode ? "ou choisir des fichiers individuels" : "ou choisir un dossier"}
+           </button>
 
           {pendingFiles.length > 0 && (
             <section aria-labelledby="studio-pending-heading" className="mt-6 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0f1419]">
@@ -194,27 +194,27 @@ export function Studio({
                   </li>
                 ))}
               </ul>
-              <div className="flex items-center justify-between bg-white/[0.02] px-4 py-3">
-                <button type="button" className="text-xs text-white/50 hover:text-white" onClick={onClearPending}>
-                  Clear all
-                </button>
-                <Button size="sm" className="h-8 bg-white px-4 text-xs font-medium text-[#070a10] hover:bg-white/90" onClick={onProcessQueue}>
-                  <Play className="size-3.5" /> Process {pendingFiles.length} file{pendingFiles.length === 1 ? "" : "s"}
-                </Button>
-              </div>
+               <div className="flex items-center justify-between bg-white/[0.02] px-4 py-3">
+                 <button type="button" className="text-xs text-white/50 hover:text-white" onClick={onClearPending}>
+                   Tout effacer
+                 </button>
+                 <Button size="sm" className="h-8 bg-white px-4 text-xs font-medium text-[#070a10] hover:bg-white/90" onClick={onProcessQueue}>
+                   <Play className="size-3.5" /> Traiter {pendingFiles.length} fichier{pendingFiles.length === 1 ? "" : "s"}
+                 </Button>
+               </div>
             </section>
           )}
         </div>
 
-        {/* ── Processing — stays in the SAME upload page, exactly like the screenshot ── */}
-        {isProcessing && (
-          <div className="mt-8 flex flex-col">
-            <div className="mb-4">
-              <h2 className="text-[15px] font-semibold tracking-tight">Processing</h2>
-              <p className="mt-1 text-xs text-white/50">
-                {processedCount} of {totalCount} finished · each file runs through the full pipeline independently.
-              </p>
-            </div>
+         {/* ── Processing — stays in the SAME upload page, exactly like the screenshot ── */}
+         {isProcessing && (
+           <div className="mt-8 flex flex-col">
+             <div className="mb-4">
+               <h2 className="text-[15px] font-semibold tracking-tight">Traitement</h2>
+               <p className="mt-1 text-xs text-white/50">
+                 {processedCount} sur {totalCount} terminés · chaque fichier passe par le pipeline complet indépendamment.
+               </p>
+             </div>
 
             <div className="flex flex-col gap-2.5" aria-live="polite" aria-label="Processing queue">
               {files.map((file) => {
@@ -226,7 +226,7 @@ export function Studio({
                 const isComplete = update?.stage === "complete";
                 const isQueued = !update || update.stage === "queued" || update.stage === "wasm-load";
                 const isError = !!error || update?.stage === "error";
-                const statusLabel = isError ? "Failed" : isComplete ? "Complete" : isQueued ? "Queued" : update?.message || stageToHuman(update?.stage);
+                const statusLabel = isError ? "Échec" : isComplete ? "Terminé" : isQueued ? "En file d'attente" : update?.message || stageToHuman(update?.stage);
                 const displayPercent = isComplete ? 100 : isQueued ? 0 : Math.round(percent);
                 return (
                   <div
@@ -289,7 +289,7 @@ export function Studio({
 
         {pendingFiles.length > 0 && isProcessing && (
           <div className="mt-3 rounded-lg border border-amber-500/15 bg-amber-500/[0.04] px-4 py-3 text-xs text-amber-200/70">
-            {pendingFiles.length} more file{pendingFiles.length === 1 ? "" : "s"} in review queue — not yet sent to the pipeline.
+            {pendingFiles.length} autre(s) fichier(s) en file d'attente de révision — pas encore envoyés au pipeline.
           </div>
         )}
       </div>
@@ -300,16 +300,16 @@ export function Studio({
 function stageToHuman(stage: ProgressUpdate["stage"] | undefined): string {
   switch (stage) {
     case "extract":
-      return "Extracting content";
+      return "Extraction du contenu";
     case "transcribe":
-      return "Transcribing audio";
+      return "Transcription audio";
     case "ner":
-      return "Scoring entities across chunks";
+      return "Notation des entités";
     case "pii":
-      return "Detecting PII";
+      return "Détection des PII";
     case "link":
-      return "Redacting & linking";
+      return "Mise en forme & liaison";
     default:
-      return "Processing";
+      return "Traitement";
   }
 }

@@ -170,6 +170,7 @@ mod tests {
             config_hash: "cfg".to_string(),
             principal: principal.map(str::to_string),
             vertical: None,
+            model: None,
         }
     }
 

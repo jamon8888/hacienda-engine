@@ -38,9 +38,30 @@ export interface PiiEntity {
   redact_template: string;
 }
 
+/** One entry of `hacienda-core`'s `RedactionAuditEntry` (`redaction/types.rs`), as it
+ * comes back embedded in a `PipelineResult` — same no-rename wire convention as
+ * `PiiEntity`/`AuditEntryRow` below. Every entry the wasm pipeline produces carries
+ * `action: "mask"`: `process`/`process_with_model_entities` always redact under
+ * `PipelineConfig::default()` (`RedactionMode::Mask`), regardless of whichever mode
+ * `worker/pipeline.ts`'s client-side mode dispatch actually applied to the finding
+ * afterwards. `recordPiiAudit` below is what corrects this before the entry is
+ * ever appended to the chain. */
+export interface AuditLogEntry {
+  category: string;
+  action: "mask" | "hash" | "pseudonymize" | "remove" | { custom: string };
+  source: string;
+  span_hash: string;
+  span_length: number;
+  confidence: number | null;
+  timestamp: number;
+  chain_hash: string;
+}
+
 export interface PiiPipelineResult {
   redacted_text: string;
   entities: PiiEntity[];
+  audit_log: AuditLogEntry[];
+  metrics: Record<string, unknown>;
 }
 
 type WasmModule = typeof import("hacienda-wasm");
@@ -152,6 +173,14 @@ export interface ModelEntity {
  * passed the check, then threw exactly that on the first real call). Catch and fall
  * back the same way as a missing wrapper, so a half-rebuilt `pkg/` degrades instead of
  * failing every document.
+ *
+ * Does not itself record to the audit chain — see `recordPiiAudit` below. The caller
+ * (`worker/pipeline.ts`) still has to apply its own client-side redaction-mode dispatch
+ * to the returned findings (pseudonymize/hash/remove all rewrite `redact_template`
+ * after this call returns, since none of those actually happen inside the wasm
+ * pipeline, which always redacts under `RedactionMode::Mask`); recording before that
+ * dispatch runs would permanently misattribute every non-mask redaction as "mask" in
+ * the audit chain.
  */
 export async function redactPiiWithModelEntities(
   text: string,
@@ -159,10 +188,9 @@ export async function redactPiiWithModelEntities(
 ): Promise<PiiPipelineResult> {
   await initPiiEngine();
   const mod = wasmModule as unknown as Record<string, unknown>;
-  let result: PiiPipelineResult;
   if (typeof mod.process_with_model_entities === "function") {
     try {
-      result = (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
+      return (await (mod.process_with_model_entities as (...args: unknown[]) => Promise<unknown>)(
         text,
         modelEntities,
       )) as PiiPipelineResult;
@@ -171,17 +199,9 @@ export async function redactPiiWithModelEntities(
         "[pii-engine] process_with_model_entities exists but isn't callable (stale/mismatched wasm build?) — falling back to process():",
         err,
       );
-      result = (await getWasmModule().process(text)) as PiiPipelineResult;
     }
-  } else {
-    result = (await getWasmModule().process(text)) as PiiPipelineResult;
   }
-  // Same audit-chain invariant `redactPii` documents above — this path was missing it
-  // entirely, so every model-entity redaction (the entity-glossary reuse path, which is
-  // the common case now per Tier 1.1) silently never reached the audit trail.
-  const handle = await getAuditHandle();
-  await handle.recordResult(result);
-  return result;
+  return (await getWasmModule().process(text)) as PiiPipelineResult;
 }
 
 /**
@@ -235,23 +255,52 @@ function getAuditHandle(): Promise<AuditHandle> {
 }
 
 /**
- * Detect and mask (the pipeline's default redaction mode), then record the batch of
- * redactions this call produced into the audit chain.
+ * Detect and mask (the wasm pipeline's only redaction mode — see `recordPiiAudit`
+ * below for why). Does not itself record to the audit chain; see that function.
+ */
+export async function redactPii(text: string): Promise<PiiPipelineResult> {
+  await initPiiEngine();
+  return (await getWasmModule().process(text)) as PiiPipelineResult;
+}
+
+/**
+ * Records `result`'s redactions into the audit chain, with every entry's `action`
+ * corrected to `appliedMode`.
+ *
+ * `result.audit_log` — produced by `redactPii`/`redactPiiWithModelEntities` — always
+ * says `"mask"`: those calls run the wasm pipeline under `PipelineConfig::default()`
+ * (`RedactionMode::Mask`), because the real per-mode redaction (pseudonymize/hash/
+ * remove) happens afterwards, client-side, in `worker/pipeline.ts`'s mode dispatch —
+ * there is no wasm-side plumbing for those modes on this call path (pseudonymize in
+ * particular needs a browser-derived passphrase key that never leaves `lib/
+ * pseudonymize.ts`'s WebCrypto calls). Recording the wasm call's own `audit_log`
+ * unmodified would misreport every non-mask mode as "mask" forever — the entry is
+ * appended once and the chain is hash-linked, so there is no correcting it after the
+ * fact. `appliedMode` must be the mode that was *actually* applied to `result`'s
+ * findings, not merely the one configured: `worker/pipeline.ts` falls back to mask
+ * when pseudonymize is configured but no key was derived, and the caller must pass
+ * `"mask"` in that case too.
  *
  * One `recordResult` call per document, matching the one-`append`-per-document
- * invariant `HaciendaFacade::record_audit` enforces natively — this function is the
- * whole of one document's processing, so that invariant holds for free here.
+ * invariant `HaciendaFacade::record_audit` enforces natively.
  *
  * A failed audit write fails this call rather than being swallowed: an audit trail
  * that silently drops entries on error is worse than a visible failure for a feature
  * whose entire purpose is being trustworthy.
  */
-export async function redactPii(text: string): Promise<PiiPipelineResult> {
-  await initPiiEngine();
-  const result = (await getWasmModule().process(text)) as PiiPipelineResult;
+export async function recordPiiAudit(
+  result: PiiPipelineResult,
+  appliedMode: "mask" | "hash" | "pseudonymize" | "remove",
+): Promise<void> {
   const handle = await getAuditHandle();
-  await handle.recordResult(result);
-  return result;
+  if (!result.audit_log || result.audit_log.length === 0) {
+    await handle.recordResult(result);
+    return;
+  }
+  await handle.recordResult({
+    ...result,
+    audit_log: result.audit_log.map((entry) => ({ ...entry, action: appliedMode })),
+  });
 }
 
 /**

@@ -17,15 +17,25 @@ import type { PiiEntity } from "./pii-engine";
 export type RedactionMode = "mask" | "hash" | "pseudonymize" | "remove";
 
 export const REDACTION_MODES: { value: RedactionMode; label: string }[] = [
-  { value: "mask", label: "Mask" },
-  { value: "hash", label: "Hash" },
-  { value: "pseudonymize", label: "Pseudonymize" },
-  { value: "remove", label: "Remove" },
+  { value: "mask", label: "Masquer" },
+  { value: "hash", label: "Hacher" },
+  { value: "pseudonymize", label: "Pseudonymiser" },
+  { value: "remove", label: "Supprimer" },
 ];
 
-/** Matches the `[CATEGORY:key_id:...]` shape `AppConfig.redactionMode`'s doc comment
- * describes — the one shape a plain mask (`"[EMAIL]"`) never takes. */
-function looksLikePseudonymToken(template: string): boolean {
+/**
+ * Matches the `[CATEGORY:key_id:...]` shape `AppConfig.redactionMode`'s doc comment
+ * describes — the one shape a plain mask (`"[EMAIL]"`), a Hash-mode fingerprint
+ * (`"#email:1a2b…"`), or a Remove-mode empty string never takes.
+ *
+ * Exported (Task 3, spec §8 step 3) for `worker/pipeline.ts`'s `filterExportableEntities`,
+ * which uses this exact shape check to decide whether a PII finding overlapping an entity
+ * carries a real, reversible pseudonym token — safe to key an exported entity on — or a
+ * mask/hash/remove template, which is not. Reusing this predicate rather than duplicating
+ * the regex is what keeps the two call sites from silently disagreeing on what counts as
+ * "a real token" if this shape ever changes.
+ */
+export function looksLikePseudonymToken(template: string): boolean {
   return /^\[[A-Z_]+:[^:\]]+:[^\]]+\]$/.test(template);
 }
 
@@ -108,7 +118,7 @@ export function applyRedactionMode(
       return {
         unavailable: true,
         reason:
-          "This document wasn't processed with pseudonymize mode enabled, so no reversible tokens exist for it. Re-process the file with pseudonymize turned on in the pipeline config to use this mode.",
+          "Ce document n'a pas été traité avec le mode pseudonymisation activé, donc aucun jeton réversible n'existe pour lui. Re-traitez le fichier avec la pseudonymisation activée dans la configuration du pipeline pour utiliser ce mode.",
       };
     }
     return { findings };

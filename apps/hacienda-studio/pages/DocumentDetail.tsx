@@ -204,7 +204,7 @@ export function DocumentDetail({
           <span className="hidden h-4 w-px bg-border sm:block" aria-hidden />
           <span className="truncate text-sm font-semibold tracking-tight">{result.name}</span>
           <span className="inline-flex shrink-0 items-center rounded-full border border-border bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-            {findings.length} finding{findings.length === 1 ? "" : "s"}
+            {findings.length} détection{findings.length === 1 ? "" : "s"}
           </span>
         </div>
 
@@ -220,21 +220,21 @@ export function DocumentDetail({
             </button>
           ))}
           <div className="ml-1 h-4 w-px bg-border" aria-hidden />
-          <Button
-            size="sm"
-            className="h-7 gap-1.5 rounded-md bg-foreground px-3 text-xs font-medium text-background hover:bg-foreground/90"
-            disabled={redactedBody === undefined}
-            onClick={() => redactedBody !== undefined && onExportBody(redactedBody)}
-          >
-            <Download className="size-3.5" />
-            Redacted
-          </Button>
+            <Button
+              size="sm"
+              className="h-7 gap-1.5 rounded-md bg-foreground px-3 text-xs font-medium text-background hover:bg-foreground/90"
+              disabled={redactedBody === undefined}
+              onClick={() => redactedBody !== undefined && onExportBody(redactedBody)}
+            >
+              <Download className="size-3.5" />
+              Masqué
+            </Button>
           <Button
             size="sm"
             variant="ghost"
             className="h-7 w-7 p-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
             onClick={onDelete}
-            aria-label="Delete document"
+            aria-label="Supprimer le document"
           >
             <Trash2 className="size-3.5" />
           </Button>
@@ -248,8 +248,8 @@ export function DocumentDetail({
             !
           </span>
           <span>
-            <span className="font-medium text-amber-300">Original not in this session</span>
-            <span className="text-amber-200/60"> — Processed output is cached locally, but the source file is only kept in memory. Re-add the file to see the native preview.</span>
+            <span className="font-medium text-amber-300">Original non disponible dans cette session</span>
+            <span className="text-amber-200/60"> — La sortie traitée est mise en cache localement, mais le fichier source n'est conservé qu'en mémoire. Ré-ajoutez le fichier pour voir l'aperçu natif.</span>
           </span>
         </div>
       )}
@@ -401,11 +401,11 @@ export function DocumentDetail({
                 </div>
 
                 <p className="border-t border-border pt-3 text-xs leading-relaxed text-muted-foreground">
-                  <span className="font-medium text-foreground">Tip:</span> Switch redaction modes above —{" "}
-                  <span className="font-mono text-[11px]">Mask</span> replaces with [CATEGORY],{" "}
-                  <span className="font-mono text-[11px]">Hash</span> with a fingerprint,{" "}
-                  <span className="font-mono text-[11px]">Pseudonymize</span> with reversible tokens,{" "}
-                  <span className="font-mono text-[11px]">Remove</span> deletes the span.
+                  <span className="font-medium text-foreground">Astuce :</span> Basculez les modes de rédaction ci-dessus —{" "}
+                  <span className="font-mono text-[11px]">Masquer</span> remplace par [CATÉGORIE],{" "}
+                  <span className="font-mono text-[11px]">Hacher</span> par une empreinte,{" "}
+                  <span className="font-mono text-[11px]">Pseudonymiser</span> par des jetons réversibles,{" "}
+                  <span className="font-mono text-[11px]">Supprimer</span> supprime la portion.
                 </p>
               </div>
             )}
@@ -413,7 +413,7 @@ export function DocumentDetail({
 
           {/* selection hint bar — matches screenshot's bottom "Select text..." */}
           <div className="border-t border-border bg-card px-4 py-2 text-center text-[11px] text-muted-foreground">
-            Select text in the document to tag it as PII.
+            Sélectionnez du texte dans le document pour le marquer comme PII.
           </div>
         </div>
 
@@ -441,10 +441,14 @@ export function DocumentDetail({
                     }
                   >
                     {tab === "redacted"
-                      ? "Redacted"
+                      ? "Masqué"
                       : tab === "source"
                         ? "Source"
-                        : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                        : tab === "findings"
+                          ? "Détections"
+                          : tab === "layout"
+                            ? "Mise en page"
+                            : "Audit"}
                   </button>
                 );
               })}
@@ -462,9 +466,9 @@ export function DocumentDetail({
                 </div>
                 {findings.length > 0 && (
                   <div className="mt-3 rounded-lg border border-amber-500/15 bg-amber-500/[0.04] p-3">
-                    <p className="text-xs font-medium text-amber-200">About these findings</p>
+                    <p className="text-xs font-medium text-amber-200">À propos de ces détections</p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      Categories come from the on-device detector. Low-confidence spans are flagged — review before exporting.
+                      Les catégories proviennent du détecteur sur appareil. Les portions de faible confiance sont signalées — vérifiez avant d'exporter.
                     </p>
                   </div>
                 )}
@@ -472,7 +476,7 @@ export function DocumentDetail({
             ) : activeTab === "source" ? (
               <div className="space-y-3 p-3">
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Source file</p>
+                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Fichier source</p>
                   <p className="mt-1 break-all font-mono text-xs text-foreground">{result.frontmatter.source}</p>
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                     <div className="rounded-md bg-muted/40 px-2.5 py-2">
@@ -486,25 +490,25 @@ export function DocumentDetail({
                   </div>
                   {!hasViewer && (
                     <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                      Native preview supports <span className="font-mono text-[11px]">pdf</span>,{" "}
+                      L'aperçu natif prend en charge <span className="font-mono text-[11px]">pdf</span>,{" "}
                       <span className="font-mono text-[11px]">docx</span>,{" "}
                       <span className="font-mono text-[11px]">xlsx</span>,{" "}
-                      <span className="font-mono text-[11px]">pptx</span> (and legacy doc/xls/ppt). Other formats render as extracted markdown.
+                      <span className="font-mono text-[11px]">pptx</span> (et doc/xls/ppt hérités). Les autres formats s'affichent sous forme de markdown extrait.
                     </p>
                   )}
                 </div>
                 {hasViewer && (
                   <p className="px-1 text-xs text-muted-foreground">
-                    Native preview is scrolled inside the left panel. Use the viewer toolbar to zoom, search, and paginate.
+                    L'aperçu natif défile dans le panneau gauche. Utilisez la barre d'outils du visualiseur pour zoomer, rechercher et paginer.
                   </p>
                 )}
               </div>
             ) : activeTab === "layout" ? (
               <div className="p-3">
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-sm font-medium">Layout</p>
+                  <p className="text-sm font-medium">Mise en page</p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Block and bounding-box positions are produced for scanned PDFs and images. This document has no layout map — the extracted markdown in the left panel is the full extraction.
+                    Les blocs et positions des encadrés sont produits pour les PDF scannés et les images. Ce document n'a pas de carte de mise en page — le markdown extrait dans le panneau gauche est l'extraction complète.
                   </p>
                 </div>
               </div>
@@ -512,10 +516,10 @@ export function DocumentDetail({
               // redacted — right summary
               <div className="space-y-3 p-3">
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Findings</p>
+                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Détections</p>
                   <p className="mt-1 flex items-baseline gap-2">
                     <span className="text-2xl font-semibold tabular-nums">{findings.length}</span>
-                    <span className="text-xs text-muted-foreground">span{findings.length === 1 ? "" : "s"} detected</span>
+                    <span className="text-xs text-muted-foreground">portion{findings.length === 1 ? "" : "s"} détectée{findings.length === 1 ? "" : "s"}</span>
                   </p>
                   {findings.length > 0 ? (
                     <ul className="mt-3 space-y-1.5">
@@ -529,18 +533,18 @@ export function DocumentDetail({
                       ))}
                       {findings.length > 6 && (
                         <li className="px-2.5 py-1 text-xs text-muted-foreground">
-                          +{findings.length - 6} more — open Findings tab to see all
+                          +{findings.length - 6} de plus — ouvrez l'onglet Détections pour tout voir
                         </li>
                       )}
                     </ul>
                   ) : (
-                    <p className="mt-2 text-xs text-muted-foreground">No PII detected. Use the editor to mark spans manually.</p>
+                    <p className="mt-2 text-xs text-muted-foreground">Aucune PII détectée. Utilisez l'éditeur pour marquer les portions manuellement.</p>
                   )}
                 </div>
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-xs font-medium">Exports are deterministic</p>
+                  <p className="text-xs font-medium">Les exports sont déterministes</p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    <span className="font-mono text-[11px]">Mask</span> and <span className="font-mono text-[11px]">Hash</span> re-derive instantly. Pseudonymize needs a key set at processing time.
+                    <span className="font-mono text-[11px]">Masquer</span> et <span className="font-mono text-[11px]">Hacher</span> se redérivent instantanément. La pseudonymisation nécessite une clé définie au moment du traitement.
                   </p>
                 </div>
               </div>
@@ -556,7 +560,7 @@ export function DocumentDetail({
 function ViewerLoadingFallback() {
   return (
     <div className="flex h-full min-h-[400px] items-center justify-center text-sm text-muted-foreground">
-      Loading viewer…
+      Chargement du visualiseur…
     </div>
   );
 }
@@ -599,16 +603,16 @@ function SourceReAddPrompt({
         <div className="mx-auto flex size-9 items-center justify-center rounded-lg border border-border bg-card">
           <FileText className="size-4 text-muted-foreground" />
         </div>
-        <p className="mt-3 text-sm font-medium">Native {viewerKind.toUpperCase()} preview unavailable</p>
+        <p className="mt-3 text-sm font-medium">Aperçu natif {viewerKind.toUpperCase()} indisponible</p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          The original <span className="font-mono text-[11px]">{fileName}</span> is only kept in memory for the session that processed it. Re-add it to render the source viewer for{" "}
+          L'original <span className="font-mono text-[11px]">{fileName}</span> n'est conservé qu'en mémoire pour la session qui l'a traité. Ré-ajoutez-le pour afficher le visualiseur source pour{" "}
           <span className="font-mono text-[11px]">pdf</span>, <span className="font-mono text-[11px]">docx</span>,{" "}
-          <span className="font-mono text-[11px]">pptx</span>, <span className="font-mono text-[11px]">xlsx</span> (and legacy doc/xls/ppt) — xslt maps to the sheet viewer.
+          <span className="font-mono text-[11px]">pptx</span>, <span className="font-mono text-[11px]">xlsx</span> (et doc/xls/ppt hérités) — xslt correspond au visualiseur de feuille.
         </p>
         <Button size="sm" className="mt-4" onClick={() => inputRef.current?.click()}>
-          Re-add {ext} file
+          Ré-ajouter le fichier {ext}
         </Button>
-        <p className="mt-2 text-[11px] text-muted-foreground">Or drop the file anywhere — handling stays on-device.</p>
+        <p className="mt-2 text-[11px] text-muted-foreground">Ou déposez le fichier n'importe où — le traitement reste sur l'appareil.</p>
       </div>
       <div className="mt-6 w-full max-w-md text-left">
         <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">Fallback — extracted markdown</p>
@@ -704,7 +708,7 @@ function AuditTab() {
       // Newest first — matches the order a reader scanning "what just happened" expects.
       setEntries([...chainEntries].reverse());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Audit chain unavailable");
+      setError(e instanceof Error ? e.message : "Chaîne d'audit indisponible");
     }
   }
 
@@ -738,7 +742,7 @@ function AuditTab() {
           disabled={status === "checking"}
           className="ml-auto rounded-md bg-foreground px-2.5 py-1 text-xs font-medium text-background hover:bg-foreground/90 disabled:opacity-50"
         >
-          {status === "checking" ? "Verifying…" : "Verify"}
+          {status === "checking" ? "Vérification…" : "Vérifier"}
         </button>
       </div>
 
@@ -746,7 +750,7 @@ function AuditTab() {
         {entries === null ? (
           <div className="px-3 py-3">
             <p className="text-xs text-muted-foreground">
-              {error ? "Audit chain unavailable." : "Loading…"}
+              {error ? "Chaîne d'audit indisponible." : "Chargement…"}
             </p>
           </div>
         ) : entries.length === 0 ? (

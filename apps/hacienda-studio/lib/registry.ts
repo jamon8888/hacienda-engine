@@ -1,9 +1,22 @@
+import { computeContentHash } from "./content-hash";
+
 export interface RegistryEntity {
   id: string;
   canonical_name: string;
   display_name: string;
   type: string;
-  /** First mention's slug, per Track I2's `entities/<type>-<slug>.md` file naming. */
+  /**
+   * Task 4 (spec §8 step 4): content-derived — `hash(type|vertical|dedupKey)` — not
+   * "first mention's slug" as this field used to be documented. Ordinal ids (`ent-001`)
+   * and first-mention slugs renumbered or renamed on every re-export whose file order
+   * changed, breaking any external reference into `entities-registry.json` or a link a
+   * user made into `entities/<type>-<slug>.md`. Every spelling variant that merges into
+   * one entity (via exact-key match or the alias matchers below) shares the identical
+   * dedup key by construction, so this is stable across variants and across re-export
+   * order — see `identityFor`. Deliberately never recomputed on alias promotion
+   * (`recordAlias`): a fuller name becoming canonical/display must not change the
+   * filename an existing external link points at.
+   */
   slug: string;
   vertical: string;
   sector?: string;
@@ -47,18 +60,6 @@ const PROXIMITY_CONFIDENCE: Record<ProximityBand, number> = {
   same_sentence: 0.6,
   same_paragraph: 0.3,
 };
-
-/**
- * Simple deterministic FNV-1a 32-bit hash for stable IDs.
- */
-function hashString(s: string): string {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return h.toString(16).padStart(8, "0");
-}
 
 function slugify(text: string): string {
   return text
@@ -170,7 +171,12 @@ function normalizeOrgName(name: string): string {
 }
 
 /**
- * Strip trailing legal suffixes that are not semantically distinguishing.
+ * Strip trailing legal suffixes that are not semantically distinguishing — a loop, not a
+ * single strip, so cascading suffixes ("Acme Holdings Ltd Inc") reduce fully rather than
+ * leaving one behind. Doubles as Task 4's dedup-key/id-stability input for organisations
+ * (`addEntity`'s `stableKeyForId`): "Acme", "Acme SAS" and "ACME S.A.S." must all strip to
+ * the same base for both alias matching (below) and the content-hashed id (`identityFor`)
+ * to treat them as one entity.
  */
 function stripLegalSuffixes(name: string): string {
   const suffixes = new Set(["sas", "sarl", "sa", "ltd", "gmbh", "inc"]);
@@ -184,6 +190,26 @@ function stripLegalSuffixes(name: string): string {
     }
   }
   return tokens.join(" ");
+}
+
+/**
+ * Content-derived identity for a registry entity: `hash(stableKey)`, truncated to 12 hex
+ * chars (48 bits — ample margin against collision for any realistic batch size, short
+ * enough for a readable filename). `stableKey` is built by the caller from
+ * `type|vertical|normalizedOrDedupedName` — stable across re-export in a different
+ * document order, because every spelling variant that merges into one entity (exact-key
+ * match or an alias matcher) produces the identical `stableKey` by construction, so
+ * whichever variant happens to be seen first yields the same id any other would have.
+ *
+ * SHA-256 via `lib/content-hash.ts` rather than a lighter non-cryptographic hash (contrast
+ * `worker/pipeline.ts`'s `tokenSlug`, Task 3): this id is meant to be a stable reference
+ * other tooling can rely on, not a cosmetic filename shortener, and a real batch's entity
+ * count is not so small that a 32-bit hash's collision odds are obviously negligible.
+ */
+async function identityFor(stableKey: string): Promise<{ id: string; slug: string }> {
+  const digest = await computeContentHash(new TextEncoder().encode(stableKey).buffer);
+  const slug = digest.slice(0, 12);
+  return { id: `ent-${slug}`, slug };
 }
 
 export class BatchEntityRegistry {
@@ -206,7 +232,7 @@ export class BatchEntityRegistry {
     this.batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
-  addEntity(
+  async addEntity(
     entity: {
       name: string;
       type: string;
@@ -216,22 +242,7 @@ export class BatchEntityRegistry {
     },
     metadata: { vertical: string; sector?: string; roles?: string[] },
     docId: string,
-  ): {
-    id: string;
-    canonical_name: string;
-    display_name: string;
-    type: string;
-    slug: string;
-    vertical: string;
-    sector?: string;
-    roles: string[];
-    aliases: string[];
-    source_documents: string[];
-    mention_count: number;
-    vertical_metadata: Record<string, any>;
-    first_seen: string;
-    last_seen: string;
-  } {
+  ): Promise<RegistryEntity> {
     // Normalize entity name for deduplication (remove trailing punctuation)
     const normalizedName = entity.name.replace(/[.,;:]+$/, "").toLowerCase();
     const key = `${normalizedName}|${entity.type}|${metadata.vertical}`;
@@ -239,6 +250,14 @@ export class BatchEntityRegistry {
 
     if (existingId) {
       const existing = this.entities.get(existingId)!;
+      // Task 4 (spec §8 step 4): even an exact-dedup-key repeat can differ in casing or
+      // trailing punctuation ("acme sas" vs "Acme SAS" both normalize to the same key) —
+      // record it as an alias and promote to the longest surface form seen, same rule
+      // `recordAlias` applies for the fuzzy-matched (person/org) branches below. Skipped
+      // when byte-identical to the current display name, the common repeat-mention case.
+      if (entity.name !== existing.display_name) {
+        this.recordAlias(existing, entity.name);
+      }
       // Bug fix (Task 1): this branch used to update `source_documents` but never
       // `docEntityMap`, so an entity first seen in doc-001 and seen again in doc-002 was
       // absent from doc-002's entity list. Two consequences, both silent: `document_entities`
@@ -273,13 +292,13 @@ export class BatchEntityRegistry {
     }
 
     const stableKeyForId = `${entity.type}|${metadata.vertical}|${entity.type === "organization" ? stripLegalSuffixes(entity.name) : normalizedName}`;
-    const id = `ent-${hashString(stableKeyForId)}`;
-    const registryEntity = {
+    const { id, slug } = await identityFor(stableKeyForId);
+    const registryEntity: RegistryEntity = {
       id,
       canonical_name: entity.name,
       display_name: entity.name,
       type: entity.type,
-      slug: entity.slug,
+      slug,
       vertical: metadata.vertical,
       sector: metadata.sector,
       roles: metadata.roles || [],
@@ -300,7 +319,7 @@ export class BatchEntityRegistry {
     return registryEntity;
   }
 
-  /** Shared by the exact-key and person-alias match branches of `addEntity`. */
+  /** Shared by the exact-key and person/org-alias match branches of `addEntity`. */
   private recordMention(existing: RegistryEntity, docId: string, spans: EntitySpan[]) {
     if (!existing.source_documents.includes(docId)) {
       existing.source_documents.push(docId);
@@ -348,12 +367,27 @@ export class BatchEntityRegistry {
    * later), in which case the fuller form is promoted to canonical/display and the bare form
    * that used to be there becomes the alias instead. Either way the registry always shows the
    * most complete surface form seen so far, with the rest recorded, not discarded.
+   *
+   * "Fuller" is character length, not `personNameTokens(...).length` (word count) as an
+   * earlier, person-only version of this function used — reconciled to character length
+   * (Task 4 §8 step 4) because this function now also promotes organisation aliases, and
+   * word count cannot distinguish "Acme SAS" from "ACME S.A.S." (both 2 tokens), silently
+   * freezing promotion after the first multi-word variant — caught by
+   * `registry.test.ts`'s "merges 'Acme', 'Acme SAS', and 'ACME S.A.S.'" test, which
+   * expects the longest to win. Character length gives the correct answer for both the
+   * person and organisation cases already covered by this suite.
+   *
+   * Deliberately does **not** touch `existing.slug`/`existing.id` on promotion (a deviation
+   * from this function's pre-reconciliation form, which called `slugify(surfaceForm)` here):
+   * both are content-hashed at creation time from the entity's *dedup key*, specifically so
+   * they stay stable regardless of which spelling variant a reader or an external link saw
+   * first — recomputing the slug from whichever name becomes canonical would silently
+   * reintroduce that instability for every entity that ever gets an alias promoted, which is
+   * the exact failure mode Task 4 exists to eliminate.
    */
   private recordAlias(existing: RegistryEntity, rawName: string) {
     const surfaceForm = rawName.trim();
-    if (
-      personNameTokens(rawName).length > personNameTokens(existing.canonical_name).length
-    ) {
+    if (surfaceForm.length > existing.canonical_name.length) {
       if (
         existing.display_name !== surfaceForm &&
         !existing.aliases.includes(existing.display_name)
@@ -362,7 +396,6 @@ export class BatchEntityRegistry {
       }
       existing.canonical_name = surfaceForm;
       existing.display_name = surfaceForm;
-      existing.slug = slugify(surfaceForm);
       return;
     }
     if (surfaceForm !== existing.display_name && !existing.aliases.includes(surfaceForm)) {
