@@ -7,7 +7,7 @@ use hacienda_core::store::postgres::usage::UsageStore;
 use hacienda_core::store::postgres::versions::DocumentVersionStore;
 use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::RagStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::quota::InMemoryQuotaStore;
 
@@ -24,6 +24,12 @@ pub struct ApiLimits {
     pub max_body_bytes: usize,
     /// Maximum number of documents in a single `POST /v1/documents` request.
     pub max_documents: usize,
+}
+
+pub(crate) enum ProbeState {
+    Idle,
+    Running,
+    Ready(hacienda_core::capabilities::CapabilityStatus),
 }
 
 impl Default for ApiLimits {
@@ -77,6 +83,8 @@ pub struct ApiState {
     /// before `DefaultBodyLimit`/any body decode. `None` means quotas are not enforced —
     /// today's behaviour, and opt-in the same way every other store above is.
     pub(crate) quota_store: Option<Arc<InMemoryQuotaStore>>,
+    /// Per-router ONNX probe state; independent API routers must not share it.
+    pub(crate) probe_state: Arc<Mutex<ProbeState>>,
 }
 
 impl ApiState {
@@ -97,6 +105,7 @@ impl ApiState {
             object_store: None,
             usage_store: None,
             quota_store: None,
+            probe_state: Arc::new(Mutex::new(ProbeState::Idle)),
         }
     }
 

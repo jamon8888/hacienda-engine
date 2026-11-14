@@ -65,11 +65,11 @@ use params::{
     MimeDetectParams, RevealParams, TextParams,
 };
 use rmcp::{
-    ServerHandler, ServiceExt,
+    RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router,
-    transport::stdio,
+    transport::{async_rw::AsyncRwTransport, stdio},
 };
 use xberg::ExtractInput;
 
@@ -78,6 +78,11 @@ use xberg::ExtractInput;
 const DEFAULT_PAGE_LIMIT: usize = 100;
 /// Largest page this tool will serve, mirroring that module's `MAX_PAGE_LIMIT`.
 const MAX_PAGE_LIMIT: usize = 1000;
+/// Maximum size of one JSON-RPC request line accepted over MCP stdio.
+///
+/// This leaves room for the 8 MiB MIME payload after base64 encoding and its
+/// JSON-RPC envelope, while bounding the transport's per-message allocation.
+const MAX_MCP_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// The hacienda MCP server. Holds the facade every tool call routes through.
 #[derive(Clone)]
@@ -109,7 +114,10 @@ impl HaciendaMcp {
     /// This is the transport Claude Desktop and most local MCP clients use: they launch
     /// the server as a child process and speak JSON-RPC 2.0 over its stdin/stdout.
     pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let service = self.serve(stdio()).await?;
+        let (reader, writer) = stdio();
+        let transport = AsyncRwTransport::<RoleServer, _, _>::new(reader, writer)
+            .with_max_line_length(MAX_MCP_REQUEST_BYTES);
+        let service = self.serve(transport).await?;
         service.waiting().await?;
         Ok(())
     }
@@ -401,7 +409,7 @@ impl HaciendaMcp {
         &self,
         Parameters(params): Parameters<MimeDetectParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if params.content_base64.len() > (hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES * 4 / 3 + 4) {
+        if params.content_base64.len() > hacienda_core::xberg_surface::MAX_MIME_INPUT_BASE64_BYTES {
             return Err(rmcp::ErrorData::invalid_params("content_base64 exceeds the 8 MiB limit", None));
         }
         let bytes = data_encoding::BASE64

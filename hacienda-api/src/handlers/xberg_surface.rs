@@ -42,7 +42,7 @@ pub async fn formats() -> Result<Json<FormatsResponse>, ApiError> {
 pub async fn detect_mime(
     SafeJson(body): SafeJson<MimeDetectRequest>,
 ) -> Result<Json<MimeDetectResponse>, ApiError> {
-    if body.content_base64.len() > (hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES * 4 / 3 + 4) {
+    if body.content_base64.len() > hacienda_core::xberg_surface::MAX_MIME_INPUT_BASE64_BYTES {
         return Err(ApiError::invalid_request("content_base64 exceeds the 8 MiB limit."));
     }
     let bytes = data_encoding::BASE64

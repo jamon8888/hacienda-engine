@@ -783,7 +783,7 @@ async fn migrate_embeddings_work(
 
             if !chunks.is_empty() {
                 let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-                let vectors = xberg::embed_texts_async(texts, &config)
+                let vectors = embed_texts_for_migration(texts, &config)
                     .await
                     .map_err(|e| format!("embedding failed: {e}"))?;
 
@@ -829,6 +829,24 @@ async fn migrate_embeddings_work(
     }
 
     Ok(())
+}
+
+#[cfg(feature = "rag-embeddings")]
+async fn embed_texts_for_migration(
+    texts: Vec<String>,
+    config: &xberg::EmbeddingConfig,
+) -> Result<Vec<Vec<f32>>, String> {
+    xberg::embed_texts_async(texts, config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "rag-embeddings"))]
+async fn embed_texts_for_migration(
+    _texts: Vec<String>,
+    _config: &xberg::EmbeddingConfig,
+) -> Result<Vec<Vec<f32>>, String> {
+    Err("embedding migration requires the `rag-embeddings` feature".to_owned())
 }
 
 /// `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}` — poll a

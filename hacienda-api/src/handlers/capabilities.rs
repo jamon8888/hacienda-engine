@@ -1,13 +1,13 @@
 //! Safe build and runtime capability discovery.
 
-use std::{
-    sync::{Mutex, OnceLock},
-    time::Duration,
+use std::{sync::Arc, time::Duration};
+
+use axum::{extract::State, Json};
+
+use crate::{
+    dto::CapabilitiesResponse,
+    state::{ApiState, ProbeState},
 };
-
-use axum::{Json, extract::State};
-
-use crate::{dto::CapabilitiesResponse, state::ApiState};
 
 /// `GET /capabilities` — report safe feature availability without exposing document
 /// content, configuration secrets, model paths, or filesystem details.
@@ -19,7 +19,7 @@ use crate::{dto::CapabilitiesResponse, state::ApiState};
     responses((status = 200, description = "Build and runtime capability state", body = CapabilitiesResponse))
 )]
 pub async fn capabilities(State(state): State<ApiState>) -> Json<CapabilitiesResponse> {
-    let onnx_runtime = probe_onnx_runtime_status().await;
+    let onnx_runtime = probe_onnx_runtime_status(&state).await;
     let report = hacienda_core::capabilities::report(
         env!("CARGO_PKG_VERSION"),
         cfg!(feature = "rag-embeddings"),
@@ -29,19 +29,13 @@ pub async fn capabilities(State(state): State<ApiState>) -> Json<CapabilitiesRes
     Json(report.into())
 }
 
-enum ProbeState {
-    Idle,
-    Running,
-    Ready(hacienda_core::capabilities::CapabilityStatus),
-}
-
-static PROBE_STATE: OnceLock<Mutex<ProbeState>> = OnceLock::new();
-
-async fn probe_onnx_runtime_status() -> hacienda_core::capabilities::CapabilityStatus {
-    let state = PROBE_STATE.get_or_init(|| Mutex::new(ProbeState::Idle));
+async fn probe_onnx_runtime_status(
+    state: &ApiState,
+) -> hacienda_core::capabilities::CapabilityStatus {
+    let probe_state = Arc::clone(&state.probe_state);
 
     {
-        let guard = state
+        let guard = probe_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match &*guard {
@@ -54,7 +48,7 @@ async fn probe_onnx_runtime_status() -> hacienda_core::capabilities::CapabilityS
     }
 
     {
-        let mut guard = state
+        let mut guard = probe_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !matches!(*guard, ProbeState::Idle) {
@@ -69,10 +63,10 @@ async fn probe_onnx_runtime_status() -> hacienda_core::capabilities::CapabilityS
         *guard = ProbeState::Running;
     }
 
-    let task = tokio::task::spawn_blocking(|| {
+    let task_state = Arc::clone(&probe_state);
+    let task = tokio::task::spawn_blocking(move || {
         let status = hacienda_core::capabilities::onnx_runtime_status();
-        let state = PROBE_STATE.get_or_init(|| Mutex::new(ProbeState::Idle));
-        let mut guard = state
+        let mut guard = task_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = ProbeState::Ready(status.clone());
@@ -83,14 +77,14 @@ async fn probe_onnx_runtime_status() -> hacienda_core::capabilities::CapabilityS
     match result {
         Ok(Ok(status)) => status,
         Ok(Err(_)) => {
-            let mut guard = state
+            let mut guard = probe_state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *guard = ProbeState::Idle;
             unavailable_status("runtime preflight could not start")
         }
         Err(_) => {
-            let mut guard = state
+            let mut guard = probe_state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if matches!(*guard, ProbeState::Running) {

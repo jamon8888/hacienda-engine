@@ -56,7 +56,7 @@ xberg = { workspace = true, features = ["embedding-presets"] }
 # on a host with no prebuilt ONNX Runtime binary for the requested
 # accelerator combination. Build with `--features rag-embeddings` to enable
 # real re-embedding.
-rag-embeddings = ["hacienda-rag/embeddings"]
+rag-embeddings = ["hacienda-core/rag-embeddings", "hacienda-rag/embeddings"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

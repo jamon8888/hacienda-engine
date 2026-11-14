@@ -30,6 +30,7 @@ use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::{EnvKeyResolver, RedactionMode};
 use hacienda_rag::InMemoryVectorStore;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -341,8 +342,15 @@ pub fn run_formats(args: FormatsArgs) -> Result<()> {
 }
 
 pub fn run_mime(args: MimeArgs) -> Result<()> {
-    let bytes = std::fs::read(&args.path)
+    let mut file = std::fs::File::open(&args.path)
         .with_context(|| format!("reading MIME input {}", args.path.display()))?;
+    let mut bytes = Vec::with_capacity(hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES + 1);
+    file.take((hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading MIME input {}", args.path.display()))?;
+    if bytes.len() > hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES {
+        anyhow::bail!("MIME input exceeds the 8 MiB limit");
+    }
     let mime = hacienda_core::xberg_surface::detect_mime_type(&bytes, args.path.to_str())
         .map_err(|error| anyhow::anyhow!(error))?;
     match args.format {

@@ -229,8 +229,14 @@ mod audit_handle {
         ///
         /// Rejects if `result` doesn't deserialize as a `PipelineResult`, or if the
         /// store rejects the batch (e.g. the chain was closed).
+        /// `model` is recorded only for model-sourced entries; callers should pass the
+        /// identifier of the model selected by the surrounding Studio asset loader.
         #[wasm_bindgen(js_name = recordResult)]
-        pub async fn record_result(&self, result: JsValue) -> Result<String, JsValue> {
+        pub async fn record_result(
+            &self,
+            result: JsValue,
+            model: Option<String>,
+        ) -> Result<String, JsValue> {
             let result: PipelineResult =
                 serde_wasm_bindgen::from_value(result).map_err(to_js_err)?;
 
@@ -238,25 +244,30 @@ mod audit_handle {
                 let inputs: Vec<AuditEntryInput> = result
                     .audit_log
                     .into_iter()
-                    .map(|entry| AuditEntryInput {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        category: entry.category,
-                        action: entry.action,
-                        span_hash: entry.span_hash,
-                        span_length: entry.span_length,
-                        confidence: entry.confidence,
-                        source: entry.source.into(),
-                        pipeline_version: PIPELINE_VERSION.to_string(),
-                        // The store owns config_hash — AuditChain::push overwrites this
-                        // with the chain's own value (chain.rs). No local principal
-                        // concept exists in Studio today, so this is always `None`.
-                        config_hash: String::new(),
-                        principal: None,
-                        // Studio hardcodes `PipelineConfig::default()` (no config
-                        // surface exists in the browser today), so no vertical is ever
-                        // configured here either.
-                        vertical: None,
-                        model: None,
+                    .map(|entry| {
+                        let source: EntitySource = entry.source.into();
+                        AuditEntryInput {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            category: entry.category,
+                            action: entry.action,
+                            span_hash: entry.span_hash,
+                            span_length: entry.span_length,
+                            confidence: entry.confidence,
+                            source,
+                            pipeline_version: PIPELINE_VERSION.to_string(),
+                            // The store owns config_hash — AuditChain::push overwrites this
+                            // with the chain's own value (chain.rs). No local principal
+                            // concept exists in Studio today, so this is always `None`.
+                            config_hash: String::new(),
+                            principal: None,
+                            // Studio hardcodes `PipelineConfig::default()` (no config
+                            // surface exists in the browser today), so no vertical is ever
+                            // configured here either.
+                            vertical: None,
+                            model: (source == EntitySource::Model)
+                                .then(|| model.clone())
+                                .flatten(),
+                        }
                     })
                     .collect();
 
@@ -280,6 +291,7 @@ mod audit_handle {
         /// `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
         ///
         /// `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+        /// `model` is recorded for model-sourced reveals when supplied by the caller.
         ///
         /// # `principal: None`, not a caller-supplied identity
         ///
@@ -306,6 +318,7 @@ mod audit_handle {
             revealed_text: String,
             category: String,
             source: String,
+            model: Option<String>,
         ) -> Result<String, JsValue> {
             let source = EntitySource::from_str(&source).map_err(to_js_err)?;
             let span_hash = blake3::hash(revealed_text.as_bytes()).to_hex().to_string();
@@ -321,7 +334,7 @@ mod audit_handle {
                 config_hash: String::new(),
                 principal: None,
                 vertical: None,
-                model: None,
+                model: (source == EntitySource::Model).then_some(model).flatten(),
             };
 
             self.store

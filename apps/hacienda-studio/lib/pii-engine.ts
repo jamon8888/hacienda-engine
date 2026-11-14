@@ -25,6 +25,7 @@
  * the build output is missing. See `initPiiEngine` below.
  */
 import type { AuditHandle } from "hacienda-wasm";
+import { MODEL_PROVENANCE } from "./asset-loader";
 import { initializeWasmWithCache } from "./wasm-cache";
 
 export interface PiiEntity {
@@ -294,13 +295,13 @@ export async function recordPiiAudit(
 ): Promise<void> {
   const handle = await getAuditHandle();
   if (!result.audit_log || result.audit_log.length === 0) {
-    await handle.recordResult(result);
+    await handle.recordResult(result, MODEL_PROVENANCE);
     return;
   }
   await handle.recordResult({
     ...result,
     audit_log: result.audit_log.map((entry) => ({ ...entry, action: appliedMode })),
-  });
+  }, MODEL_PROVENANCE);
 }
 
 /**
@@ -342,7 +343,7 @@ export async function recordPiiReveal(
 ): Promise<string> {
   await initPiiEngine();
   const handle = await getAuditHandle();
-  return handle.recordReveal(revealedText, category, source);
+  return handle.recordReveal(revealedText, category, source, MODEL_PROVENANCE);
 }
 
 /** One row of `hacienda-core`'s `AuditEntry` (`hacienda-core/src/audit/entry.rs`),
