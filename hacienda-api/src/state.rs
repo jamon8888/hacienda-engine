@@ -7,7 +7,34 @@ use hacienda_core::store::postgres::usage::UsageStore;
 use hacienda_core::store::postgres::versions::DocumentVersionStore;
 use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::RagStore;
+use prometheus::{HistogramVec, Registry};
 use std::sync::Arc;
+
+#[derive(Clone)]
+pub(crate) struct ApiMetrics {
+    pub registry: Arc<Registry>,
+    pub request_duration: Arc<HistogramVec>,
+}
+
+impl ApiMetrics {
+    pub fn new() -> Self {
+        let registry = Arc::new(Registry::new());
+        let request_duration = Arc::new(
+            HistogramVec::new(
+                prometheus::Opts::new("http_request_duration_seconds", "HTTP request duration"),
+                &["method", "path", "status"],
+            )
+            .expect("request duration metric definition"),
+        );
+        registry
+            .register(Box::new(request_duration.as_ref().clone()))
+            .expect("request duration metric registration");
+        Self {
+            registry,
+            request_duration,
+        }
+    }
+}
 
 use crate::quota::InMemoryQuotaStore;
 
@@ -40,6 +67,7 @@ impl Default for ApiLimits {
 /// Clone is cheap — every field is either `Arc` or `Copy`.
 #[derive(Clone)]
 pub struct ApiState {
+    pub(crate) metrics: ApiMetrics,
     /// The business-logic facade. All document processing, scanning, and audit go here.
     pub(crate) facade: Arc<HaciendaFacade>,
     /// Async job registry. In-memory only; dies with the process.
@@ -87,6 +115,7 @@ impl ApiState {
         limits: ApiLimits,
     ) -> Self {
         Self {
+            metrics: ApiMetrics::new(),
             facade,
             jobs,
             auth,

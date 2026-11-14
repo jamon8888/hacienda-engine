@@ -29,6 +29,7 @@ jobs:
         run: pipx install schemathesis
       - name: Start test API
         run: |
+          sed -i 's/replace-me-before-deploying/ci-contract-token/; s/id = "replace-me"/id = "ci-contract"/; s/principal_id = "replace-me"/principal_id = "ci-contract"/' config/production.toml
           docker compose -f docker-compose.yml up -d hacienda
           sleep 10
           curl -sf http://localhost:8787/health
@@ -36,7 +37,7 @@ jobs:
         run: |
           schemathesis run --checks=all \
             --base-url=http://localhost:8787 \
-            --header="Authorization: Bearer replace-me-before-deploying" \
+            --header="Authorization: Bearer ci-contract-token" \
             http://localhost:8787/openapi.json
       - name: Upload results
         uses: actions/upload-artifact@v4

@@ -35,6 +35,7 @@ OLD_KEY=$(vault kv get -field=active_key "secret/hacienda/$ENV/pseudonym" 2>/dev
   exit 1
 })
 OLD_MATERIAL=$(vault kv get -field="${OLD_KEY}" "secret/hacienda/$ENV/pseudonym" 2>/dev/null || true)
+[ -n "$OLD_MATERIAL" ] || { echo "ERROR: active key material unavailable; refusing rotation" >&2; exit 1; }
 
 # Archive old key
 TIMESTAMP=$(date +%s)
@@ -44,9 +45,7 @@ vault kv put "secret/hacienda/$ENV/pseudonym/$ARCHIVE_KEY" key_id="$OLD_KEY" mat
 
 # Generate new key
 NEW_KEY=$(openssl rand -hex 32)
-# Keep the rendered ExternalSecret contract stable; rotate the material under
-# the active key ID so the resolver can continue to load it without a manifest
-# change. The previous material remains archived above for audit/recovery.
+# Alternate the two rendered IDs so historical tokens retain their material.
 NEW_KEY_ID="key_1"
 if [ "$OLD_KEY" = "key_1" ]; then NEW_KEY_ID="key_2"; fi
 echo "Generated new key"
