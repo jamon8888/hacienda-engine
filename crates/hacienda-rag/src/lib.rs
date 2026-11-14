@@ -40,6 +40,7 @@ pub mod backends;
 pub mod capability;
 #[cfg(feature = "chunking")]
 pub mod chunk;
+pub mod embedding;
 pub mod error;
 pub mod filter;
 pub mod query;
@@ -55,6 +56,12 @@ pub use backends::memory::InMemoryVectorStore;
 pub use capability::Capabilities;
 #[cfg(feature = "chunking")]
 pub use chunk::chunk_full_text;
+pub use embedding::{
+    validate_batch, EmbeddingError, EmbeddingMetadata, EmbeddingProvenance, TextEmbedder,
+    TokenOnlyText, TokenTextEmbedder,
+};
+#[cfg(feature = "embeddings")]
+pub use embedding::{XbergTextEmbedder, XbergTokenEmbedder};
 pub use error::{ComplexityKind, RagError, RagResult};
 pub use filter::{Filter, FilterField, FilterNamespace};
 pub use query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
