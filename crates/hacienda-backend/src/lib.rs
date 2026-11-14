@@ -382,7 +382,15 @@ impl Backend {
                 source: token.source.clone(),
             })
             .collect::<Vec<_>>();
+        // `project_document` is the single redaction boundary for extractor metadata: it
+        // retains only Hacienda token references and drops every plaintext value. Keep the
+        // same token-only projection in the RAG record; storing the original Xberg metadata
+        // here would bypass the editor's disclosure contract.
         let metadata = serde_json::to_value(&editor.metadata)?;
+        let mut rag_metadata = serde_json::to_value(&editor.provenance)?;
+        if let Value::Object(fields) = &mut rag_metadata {
+            fields.insert("token_only".to_owned(), metadata.clone());
+        }
         let title = token_text(&editor.metadata.title);
         let full_text = document.document.content.clone();
         let source_hash = blake3::hash(full_text.as_bytes()).to_hex().to_string();
@@ -425,7 +433,7 @@ impl Backend {
                 "format_kind": format_kind,
                 "audit_references": document.audit_references(),
             }),
-            metadata: serde_json::to_value(&editor.provenance)?,
+            metadata: rag_metadata,
         };
         let chunks = vec![ChunkRecord {
             external_id: Some(format!("{document_id}:{version_id}:0")),
@@ -633,7 +641,37 @@ mod tests {
             mime_type: mime.into(),
             ..Default::default()
         };
-        document.metadata.title = Some("[TITLE:k1:IFBEG]".into());
+        document.metadata.title = Some("[PERSON:k1:MFRGG2LTMVRXEZLU]".into());
+        document.metadata.subject = Some("Jane Doe".into());
+        document.metadata.additional.insert(
+            "filename".into(),
+            serde_json::json!("[FILENAME:k1:IFBEGRCF]"),
+        );
+        document.metadata.additional.insert(
+            "owner".into(),
+            serde_json::json!({
+                "name": "[PERSON:k1:MFRGG2LTMVRXEZLU]",
+                "email": "[EMAIL:k1:IFBEGRCF]",
+            }),
+        );
+        document
+            .metadata
+            .additional
+            .insert("raw_contact".into(), serde_json::json!("jane@example.com"));
+        document
+    }
+
+    fn no_pii_document(mime: &str) -> xberg::ExtractedDocument {
+        let mut document = xberg::ExtractedDocument {
+            content: "Quarterly report".into(),
+            mime_type: mime.into(),
+            ..Default::default()
+        };
+        document.metadata.title = Some("Quarterly report".into());
+        document
+            .metadata
+            .additional
+            .insert("filename".into(), serde_json::json!("quarterly-report.pdf"));
         document
     }
 
@@ -659,14 +697,86 @@ mod tests {
             assert_eq!(record.rag_document().labels["format_kind"], kind);
             assert_eq!(
                 record.rag_document().title.as_deref(),
-                Some("[TITLE:k1:IFBEG]")
+                Some("[PERSON:k1:MFRGG2LTMVRXEZLU]")
             );
-            assert!(
-                !serde_json::to_string(record.rag_document())
-                    .unwrap()
-                    .contains("PERSON_RAW")
-            );
+            let serialized = serde_json::to_string(&record).unwrap();
+            assert!(serialized.contains("[FILENAME:k1:IFBEGRCF]"));
+            assert!(serialized.contains("metadata_token_only"));
+            assert!(!serialized.contains("PERSON_RAW"));
         }
+    }
+
+    #[test]
+    fn sensitive_title_filename_and_metadata_are_token_only_across_projections() {
+        let backend = Backend::new(local()).unwrap();
+        let record = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+
+        assert_eq!(
+            record.editor().metadata.title[0].token_id,
+            "[PERSON:k1:MFRGG2LTMVRXEZLU]"
+        );
+        assert_eq!(
+            record.editor().metadata.filename[0].token_id,
+            "[FILENAME:k1:IFBEGRCF]"
+        );
+        assert!(
+            record.editor().metadata.additional["owner"]
+                .iter()
+                .any(|token| token.token_id == "[PERSON:k1:MFRGG2LTMVRXEZLU]")
+        );
+        assert!(record.editor().metadata.subject.is_empty());
+        assert!(
+            !record
+                .editor()
+                .metadata
+                .additional
+                .contains_key("raw_contact")
+        );
+
+        let serialized = serde_json::to_string(record).unwrap();
+        assert!(serialized.contains("[FILENAME:k1:IFBEGRCF]"));
+        assert!(serialized.contains("[EMAIL:k1:IFBEGRCF]"));
+        assert!(!serialized.contains("Jane Doe"));
+        assert!(!serialized.contains("jane@example.com"));
+        assert_eq!(
+            record.rag_document().metadata["token_only"]["filename"][0]["token_id"],
+            "[FILENAME:k1:IFBEGRCF]"
+        );
+        assert_eq!(record.chunks()[0].chunk_metadata["document_id"], "doc");
+        assert_eq!(
+            backend.provider_prompt(record).text,
+            record.rag_document().full_text
+        );
+        assert!(!backend.provider_prompt(record).text.contains("Jane Doe"));
+    }
+
+    #[test]
+    fn no_pii_control_does_not_fabricate_sensitive_tokens_or_leak_metadata() {
+        let backend = Backend::new(local()).unwrap();
+        let record = backend
+            .project(
+                &RedactedXbergDocument::test(no_pii_document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+
+        assert!(record.editor().search.tokens.is_empty());
+        assert!(record.editor().metadata.title.is_empty());
+        assert!(record.editor().metadata.filename.is_empty());
+        assert!(record.editor().metadata.additional.is_empty());
+        let serialized_metadata = serde_json::to_string(&record.rag_document().metadata).unwrap();
+        assert!(!serialized_metadata.contains("quarterly-report.pdf"));
+        assert!(!serialized_metadata.contains("Quarterly report"));
+        assert_eq!(backend.provider_prompt(record).text, "Quarterly report");
     }
 
     #[test]
@@ -756,6 +866,25 @@ mod tests {
         assert_eq!(
             backend.provider_prompt(&record).text,
             record.rag_document().full_text
+        );
+        let (persisted, persisted_chunks) = store
+            .get_document_chunks("local:contracts", &first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.title.as_deref(),
+            Some("[PERSON:k1:MFRGG2LTMVRXEZLU]")
+        );
+        assert_eq!(
+            persisted.metadata["token_only"]["filename"][0]["token_id"],
+            "[FILENAME:k1:IFBEGRCF]"
+        );
+        assert_eq!(persisted_chunks[0].content, "Contact [PERSON:k1:IFBEGRCF]");
+        assert!(
+            !serde_json::to_string(&persisted_chunks)
+                .unwrap()
+                .contains("Jane Doe")
         );
     }
 
