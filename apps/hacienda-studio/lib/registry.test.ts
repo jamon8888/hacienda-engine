@@ -58,7 +58,9 @@ describe("BatchEntityRegistry.inferRelationships", () => {
     addEntity(registrySameSentence, "doc-001", "Jean Dupont", "person", [{ start: 0, end: 11 }]);
     addEntity(registrySameSentence, "doc-001", "Marie Curie", "person", [{ start: 16, end: 27 }]);
     registrySameSentence.inferRelationships("doc-001", sentenceText);
-    const sameSentenceConfidence = registrySameSentence.getRelationships()[0].confidence;
+    const sameSentenceRelationships = registrySameSentence.getRelationships();
+    expect(sameSentenceRelationships).toHaveLength(1);
+    const sameSentenceConfidence = sameSentenceRelationships[0];
 
     const registryFarther = new BatchEntityRegistry();
     const paragraphText =
@@ -69,9 +71,14 @@ describe("BatchEntityRegistry.inferRelationships", () => {
       { start: paragraphText.indexOf("Marie Curie"), end: paragraphText.indexOf("Marie Curie") + 11 },
     ]);
     registryFarther.inferRelationships("doc-001", paragraphText);
-    const sameParagraphConfidence = registryFarther.getRelationships()[0].confidence;
+    const sameParagraphRelationships = registryFarther.getRelationships();
+    expect(sameParagraphRelationships).toHaveLength(1);
+    const sameParagraphConfidence = sameParagraphRelationships[0];
 
-    expect(sameSentenceConfidence).toBeGreaterThan(sameParagraphConfidence);
+    expect(sameSentenceConfidence.confidence).toBe(0.6);
+    expect(sameSentenceConfidence.context).toBe("Named in the same sentence");
+    expect(sameParagraphConfidence.confidence).toBe(0.3);
+    expect(sameParagraphConfidence.context).toBe("Named in the same paragraph");
   });
 
   it("emits no edge across a paragraph break", () => {
