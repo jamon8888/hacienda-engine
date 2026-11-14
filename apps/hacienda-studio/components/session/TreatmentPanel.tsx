@@ -15,7 +15,7 @@ export function TreatmentPanel({ mode, onChange }: TreatmentPanelProps) {
         <CardTitle className="text-sm">Traitement</CardTitle>
       </CardHeader>
       <CardContent>
-        <RadioGroup value={mode} onValueChange={onChange as any}>
+        <RadioGroup value={mode} onValueChange={(value) => { if (value === "pseudonymize" || value === "anonymize") onChange(value); }}>
           <div className="flex items-center space-x-2">
             <RadioGroupItem value="pseudonymize" id="pseudo" />
             <Label htmlFor="pseudo">Pseudonymiser</Label>

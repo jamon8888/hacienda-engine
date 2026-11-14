@@ -40,7 +40,7 @@ function RootShell() {
   }
 
   return (
-    <AppShell>
+    <AppShell onNewSession={() => navigate({ to: "/" })}>
       {state.error && (
         <div
           className="error-banner flex items-center justify-between bg-destructive/15 px-6 py-3 text-destructive"

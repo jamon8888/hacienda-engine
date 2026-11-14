@@ -4,9 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { X, Check, MoreHorizontal } from "lucide-react";
 
-export type ProcessedFile = { id: string; name: string; status: string; };
+export interface ProcessedFile { readonly id: string; readonly name: string; readonly status: string; }
 
-export function ProcessedFilesList({ files }: { files: ReadonlyArray<ProcessedFile> }) {
+export function ProcessedFilesList({ files, onView, onDelete }: { files: ReadonlyArray<ProcessedFile>; onView?: (name: string) => void; onDelete?: (name: string) => void }) {
   return (
     <div className="space-y-2">
       <h3 className="text-sm font-medium">Fichiers traités</h3>
@@ -19,10 +19,10 @@ export function ProcessedFilesList({ files }: { files: ReadonlyArray<ProcessedFi
                 <span className="truncate text-xs">{f.name}</span>
               </div>
               <div className="flex items-center gap-1">
-                <Button variant="ghost" size="icon" className="h-7 w-7">
+                <Button aria-label={`Voir ${f.name}`} variant="ghost" size="icon" className="h-7 w-7" onClick={() => onView?.(f.name)}>
                   <Check className="size-3" />
                 </Button>
-                <Button variant="ghost" size="icon" className="h-7 w-7">
+                <Button aria-label={`Supprimer ${f.name}`} variant="ghost" size="icon" className="h-7 w-7" onClick={() => onDelete?.(f.name)}>
                   <MoreHorizontal className="size-3" />
                 </Button>
               </div>

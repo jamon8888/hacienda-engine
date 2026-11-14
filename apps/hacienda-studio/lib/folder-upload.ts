@@ -15,12 +15,10 @@ export async function traverseFolder(entry: FileSystemDirectoryEntry): Promise<F
         for (const e of entries) {
           if (e.isFile) {
             const fileEntry = e as FileSystemFileEntry;
-            fileEntry.file(async (file) => {
-              const path = entry.name + "/" + file.name;
-              results.push({ path, file });
-            }, () => {});
+            const file = await new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
+            results.push({ path: entry.name + "/" + file.name, file });
           } else if (e.isDirectory) {
-            await traverseFolder(e as FileSystemDirectoryEntry);
+            results.push(...await traverseFolder(e as FileSystemDirectoryEntry));
           }
         }
         await readEntries();

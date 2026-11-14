@@ -10,36 +10,24 @@ import { TreatmentPanel } from "@/components/session/TreatmentPanel";
 import { ConversionPanel } from "@/components/session/ConversionPanel";
 import { ProcessedFilesList } from "@/components/session/ProcessedFilesList";
 import { useAppState } from "@/lib/app-state";
+import { DETECTION_CATEGORIES } from "@/lib/pii-categories";
 
 export interface NouvelleSessionProps {
   readonly onCancel?: () => void;
 }
 
 export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
-  let appState: ReturnType<typeof useAppState> | null = null;
-  try {
-    appState = useAppState();
-  } catch {
-    appState = null;
-  }
+  const appState = useAppState();
 
   const detectionSelection = appState?.detectionSelection ?? new Set<string>(["PR","MAIL","PHON","CIE","CID","ACT","ADR","LOC","CP","CARD","IBAN","URL","FILE","REF"]);
   const treatmentMode = appState?.treatmentMode ?? "pseudonymize";
   const conversionMode = appState?.conversionMode ?? "markdown";
 
   const [showAdvanced, setShowAdvanced] = React.useState(false);
-  let navigate: ReturnType<typeof useNavigate> | null = null;
-  try {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    navigate = useNavigate();
-  } catch {
-    navigate = null;
-  }
+  const navigate = useNavigate();
 
   function handleFiles(files: File[]): void {
-    if (appState) {
-      void appState.handleFilesAccepted(files);
-    }
+    void appState.handleFilesAccepted(files);
   }
 
   return (
@@ -57,26 +45,29 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
         {/* Left panel 340px */}
         <Card className="flex w-[340px] shrink-0 flex-col bg-white p-4">
           <DetectionPanel
-            selection={detectionSelection}
-            onOpenModal={appState?.openDetectionModal}
+            selectedCount={detectionSelection.size}
+            totalCount={14}
+            onOpenModal={appState.openDetectionModal}
           />
           <DetectionModal
             open={appState?.isDetectionModalOpen ?? false}
-            selection={detectionSelection}
-            onChange={appState ? appState.setDetectionSelection : () => {}}
+            selected={new Set(detectionSelection)}
+            onToggle={(code) => { const next = new Set(detectionSelection); next.has(code) ? next.delete(code) : next.add(code); appState.setDetectionSelection(next); }}
+            onToggleGroup={(group, all) => { const category = (DETECTION_CATEGORIES.find(g => g.title === group)?.categories ?? []).map(c => c.code); const next = new Set(detectionSelection); category.forEach(c => all ? next.add(c) : next.delete(c)); appState.setDetectionSelection(next); }}
+            onDefaults={() => appState.setDetectionSelection(new Set(["PR","MAIL","PHON","CIE","CID","ACT","ADR","LOC","CP","CARD","IBAN","URL","FILE","REF"]))}
             onOpenChange={(open) => {
-              if (appState) appState.setIsDetectionModalOpen(open);
+              appState.setIsDetectionModalOpen(open);
             }}
           />
           <div className="border-t border-slate-100" />
           <TreatmentPanel
             mode={treatmentMode}
-            onChange={appState ? appState.setTreatmentMode : () => {}}
+            onChange={appState.setTreatmentMode}
           />
           <div className="border-t border-slate-100" />
           <ConversionPanel
             mode={conversionMode}
-            onChange={appState ? appState.setConversionMode : () => {}}
+            onChange={appState.setConversionMode}
           />
           <div className="mt-auto border-t border-slate-100 pt-4">
             <button
@@ -108,14 +99,14 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
                 <p className="mt-2 text-xs text-slate-400">Formats supportés : PDF, DOCX, XLSX, PPTX, images et textes (TXT, JSON, FEC, etc.)</p>
                 <div className="mt-3">
                   <Dropzone
-                    onFiles={handleFiles}
-                    folderMode={appState.folderMode}
-                    onToggleFolderMode={appState.toggleFolderMode}
+                    onDropFiles={files => void appState.handleFilesAccepted(files)}
+                    onDropFolder={files => void appState.handleFilesAccepted(files)}
+                    disabled={false}
                   />
                 </div>
               </Card>
               <ProcessedFilesList
-                files={appState.results.map((r) => {
+                files={appState.results.map((r, index) => {
                   const count = r.frontmatter.piiEntitiesFound;
                   const pagesHint = r.markdown.length > 1000 ? `${String(Math.round(r.markdown.length / 1000))} k caractères` : `${String(r.markdown.length)} caractères`;
                   const subtitle =
@@ -128,18 +119,14 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
                           : `${pagesHint} · ${String(count)} occurrences détectées`;
                   const prefix = appState.treatmentMode === "pseudonymize" ? "[PSEUDONYMISÉ] " : "";
                   return {
+                    id: `${String(index)}-${r.name}`,
                     name: `${prefix}${r.name}`,
-                    subtitle,
-                    pseudonymized: appState.treatmentMode === "pseudonymize",
+                    status: subtitle,
                   };
                 })}
                 onView={(name) => {
                   const clean = name.replace(/^\[PSEUDONYMISÉ\] /, "");
-                  if (navigate) {
-                    navigate({ to: "/documents/$name", params: { name: clean } });
-                  } else {
-                    window.location.href = `/documents/${encodeURIComponent(clean)}`;
-                  }
+                  navigate({ to: "/documents/$name", params: { name: clean } });
                 }}
                 onDelete={(name) => {
                   const clean = name.replace(/^\[PSEUDONYMISÉ\] /, "");
@@ -149,9 +136,9 @@ export function NouvelleSession({ onCancel }: NouvelleSessionProps) {
             </div>
           ) : (
             <Dropzone
-              onFiles={handleFiles}
-              folderMode={appState?.folderMode ?? false}
-              onToggleFolderMode={appState?.toggleFolderMode}
+              onDropFiles={files => void appState.handleFilesAccepted(files)}
+              onDropFolder={files => void appState.handleFilesAccepted(files)}
+              disabled={false}
             />
           )}
         </div>

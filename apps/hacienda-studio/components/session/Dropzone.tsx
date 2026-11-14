@@ -15,6 +15,7 @@ export function Dropzone({
 }) {
   const [drag, setDrag] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const folderInputRef = React.useRef<HTMLInputElement>(null);
 
   return (
     <div
@@ -31,14 +32,15 @@ export function Dropzone({
       <div className="text-center space-y-4">
         <Upload className="mx-auto size-12 text-muted-foreground/50" />
         <div className="space-y-1">
-          <p className="font-medium">Cliquez pour téléverser ou <span className="text-primary underline cursor-pointer" onClick={()=>inputRef.current?.click()}>ouvrez la sélection de fichiers</span></p>
+          <p className="font-medium">Cliquez pour téléverser ou <button type="button" className="text-primary underline cursor-pointer" onClick={()=>inputRef.current?.click()}>ouvrez la sélection de fichiers</button></p>
           <p className="text-xs text-muted-foreground">Formats supportés : PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, LV …</p>
         </div>
         <div className="flex items-center justify-center gap-2">
           <Button variant="outline" size="sm" onClick={()=>inputRef.current?.click()} disabled={disabled}>Choisir le fichier</Button>
-          <Button variant="outline" size="sm" disabled={disabled}>Choisir un dossier</Button>
+          <Button variant="outline" size="sm" onClick={()=>folderInputRef.current?.click()} disabled={disabled}>Choisir un dossier</Button>
         </div>
-        <input ref={inputRef} type="file" multiple className="hidden" />
+        <input ref={inputRef} type="file" multiple className="hidden" onChange={e => { if (e.currentTarget.files?.length) onDropFiles?.(e.currentTarget.files); e.currentTarget.value = ""; }} />
+        <input ref={folderInputRef} type="file" multiple className="hidden" onChange={e => { if (e.currentTarget.files?.length) onDropFolder?.(e.currentTarget.files); e.currentTarget.value = ""; }} {...({ webkitdirectory: "" } as React.InputHTMLAttributes<HTMLInputElement>)} />
       </div>
     </div>
   );

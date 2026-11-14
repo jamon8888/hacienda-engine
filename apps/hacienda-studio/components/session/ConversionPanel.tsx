@@ -15,7 +15,7 @@ export function ConversionPanel({ mode, onChange }: ConversionPanelProps) {
         <CardTitle className="text-sm">Conversion</CardTitle>
       </CardHeader>
       <CardContent>
-        <RadioGroup value={mode} onValueChange={onChange as any}>
+        <RadioGroup value={mode} onValueChange={(value) => { if (value === "original" || value === "markdown") onChange(value); }}>
           <div className="flex items-center space-x-2">
             <RadioGroupItem value="original" id="orig" />
             <Label htmlFor="orig">Format original</Label>
