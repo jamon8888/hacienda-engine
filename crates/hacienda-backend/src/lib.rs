@@ -3,6 +3,7 @@
 //! client and no vault implementation: provider input is a [`ProviderPrompt`] and
 //! rehydration returns references, never plaintext.
 
+use async_trait::async_trait;
 use hacienda_client_core::{
     AuditReference, ConfigurationError, InstallationConfig, RehydrationCapability,
     RehydrationRequest, TenantScope, TokenizedText, VaultId,
@@ -18,6 +19,7 @@ use hacienda_rag::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Stable, profile-scoped addressing. A client never supplies a tenant to a store
@@ -296,6 +298,14 @@ pub enum BackendError {
     InvalidCollection,
     #[error("TeamOnPremise LanceDB access must come from the authenticated gateway")]
     DirectLanceDbAccess,
+    #[error("TeamOnPremise RAG requires an authenticated tenant gateway")]
+    GatewayRequired,
+    #[error("authenticated gateway tenant does not match the configured tenant")]
+    TenantScopeMismatch,
+    #[error("configured LocalFull LanceDB topology is not embedded")]
+    InvalidLocalLanceDbTopology,
+    #[error("LanceDB URI does not match the configured LocalFull storage path")]
+    UnconfiguredLanceDbPath,
     #[error("document is not a supported redacted extraction")]
     UnredactedDocument,
     #[error("rehydration authorization failed")]
@@ -304,6 +314,16 @@ pub enum BackendError {
     Rag(#[from] RagError),
     #[error("serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+}
+
+/// The narrow gateway seam for TeamOnPremise RAG access.
+#[async_trait]
+pub trait AuthenticatedTenantGateway: Send + Sync {
+    /// The tenant scope established by authentication at the gateway.
+    fn tenant_scope(&self) -> &TenantScope;
+
+    /// Return a RagStore whose operations are already restricted to `tenant_scope`.
+    async fn rag_store(&self) -> RagResult<Arc<dyn RagStore>>;
 }
 
 impl Backend {
@@ -512,6 +532,29 @@ impl Backend {
             .await
     }
 
+    /// Persist through an authenticated TeamOnPremise gateway. The gateway supplies
+    /// the tenant-scoped store; callers cannot inject a raw LanceDB connection here.
+    pub async fn persist_via_gateway<G: AuthenticatedTenantGateway>(
+        &self,
+        gateway: &G,
+        requested_collection: &str,
+        document: &BackendDocument,
+    ) -> RagResult<DocumentId> {
+        let expected = self.tenant_scope().ok_or_else(|| {
+            RagError::InvalidQuery(
+                "authenticated gateway access is only valid for TeamOnPremise".into(),
+            )
+        })?;
+        if gateway.tenant_scope().0 != expected {
+            return Err(RagError::InvalidQuery(
+                BackendError::TenantScopeMismatch.to_string(),
+            ));
+        }
+        let store = gateway.rag_store().await?;
+        self.persist_to(store.as_ref(), requested_collection, document)
+            .await
+    }
+
     fn tenant_scope(&self) -> Option<String> {
         match &self.profile {
             InstallationConfig::LocalFull(_) => None,
@@ -531,6 +574,7 @@ mod tests {
         StoragePath, TeamOnPremiseConfig, TenantScope, TrustBoundary, VaultId,
     };
     use hacienda_rag::{InMemoryVectorStore, RagStore};
+    use std::sync::Arc;
 
     fn local() -> InstallationConfig {
         InstallationConfig::LocalFull(LocalFullConfig {
@@ -714,6 +758,146 @@ mod tests {
             record.rag_document().full_text
         );
     }
+
+    struct TestGateway {
+        tenant: TenantScope,
+        store: Arc<dyn RagStore>,
+    }
+
+    #[async_trait]
+    impl AuthenticatedTenantGateway for TestGateway {
+        fn tenant_scope(&self) -> &TenantScope {
+            &self.tenant
+        }
+
+        async fn rag_store(&self) -> RagResult<Arc<dyn RagStore>> {
+            Ok(Arc::clone(&self.store))
+        }
+    }
+
+    #[tokio::test]
+    async fn team_rag_requires_matching_authenticated_gateway_tenant() {
+        let backend_a = Backend::new(team("tenant-a")).unwrap();
+        let backend_b = Backend::new(team("tenant-b")).unwrap();
+        let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::default());
+        let gateway_a = TestGateway {
+            tenant: TenantScope("tenant-a".into()),
+            store: Arc::clone(&store),
+        };
+        let gateway_b = TestGateway {
+            tenant: TenantScope("tenant-b".into()),
+            store,
+        };
+        let document_a = backend_a
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc-a",
+                "v1",
+            )
+            .unwrap();
+        let document_b = backend_b
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc-b",
+                "v1",
+            )
+            .unwrap();
+
+        backend_a
+            .persist_via_gateway(&gateway_a, "contracts", &document_a)
+            .await
+            .unwrap();
+        assert!(
+            backend_b
+                .persist_via_gateway(&gateway_a, "contracts", &document_b)
+                .await
+                .is_err()
+        );
+        backend_b
+            .persist_via_gateway(&gateway_b, "contracts", &document_b)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            gateway_a
+                .store
+                .collection_stats("tenant:tenant-a:contracts")
+                .await
+                .unwrap()
+                .documents,
+            1
+        );
+        assert_eq!(
+            gateway_b
+                .store
+                .collection_stats("tenant:tenant-b:contracts")
+                .await
+                .unwrap()
+                .documents,
+            1
+        );
+    }
+
+    #[cfg(feature = "lancedb")]
+    #[tokio::test]
+    async fn local_lancedb_uses_configured_path_and_survives_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut profile = local();
+        let path = dir.path().join("private-lance");
+        if let InstallationConfig::LocalFull(config) = &mut profile {
+            if let hacienda_client_core::LanceDbTopology::LocalEmbedded { path: configured } =
+                &mut config.storage.lancedb
+            {
+                configured.0 = path.to_string_lossy().into_owned();
+            }
+        }
+        let (backend, store) = Backend::connect_configured_lancedb(profile.clone())
+            .await
+            .unwrap();
+        let record = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let first = backend
+            .persist_to(&store, "contracts", &record)
+            .await
+            .unwrap();
+        let second = backend
+            .persist_to(&store, "contracts", &record)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            store
+                .collection_stats("local:contracts")
+                .await
+                .unwrap()
+                .documents,
+            1
+        );
+        assert!(
+            !serde_json::to_string(record.rag_document())
+                .unwrap()
+                .contains("PERSON_RAW")
+        );
+
+        drop(store);
+        let (_, reopened) = Backend::connect_configured_lancedb(profile).await.unwrap();
+        assert_eq!(
+            reopened
+                .collection_stats("local:contracts")
+                .await
+                .unwrap()
+                .documents,
+            1
+        );
+    }
 }
 
 fn token_text(tokens: &[SensitiveToken]) -> Option<String> {
@@ -728,15 +912,50 @@ fn token_text(tokens: &[SensitiveToken]) -> Option<String> {
 
 #[cfg(feature = "lancedb")]
 impl Backend {
+    /// Open the private, durable LanceDB path declared by a valid LocalFull profile.
+    /// TeamOnPremise deliberately has no equivalent constructor: its client receives
+    /// a tenant-scoped [`RagStore`] from [`AuthenticatedTenantGateway`] instead.
+    pub async fn connect_configured_lancedb(
+        profile: InstallationConfig,
+    ) -> Result<(Self, hacienda_rag::backends::lancedb::LanceDbStore), BackendError> {
+        let backend = Self::new(profile)?;
+        let path = match &backend.profile {
+            InstallationConfig::LocalFull(config) => {
+                let hacienda_client_core::LanceDbTopology::LocalEmbedded { path } =
+                    &config.storage.lancedb
+                else {
+                    return Err(BackendError::InvalidLocalLanceDbTopology);
+                };
+                path.0.clone()
+            }
+            InstallationConfig::TeamOnPremise(_) => {
+                return Err(BackendError::DirectLanceDbAccess);
+            }
+        };
+        let store = hacienda_rag::backends::lancedb::LanceDbStore::connect(&path).await?;
+        Ok((backend, store))
+    }
+
+    /// Explicit form that still enforces the profile's configured path; arbitrary
+    /// client-supplied LanceDB URIs are rejected.
     pub async fn connect_lancedb(
         profile: InstallationConfig,
         uri: &str,
     ) -> Result<(Self, hacienda_rag::backends::lancedb::LanceDbStore), BackendError> {
-        let backend = Self::new(profile)?;
-        if matches!(backend.profile, InstallationConfig::TeamOnPremise(_)) {
-            return Err(BackendError::DirectLanceDbAccess);
+        let configured = match &profile {
+            InstallationConfig::LocalFull(config) => {
+                let hacienda_client_core::LanceDbTopology::LocalEmbedded { path } =
+                    &config.storage.lancedb
+                else {
+                    return Err(BackendError::InvalidLocalLanceDbTopology);
+                };
+                path.0.as_str()
+            }
+            InstallationConfig::TeamOnPremise(_) => return Err(BackendError::DirectLanceDbAccess),
+        };
+        if uri != configured {
+            return Err(BackendError::UnconfiguredLanceDbPath);
         }
-        let store = hacienda_rag::backends::lancedb::LanceDbStore::connect(uri).await?;
-        Ok((backend, store))
+        Self::connect_configured_lancedb(profile).await
     }
 }

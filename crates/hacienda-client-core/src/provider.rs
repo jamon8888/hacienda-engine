@@ -417,6 +417,15 @@ pub enum ClientError {
 pub trait RedactionAdapter {
     /// Redact every prompt and context field before provider transport.
     fn redact(&self, request: &ProviderRequest) -> Result<RedactedProviderRequest, RedactionError>;
+
+    /// Redact provider output before it is exposed to the renderer.
+    ///
+    /// Implementations must use the same local Hacienda policy as [`Self::redact`].
+    /// The default rejects the operation so an adapter that has not implemented the
+    /// response boundary cannot accidentally return raw provider text.
+    fn redact_text(&self, _text: &str) -> Result<TokenizedText, RedactionError> {
+        Err(RedactionError::Rejected)
+    }
 }
 
 /// Adapter seam for provider streaming. It receives token-only data only.
@@ -568,6 +577,21 @@ impl ProviderTransportConfig {
             credential: credential.into(),
         }
     }
+
+    /// Validate that this route terminates at a local or authenticated gateway.
+    pub fn validate(&self) -> Result<(), TransportError> {
+        let endpoint = reqwest::Url::parse(&self.endpoint).map_err(|_| TransportError::Failed)?;
+        let host = endpoint.host_str().ok_or(TransportError::Failed)?;
+        let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+        if endpoint.scheme() != "https" && !(endpoint.scheme() == "http" && loopback) {
+            return Err(TransportError::Failed);
+        }
+        if self.model.trim().is_empty() || self.max_tokens == 0 || self.credential.trim().is_empty()
+        {
+            return Err(TransportError::Failed);
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for ProviderTransportConfig {
@@ -700,6 +724,79 @@ where
             serde_json::to_vec(&body).map_err(|_| TransportError::Failed)?,
         ))?;
         map_provider_response(request, response, ProviderKind::Codex, openai_text)
+    }
+}
+
+/// Real blocking HTTP implementation used by the desktop process.
+#[derive(Clone)]
+pub struct ReqwestHttpClient {
+    client: reqwest::blocking::Client,
+}
+
+impl ReqwestHttpClient {
+    /// Build the native HTTP client with a bounded request timeout.
+    pub fn new() -> Result<Self, TransportError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|_| TransportError::Failed)?;
+        Ok(Self { client })
+    }
+}
+
+impl ProviderHttpClient for ReqwestHttpClient {
+    fn send(
+        &mut self,
+        request: ProviderHttpRequest,
+    ) -> Result<ProviderHttpResponse, TransportError> {
+        let mut builder = self.client.request(
+            request.method.parse().map_err(|_| TransportError::Failed)?,
+            &request.url,
+        );
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        let response = builder
+            .body(request.body)
+            .send()
+            .map_err(|_| TransportError::Failed)?;
+        let status = response.status().as_u16();
+        let body = response.text().map_err(|_| TransportError::Failed)?;
+        Ok(ProviderHttpResponse::new(status, body))
+    }
+}
+
+/// Configured gateway transport that selects the provider wire adapter at runtime.
+pub struct GatewayProviderTransport {
+    http: ReqwestHttpClient,
+    config: ProviderTransportConfig,
+}
+
+impl GatewayProviderTransport {
+    /// Construct and validate a real gateway transport.
+    pub fn new(config: ProviderTransportConfig) -> Result<Self, TransportError> {
+        config.validate()?;
+        Ok(Self {
+            http: ReqwestHttpClient::new()?,
+            config,
+        })
+    }
+}
+
+impl ProviderTransport for GatewayProviderTransport {
+    fn stream(
+        &mut self,
+        request: &RedactedProviderRequest,
+    ) -> Result<ProviderResponse, TransportError> {
+        match request.provider {
+            ProviderKind::ClaudeDesktop => {
+                AnthropicProviderTransport::new(self.http.clone(), self.config.clone())
+                    .stream(request)
+            }
+            ProviderKind::Codex => {
+                OpenAiProviderTransport::new(self.http.clone(), self.config.clone()).stream(request)
+            }
+        }
     }
 }
 
@@ -879,9 +976,11 @@ where
             .as_ref()
             .ok_or(ClientError::RedactionUnavailable)?;
         let safe_request = redactor.redact(request)?;
-        self.transport
+        let response = self
+            .transport
             .stream(&safe_request)
-            .map_err(ClientError::from)
+            .map_err(ClientError::from)?;
+        redact_provider_response(redactor, response).map_err(ClientError::from)
     }
 
     /// Rehydrate one response chunk only for an explicitly authorized display.
@@ -903,6 +1002,41 @@ where
             text,
         })
     }
+}
+
+fn redact_provider_response<R: RedactionAdapter>(
+    redactor: &R,
+    response: ProviderResponse,
+) -> Result<ProviderResponse, RedactionError> {
+    let redact = |mut chunk: ProviderStreamChunk| {
+        let original_references = chunk.content.references.clone();
+        let mut content = redactor.redact_text(&chunk.content.text)?;
+        for reference in original_references {
+            if !content.references.contains(&reference) {
+                content.references.push(reference);
+            }
+        }
+        chunk.content = content;
+        Ok(chunk)
+    };
+    Ok(match response {
+        ProviderResponse::ClaudeDesktop(mut response) => {
+            response.chunks = response
+                .chunks
+                .into_iter()
+                .map(redact)
+                .collect::<Result<_, _>>()?;
+            ProviderResponse::ClaudeDesktop(response)
+        }
+        ProviderResponse::Codex(mut response) => {
+            response.chunks = response
+                .chunks
+                .into_iter()
+                .map(redact)
+                .collect::<Result<_, _>>()?;
+            ProviderResponse::Codex(response)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -950,6 +1084,14 @@ mod tests {
                     })
                     .collect(),
             })
+        }
+
+        fn redact_text(&self, text: &str) -> Result<TokenizedText, RedactionError> {
+            Ok(TokenizedText::new(
+                text.replace(PERSON, PERSON_TOKEN)
+                    .replace(EMAIL, "[EMAIL:opaque-2]"),
+                vec![OpaqueTokenReference::new(PERSON_TOKEN, "person")],
+            ))
         }
     }
 
@@ -1197,5 +1339,53 @@ mod tests {
         assert_eq!(response.chunks[1].content.references[0].token, PERSON_TOKEN);
         assert!(format!("{response:?}").contains("<token-only>"));
         assert!(!format!("{response:?}").contains("[PERSON:opaque-1]"));
+    }
+
+    #[test]
+    fn transport_configuration_accepts_loopback_and_https_gateways_only() {
+        assert!(
+            ProviderTransportConfig::new(
+                "http://127.0.0.1:8787/provider",
+                "local-model",
+                32,
+                "gateway-token",
+            )
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            ProviderTransportConfig::new(
+                "https://gateway.example.test/provider",
+                "team-model",
+                32,
+                "gateway-token",
+            )
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            ProviderTransportConfig::new("http://provider.example.test/v1", "model", 32, "token",)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transport_configuration_fails_closed_when_required_values_are_missing() {
+        assert!(
+            ProviderTransportConfig::new("http://127.0.0.1:8787", "", 32, "token")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ProviderTransportConfig::new("http://127.0.0.1:8787", "model", 0, "token")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ProviderTransportConfig::new("http://127.0.0.1:8787", "model", 32, "")
+                .validate()
+                .is_err()
+        );
     }
 }

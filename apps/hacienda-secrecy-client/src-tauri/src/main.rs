@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use futures::executor::block_on;
+use hacienda_core::pii::{PiiPipeline, PipelineConfig};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -12,8 +15,9 @@ use tauri_plugin_opener::OpenerExt;
 
 use hacienda_client_core::{
     ClaudeDesktopRequest, ClaudeDesktopResponse, ClientError, CodexRequest, CodexResponse,
-    ProviderRequest, ProviderResponse, ProviderStreamChunk, ProviderTransport,
-    RedactedProviderRequest, RedactionAdapter, TransportError,
+    GatewayProviderTransport, OpaqueTokenReference, ProviderKind, ProviderRequest,
+    ProviderResponse, ProviderStreamChunk, ProviderTransport, RedactedContext,
+    RedactedProviderRequest, RedactionAdapter, RedactionError, TokenizedText, TransportError,
 };
 
 /// Opaque references are resolved inside the desktop process.  The renderer is
@@ -30,6 +34,75 @@ struct OpenOriginalRequest {
 #[derive(Debug, Serialize)]
 struct OpenOriginalResponse {
     opened: bool,
+}
+
+/// Hacienda's local deterministic PII pipeline is the only redaction capability
+/// injected into the provider command state. It deliberately starts regex-only;
+/// enabling a model is a deployment decision and a failed model load must keep the
+/// client unavailable rather than silently downgrade.
+struct HaciendaLocalRedactor {
+    pipeline: PiiPipeline,
+}
+
+impl HaciendaLocalRedactor {
+    fn new() -> Result<Self, RedactionError> {
+        PiiPipeline::new(PipelineConfig::default())
+            .map(|pipeline| Self { pipeline })
+            .map_err(|_| RedactionError::Rejected)
+    }
+
+    fn tokenize(&self, text: &str) -> Result<TokenizedText, RedactionError> {
+        let result = block_on(self.pipeline.process(text)).map_err(|_| RedactionError::Rejected)?;
+        let mut references = Vec::new();
+        for entity in result.entities {
+            let reference =
+                OpaqueTokenReference::new(entity.redact_template, entity.category.to_string());
+            if !references.contains(&reference) {
+                references.push(reference);
+            }
+        }
+        Ok(TokenizedText::new(result.redacted_text, references))
+    }
+}
+
+impl RedactionAdapter for HaciendaLocalRedactor {
+    fn redact(&self, request: &ProviderRequest) -> Result<RedactedProviderRequest, RedactionError> {
+        let (provider, conversation_id, context_id, prompt, context) = match request {
+            ProviderRequest::ClaudeDesktop(request) => (
+                ProviderKind::ClaudeDesktop,
+                request.conversation_id.clone(),
+                request.context_id.clone(),
+                request.prompt.as_str(),
+                request.context.as_slice(),
+            ),
+            ProviderRequest::Codex(request) => (
+                ProviderKind::Codex,
+                request.conversation_id.clone(),
+                request.context_id.clone(),
+                request.prompt.as_str(),
+                request.context.as_slice(),
+            ),
+        };
+        Ok(RedactedProviderRequest {
+            provider,
+            conversation_id,
+            context_id,
+            prompt: self.tokenize(prompt)?,
+            context: context
+                .iter()
+                .map(|item| {
+                    Ok(RedactedContext {
+                        label: item.label.clone(),
+                        content: self.tokenize(&item.content)?,
+                    })
+                })
+                .collect::<Result<_, RedactionError>>()?,
+        })
+    }
+
+    fn redact_text(&self, text: &str) -> Result<TokenizedText, RedactionError> {
+        self.tokenize(text)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -219,6 +292,37 @@ impl ProviderCommandState {
         Self::new(FailClosedTransport, None::<FailClosedRedactor>)
     }
 
+    /// Build the production path from gateway environment configuration.
+    /// Missing or malformed configuration intentionally returns an error so the
+    /// caller can install the fail-closed state instead.
+    pub fn from_environment() -> Result<Self, String> {
+        let endpoint = env::var("HACIENDA_GATEWAY_URL")
+            .or_else(|_| env::var("HACIENDA_PROVIDER_ENDPOINT"))
+            .map_err(|_| "Hacienda gateway is not configured".to_owned())?;
+        let model = env::var("HACIENDA_PROVIDER_MODEL").unwrap_or_else(|_| "hacienda-local".into());
+        let max_tokens = env::var("HACIENDA_PROVIDER_MAX_TOKENS")
+            .unwrap_or_else(|_| "2048".into())
+            .parse::<u32>()
+            .map_err(|_| "Hacienda provider token limit is invalid".to_owned())?;
+        let credential = env::var("HACIENDA_GATEWAY_TOKEN")
+            .or_else(|_| env::var("HACIENDA_PROVIDER_CREDENTIAL"))
+            .map_err(|_| "Hacienda gateway credential is not configured".to_owned())?;
+        let transport =
+            GatewayProviderTransport::new(hacienda_client_core::ProviderTransportConfig::new(
+                endpoint, model, max_tokens, credential,
+            ))
+            .map_err(|_| "Hacienda gateway transport is invalid".to_owned())?;
+        let redactor = HaciendaLocalRedactor::new()
+            .map_err(|_| "Hacienda local redactor is unavailable".to_owned())?;
+        Ok(Self::new(transport, Some(redactor)))
+    }
+
+    /// Install the configured runtime when possible, otherwise preserve the
+    /// no-egress fail-closed contract.
+    pub fn runtime() -> Self {
+        Self::from_environment().unwrap_or_else(|_| Self::fail_closed())
+    }
+
     /// Redact first, then stream through the injected token-only transport.
     pub fn stream(&self, request: &ProviderRequest) -> Result<ProviderResponse, ClientError> {
         let safe_request = {
@@ -234,9 +338,52 @@ impl ProviderCommandState {
             .lock()
             .map_err(|_| ClientError::Transport(TransportError::Failed))?
             .stream(&safe_request)?;
+        let response = {
+            let redactor = self
+                .redactor
+                .lock()
+                .map_err(|_| ClientError::RedactionUnavailable)?;
+            let redactor = redactor.as_ref().ok_or(ClientError::RedactionUnavailable)?;
+            redact_response(redactor.as_ref(), response)?
+        };
         validate_response(request, &response)?;
         Ok(response)
     }
+}
+
+fn redact_response(
+    redactor: &dyn RedactionAdapter,
+    response: ProviderResponse,
+) -> Result<ProviderResponse, ClientError> {
+    let redact = |mut chunk: ProviderStreamChunk| {
+        let existing = chunk.content.references.clone();
+        let mut content = redactor.redact_text(&chunk.content.text)?;
+        for reference in existing {
+            if !content.references.contains(&reference) {
+                content.references.push(reference);
+            }
+        }
+        chunk.content = content;
+        Ok(chunk)
+    };
+    Ok(match response {
+        ProviderResponse::ClaudeDesktop(mut response) => {
+            response.chunks = response
+                .chunks
+                .into_iter()
+                .map(redact)
+                .collect::<Result<_, ClientError>>()?;
+            ProviderResponse::ClaudeDesktop(response)
+        }
+        ProviderResponse::Codex(mut response) => {
+            response.chunks = response
+                .chunks
+                .into_iter()
+                .map(redact)
+                .collect::<Result<_, ClientError>>()?;
+            ProviderResponse::Codex(response)
+        }
+    })
 }
 
 struct FailClosedRedactor;
@@ -317,7 +464,7 @@ fn stream_codex(
 #[cfg(not(test))]
 fn main() {
     tauri::Builder::default()
-        .manage(ProviderCommandState::fail_closed())
+        .manage(ProviderCommandState::runtime())
         .setup(|app| {
             app.manage(OriginalViewerCommandState::native(app.handle().clone()));
             Ok(())

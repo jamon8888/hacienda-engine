@@ -11,6 +11,7 @@ default = []
 lancedb = ["hacienda-rag/lancedb"]
 
 [dependencies]
+async-trait = { workspace = true }
 blake3 = { workspace = true }
 hacienda-client-core = { path = "../hacienda-client-core" }
 hacienda-core = { path = "../../hacienda-core" }
