@@ -42,12 +42,12 @@ pub async fn formats() -> Result<Json<FormatsResponse>, ApiError> {
 pub async fn detect_mime(
     SafeJson(body): SafeJson<MimeDetectRequest>,
 ) -> Result<Json<MimeDetectResponse>, ApiError> {
-    let _ = body.filename.as_deref();
     let bytes = data_encoding::BASE64
         .decode(body.content_base64.as_bytes())
         .map_err(|_| ApiError::invalid_request("content_base64 is not valid base64."))?;
-    let mime_type = hacienda_core::xberg_surface::detect_mime_type(&bytes)
-        .map_err(|_| ApiError::invalid_request("The content format is unsupported."))?;
+    let mime_type =
+        hacienda_core::xberg_surface::detect_mime_type(&bytes, body.filename.as_deref())
+            .map_err(|_| ApiError::invalid_request("The content format is unsupported."))?;
     Ok(Json(MimeDetectResponse { mime_type }))
 }
 
@@ -134,7 +134,8 @@ pub async fn cache_warm(
         hacienda_core::xberg_surface::XbergSurfaceError::Warm(_) => ApiError::internal(),
         hacienda_core::xberg_surface::XbergSurfaceError::Mime(_)
         | hacienda_core::xberg_surface::XbergSurfaceError::Cache(_)
-        | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot => ApiError::internal(),
+        | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot
+        | hacienda_core::xberg_surface::XbergSurfaceError::CacheBusy => ApiError::internal(),
     })?;
     tracing::info!(operation = "xberg_cache_warm", preset = %result.preset);
     Ok(Json(CacheWarmResponse {

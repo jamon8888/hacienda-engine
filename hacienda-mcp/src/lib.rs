@@ -404,8 +404,11 @@ impl HaciendaMcp {
         let bytes = data_encoding::BASE64
             .decode(params.content_base64.as_bytes())
             .map_err(|_| rmcp::ErrorData::invalid_params("content_base64 is invalid", None))?;
-        let mime_type = hacienda_core::xberg_surface::detect_mime_type(&bytes)
-            .map_err(|_| rmcp::ErrorData::invalid_params("unsupported document content", None))?;
+        let mime_type =
+            hacienda_core::xberg_surface::detect_mime_type(&bytes, params.filename.as_deref())
+                .map_err(|_| {
+                    rmcp::ErrorData::invalid_params("unsupported document content", None)
+                })?;
         json_tool_result(&serde_json::json!({ "mime_type": mime_type }))
     }
 
@@ -474,7 +477,8 @@ impl HaciendaMcp {
             }
             hacienda_core::xberg_surface::XbergSurfaceError::Mime(_)
             | hacienda_core::xberg_surface::XbergSurfaceError::Cache(_)
-            | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot => {
+            | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot
+            | hacienda_core::xberg_surface::XbergSurfaceError::CacheBusy => {
                 rmcp::ErrorData::internal_error("embedding preset warm failed", None)
             }
         })?;

@@ -343,7 +343,7 @@ pub fn run_formats(args: FormatsArgs) -> Result<()> {
 pub fn run_mime(args: MimeArgs) -> Result<()> {
     let bytes = std::fs::read(&args.path)
         .with_context(|| format!("reading MIME input {}", args.path.display()))?;
-    let mime = hacienda_core::xberg_surface::detect_mime_type(&bytes)
+    let mime = hacienda_core::xberg_surface::detect_mime_type(&bytes, args.path.to_str())
         .map_err(|error| anyhow::anyhow!(error))?;
     match args.format {
         Format::Json => println!("{}", serde_json::json!({"mime_type": mime})),

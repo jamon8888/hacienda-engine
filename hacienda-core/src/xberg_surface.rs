@@ -1,6 +1,7 @@
 //! Safe, shared access to the Xberg capabilities exposed by Hacienda surfaces.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Serialize;
 
@@ -18,6 +19,10 @@ pub enum XbergSurfaceError {
         "cache operation failed: the configured Xberg cache root is unsafe; suggestion: set XBERG_CACHE_DIR to a dedicated cache directory"
     )]
     UnsafeCacheRoot,
+    #[error(
+        "cache operation is busy: another Xberg cache operation is still running; suggestion: retry after it completes"
+    )]
+    CacheBusy,
     #[error(
         "embedding warm failed: the requested preset is unavailable; suggestion: choose a compiled Xberg embedding preset"
     )]
@@ -53,8 +58,24 @@ pub fn supported_formats() -> Vec<xberg::SupportedFormat> {
     xberg::list_supported_formats()
 }
 
-pub fn detect_mime_type(bytes: &[u8]) -> Result<String, XbergSurfaceError> {
-    xberg::detect_mime_type_from_bytes(bytes).map_err(XbergSurfaceError::Mime)
+pub fn detect_mime_type(bytes: &[u8], filename: Option<&str>) -> Result<String, XbergSurfaceError> {
+    match xberg::detect_mime_type_from_bytes(bytes) {
+        Ok(mime) => Ok(mime),
+        Err(error) => filename
+            .and_then(filename_mime_hint)
+            .ok_or(XbergSurfaceError::Mime(error)),
+    }
+}
+
+fn filename_mime_hint(filename: &str) -> Option<String> {
+    let extension = Path::new(filename)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    xberg::list_supported_formats()
+        .into_iter()
+        .find(|format| format.extension.eq_ignore_ascii_case(&extension))
+        .map(|format| format.mime_type)
 }
 
 pub fn cache_stats() -> Result<CacheStats, XbergSurfaceError> {
@@ -70,6 +91,9 @@ pub fn cache_stats() -> Result<CacheStats, XbergSurfaceError> {
 }
 
 pub fn clear_cache() -> Result<CacheClearResult, XbergSurfaceError> {
+    let _operation = cache_operation_lock()
+        .try_lock()
+        .map_err(|_| XbergSurfaceError::CacheBusy)?;
     let root = cache_root();
     if !is_safe_cache_root(&root) {
         return Err(XbergSurfaceError::UnsafeCacheRoot);
@@ -88,6 +112,7 @@ pub fn clear_cache() -> Result<CacheClearResult, XbergSurfaceError> {
 
 #[cfg(feature = "rag-embeddings")]
 pub async fn warm_embedding_preset(name: &str) -> Result<WarmResult, XbergSurfaceError> {
+    let _operation = cache_operation_lock().lock().await;
     let name = name.trim();
     if name.is_empty() || xberg::get_embedding_preset(name).is_none() {
         return Err(XbergSurfaceError::WarmUnavailable);
@@ -128,6 +153,11 @@ fn cache_root() -> PathBuf {
         return PathBuf::from(home).join(".cache/xberg");
     }
     PathBuf::from(".xberg")
+}
+
+fn cache_operation_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 fn is_safe_cache_root(root: &PathBuf) -> bool {
