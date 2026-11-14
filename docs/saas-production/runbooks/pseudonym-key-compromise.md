@@ -44,7 +44,7 @@ kubectl annotate externalsecret hacienda-secrets -n hacienda-prod \
 # 6. Verify the rendered secret changed before restart
 for attempt in $(seq 1 12); do
   if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY_ID"; then
-  echo "Secret verified with new key"
+    echo "Secret verified with new key ID $NEW_KEY_ID"
     break
   fi
   [ "$attempt" -eq 12 ] && { echo "ERROR: Secret verification failed; refusing restart"; exit 1; }
@@ -78,22 +78,27 @@ NEW_ACTIVE_KEY_ID="key_1"
 NEW_ACTIVE_KEY=$(openssl rand -hex 32)
 vault kv patch secret/hacienda/prod/pseudonym active_key="$NEW_ACTIVE_KEY_ID" "$NEW_ACTIVE_KEY_ID"="$NEW_ACTIVE_KEY"
 
-# 4. Force ExternalSecrets sync & restart
+# 4. Force ExternalSecrets sync
 kubectl annotate externalsecret hacienda-secrets -n hacienda-prod force-sync=$(date +%s) --overwrite
+
+# 5. Verify the rendered active key ID before restarting
 for attempt in $(seq 1 12); do
   if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_ACTIVE_KEY_ID"; then
-    kubectl rollout restart deployment/hacienda-api -n hacienda-prod
+    echo "Secret verified with new key ID $NEW_ACTIVE_KEY_ID"
     break
   fi
   [ "$attempt" -eq 12 ] && { echo "ERROR: rendered secret not updated; refusing restart" >&2; exit 1; }
   sleep 5
 done
 
-# 5. Re-pseudonymize all existing data (BACKGROUND JOB)
+# 6. Restart API pods to pick up the verified key
+kubectl rollout restart deployment/hacienda-api -n hacienda-prod
+
+# 7. Re-pseudonymize all existing data (BACKGROUND JOB)
 # This is expensive - schedule during low traffic
 hacienda pii re-pseudonymize --all-tenants --key-rotation
 
-# 6. Verify
+# 8. Verify
 - Check audit chain: hacienda audit verify
 - Spot-check: hacienda pii reveal <token> (should fail with old key)
 ```
