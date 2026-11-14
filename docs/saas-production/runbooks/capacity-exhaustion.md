@@ -41,8 +41,9 @@ kubectl patch hpa hacienda-api -n hacienda-prod -p '{"spec":{"maxReplicas":30}}'
 # 2. Scale workers
 kubectl scale deployment hacienda-worker -n hacienda-prod --replicas=10
 
-# 3. Enable rate limiting at ingress (returns 503 when limit exceeded, not queueing)
+# 3. Apply and verify the supported ingress rate limit before changing app behavior
 kubectl patch ingress hacienda-api -n hacienda-prod -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/limit-rps":"200"}}}'
+kubectl get ingress hacienda-api -n hacienda-prod -o jsonpath='{.metadata.annotations.nginx\.ingress\.kubernetes\.io/limit-rps}'
 
 # 4. Shed load: return 503 for non-critical endpoints
 # (Requires code change / feature flag)
@@ -51,8 +52,8 @@ kubectl patch ingress hacienda-api -n hacienda-prod -p '{"metadata":{"annotation
 ## Rollback
 
 ```bash
-# Remove rate limit annotation if it causes issues
-kubectl annotate ingress hacienda-api -n hacienda-prod nginx.ingress.kubernetes.io/limit-rps-
+# Restore the baseline limit; never leave ingress protection inactive
+kubectl patch ingress hacienda-api -n hacienda-prod -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/limit-rps":"100"}}}'
 ```
 
 ## Escalation

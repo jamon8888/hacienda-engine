@@ -83,13 +83,15 @@ resource "google_storage_bucket" "hacienda_dr" {
 }
 
 # Cross-region replication (prod only)
-resource "google_storage_bucket_replication" "hacienda_crr" {
+resource "google_storage_transfer_job" "hacienda_crr" {
   count = var.environment == "prod" ? 1 : 0
-  bucket = google_storage_bucket.hacienda.name
-  rule {
-    destination_bucket = google_storage_bucket.hacienda_dr[0].name
-    include_prefixes   = ["*"]
-    source_bucket      = google_storage_bucket.hacienda.name
+  description = "Replicate Hacienda production objects to DR"
+  project = var.project_id
+  transfer_spec {
+    gcs_data_source { bucket_name = google_storage_bucket.hacienda.name }
+    gcs_data_sink { bucket_name = google_storage_bucket.hacienda_dr[0].name }
+    object_conditions { include_prefixes = [""] }
+    transfer_options { overwrite_objects_already_existing_in_sink = false }
   }
 }
 

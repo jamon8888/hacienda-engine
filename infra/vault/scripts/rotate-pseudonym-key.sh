@@ -29,6 +29,7 @@ OLD_KEY=$(vault kv get -field=active_key "secret/hacienda/$ENV/pseudonym" 2>/dev
   echo "ERROR: Failed to retrieve current active_key for $ENV"
   exit 1
 })
+OLD_MATERIAL=$(vault kv get -field="${OLD_KEY}" "secret/hacienda/$ENV/pseudonym" 2>/dev/null || true)
 
 # Archive old key
 TIMESTAMP=$(date +%s)
@@ -38,17 +39,18 @@ vault kv put "secret/hacienda/$ENV/pseudonym/$ARCHIVE_KEY" key="$OLD_KEY"
 
 # Generate new key
 NEW_KEY=$(openssl rand -hex 32)
+NEW_KEY_ID="key_$(date +%s)"
 echo "Generated new key"
 
 # Update active key (same path consumed by ExternalSecret)
 if [ -n "$TENANT_ID" ]; then
   # For multi-tenant: update both the global active_key and tenant-specific key
-  vault kv put "secret/hacienda/$ENV/pseudonym" active_key="$NEW_KEY"
-  vault kv put "secret/hacienda/$ENV/pseudonym/tenant_$TENANT_ID" key="$NEW_KEY"
+  vault kv patch "secret/hacienda/$ENV/pseudonym" active_key="$NEW_KEY_ID" "${NEW_KEY_ID}=$NEW_KEY"
+  vault kv patch "secret/hacienda/$ENV/pseudonym/tenant_$TENANT_ID" key="$NEW_KEY"
   echo "Updated active_key and tenant_$TENANT_ID key"
 else
   # Single active key (legacy/single-tenant mode)
-  vault kv put "secret/hacienda/$ENV/pseudonym" active_key="$NEW_KEY"
+  vault kv patch "secret/hacienda/$ENV/pseudonym" active_key="$NEW_KEY_ID" "${NEW_KEY_ID}=$NEW_KEY"
   echo "Updated active_key"
 fi
 
@@ -61,10 +63,11 @@ if command -v kubectl >/dev/null 2>&1; then
   # Verify the rendered secret changed before restart
   echo "Verifying secret update..."
   sleep 5
-  if kubectl get secret hacienda-secrets -n hacienda-$ENV -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -q "$NEW_KEY"; then
+  if kubectl get secret hacienda-secrets -n hacienda-$ENV -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY_ID"; then
     echo "Secret verified with new key"
   else
-    echo "WARNING: Secret may not have updated yet"
+    echo "ERROR: Secret did not verify; refusing to restart"
+    exit 1
   fi
   
   echo "Restarting hacienda-api pods to pick up new key..."

@@ -29,9 +29,9 @@ API-Version: v1
 
 # Deprecated response
 API-Version: v1
-Sunset: Sat, 01 Jan 2027 00:00:00 GMT
+Sunset: Fri, 01 Jan 2027 00:00:00 GMT
 Link: </v2/>; rel="successor-version"
-Deprecation: "Sat, 01 Jan 2027 00:00:00 GMT"
+Deprecation: @1798761600
 
 # Retired response
 410 Gone

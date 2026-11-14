@@ -41,12 +41,14 @@ kubectl annotate externalsecret hacienda-secrets -n hacienda-prod \
   force-sync=$(date +%s) --overwrite
 
 # 6. Verify the rendered secret changed before restart
-sleep 5
-if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -q "$NEW_KEY"; then
+for attempt in $(seq 1 12); do
+  if kubectl get secret hacienda-secrets -n hacienda-prod -o jsonpath='{.data.HACIENDA_PSEUDONYM_ACTIVE_KEY}' | base64 -d | grep -qx "$NEW_KEY"; then
   echo "Secret verified with new key"
-else
-  echo "WARNING: Secret may not have updated yet"
-fi
+    break
+  fi
+  [ "$attempt" -eq 12 ] && { echo "ERROR: Secret verification failed; refusing restart"; exit 1; }
+  sleep 5
+done
 
 # 7. Restart API pods to pick up new key
 kubectl rollout restart deployment/hacienda-api -n hacienda-prod
@@ -68,9 +70,6 @@ kubectl rollout restart deployment/hacienda-api -n hacienda-prod
 for tenant in $(kubectl exec -n hacienda-prod <pg-pod> -- psql -t -c "SELECT id FROM tenants;"); do
   NEW_KEY=$(openssl rand -hex 32)
   vault kv put secret/hacienda/prod/pseudonym/tenant_${tenant} key=$NEW_KEY
-  # Update tenant record with new key_id
-  kubectl exec -n hacienda-prod <pg-pod> -- psql -c \
-    "UPDATE tenants SET pseudonym_key_id = 'key_$(date +%s)_${tenant}' WHERE id = '${tenant}';";
 done
 
 # 2. Update global active_key as well

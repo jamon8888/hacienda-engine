@@ -51,7 +51,7 @@ resource "google_redis_instance" "hacienda" {
 resource "vault_generic_secret" "redis" {
   path = "secret/hacienda/${var.environment}/redis"
   data_json = jsonencode({
-    url = "redis://:${google_redis_instance.hacienda.auth_string}@${google_redis_instance.hacienda.host}:6379"
+    url = "rediss://:${google_redis_instance.hacienda.auth_string}@${google_redis_instance.hacienda.host}:6378"
   })
 }
 

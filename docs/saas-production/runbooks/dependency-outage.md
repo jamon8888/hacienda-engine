@@ -58,7 +58,9 @@ kubectl set env deployment/hacienda-api -n hacienda-prod \
 ### Redis Outage
 
 ```bash
-# 1. Retain bounded local rate limiter or ingress limit-rps as compensating control
+# 1. Apply and verify ingress limit-rps before disabling the application limiter
+kubectl patch ingress hacienda-api -n hacienda-prod -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/limit-rps":"100"}}}'
+kubectl get ingress hacienda-api -n hacienda-prod -o jsonpath='{.metadata.annotations.nginx\.ingress\.kubernetes\.io/limit-rps}'
 kubectl set env deployment/hacienda-api -n hacienda-prod RATE_LIMIT_ENABLED=false
 
 # 2. Disable caching

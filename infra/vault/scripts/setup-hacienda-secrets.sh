@@ -45,6 +45,8 @@ create_secret() {
   vault kv put "secret/$path" "$@"
 }
 
+uri_encode() { jq -nr --arg value "$1" '$value|@uri'; }
+
 # Validate required environment variables
 validate_env() {
   local var=$1
@@ -61,12 +63,15 @@ validate_env HACIENDA_DB_PASSWORD_PROD
 validate_env HACIENDA_S3_ACCESS_KEY_PROD
 validate_env HACIENDA_S3_SECRET_KEY_PROD
 validate_env HACIENDA_REDIS_PASSWORD_PROD
+DB_PASSWORD_PROD_URI=$(uri_encode "$HACIENDA_DB_PASSWORD_PROD")
+REDIS_PASSWORD_PROD_URI=$(uri_encode "$HACIENDA_REDIS_PASSWORD_PROD")
 
 create_secret hacienda/prod/database \
-  url="postgresql://hacienda:${HACIENDA_DB_PASSWORD_PROD}@hacienda-postgres:5432/hacienda?sslmode=require"
+  url="postgresql://hacienda:${DB_PASSWORD_PROD_URI}@hacienda-postgres:5432/hacienda?sslmode=require"
 
 create_secret hacienda/prod/pseudonym \
-  active_key="$(openssl rand -hex 32)" \
+  active_key="key_1" \
+  key_1="$(openssl rand -hex 32)" \
   fpe_key="$(openssl rand -hex 32)"
 
 create_secret hacienda/prod/s3 \
@@ -81,7 +86,7 @@ create_secret hacienda/prod/auth \
   api_key_salt="$(openssl rand -base64 16)"
 
 create_secret hacienda/prod/redis \
-  url="redis://:${HACIENDA_REDIS_PASSWORD_PROD}@hacienda-redis:6379"
+  url="rediss://:${REDIS_PASSWORD_PROD_URI}@hacienda-redis:6378"
 
 # Staging secrets
 echo "=== Creating Staging Secrets ==="
@@ -89,12 +94,15 @@ validate_env HACIENDA_DB_PASSWORD_STAGING
 validate_env HACIENDA_S3_ACCESS_KEY_STAGING
 validate_env HACIENDA_S3_SECRET_KEY_STAGING
 validate_env HACIENDA_REDIS_PASSWORD_STAGING
+DB_PASSWORD_STAGING_URI=$(uri_encode "$HACIENDA_DB_PASSWORD_STAGING")
+REDIS_PASSWORD_STAGING_URI=$(uri_encode "$HACIENDA_REDIS_PASSWORD_STAGING")
 
 create_secret hacienda/staging/database \
-  url="postgresql://hacienda:${HACIENDA_DB_PASSWORD_STAGING}@hacienda-postgres-staging:5432/hacienda?sslmode=require"
+  url="postgresql://hacienda:${DB_PASSWORD_STAGING_URI}@hacienda-postgres-staging:5432/hacienda?sslmode=require"
 
 create_secret hacienda/staging/pseudonym \
-  active_key="$(openssl rand -hex 32)" \
+  active_key="key_1" \
+  key_1="$(openssl rand -hex 32)" \
   fpe_key="$(openssl rand -hex 32)"
 
 create_secret hacienda/staging/s3 \
@@ -109,7 +117,7 @@ create_secret hacienda/staging/auth \
   api_key_salt="$(openssl rand -base64 16)"
 
 create_secret hacienda/staging/redis \
-  url="redis://:${HACIENDA_REDIS_PASSWORD_STAGING}@hacienda-redis-staging:6379"
+  url="rediss://:${REDIS_PASSWORD_STAGING_URI}@hacienda-redis-staging:6378"
 
 # Development secrets (can use defaults)
 echo "=== Creating Development Secrets ==="
