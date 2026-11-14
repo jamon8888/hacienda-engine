@@ -3928,6 +3928,7 @@ dependencies = [
 name = "hacienda-backend"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "hacienda-client-core",
  "hacienda-core",
@@ -3936,7 +3937,9 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "uuid",
  "xberg",
+ "zeroize",
 ]
 
 [[package]]
@@ -3971,7 +3974,9 @@ dependencies = [
 name = "hacienda-client-core"
 version = "0.1.0"
 dependencies = [
+ "reqwest 0.13.4",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
@@ -8146,6 +8151,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

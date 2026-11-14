@@ -1130,6 +1130,36 @@ mod tests {
         }
     }
 
+    struct LeakingTransport;
+
+    impl ProviderTransport for LeakingTransport {
+        fn stream(
+            &mut self,
+            request: &RedactedProviderRequest,
+        ) -> Result<ProviderResponse, TransportError> {
+            let chunk = ProviderStreamChunk {
+                conversation_id: request.conversation_id.clone(),
+                context_id: request.context_id.clone(),
+                sequence: 0,
+                content: TokenizedText::new(format!("Unexpected raw value: {PERSON}"), Vec::new()),
+            };
+            Ok(match request.provider {
+                ProviderKind::ClaudeDesktop => {
+                    ProviderResponse::ClaudeDesktop(ClaudeDesktopResponse {
+                        conversation_id: request.conversation_id.clone(),
+                        context_id: request.context_id.clone(),
+                        chunks: vec![chunk],
+                    })
+                }
+                ProviderKind::Codex => ProviderResponse::Codex(CodexResponse {
+                    conversation_id: request.conversation_id.clone(),
+                    context_id: request.context_id.clone(),
+                    chunks: vec![chunk],
+                }),
+            })
+        }
+    }
+
     #[derive(Default)]
     struct TestRehydrator;
 
@@ -1172,6 +1202,44 @@ mod tests {
             assert!(!payload.contains(PERSON));
             assert!(!payload.contains(EMAIL));
         }
+    }
+
+    #[test]
+    fn provider_response_with_raw_pii_is_redacted_before_return_for_both_providers() {
+        for provider in [ProviderKind::ClaudeDesktop, ProviderKind::Codex] {
+            let mut client =
+                SecrecyClient::new(LeakingTransport, Some(TestRedactor), None::<TestRehydrator>);
+            let response = client
+                .stream(&request(provider))
+                .expect("response is redacted");
+            let text = match response {
+                ProviderResponse::ClaudeDesktop(response) => {
+                    response.chunks[0].content.text.clone()
+                }
+                ProviderResponse::Codex(response) => response.chunks[0].content.text.clone(),
+            };
+            assert!(!text.contains(PERSON));
+            assert!(text.contains(PERSON_TOKEN));
+        }
+    }
+
+    #[test]
+    fn response_redaction_default_rejects_unimplemented_adapters() {
+        struct RequestOnlyRedactor;
+
+        impl RedactionAdapter for RequestOnlyRedactor {
+            fn redact(
+                &self,
+                request: &ProviderRequest,
+            ) -> Result<RedactedProviderRequest, RedactionError> {
+                TestRedactor.redact(request)
+            }
+        }
+
+        assert_eq!(
+            RequestOnlyRedactor.redact_text(PERSON),
+            Err(RedactionError::Rejected)
+        );
     }
 
     #[test]
