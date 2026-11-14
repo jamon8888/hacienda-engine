@@ -15,7 +15,7 @@ A hacienda plugin for email archiving, NER extraction, RAG indexing, and PII red
 
 The plugin integrates at the `io-email` domain library layer of the Pimalaya stack:
 
-```
+```text
 Pimalaya Stack (what we integrate)
 ┌─────────────────────────────────────────────────────────────┐
 │                    APPLICATION LAYER                         │
@@ -173,7 +173,7 @@ When running `hacienda mcp serve`, the following tools are available:
 - `email_rag_index` - Index for RAG
 - `email_redact` - Redact PII
 
-## Features
+## Feature flags
 
 | Feature | Description | Dependencies |
 |---------|-------------|--------------|
@@ -238,6 +238,7 @@ cargo test -p hacienda-email --all-features
 ## License
 
 Licensed under either of:
+
 - Apache License, Version 2.0 (LICENSE-APACHE)
 - MIT license (LICENSE-MIT)
 
@@ -245,7 +246,7 @@ at your option.
 
 ## Contributing
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines.
 
 ## Related Projects
 
