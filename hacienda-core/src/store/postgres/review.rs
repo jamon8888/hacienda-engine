@@ -18,7 +18,7 @@ pub struct PostgresReviewStore {
 }
 
 impl PostgresReviewStore {
-/// new function
+    /// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

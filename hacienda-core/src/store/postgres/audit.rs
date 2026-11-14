@@ -105,7 +105,12 @@ impl AuditStore for PostgresAuditStore {
         .bind(tenant_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| AuditError::Backend(format!("entries: fetch open segment for tenant {}: {}", tenant_id, e)))?;
+        .map_err(|e| {
+            AuditError::Backend(format!(
+                "entries: fetch open segment for tenant {}: {}",
+                tenant_id, e
+            ))
+        })?;
 
         rows.into_iter().map(row_to_entry).collect()
     }
@@ -749,9 +754,11 @@ async fn insert_entry(
     .bind(entry.vertical.clone())
     .bind(entry.model.clone())
     .bind(entry.chain_hash.clone())
-    .bind(DateTime::parse_from_rfc3339(&entry.timestamp)
-        .map(|t| t.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now()))
+    .bind(
+        DateTime::parse_from_rfc3339(&entry.timestamp)
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
+    )
     .execute(&mut **tx)
     .await?;
 

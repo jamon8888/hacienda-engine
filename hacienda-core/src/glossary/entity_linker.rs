@@ -38,7 +38,7 @@ struct Accumulator {
 }
 
 impl EntityGlossary {
-/// new function
+    /// new function
     pub fn new(config: GlossaryConfig) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -83,7 +83,7 @@ impl EntityGlossary {
         entries
     }
 
-/// is_empty function
+    /// is_empty function
     pub fn is_empty(&self) -> bool {
         self.entries().is_empty()
     }

@@ -229,10 +229,17 @@ mod tests {
     fn should_export_model_provenance_in_csv() {
         let mut chain = AuditChain::new("cfg");
         chain.push(AuditEntryInput {
-            id: "id-0".into(), category: "Email".into(), action: RedactionAction::Mask,
-            span_hash: "abc".into(), span_length: 10, confidence: Some(0.9),
-            source: EntitySource::Model, pipeline_version: "1.0".into(),
-            config_hash: String::new(), principal: None, vertical: None,
+            id: "id-0".into(),
+            category: "Email".into(),
+            action: RedactionAction::Mask,
+            span_hash: "abc".into(),
+            span_length: 10,
+            confidence: Some(0.9),
+            source: EntitySource::Model,
+            pipeline_version: "1.0".into(),
+            config_hash: String::new(),
+            principal: None,
+            vertical: None,
             model: Some("gliner2@deadbeef".into()),
         });
         let text = String::from_utf8(export_csv(&chain).unwrap()).unwrap();

@@ -61,7 +61,7 @@ pub struct S3ObjectStore {
 }
 
 impl S3ObjectStore {
-/// new function
+    /// new function
     pub fn new(config: S3Config) -> Result<Self, S3ConfigError> {
         let path_style = if config.path_style {
             UrlStyle::Path

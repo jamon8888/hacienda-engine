@@ -226,7 +226,7 @@ impl KeyId {
         }
     }
 
-/// as_str function
+    /// as_str function
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -299,7 +299,7 @@ impl PseudonymKey {
         })
     }
 
-/// id function
+    /// id function
     pub fn id(&self) -> &KeyId {
         &self.id
     }
@@ -757,7 +757,7 @@ pub struct TenantPseudonymiserRegistry {
 }
 
 impl TenantPseudonymiserRegistry {
-/// new function
+    /// new function
     pub fn new() -> Self {
         Self::default()
     }

@@ -532,7 +532,7 @@ impl HaciendaFacade {
         }
     }
 
-/// config function
+    /// config function
     pub fn config(&self) -> &HaciendaConfig {
         &self.config
     }

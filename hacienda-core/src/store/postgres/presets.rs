@@ -71,7 +71,7 @@ pub struct PostgresPresetStore {
 }
 
 impl PostgresPresetStore {
-/// new function
+    /// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

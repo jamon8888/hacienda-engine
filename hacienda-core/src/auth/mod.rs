@@ -95,47 +95,47 @@ impl std::str::FromStr for Capability {
 pub struct CapabilitySet(HashSet<Capability>);
 
 impl CapabilitySet {
-/// new function
+    /// new function
     pub fn new(capabilities: impl IntoIterator<Item = Capability>) -> Self {
         Self(capabilities.into_iter().collect())
     }
 
-/// empty function
+    /// empty function
     pub fn empty() -> Self {
         Self::default()
     }
 
-/// all function
+    /// all function
     pub fn all() -> Self {
         Self(Capability::all().into_iter().collect())
     }
 
-/// has function
+    /// has function
     pub fn has(&self, cap: Capability) -> bool {
         self.0.contains(&cap)
     }
 
-/// insert function
+    /// insert function
     pub fn insert(&mut self, cap: Capability) {
         self.0.insert(cap);
     }
 
-/// remove function
+    /// remove function
     pub fn remove(&mut self, cap: Capability) {
         self.0.remove(&cap);
     }
 
-/// iter function
+    /// iter function
     pub fn iter(&self) -> impl Iterator<Item = Capability> + '_ {
         self.0.iter().copied()
     }
 
-/// is_empty function
+    /// is_empty function
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-/// len function
+    /// len function
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -389,7 +389,7 @@ pub struct InMemoryApiKeyStore {
 }
 
 impl InMemoryApiKeyStore {
-/// new function
+    /// new function
     pub fn new() -> Self {
         Self::default()
     }

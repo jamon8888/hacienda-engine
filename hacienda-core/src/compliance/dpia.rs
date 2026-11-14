@@ -90,14 +90,14 @@ pub struct DpiaGenerator {
 }
 
 impl DpiaGenerator {
-/// new function
+    /// new function
     pub fn new(model_name: &str) -> Self {
         Self {
             model_name: model_name.to_string(),
         }
     }
 
-/// generate function
+    /// generate function
     pub fn generate(&self) -> DpiaDocument {
         DpiaDocument {
             processing_description: format!(

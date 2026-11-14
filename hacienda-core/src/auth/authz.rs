@@ -320,7 +320,7 @@ pub struct AuthRouterBuilder {
 }
 
 impl AuthRouterBuilder {
-/// new function
+    /// new function
     pub fn new(state: AuthState) -> Self {
         Self { state }
     }

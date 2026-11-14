@@ -13,7 +13,7 @@ pub struct PostgresTenantStore {
 }
 
 impl PostgresTenantStore {
-/// new function
+    /// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

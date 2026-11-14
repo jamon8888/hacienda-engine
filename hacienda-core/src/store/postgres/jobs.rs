@@ -19,7 +19,7 @@ pub struct PostgresJobStore {
 }
 
 impl PostgresJobStore {
-/// new function
+    /// new function
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
