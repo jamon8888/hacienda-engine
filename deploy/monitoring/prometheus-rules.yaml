@@ -11,7 +11,7 @@ spec:
       rules:
         # Availability
         - alert: HaciendaAPIDown
-          expr: up{job="hacienda-api"} == 0
+          expr: up{job="hacienda-api"} == 0 or absent(up{job="hacienda-api"})
           for: 1m
           labels:
             severity: critical
@@ -23,7 +23,7 @@ spec:
 
         # Latency
         - alert: HaciendaAPIHighLatency
-          expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="hacienda-api"}[5m])) > 1
+          expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job="hacienda-api"}[5m]))) > 1
           for: 5m
           labels:
             severity: warning
@@ -33,7 +33,7 @@ spec:
             description: "p95 latency is {{ $value }}s for the last 5 minutes"
 
         - alert: HaciendaAPICriticalLatency
-          expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job="hacienda-api"}[5m])) > 5
+          expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{job="hacienda-api"}[5m]))) > 5
           for: 5m
           labels:
             severity: critical
@@ -55,7 +55,7 @@ spec:
 
         # Resource Usage
         - alert: HaciendaAPIHighCPU
-          expr: sum(rate(container_cpu_usage_seconds_total{pod=~"hacienda-api-.*"}[5m])) / sum(container_spec_cpu_quota{pod=~"hacienda-api-.*"} / container_spec_cpu_period{pod=~"hacienda-api-.*"}) > 0.85
+          expr: sum(rate(container_cpu_usage_seconds_total{namespace="hacienda-prod",pod=~"hacienda-api-.*"}[5m])) / sum(container_spec_cpu_quota{namespace="hacienda-prod",pod=~"hacienda-api-.*"} / container_spec_cpu_period{namespace="hacienda-prod",pod=~"hacienda-api-.*"}) > 0.85
           for: 10m
           labels:
             severity: warning
@@ -64,7 +64,7 @@ spec:
             summary: "hacienda-api CPU usage > 85%"
 
         - alert: HaciendaAPIHighMemory
-          expr: container_memory_usage_bytes{pod=~"hacienda-api-.*"} / container_spec_memory_limit_bytes{pod=~"hacienda-api-.*"} > 0.85
+          expr: container_memory_usage_bytes{namespace="hacienda-prod",pod=~"hacienda-api-.*"} / container_spec_memory_limit_bytes{namespace="hacienda-prod",pod=~"hacienda-api-.*"} > 0.85
           for: 10m
           labels:
             severity: warning

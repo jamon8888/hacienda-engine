@@ -89,7 +89,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health
               port: 8787
             initialDelaySeconds: 5
             periodSeconds: 5
@@ -104,10 +104,6 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 30
           terminationGracePeriodSeconds: 60
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sh", "-c", "sleep 30"]
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

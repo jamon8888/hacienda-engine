@@ -29,9 +29,8 @@ jobs:
       matrix:
         python: ["3.11", "3.12"]
         package:
-          - python/hacienda-crewai
-          - python/hacienda-langchain
-          - python/hacienda-surrealdb
+          - python/crewai
+          - python/langchain
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,8 +52,8 @@ jobs:
       fail-fast: false
       matrix:
         package:
-          - n8n-nodes-hacienda
-          - langchain-hacienda
+          - node/n8n-nodes-hacienda
+          - node/langchain
     steps:
       - uses: actions/checkout@v4
         with:
