@@ -369,7 +369,7 @@ impl HaciendaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let report = hacienda_core::capabilities::report(
             env!("CARGO_PKG_VERSION"),
-            cfg!(feature = "rag-embeddings"),
+            false,
             hacienda_core::capabilities::cached_onnx_runtime_status(),
             false,
         );
