@@ -8892,8 +8892,8 @@ dependencies = [
 
 [[package]]
 name = "xberg"
-version = "1.4.0"
-source = "git+https://github.com/xberg-io/xberg.git?rev=507fca3#507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd"
+version = "1.3.10"
+source = "git+https://github.com/xberg-io/xberg.git?rev=d926382a0c124dcac4562c7c61a5086d71a3aa68#d926382a0c124dcac4562c7c61a5086d71a3aa68"
 dependencies = [
  "ahash 0.8.12",
  "aho-corasick",
@@ -8994,8 +8994,8 @@ dependencies = [
 
 [[package]]
 name = "xberg-candle-ocr"
-version = "1.4.0"
-source = "git+https://github.com/xberg-io/xberg.git?rev=507fca3#507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd"
+version = "1.3.10"
+source = "git+https://github.com/xberg-io/xberg.git?rev=d926382a0c124dcac4562c7c61a5086d71a3aa68#d926382a0c124dcac4562c7c61a5086d71a3aa68"
 dependencies = [
  "base64 0.23.1",
  "candle-core",
@@ -9015,8 +9015,8 @@ dependencies = [
 
 [[package]]
 name = "xberg-gliner"
-version = "1.4.0"
-source = "git+https://github.com/xberg-io/xberg.git?rev=507fca3#507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd"
+version = "1.3.10"
+source = "git+https://github.com/xberg-io/xberg.git?rev=d926382a0c124dcac4562c7c61a5086d71a3aa68#d926382a0c124dcac4562c7c61a5086d71a3aa68"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -9037,8 +9037,8 @@ dependencies = [
 
 [[package]]
 name = "xberg-native-pdf"
-version = "1.4.0"
-source = "git+https://github.com/xberg-io/xberg.git?rev=507fca3#507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd"
+version = "1.3.10"
+source = "git+https://github.com/xberg-io/xberg.git?rev=d926382a0c124dcac4562c7c61a5086d71a3aa68#d926382a0c124dcac4562c7c61a5086d71a3aa68"
 dependencies = [
  "aes 0.9.2",
  "base64 0.23.1",

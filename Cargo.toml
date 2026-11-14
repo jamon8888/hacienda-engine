@@ -215,7 +215,7 @@ web-time = "1"
 #   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml
 #
 # Public upstream commit with the repaired `test_documents` submodule pin.
-xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3", features = [
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "d926382a0c124dcac4562c7c61a5086d71a3aa68", features = [
     "redaction",
     "ner",
     "tokio-runtime",
