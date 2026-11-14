@@ -140,7 +140,7 @@ impl RedactedXbergDocument {
 }
 
 /// The token-only record produced from one already-redacted Xberg document.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BackendDocument {
     editor: EditorEnvelope,
     rag_document: DocumentRecord,
@@ -711,11 +711,8 @@ impl Backend {
         requested_collection: &str,
         document: &BackendDocument,
     ) -> RagResult<DocumentId> {
-        if document.tenant_scope != self.tenant_scope() {
-            return Err(RagError::InvalidQuery(
-                "document tenant scope mismatch".into(),
-            ));
-        }
+        validate_backend_document(self, document)
+            .map_err(|error| RagError::InvalidQuery(error.to_string()))?;
         let collection = self
             .collection_name(requested_collection)
             .map_err(|error| RagError::InvalidQuery(error.to_string()))?;
@@ -737,6 +734,7 @@ impl Backend {
         document: &BackendDocument,
         embedder: &dyn TokenTextEmbedder,
     ) -> Result<DocumentId, BackendError> {
+        validate_backend_document(self, document)?;
         let embedded = embed_backend_document(document, embedder).await?;
         self.persist_embedded_to(store, requested_collection, &embedded, embedder)
             .await
@@ -941,6 +939,7 @@ impl Backend {
         {
             return Err(BackendError::RevisionBaseMismatch);
         }
+        validate_backend_document(self, base)?;
         if revision.editor.document_ref != base.editor.document_ref
             || revision.editor.version_ref != base.editor.version_ref
         {
@@ -970,6 +969,7 @@ impl Backend {
 
         let version_id = revision_version_id(base, revision)?;
         let candidate = build_editor_revision_document(self, base, revision, &version_id)?;
+        validate_backend_document(self, &candidate)?;
         let candidate = match embedder {
             Some(embedder) => embed_backend_document(&candidate, embedder).await?,
             None => candidate,
@@ -1400,12 +1400,14 @@ mod tests {
 
     struct TestEmbedder {
         metadata: hacienda_rag::EmbeddingMetadata,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl TestEmbedder {
         fn new() -> Self {
             Self {
                 metadata: hacienda_rag::EmbeddingMetadata::new("test:token-only", 4, 3, 8).unwrap(),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
     }
@@ -1459,6 +1461,7 @@ mod tests {
             &self,
             inputs: &[TokenOnlyText],
         ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(inputs
                 .iter()
                 .enumerate()
@@ -1499,6 +1502,30 @@ mod tests {
             .unwrap();
         assert_eq!(chunks[0].embedding, vec![0.0, 1.0, 2.0]);
         assert!(!serde_json::to_string(&chunks).unwrap().contains("Jane Doe"));
+    }
+
+    #[tokio::test]
+    async fn forged_backend_document_content_is_rejected_before_embedding() {
+        let backend = Backend::new(local()).unwrap();
+        let record = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let mut forged = record.clone();
+        forged.rag_document.full_text = "raw Jane Doe".into();
+        forged.chunks[0].content = "raw Jane Doe".into();
+        let store = InMemoryVectorStore::default();
+        let embedder = TestEmbedder::new();
+        let error = backend
+            .persist_to_with_embedder(&store, "contracts", &forged, &embedder)
+            .await
+            .expect_err("forged projection must fail closed");
+        assert!(matches!(error, BackendError::InvalidEditorRevision(_)));
+        assert_eq!(embedder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1649,6 +1676,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_tenant_document_is_rejected_before_gateway_embedding() {
+        let backend_a = Backend::new(team("tenant-a")).unwrap();
+        let backend_b = Backend::new(team("tenant-b")).unwrap();
+        let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::default());
+        let gateway_a = TestGateway {
+            tenant: TenantScope("tenant-a".into()),
+            store,
+        };
+        let document_b = backend_b
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc-b",
+                "v1",
+            )
+            .unwrap();
+        let embedder = TestEmbedder::new();
+        let error = backend_a
+            .persist_via_gateway_with_embedder(&gateway_a, "contracts", &document_b, &embedder)
+            .await
+            .expect_err("cross-tenant document must be rejected");
+        assert!(matches!(error, BackendError::InvalidScope));
+        assert_eq!(embedder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn team_rag_requires_matching_authenticated_gateway_tenant() {
         let backend_a = Backend::new(team("tenant-a")).unwrap();
         let backend_b = Backend::new(team("tenant-b")).unwrap();
@@ -1785,6 +1838,86 @@ fn revision_version_id(
         &revision.pipeline_digest,
     ))?;
     Ok(format!("v-{}", blake3::hash(&payload).to_hex()))
+}
+
+fn validate_backend_document(
+    backend: &Backend,
+    document: &BackendDocument,
+) -> Result<(), BackendError> {
+    if document.tenant_scope != backend.tenant_scope()
+        || document.dossier_id.trim().is_empty()
+        || document.editor.document_ref.trim().is_empty()
+        || document.editor.version_ref.trim().is_empty()
+    {
+        return Err(BackendError::InvalidScope);
+    }
+    validate_editor_envelope(&document.editor)?;
+    let projected_text = editor_text(&document.editor.editor)?;
+    let expected_external_id = format!(
+        "{}:{}",
+        document.editor.document_ref, document.editor.version_ref
+    );
+    if projected_text != document.rag_document.full_text
+        || blake3::hash(projected_text.as_bytes()).to_hex().to_string() != document.source_hash
+        || document.rag_document.external_id.as_deref() != Some(expected_external_id.as_str())
+    {
+        return Err(BackendError::InvalidEditorRevision(
+            "document content is not derived from its validated editor projection".into(),
+        ));
+    }
+    if document.chunks.is_empty()
+        || document
+            .chunks
+            .iter()
+            .enumerate()
+            .any(|(ordinal, chunk)| chunk.ordinal != ordinal as u32)
+        || document
+            .chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            != projected_text
+    {
+        return Err(BackendError::InvalidEditorRevision(
+            "document chunks are not derived from its editor projection".into(),
+        ));
+    }
+    let token_only = serde_json::to_value(&document.editor.metadata)?;
+    if document.rag_document.metadata["token_only"] != token_only
+        || document.rag_document.labels["metadata_token_only"] != token_only
+        || document.rag_document.title != token_text(&document.editor.metadata.title)
+        || document.rag_document.keywords
+            != document
+                .editor
+                .metadata
+                .keywords
+                .iter()
+                .flatten()
+                .map(|token| token.token_id.clone())
+                .collect::<Vec<_>>()
+    {
+        return Err(BackendError::InvalidEditorRevision(
+            "RAG metadata is not derived from the token-only editor projection".into(),
+        ));
+    }
+    let references = document
+        .editor
+        .search
+        .tokens
+        .iter()
+        .map(|token| OpaqueTokenReference {
+            token_id: token.token_id.clone(),
+            token_class: token.token_class.clone(),
+            source: token.source.clone(),
+        })
+        .collect::<Vec<_>>();
+    if references != document.token_references {
+        return Err(BackendError::InvalidEditorRevision(
+            "token references are not derived from the editor search projection".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn embed_backend_document(
