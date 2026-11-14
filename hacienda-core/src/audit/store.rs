@@ -559,6 +559,7 @@ mod tests {
             config_hash: "test-config".into(),
             principal: None,
             vertical: None,
+            model: None,
         }
     }
 

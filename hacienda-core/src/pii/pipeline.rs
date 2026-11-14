@@ -5,6 +5,7 @@
 //! configured model was never consulted.
 
 use crate::pii::config::PipelineConfig;
+use crate::pii::context;
 use crate::pii::engine::RegexEngine;
 use crate::pii::merge::{merge_entities, MergedEntity};
 use crate::pii::ner::{to_pii_category, NerDetector};
@@ -219,7 +220,8 @@ impl PiiPipeline {
         let mut metrics = PipelineMetrics::default();
 
         let regex_start = Instant::now();
-        let regex_entities = self.regex_engine.find_all(text);
+        let mut regex_entities = self.regex_engine.find_all(text);
+        context::enhance(&mut regex_entities, text);
         metrics.regex_ms = regex_start.elapsed().as_millis() as u64;
 
         let model_start = Instant::now();
@@ -253,7 +255,9 @@ impl PiiPipeline {
         model_entities: Vec<ModelEntity>,
     ) -> Result<PipelineResult, PiiError> {
         let start = Instant::now();
-        let (entities, mut metrics) = self.detect_with_model_entities(text, model_entities).await?;
+        let (entities, mut metrics) = self
+            .detect_with_model_entities(text, model_entities)
+            .await?;
 
         let redaction_start = Instant::now();
         let redaction = self.redaction_engine.redact(text, &entities)?;
@@ -278,7 +282,9 @@ impl PiiPipeline {
         model_entities: Vec<ModelEntity>,
     ) -> Result<PipelineResult, PiiError> {
         let start = Instant::now();
-        let (entities, mut metrics) = self.detect_with_model_entities(text, model_entities).await?;
+        let (entities, mut metrics) = self
+            .detect_with_model_entities(text, model_entities)
+            .await?;
         metrics.total_ms = start.elapsed().as_millis() as u64;
 
         Ok(PipelineResult {
@@ -297,7 +303,8 @@ impl PiiPipeline {
         let mut metrics = PipelineMetrics::default();
 
         let regex_start = Instant::now();
-        let regex_entities = self.regex_engine.find_all(text);
+        let mut regex_entities = self.regex_engine.find_all(text);
+        context::enhance(&mut regex_entities, text);
         metrics.regex_ms = regex_start.elapsed().as_millis() as u64;
 
         // Use pre-computed model entities instead of running the detector. Validated,
@@ -653,6 +660,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_boost_ssn_confidence_when_a_context_word_is_nearby() {
+        let result = PiiPipeline::with_detector(config(), None)
+            .unwrap()
+            .scan("my ssn is 123-45-6789 on file")
+            .await
+            .unwrap();
+
+        assert_eq!(result.entities.len(), 1);
+        // Base confidence for a structurally-plausible-but-unverified SSN is 0.4
+        // (`patterns::builtin_patterns`); "ssn" nearby should boost it.
+        assert!(
+            result.entities[0].confidence > 0.4,
+            "expected a context boost, got {}",
+            result.entities[0].confidence
+        );
+    }
+
+    #[tokio::test]
+    async fn should_not_flag_a_luhn_invalid_number_as_a_credit_card_end_to_end() {
+        let result = PiiPipeline::with_detector(config(), None)
+            .unwrap()
+            .scan("invoice number 1234567890123456")
+            .await
+            .unwrap();
+
+        assert!(result.entities.is_empty());
+    }
+
+    #[tokio::test]
     async fn should_return_no_entities_for_text_without_pii() {
         let result = PiiPipeline::with_detector(config(), None)
             .unwrap()
@@ -948,11 +984,3 @@ mod tests {
         );
     }
 }
-
-
-
-
-
-
-
-
