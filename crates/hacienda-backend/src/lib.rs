@@ -7,13 +7,13 @@ use hacienda_client_core::{
     ConfigurationError, InstallationConfig, RehydrationRequest, TokenizedText,
 };
 use hacienda_core::editor_projection::{
-    EditorEnvelope, EditorProjectionOptions, SensitiveToken, project_document,
+    project_document, EditorEnvelope, EditorProjectionOptions, SensitiveToken,
 };
 use hacienda_rag::{
     ChunkRecord, CollectionSpec, DocumentId, DocumentRecord, RagError, RagResult, RagStore,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use thiserror::Error;
 
 /// Stable, profile-scoped addressing. A client never supplies a tenant to a store
@@ -421,11 +421,9 @@ mod tests {
                 record.rag_document.title.as_deref(),
                 Some("[TITLE:k1:IFBEG]")
             );
-            assert!(
-                !serde_json::to_string(&record.rag_document)
-                    .unwrap()
-                    .contains("PERSON_RAW")
-            );
+            assert!(!serde_json::to_string(&record.rag_document)
+                .unwrap()
+                .contains("PERSON_RAW"));
         }
     }
 
@@ -472,11 +470,9 @@ mod tests {
             .rehydrate(&authorized, &record, &record.rag_document.full_text)
             .unwrap();
         assert_eq!(response.references[0].token_id, "[PERSON:k1:IFBEGRCF]");
-        assert!(
-            backend
-                .rehydrate(&authorized, &record, "raw plaintext")
-                .is_err()
-        );
+        assert!(backend
+            .rehydrate(&authorized, &record, "raw plaintext")
+            .is_err());
     }
 
     #[tokio::test]
