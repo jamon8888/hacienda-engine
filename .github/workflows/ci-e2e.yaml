@@ -17,7 +17,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg.git ../xberg
+          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/xberg-io/xberg.git ../xberg
           git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
       # Pinned date: see ci-rust.yaml's top-of-file comment for why an unpinned
       # nightly channel broke CI on 2026-08-08.
