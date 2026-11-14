@@ -58,7 +58,7 @@ futures = "0.3"
 # expects.
 liter-llm = { version = "1.11.3", default-features = false, features = ["native-http", "tracing"] }
 regex = "1.10"
-prometheus = "0.13"
+prometheus = "0.14"
 # HTTP client for the presigned-upload `confirm` step's server-side HEAD request against
 # the object store (Phase 13 Task 4). Already resolved transitively via `xberg`'s `hf-hub`
 # dependency with a rustls (not native-tls/openssl) backend and no other TLS stack appears
