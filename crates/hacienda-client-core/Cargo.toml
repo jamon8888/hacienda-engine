@@ -1,0 +1,18 @@
+[package]
+name = "hacienda-client-core"
+version.workspace = true
+edition = "2024"
+rust-version = "1.85"
+license.workspace = true
+description = "Trust-boundary contracts for Hacienda client installation profiles"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
