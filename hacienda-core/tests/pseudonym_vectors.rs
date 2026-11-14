@@ -69,7 +69,10 @@ fn mints_the_exact_token_the_ts_golden_vectors_expect() {
         let token = pseudonymiser
             .token(&category, text)
             .unwrap_or_else(|e| panic!("token({category:?}, {text:?}) failed: {e}"));
-        assert_eq!(token, expected_token, "token mismatch for {category:?} {text:?}");
+        assert_eq!(
+            token, expected_token,
+            "token mismatch for {category:?} {text:?}"
+        );
     }
 }
 
@@ -81,6 +84,9 @@ fn reveals_its_own_token_to_the_exact_text_the_ts_golden_vectors_expect() {
         let revealed = pseudonymiser
             .reveal(&token)
             .unwrap_or_else(|e| panic!("reveal({token:?}) failed: {e}"));
-        assert_eq!(revealed, expected_revealed, "reveal mismatch for {category:?} {text:?}");
+        assert_eq!(
+            revealed, expected_revealed,
+            "reveal mismatch for {category:?} {text:?}"
+        );
     }
 }

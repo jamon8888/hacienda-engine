@@ -28,6 +28,9 @@ jobs:
         if: steps.deps.outcome == 'success'
       - name: Run E2E tests
         if: steps.deps.outcome == 'success'
+        env:
+          # gemm-f16's aarch64 assembly requires this feature on the ARM runner.
+          RUSTFLAGS: -C target-feature=+fullfp16
         run: cargo test --workspace --features "ner-candle"
       - name: Skip notice
         if: steps.deps.outcome != 'success'
