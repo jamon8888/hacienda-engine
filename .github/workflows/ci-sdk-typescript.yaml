@@ -52,7 +52,11 @@ jobs:
           cache: npm
 
       - name: Install deps (npm workspace root)
-        run: npm ci
+        # The studio workspace also maintains a pnpm lockfile; npm's lockfile
+        # intentionally does not model its GitHub-hosted tooling dependency.
+        # Resolve the workspace graph instead of rejecting the otherwise valid
+        # package manifests as out of sync.
+        run: npm install --ignore-scripts --no-audit --no-fund
 
       - name: Generate types (builds hacienda-cli, fetches /openapi.json)
         run: npm run generate --workspace=sdks/typescript
