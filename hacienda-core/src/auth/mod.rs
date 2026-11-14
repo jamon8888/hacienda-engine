@@ -37,6 +37,8 @@ pub enum Capability {
     AuthManage,
     /// Raw xberg passthrough (unredacted). Only available with `xberg-passthrough` feature.
     RawExtract,
+    /// Manage the Xberg model and extraction cache.
+    CacheManage,
 }
 
 impl Capability {
@@ -50,6 +52,7 @@ impl Capability {
             Self::ReviewDecide,
             Self::AuthManage,
             Self::RawExtract,
+            Self::CacheManage,
         ]
     }
 }
@@ -64,6 +67,7 @@ impl std::fmt::Display for Capability {
             Self::ReviewDecide => write!(f, "review:decide"),
             Self::AuthManage => write!(f, "auth:manage"),
             Self::RawExtract => write!(f, "raw:extract"),
+            Self::CacheManage => write!(f, "cache:manage"),
         }
     }
 }
@@ -80,6 +84,7 @@ impl std::str::FromStr for Capability {
             "review:decide" => Ok(Self::ReviewDecide),
             "auth:manage" => Ok(Self::AuthManage),
             "raw:extract" => Ok(Self::RawExtract),
+            "cache:manage" => Ok(Self::CacheManage),
             _ => Err(format!("unknown capability: {s}")),
         }
     }

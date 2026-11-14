@@ -5,6 +5,9 @@ edition.workspace = true
 description = "MCP (Model Context Protocol) server exposing HaciendaFacade to AI agents"
 license.workspace = true
 
+[features]
+rag-embeddings = ["hacienda-core/rag-embeddings"]
+
 [dependencies]
 # The guarded facade — every tool in this crate calls through it, never through `xberg`
 # directly. See the crate's module doc for why: xberg ships its own MCP server behind its
@@ -15,13 +18,14 @@ hacienda = { path = "../hacienda" }
 hacienda-core = { path = "../hacienda-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+data-encoding = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 xberg = { workspace = true }
 
-# Same minimum version xberg itself depends on (`crates/xberg/Cargo.toml`), and expressed
-# the same lax `"2.2.0"` way xberg expresses it there rather than exact-pinned — not to
+# Same MCP SDK generation xberg 1.3.10 uses (`crates/xberg/Cargo.toml`), and expressed
+# as the same `"3.5.1"` requirement rather than exact-pinned — not to
 # match it for its own sake, but because it means both servers speak the same generation
 # of the protocol against the same Rust SDK, which is the thing worth keeping in sync; an
 # exact pin here could drift from whatever xberg's own unpinned requirement resolves to.
@@ -29,7 +33,7 @@ xberg = { workspace = true }
 # for the stdio transport `hacienda mcp serve` uses (M1a). HTTP/streamable transport
 # (`transport-streamable-http-server`, `server-side-http`) is deferred to M1b — see the
 # crate's module doc.
-rmcp = { version = "2.2.0", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.5.1", features = ["server", "macros", "transport-io"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

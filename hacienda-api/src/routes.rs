@@ -12,20 +12,20 @@
 //! silently omit a capability requirement.
 
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, post},
-    Router,
 };
 use hacienda_core::{
     auth::authz::AuthRouterBuilder,
-    auth::{authz::auth_middleware, AuthState, Capability, CapabilitySet},
+    auth::{AuthState, Capability, CapabilitySet, authz::auth_middleware},
 };
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, documents, info, jobs, keys, openapi, pii, presets, rag,
-        rag_stream, uploads, usage, versions,
+        audit, audit_review, auth, capabilities, documents, info, jobs, keys, openapi, pii,
+        presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
     },
     quota::quota_middleware,
     state::ApiState,
@@ -73,9 +73,19 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         make_router: || get(info::info),
     },
     RouteSpec {
+        path: "/capabilities",
+        access: Access::Public,
+        make_router: || get(capabilities::capabilities),
+    },
+    RouteSpec {
         path: "/openapi.json",
         access: Access::Public,
         make_router: || get(openapi::openapi),
+    },
+    RouteSpec {
+        path: "/v1/formats",
+        access: Access::Public,
+        make_router: || get(xberg_surface::formats),
     },
     // ── documents:process endpoints ───────────────────────────────────────────
     RouteSpec {
@@ -129,6 +139,26 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/pii/config",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(pii::pii_config),
+    },
+    RouteSpec {
+        path: "/v1/mime/detect",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(xberg_surface::detect_mime),
+    },
+    RouteSpec {
+        path: "/v1/cache/stats",
+        access: Access::Capability(Capability::CacheManage),
+        make_router: || get(xberg_surface::cache_stats),
+    },
+    RouteSpec {
+        path: "/v1/cache/clear",
+        access: Access::Capability(Capability::CacheManage),
+        make_router: || post(xberg_surface::cache_clear),
+    },
+    RouteSpec {
+        path: "/v1/cache/warm",
+        access: Access::Capability(Capability::CacheManage),
+        make_router: || post(xberg_surface::cache_warm),
     },
     // ── audit:read endpoints (Phase 10) ─────────────────────────────────────────
     // `/v1/audit` is the coarse Phase 10 shape (`AuditResponse`, open segment only) —
@@ -442,11 +472,11 @@ pub(crate) mod tests {
     use crate::state::{ApiLimits, ApiState};
     use axum::{body::Body, http::Request};
     use hacienda_core::{
-        auth::{authn::DevTokenResolver, AuthState},
+        HaciendaConfig, HaciendaFacade,
+        auth::{AuthState, authn::DevTokenResolver},
         jobs::InMemoryJobStore,
         pii::PipelineConfig,
         redaction::{EnvKeyResolver, RedactionConfig, RedactionMode},
-        HaciendaConfig, HaciendaFacade,
     };
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -671,6 +701,35 @@ pub(crate) mod tests {
         }
     }
 
+    /// Capability discovery is public and must distinguish preset-only builds from
+    /// binaries that include the real ONNX-backed migration path.
+    #[tokio::test]
+    async fn capabilities_report_safe_build_state_without_authentication() {
+        let response = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["embedding_mode"], "presets_only");
+        assert_eq!(json["onnx_runtime"]["compiled"], false);
+        assert_eq!(json["onnx_runtime"]["runtime_ready"], false);
+        assert_eq!(json["capabilities"][3]["runtime_ready"], false);
+        assert!(json["capabilities"].as_array().unwrap().iter().any(|item| {
+            item["name"] == "redaction" && item["compiled"] == true && item["runtime_ready"] == true
+        }));
+    }
+
     /// A guarded handler must observe the `AuthExtension` — not silently run as
     /// `Caller::Trusted`.
     ///
@@ -792,6 +851,9 @@ pub(crate) mod tests {
             serde_json::json!([]),
             "no PII pipeline configured means no entities, not a missing document"
         );
+        assert_eq!(documents[0]["structured"]["mime_type"], "text/plain");
+        assert_eq!(documents[0]["structured"]["counts"]["pages"], 0);
+        assert!(documents[0]["structured"]["tables"].is_array());
     }
 
     /// `GET /v1/review` and `POST /v1/review/{id}/decide` are declared under two
@@ -2319,11 +2381,13 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
-        assert!(list_json["presets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["id"].as_str().unwrap() == id));
+        assert!(
+            list_json["presets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"].as_str().unwrap() == id)
+        );
 
         let get = app
             .clone()
@@ -2589,15 +2653,21 @@ pub(crate) mod tests {
             .unwrap();
         let diff_json: serde_json::Value = serde_json::from_slice(&diff_bytes).unwrap();
         let lines = diff_json["lines"].as_array().unwrap();
-        assert!(lines
-            .iter()
-            .any(|l| l["op"] == "equal" && l["text"] == "line one"));
-        assert!(lines
-            .iter()
-            .any(|l| l["op"] == "delete" && l["text"] == "line two"));
-        assert!(lines
-            .iter()
-            .any(|l| l["op"] == "insert" && l["text"] == "line three"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l["op"] == "equal" && l["text"] == "line one")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l["op"] == "delete" && l["text"] == "line two")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l["op"] == "insert" && l["text"] == "line three")
+        );
     }
 
     /// Diffing an out-of-range version sequence must be 404, not 500 or a panic.
@@ -2789,6 +2859,7 @@ pub(crate) mod tests {
                     config_hash: "cfg".to_string(),
                     principal: Some(principal.clone()),
                     vertical: None,
+                    model: None,
                 }],
             )
             .await
@@ -2876,6 +2947,7 @@ pub(crate) mod tests {
                     config_hash: "cfg".to_string(),
                     principal: Some(principal.clone()),
                     vertical: None,
+                    model: None,
                 }],
             )
             .await
@@ -3045,10 +3117,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(json["report"]["processing_description"]
-            .as_str()
-            .unwrap()
-            .contains("hacienda-pii"));
+        assert!(
+            json["report"]["processing_description"]
+                .as_str()
+                .unwrap()
+                .contains("hacienda-pii")
+        );
 
         // GET /v1/compliance/report
         let response = app

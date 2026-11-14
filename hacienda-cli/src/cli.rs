@@ -2,7 +2,7 @@
 //!
 //! Scope is Phases 2 and 4 of
 //! `superpowers/specs/2026-07-28-hacienda-cli-api-integration-design.md` §9: `extract`,
-//! `scan`, `config show`, and `serve`, plus a later, narrower slice closing part of the
+//! `scan`, `config show`, `capabilities`, and `serve`, plus a later, narrower slice closing part of the
 //! CLI/API parity gap: `audit verify` (verifying the `--audit-out` export, not the full
 //! `GET /v1/audit` surface) and `pii reveal`, plus a `--glossary-out` flag on `extract`
 //! and `scan` (glossary state lives only inside a live run's facade, so there is nothing
@@ -53,6 +53,17 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Inspect compiled and runtime capability state.
+    Capabilities(CapabilitiesArgs),
+    /// List the document formats enabled through Xberg.
+    Formats(FormatsArgs),
+    /// Detect a local file's MIME type without extracting it.
+    Mime(MimeArgs),
+    /// Inspect and manage Xberg's cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
     /// Serve the HTTP API.
     Serve(ServeArgs),
     /// Operations on pseudonym tokens.
@@ -91,6 +102,45 @@ pub enum Command {
 pub struct McpArgs {
     #[command(subcommand)]
     pub command: McpCommand,
+}
+
+#[derive(Debug, Parser)]
+pub struct CapabilitiesArgs {
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct FormatsArgs {
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct MimeArgs {
+    pub path: PathBuf,
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Show sanitized Xberg cache statistics.
+    Stats {
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Warm one compiled Xberg embedding preset.
+    Warm {
+        preset: String,
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Clear Xberg-owned extraction cache files and resident engines.
+    Clear {
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

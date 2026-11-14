@@ -2,17 +2,17 @@
 
 use crate::cli::{
     AuditExportArgs, AuditExportFormat, AuditListArgs, AuditStoreArgs, AuditVerifyArgs,
-    CompletionsArgs, ComplianceDoraArgs, ComplianceFormatArgs, ComplianceReportArgs,
-    ConcurrencyArgs, ExtractArgs, Format, RevealArgs, ReviewAssignArgs, ReviewDecideArgs,
-    ReviewDecisionArg, ReviewListArgs, ReviewShowArgs, ReviewStatsArgs, ReviewStatusArg,
-    ReviewStoreArgs, ScanArgs, ServeArgs,
+    CacheCommand, CapabilitiesArgs, CompletionsArgs, ComplianceDoraArgs, ComplianceFormatArgs,
+    ComplianceReportArgs, ConcurrencyArgs, ExtractArgs, Format, FormatsArgs, MimeArgs, RevealArgs,
+    ReviewAssignArgs, ReviewDecideArgs, ReviewDecisionArg, ReviewListArgs, ReviewShowArgs,
+    ReviewStatsArgs, ReviewStatusArg, ReviewStoreArgs, ScanArgs, ServeArgs,
 };
 use crate::config::load_config;
 use anyhow::{Context, Result};
 use clap::CommandFactory;
 use hacienda::audit::{
-    export_json, verify_entries, AuditChain, AuditEntry, AuditStore, ExportFormat, FileAuditStore,
-    NodeId, GENESIS_HASH,
+    AuditChain, AuditEntry, AuditStore, ExportFormat, FileAuditStore, GENESIS_HASH, NodeId,
+    export_json, verify_entries,
 };
 use hacienda::compliance::{
     ChecklistItem, ComplianceChecklist, ComplianceGenerator, ComplianceReport, DoraReport,
@@ -286,6 +286,108 @@ pub async fn run_config_show(
         }
         Format::Text => {
             print_config_text(&config);
+        }
+    }
+    Ok(())
+}
+
+/// Run the capability preflight without constructing a facade or reading documents.
+pub fn run_capabilities(args: CapabilitiesArgs) -> Result<()> {
+    let report = hacienda_core::capabilities::report(
+        env!("CARGO_PKG_VERSION"),
+        cfg!(feature = "rag-embeddings"),
+        hacienda_core::capabilities::cached_onnx_runtime_status(),
+        false,
+    );
+
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Text => {
+            println!("hacienda capabilities");
+            println!("version = {}", report.version);
+            println!("embedding_mode = {}", report.embedding_mode);
+            println!(
+                "onnx_runtime = compiled:{} runtime_ready:{}",
+                report.onnx_runtime.compiled, report.onnx_runtime.runtime_ready
+            );
+            for capability in report.capabilities {
+                println!(
+                    "{} = compiled:{} runtime_ready:{}{}",
+                    capability.name,
+                    capability.compiled,
+                    capability.runtime_ready,
+                    capability
+                        .reason
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn run_formats(args: FormatsArgs) -> Result<()> {
+    let formats = serde_json::to_value(hacienda_core::xberg_surface::supported_formats())?;
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&formats)?),
+        Format::Text => {
+            for format in formats.as_array().into_iter().flatten() {
+                println!("{}", serde_json::to_string(format)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn run_mime(args: MimeArgs) -> Result<()> {
+    let bytes = std::fs::read(&args.path)
+        .with_context(|| format!("reading MIME input {}", args.path.display()))?;
+    let mime = hacienda_core::xberg_surface::detect_mime_type(&bytes)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    match args.format {
+        Format::Json => println!("{}", serde_json::json!({"mime_type": mime})),
+        Format::Text => println!("{mime}"),
+    }
+    Ok(())
+}
+
+pub async fn run_cache(command: CacheCommand) -> Result<()> {
+    match command {
+        CacheCommand::Stats { format } => {
+            let stats =
+                tokio::task::spawn_blocking(hacienda_core::xberg_surface::cache_stats).await??;
+            match format {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
+                Format::Text => println!(
+                    "files={} size_bytes={} oldest_days={} newest_days={}",
+                    stats.total_files,
+                    stats.total_size_bytes,
+                    stats.oldest_file_age_days,
+                    stats.newest_file_age_days
+                ),
+            }
+        }
+        CacheCommand::Clear { confirm } => {
+            if !confirm {
+                anyhow::bail!("cache clear requires --confirm");
+            }
+            let result =
+                tokio::task::spawn_blocking(hacienda_core::xberg_surface::clear_cache).await??;
+            println!("removed_files={}", result.removed_files);
+            println!("freed_bytes={}", result.freed_bytes);
+            println!("cleared_engine_count={}", result.cleared_engine_count);
+        }
+        CacheCommand::Warm { preset, confirm } => {
+            if !confirm {
+                anyhow::bail!("cache warm requires --confirm");
+            }
+            let result = hacienda_core::xberg_surface::warm_embedding_preset(&preset).await?;
+            println!("preset={}", result.preset);
+            println!(
+                "already_loaded_or_downloaded={}",
+                result.already_loaded_or_downloaded
+            );
         }
     }
     Ok(())
@@ -1121,7 +1223,11 @@ pub async fn run_review_show(args: ReviewShowArgs) -> Result<()> {
 pub async fn run_review_assign(args: ReviewAssignArgs) -> Result<()> {
     let queue = open_review_queue(&args.store)?;
     let item = queue
-        .assign(&Caller::Trusted.tenant_ctx().tenant, &args.id, &args.reviewer)
+        .assign(
+            &Caller::Trusted.tenant_ctx().tenant,
+            &args.id,
+            &args.reviewer,
+        )
         .await
         .with_context(|| format!("assigning review item '{}'", args.id))?;
     print_review_item(&item, args.format)
@@ -1559,7 +1665,7 @@ pub async fn run_serve(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_bind_policy, PLACEHOLDER_STATIC_TOKEN};
+    use super::{PLACEHOLDER_STATIC_TOKEN, check_bind_policy};
     use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
     use std::net::SocketAddr;
 
@@ -1627,8 +1733,11 @@ mod tests {
     /// than no auth at all.
     #[test]
     fn should_refuse_a_network_reachable_bind_when_a_static_token_is_still_the_placeholder() {
-        let error = check_bind_policy(addr("0.0.0.0:8787"), &auth_with_token(PLACEHOLDER_STATIC_TOKEN))
-            .expect_err("binding with the placeholder token must be refused");
+        let error = check_bind_policy(
+            addr("0.0.0.0:8787"),
+            &auth_with_token(PLACEHOLDER_STATIC_TOKEN),
+        )
+        .expect_err("binding with the placeholder token must be refused");
         let message = error.to_string();
         assert!(
             message.contains("placeholder"),
@@ -1648,8 +1757,11 @@ mod tests {
     #[test]
     fn should_allow_loopback_even_with_the_placeholder_token() {
         assert!(
-            check_bind_policy(addr("127.0.0.1:8787"), &auth_with_token(PLACEHOLDER_STATIC_TOKEN))
-                .is_ok()
+            check_bind_policy(
+                addr("127.0.0.1:8787"),
+                &auth_with_token(PLACEHOLDER_STATIC_TOKEN)
+            )
+            .is_ok()
         );
     }
 }

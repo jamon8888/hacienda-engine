@@ -42,6 +42,10 @@ fn main() -> std::process::ExitCode {
                     commands::run_config_show(format, cli.config, cli.config_json).await
                 }
             },
+            Command::Capabilities(args) => commands::run_capabilities(args),
+            Command::Formats(args) => commands::run_formats(args),
+            Command::Mime(args) => commands::run_mime(args),
+            Command::Cache { command } => commands::run_cache(command).await,
             Command::Serve(args) => commands::run_serve(args, cli.config, cli.config_json).await,
             Command::Pii { command } => match command {
                 cli::PiiCommand::Reveal(args) => {

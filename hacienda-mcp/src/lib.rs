@@ -7,8 +7,9 @@
 //! # Why this is not xberg's own MCP server
 //!
 //! `xberg` ships its own MCP server behind its `mcp` cargo feature
-//! (`crates/xberg/src/mcp/`): `extract`, `extract_batch`, `detect_mime_type`, and four
-//! cache-management tools, all returning **unredacted** document content — there is no
+//! (`crates/xberg/src/mcp/`): nine raw tools including `extract`, `extract_batch`,
+//! `detect_mime_type`, `list_formats`, version, and cache-management operations, all
+//! returning **unredacted** document content — there is no
 //! PII detection or audit chain on that path, by design, because xberg is a document
 //! extraction library and hacienda's PII/audit layer is what wraps it.
 //!
@@ -32,7 +33,8 @@
 //!
 //! # Tool inventory
 //!
-//! Eight tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
+//! Fourteen Hacienda tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method or a
+//! safe shared Xberg operation already
 //! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands:
 //!
 //! | Tool | Facade method | Mirrors |
@@ -44,6 +46,12 @@
 //! | `audit_verify` | `verify_audit_with_auth` | `GET /v1/audit/verify` |
 //! | `audit_entries` | `audit_history_with_auth` | `GET /v1/audit/entries` |
 //! | `compliance_report` | `compliance_report_with_auth` | `GET /v1/compliance/report` |
+//! | `get_capabilities` | (static) | `GET /capabilities`, `hacienda capabilities` |
+//! | `list_formats` | (Xberg) | `GET /v1/formats`, `hacienda formats` |
+//! | `detect_mime_type` | (Xberg) | `POST /v1/mime/detect`, `hacienda mime` |
+//! | `cache_stats` | (Xberg) | `GET /v1/cache/stats`, `hacienda cache stats` |
+//! | `cache_clear` | (Xberg) | `POST /v1/cache/clear`, `hacienda cache clear` |
+//! | `cache_warm` | (Xberg) | `POST /v1/cache/warm`, `hacienda cache warm` |
 //! | `get_version` | (static) | `GET /version` |
 
 mod params;
@@ -52,13 +60,16 @@ use std::sync::Arc;
 
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};
-use params::{AuditEntriesParams, DocumentsProcessParams, EmptyParams, RevealParams, TextParams};
+use params::{
+    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams, EmptyParams,
+    MimeDetectParams, RevealParams, TextParams,
+};
 use rmcp::{
+    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router,
     transport::stdio,
-    ServerHandler, ServiceExt,
 };
 use xberg::ExtractInput;
 
@@ -208,7 +219,7 @@ impl HaciendaMcp {
                 return Err(rmcp::ErrorData::invalid_params(
                     "invalid pseudonym token",
                     None,
-                ))
+                ));
             }
             Err(other) => return Err(map_hacienda_error(other)),
         };
@@ -284,7 +295,7 @@ impl HaciendaMcp {
                     "`limit` must be at least 1: a limit of 0 returns an empty page, \
                      indistinguishable from having reached the end of the history",
                     None,
-                ))
+                ));
             }
             Some(n) => n.min(MAX_PAGE_LIMIT),
         };
@@ -342,6 +353,123 @@ impl HaciendaMcp {
         json_tool_result(&report)
     }
 
+    /// Report the compiled and runtime capability state shared with REST and CLI.
+    #[tool(
+        description = "Report safe build and runtime capability state. This never returns \
+            document content, secrets, model paths, or authorization grants.",
+        annotations(
+            title = "Get Capabilities",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    fn get_capabilities(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let report = hacienda_core::capabilities::report(
+            env!("CARGO_PKG_VERSION"),
+            cfg!(feature = "rag-embeddings"),
+            hacienda_core::capabilities::cached_onnx_runtime_status(),
+            false,
+        );
+        json_tool_result(&report)
+    }
+
+    #[tool(
+        description = "List Xberg document formats enabled in Hacienda.",
+        annotations(title = "List Formats", read_only_hint = true, idempotent_hint = true)
+    )]
+    fn list_formats(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        json_tool_result(&serde_json::json!({
+            "xberg_version": env!("CARGO_PKG_VERSION"),
+            "formats": hacienda_core::xberg_surface::supported_formats()
+        }))
+    }
+
+    #[tool(
+        description = "Detect MIME type from inline base64 bytes without reading a path or URL.",
+        annotations(
+            title = "Detect MIME Type",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    fn detect_mime_type(
+        &self,
+        Parameters(params): Parameters<MimeDetectParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let bytes = data_encoding::BASE64
+            .decode(params.content_base64.as_bytes())
+            .map_err(|_| rmcp::ErrorData::invalid_params("content_base64 is invalid", None))?;
+        let mime_type = hacienda_core::xberg_surface::detect_mime_type(&bytes)
+            .map_err(|_| rmcp::ErrorData::invalid_params("unsupported document content", None))?;
+        json_tool_result(&serde_json::json!({ "mime_type": mime_type }))
+    }
+
+    #[tool(
+        description = "Return sanitized Xberg cache statistics without filesystem paths.",
+        annotations(title = "Cache Stats", read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn cache_stats(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let stats = tokio::task::spawn_blocking(hacienda_core::xberg_surface::cache_stats)
+            .await
+            .map_err(|_| rmcp::ErrorData::internal_error("cache stats failed", None))?
+            .map_err(|_| rmcp::ErrorData::internal_error("cache stats failed", None))?;
+        json_tool_result(&stats)
+    }
+
+    #[tool(
+        description = "Clear Xberg-owned cache files and resident engines. Requires confirm=true.",
+        annotations(title = "Clear Cache", read_only_hint = false, destructive_hint = true)
+    )]
+    async fn cache_clear(
+        &self,
+        Parameters(params): Parameters<CacheConfirmParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !params.confirm {
+            return Err(rmcp::ErrorData::invalid_params(
+                "confirm must be true",
+                None,
+            ));
+        }
+        let result = tokio::task::spawn_blocking(hacienda_core::xberg_surface::clear_cache)
+            .await
+            .map_err(|_| rmcp::ErrorData::internal_error("cache clear failed", None))?
+            .map_err(|_| rmcp::ErrorData::internal_error("cache clear failed", None))?;
+        json_tool_result(&result)
+    }
+
+    #[tool(
+        description = "Warm one compiled Xberg embedding preset. Requires confirm=true.",
+        annotations(title = "Warm Cache", read_only_hint = false, open_world_hint = true)
+    )]
+    async fn cache_warm(
+        &self,
+        Parameters(params): Parameters<CacheWarmParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !params.confirm {
+            return Err(rmcp::ErrorData::invalid_params(
+                "confirm must be true",
+                None,
+            ));
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30 * 60),
+            hacienda_core::xberg_surface::warm_embedding_preset(&params.preset),
+        )
+        .await
+        .map_err(|_| rmcp::ErrorData::internal_error("cache warm timed out", None))?
+        .map_err(|_| rmcp::ErrorData::invalid_params("embedding preset unavailable", None))?;
+        json_tool_result(&result)
+    }
+
     /// Get hacienda's version.
     #[tool(
         description = "Get the current hacienda version.",
@@ -357,7 +485,7 @@ impl HaciendaMcp {
 
 #[tool_handler]
 impl ServerHandler for HaciendaMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let capabilities = ServerCapabilities::builder().enable_tools().build();
 
         let server_info = Implementation::new("hacienda-mcp", env!("CARGO_PKG_VERSION"))
@@ -559,13 +687,34 @@ mod tests {
             "audit_verify",
             "compliance_report",
             "documents_process",
+            "cache_clear",
+            "cache_stats",
+            "cache_warm",
+            "detect_mime_type",
+            "get_capabilities",
             "get_version",
+            "list_formats",
             "pii_redact",
             "pii_reveal",
             "pii_scan",
         ];
         expected.sort_unstable();
         assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn capabilities_tool_uses_the_shared_report_shape() {
+        let server = server_with_pii(RedactionMode::Mask);
+        let result = server
+            .get_capabilities(Parameters(EmptyParams {}))
+            .expect("capability probe must serialize");
+        let content = result
+            .structured_content
+            .expect("capability probe must include structured content");
+
+        assert_eq!(content["embedding_mode"], "presets_only");
+        assert_eq!(content["capabilities"][0]["name"], "redaction");
+        assert_eq!(content["onnx_runtime"]["compiled"], false);
     }
 
     /// `RedactionDepthExceeded` is a client-input-limit violation (an archive nested
