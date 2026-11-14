@@ -252,6 +252,7 @@ mod audit_handle {
                         // concept exists in Studio today, so this is always `None`.
                         config_hash: String::new(),
                         principal: None,
+                        model: None,
                         // Studio hardcodes `PipelineConfig::default()` (no config
                         // surface exists in the browser today), so no vertical is ever
                         // configured here either.

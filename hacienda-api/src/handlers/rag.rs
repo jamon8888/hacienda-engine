@@ -783,9 +783,17 @@ async fn migrate_embeddings_work(
 
             if !chunks.is_empty() {
                 let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+                #[cfg(feature = "rag-embeddings")]
                 let vectors = xberg::embed_texts_async(texts, &config)
                     .await
                     .map_err(|e| format!("embedding failed: {e}"))?;
+
+                #[cfg(not(feature = "rag-embeddings"))]
+                let _ = (texts, config);
+                #[cfg(not(feature = "rag-embeddings"))]
+                return Err(
+                    "embedding migration requires the `rag-embeddings` feature".to_owned(),
+                );
 
                 // Defensive: `embed_texts_async` is not contractually guaranteed to
                 // return one vector per input text. Catch a mismatch here rather
