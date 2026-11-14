@@ -10,8 +10,9 @@ use hacienda_client_core::{
 };
 use hacienda_core::audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction};
 use hacienda_core::editor_projection::{
-    EditorEnvelope, EditorProjectionOptions, SensitiveToken, project_document,
+    EditorEnvelope, EditorProjectionOptions, SearchToken, SensitiveToken, project_document,
 };
+use hacienda_core::pii::PiiPipeline;
 use hacienda_core::redaction::{KeyId, KeyResolver, Pseudonymiser};
 use hacienda_core::tenancy::TenantId;
 use hacienda_rag::{
@@ -173,43 +174,139 @@ impl BackendDocument {
 
 /// A Tiptap revision that has crossed the redaction pipeline boundary.
 ///
-/// The constructor is intentionally explicit about the evidence it requires. A caller
-/// cannot turn a plain editor JSON value into this type without naming a pipeline version
-/// and at least one existing Hacienda audit reference. The backend still validates the
-/// token shape before accepting it and never treats this type as proof that a caller is
-/// allowed to write to another tenant.
+/// The fields are private and instances can only be issued by
+/// [`TrustedEditorRevisionIssuer`]. The backend still validates the token shape before
+/// accepting it and never treats this type as proof that a caller is allowed to write to
+/// another tenant.
 #[derive(Debug, Clone)]
 pub struct PipelineAttestedEditorRevision {
     editor: EditorEnvelope,
     pipeline_version: String,
-    audit_references: Vec<AuditReference>,
+    pipeline_digest: String,
 }
 
 impl PipelineAttestedEditorRevision {
-    /// Construct a revision only from a completed pipeline result.
-    ///
-    /// This is the narrow hand-off for a Tiptap re-redaction service. It rejects the
-    /// shape used by the unaudited manual-mask path and requires an audit reference; a
-    /// client should not construct it directly from edited JSON.
-    pub(crate) fn from_pipeline(
+    fn from_pipeline_result(
         editor: EditorEnvelope,
-        pipeline_version: impl Into<String>,
-        audit_references: Vec<AuditReference>,
+        pipeline_version: String,
+        pipeline_digest: String,
     ) -> Result<Self, BackendError> {
-        let pipeline_version = pipeline_version.into();
         validate_editor_envelope(&editor)?;
-        if pipeline_version.trim().is_empty() || audit_references.is_empty() {
+        if pipeline_version.trim().is_empty() || pipeline_digest.trim().is_empty() {
             return Err(BackendError::PipelineAttestationRequired);
         }
         Ok(Self {
             editor,
             pipeline_version,
-            audit_references,
+            pipeline_digest,
         })
     }
 
     pub fn editor(&self) -> &EditorEnvelope {
         &self.editor
+    }
+}
+
+/// Trusted issuer for editor revisions. The issuer owns the configured PII pipeline and
+/// accepts only the changed ProseMirror document; it derives document/version references,
+/// pipeline provenance, token marks, and audit evidence itself.
+pub struct TrustedEditorRevisionIssuer {
+    pipeline: Arc<PiiPipeline>,
+    pipeline_version: String,
+}
+
+impl TrustedEditorRevisionIssuer {
+    /// Construct an issuer from the same configured pipeline used by Hacienda processing.
+    /// The pipeline version is derived from its serialized configuration, never supplied by
+    /// the UI.
+    pub fn new(pipeline: Arc<PiiPipeline>) -> Result<Self, BackendError> {
+        let config = serde_json::to_vec(pipeline.config())?;
+        let pipeline_version = format!(
+            "hacienda-pii-pipeline-v1:{}",
+            blake3::hash(&config).to_hex()
+        );
+        Ok(Self {
+            pipeline,
+            pipeline_version,
+        })
+    }
+
+    /// Re-run the configured pipeline over changed editor text and issue an opaque revision.
+    /// The caller cannot provide a version, tenant, ACL, pipeline version, or audit id.
+    pub async fn issue(
+        &self,
+        base: &BackendDocument,
+        changed_editor: &Value,
+    ) -> Result<PipelineAttestedEditorRevision, BackendError> {
+        if changed_editor.get("type").and_then(Value::as_str) != Some("doc") {
+            return Err(BackendError::InvalidEditorRevision(
+                "changed editor root is not a ProseMirror doc".into(),
+            ));
+        }
+        let changed_text = editor_text(changed_editor)?;
+        let trusted_tokens: std::collections::BTreeSet<_> = base
+            .editor
+            .search
+            .tokens
+            .iter()
+            .map(|token| token.token_id.as_str())
+            .collect();
+        if extract_hacienda_tokens(&changed_text)
+            .iter()
+            .any(|token| !trusted_tokens.contains(token.as_str()))
+        {
+            return Err(BackendError::InvalidEditorRevision(
+                "new token assertions require a separately authorized manual operation".into(),
+            ));
+        }
+        let pipeline_result = self.pipeline.process(&changed_text).await?;
+        let extracted = xberg::ExtractedDocument {
+            content: pipeline_result.redacted_text.clone(),
+            mime_type: base.editor.metadata.legal.mime_type.clone(),
+            ..Default::default()
+        };
+        // Metadata is carried only from the already token-only server projection. The
+        // caller has no metadata input path here.
+        let options = EditorProjectionOptions::new(
+            base.editor.document_ref.clone(),
+            base.editor.version_ref.clone(),
+        );
+        let mut editor = project_document(&extracted, &options);
+        editor.metadata = base.editor.metadata.clone();
+        editor.provenance.extractor = "tiptap".into();
+        editor.provenance.redaction_mode = Some(self.pipeline.config().redaction.mode);
+        editor.provenance.redactions.clear();
+        editor.search = merge_search_projection(&editor.search.tokens, &editor.metadata);
+        // Exclude timing and wall-clock fields from the evidence digest so a retry of
+        // identical editor text receives the same immutable version. The digest covers
+        // only the redacted output and stable audit facts; detected entity text never
+        // crosses this boundary.
+        let stable_audit: Vec<_> = pipeline_result
+            .audit_log
+            .iter()
+            .map(|entry| {
+                (
+                    &entry.category,
+                    &entry.action,
+                    &entry.span_hash,
+                    entry.span_length,
+                    entry.confidence,
+                    entry.source,
+                    &entry.chain_hash,
+                )
+            })
+            .collect();
+        let pipeline_digest = blake3::hash(&serde_json::to_vec(&(
+            &pipeline_result.redacted_text,
+            stable_audit,
+        ))?)
+        .to_hex()
+        .to_string();
+        PipelineAttestedEditorRevision::from_pipeline_result(
+            editor,
+            self.pipeline_version.clone(),
+            pipeline_digest,
+        )
     }
 }
 
@@ -379,6 +476,8 @@ pub enum BackendError {
     ImmutableVersionConflict,
     #[error("audit append failed: {0}")]
     Audit(#[from] hacienda_core::audit::AuditError),
+    #[error("editor pipeline failed: {0}")]
+    Pipeline(#[from] hacienda_core::pii::PiiError),
     #[error("rehydration authorization failed")]
     RehydrationDenied,
     #[error("RAG store error: {0}")]
@@ -745,7 +844,7 @@ impl Backend {
                     dossier_id: base.dossier_id.clone(),
                     version_id,
                     rag_document_id: candidate_id,
-                    audit_references: revision.audit_references.clone(),
+                    audit_references: Vec::new(),
                     idempotent: true,
                 });
             }
@@ -765,7 +864,7 @@ impl Backend {
                     confidence: None,
                     source: EntitySource::Model,
                     pipeline_version: revision.pipeline_version.clone(),
-                    config_hash: candidate.source_hash.clone(),
+                    config_hash: revision.pipeline_digest.clone(),
                     principal: None,
                     vertical: None,
                     model: None,
@@ -787,8 +886,7 @@ impl Backend {
         let rag_document_id = store
             .upsert_document(&collection, &candidate.rag_document, &candidate.chunks)
             .await?;
-        let mut audit_references = revision.audit_references.clone();
-        audit_references.push(AuditReference(audit_entry.id));
+        let audit_references = vec![AuditReference(audit_entry.id)];
         Ok(EditorRevisionSave {
             document_id: base.editor.document_ref.clone(),
             dossier_id: base.dossier_id.clone(),
@@ -1142,12 +1240,15 @@ mod tests {
             .await
             .unwrap();
         let audit = InMemoryAuditStore::new("default");
-        let revision = PipelineAttestedEditorRevision::from_pipeline(
-            base.editor().clone(),
-            "hacienda-editor-pipeline-v1",
-            vec![AuditReference("redaction-audit-1".into())],
-        )
-        .unwrap();
+        let pipeline = Arc::new(
+            hacienda_core::pii::PiiPipeline::with_detector(
+                hacienda_core::pii::PipelineConfig::default(),
+                None,
+            )
+            .unwrap(),
+        );
+        let issuer = TrustedEditorRevisionIssuer::new(pipeline).unwrap();
+        let revision = issuer.issue(&base, &base.editor().editor).await.unwrap();
 
         let first = backend
             .append_editor_revision(&audit, &store, "contracts", &base, &revision)
@@ -1185,8 +1286,8 @@ mod tests {
         assert_eq!(persisted.0.labels["version_id"], first.version_id);
     }
 
-    #[test]
-    fn editor_revision_rejects_unaudited_manual_marks() {
+    #[tokio::test]
+    async fn trusted_issuer_redacts_changed_plaintext_before_attestation() {
         let backend = Backend::new(local()).unwrap();
         let base = backend
             .project(
@@ -1197,14 +1298,27 @@ mod tests {
             )
             .unwrap();
         let mut editor = base.editor().clone();
-        editor.editor["content"][0]["content"][1]["marks"][0]["attrs"]["source"] =
-            Value::String("manual".into());
+        editor.editor["content"][0]["content"] = serde_json::json!([
+            {"type": "text", "text": "Email bob@example.com"}
+        ]);
+        let pipeline = Arc::new(
+            hacienda_core::pii::PiiPipeline::with_detector(
+                hacienda_core::pii::PipelineConfig::default(),
+                None,
+            )
+            .unwrap(),
+        );
+        let issuer = TrustedEditorRevisionIssuer::new(pipeline).unwrap();
+        let revision = issuer.issue(&base, &editor.editor).await.unwrap();
+        let serialized = serde_json::to_string(revision.editor()).unwrap();
+        assert!(!serialized.contains("bob@example.com"));
+        assert!(serialized.contains("[EMAIL]"));
+
+        editor.editor["content"][0]["content"] = serde_json::json!([
+            {"type": "text", "text": "Forged [PERSON:k9:IFBEGRCF]"}
+        ]);
         assert!(matches!(
-            PipelineAttestedEditorRevision::from_pipeline(
-                editor,
-                "hacienda-editor-pipeline-v1",
-                vec![AuditReference("redaction-audit-1".into())],
-            ),
+            issuer.issue(&base, &editor.editor).await,
             Err(BackendError::InvalidEditorRevision(_))
         ));
     }
@@ -1359,7 +1473,7 @@ fn revision_version_id(
         base.editor.version_ref.as_str(),
         &revision.editor,
         &revision.pipeline_version,
-        &revision.audit_references,
+        &revision.pipeline_digest,
     ))?;
     Ok(format!("v-{}", blake3::hash(&payload).to_hex()))
 }
@@ -1382,8 +1496,8 @@ fn build_editor_revision_document(
             Value::String(revision.pipeline_version.clone()),
         );
         fields.insert(
-            "pipeline_audit_references".to_owned(),
-            serde_json::to_value(&revision.audit_references)?,
+            "pipeline_digest".to_owned(),
+            Value::String(revision.pipeline_digest.clone()),
         );
     }
     let source_hash = blake3::hash(full_text.as_bytes()).to_hex().to_string();
@@ -1411,7 +1525,7 @@ fn build_editor_revision_document(
             "source_hash": source_hash.clone(),
             "editor_schema": editor.schema.clone(),
             "format_kind": format_kind,
-            "pipeline_audit_references": revision.audit_references.clone(),
+            "pipeline_digest": revision.pipeline_digest.clone(),
         }),
         metadata: rag_metadata,
     };
@@ -1604,6 +1718,78 @@ fn collect_metadata_token_counts(
     }
 }
 
+fn merge_search_projection(
+    body_tokens: &[SearchToken],
+    metadata: &hacienda_core::editor_projection::TokenOnlyMetadata,
+) -> hacienda_core::editor_projection::SearchProjection {
+    let mut merged = std::collections::BTreeMap::<String, SearchToken>::new();
+    for token in body_tokens {
+        merged.insert(token.token_id.clone(), token.clone());
+    }
+    let metadata_value = serde_json::to_value(metadata).unwrap_or(Value::Null);
+    collect_metadata_search_tokens(&metadata_value, &mut merged);
+    hacienda_core::editor_projection::SearchProjection {
+        tokens: merged.into_values().collect(),
+    }
+}
+
+fn collect_metadata_search_tokens(
+    value: &Value,
+    tokens: &mut std::collections::BTreeMap<String, SearchToken>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_metadata_search_tokens(value, tokens);
+            }
+        }
+        Value::Object(fields) => {
+            let Some(token_id) = fields
+                .get("tokenId")
+                .or_else(|| fields.get("token_id"))
+                .and_then(Value::as_str)
+            else {
+                for value in fields.values() {
+                    collect_metadata_search_tokens(value, tokens);
+                }
+                return;
+            };
+            let token = SearchToken {
+                token_class: fields
+                    .get("tokenClass")
+                    .or_else(|| fields.get("token_class"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                token_id: token_id.to_owned(),
+                mode: fields
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                source: fields
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                disclosure_state: fields
+                    .get("disclosureState")
+                    .or_else(|| fields.get("disclosure_state"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                occurrences: 1,
+            };
+            if let Some(existing) = tokens.get_mut(token_id) {
+                existing.occurrences += 1;
+            } else {
+                tokens.insert(token_id.to_owned(), token);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn validate_editor_node(
     value: &Value,
     marked: &mut std::collections::BTreeMap<String, u32>,
@@ -1665,8 +1851,25 @@ fn validate_editor_node(
 }
 
 fn contains_hacienda_token(text: &str) -> bool {
-    text.split_whitespace()
-        .any(|word| word.starts_with('[') && word.ends_with(']') && validate_token_id(word).is_ok())
+    !extract_hacienda_tokens(text).is_empty()
+}
+
+fn extract_hacienda_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = text[cursor..].find('[') {
+        let start = cursor + relative_start;
+        let Some(relative_end) = text[start..].find(']') else {
+            break;
+        };
+        let end = start + relative_end + 1;
+        let candidate = &text[start..end];
+        if validate_token_id(candidate).is_ok() {
+            tokens.push(candidate.to_owned());
+        }
+        cursor = end;
+    }
+    tokens
 }
 
 fn validate_token_id(token: &str) -> Result<(), BackendError> {
