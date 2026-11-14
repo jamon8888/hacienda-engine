@@ -532,7 +532,7 @@ impl HaciendaFacade {
         }
     }
 
-/// config function
+    /// config function
     pub fn config(&self) -> &HaciendaConfig {
         &self.config
     }
@@ -1427,7 +1427,9 @@ impl HaciendaFacade {
                     config_hash: String::new(),
                     principal: principal.clone(),
                     vertical: vertical.clone(),
-                    model: None,
+                    model: (entity.source == EntitySource::Model)
+                        .then(|| vertical.clone())
+                        .flatten(),
                 }
             })
             .collect();
@@ -1523,7 +1525,9 @@ impl HaciendaFacade {
                 config_hash: String::new(),
                 principal: principal.clone(),
                 vertical: vertical.clone(),
-                model: None,
+                model: (entry.source == EntitySource::Model)
+                    .then(|| vertical.clone())
+                    .flatten(),
             })
             .collect();
 

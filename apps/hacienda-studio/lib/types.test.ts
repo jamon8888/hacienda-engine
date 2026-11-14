@@ -42,6 +42,7 @@ describe("NER category vocabulary", () => {
     for (const cat of ENGINE_CATEGORIES) {
       expect(mirrored).toContain(cat);
     }
+    expect([...mirrored].sort()).toEqual([...ENGINE_CATEGORIES].sort());
     // Custom may still be used via customLabels
     expect(mirrored).toContain("person");
   });

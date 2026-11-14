@@ -1,14 +1,22 @@
 import { openDB } from "idb";
 import type { NerModel } from "@xberg-io/xberg-wasm";
 import { MODEL_DIGESTS } from "./model-digests";
+import { z } from "zod";
 
 const DB_NAME = "xberg-studio-assets";
 const DB_VERSION = 1;
 const MODEL_STORE = "models";
 const TESSDATA_STORE = "tessdata";
 
-const MODEL_ID = (import.meta.env.VITE_GLINER_MODEL_ID as string | undefined) ?? "jamon8888/gliner2-guardrails-pii-f16";
-const MODEL_BASE_URL = import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingface.co/${MODEL_ID}/resolve/main`;
+const modelConfig = z.object({
+  modelId: z.string().trim().min(1),
+  baseUrl: z.string().url().refine((url) => url.startsWith("https://huggingface.co/") || url.startsWith("http://localhost:") || url.startsWith("http://127.0.0.1:"), "model base URL is not allowed"),
+}).parse({
+  modelId: import.meta.env.VITE_GLINER_MODEL_ID ?? "jamon8888/gliner2-guardrails-pii-f16",
+  baseUrl: import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingface.co/${import.meta.env.VITE_GLINER_MODEL_ID ?? "jamon8888/gliner2-guardrails-pii-f16"}/resolve/main`,
+});
+const MODEL_ID = modelConfig.modelId;
+const MODEL_BASE_URL = modelConfig.baseUrl;
 const MODEL_BASE = import.meta.env.DEV && MODEL_BASE_URL.startsWith('https://huggingface.co')
   ? MODEL_BASE_URL.replace('https://huggingface.co', '/hf-model')
   : MODEL_BASE_URL;
@@ -348,9 +356,9 @@ async function getDB() {
 
 export async function isModelCached(): Promise<boolean> {
   const db = await getDB();
-  const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
-  const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
-  const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+  const modelKey = `model-${encodeURIComponent(MODEL_ID)}`;
+  const tokenizerKey = `tokenizer-${encodeURIComponent(MODEL_ID)}`;
+  const configKey = `config-${encodeURIComponent(MODEL_ID)}`;
   const model = await db.get(MODEL_STORE, modelKey);
   const tokenizer = await db.get(MODEL_STORE, tokenizerKey);
   const config = await db.get(MODEL_STORE, configKey);
@@ -360,9 +368,9 @@ export async function isModelCached(): Promise<boolean> {
 async function clearStaleModelCache(): Promise<void> {
   try {
     const db = await getDB();
-    const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
-    const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
-    const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+    const modelKey = `model-${encodeURIComponent(MODEL_ID)}`;
+    const tokenizerKey = `tokenizer-${encodeURIComponent(MODEL_ID)}`;
+    const configKey = `config-${encodeURIComponent(MODEL_ID)}`;
     const tx = db.transaction(MODEL_STORE, "readwrite");
     await Promise.all([
       tx.store.delete(modelKey),
@@ -424,6 +432,20 @@ function insufficientStorage(availableBytes: number, neededBytes: number): NerMo
 // `loadNerModel`'s preflight check compares `navigator.storage.estimate()` against.
 const MODEL_STORAGE_BYTES_NEEDED = 620 * 1024 * 1024;
 
+async function verifyAssetDigests(assets: NerModelAssets): Promise<void> {
+  const expected = MODEL_DIGESTS[MODEL_ID as keyof typeof MODEL_DIGESTS];
+  if (!expected) throw new Error(`No trusted digest is configured for model ${MODEL_ID}`);
+  const digest = async (bytes: Uint8Array) => {
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+  const actual = await Promise.all([digest(assets.model), digest(assets.tokenizer), digest(assets.encoderConfig)]);
+  const expectedValues = [expected.model, expected.tokenizer, expected.encoder];
+  if (actual.some((value, index) => !value.startsWith(expectedValues[index]))) {
+    throw new Error(`Model asset digest mismatch for ${MODEL_ID}`);
+  }
+}
+
 /**
  * Best-effort check, run before the ~600MB download even starts: if the browser reports
  * (via the Storage API) that less quota remains than the model needs, fail fast with a
@@ -453,9 +475,9 @@ export async function loadNerModel(
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<NerModelLoad> {
   const db = await getDB();
-  const modelKey = `model-${MODEL_ID.replace('/', '-')}`;
-  const tokenizerKey = `tokenizer-${MODEL_ID.replace('/', '-')}`;
-  const configKey = `config-${MODEL_ID.replace('/', '-')}`;
+  const modelKey = `model-${encodeURIComponent(MODEL_ID)}`;
+  const tokenizerKey = `tokenizer-${encodeURIComponent(MODEL_ID)}`;
+  const configKey = `config-${encodeURIComponent(MODEL_ID)}`;
 
   // One-slot eviction: remove any model entries not for current MODEL_ID
   const evictOtherModels = async () => {
@@ -463,21 +485,32 @@ export async function loadNerModel(
     const keys = await tx.store.getAllKeys();
     await Promise.all(
       keys
-        .filter(k => typeof k === "string" && k.startsWith("model-") && !k.startsWith(modelKey))
+        .filter(k => typeof k === "string" && k.startsWith("model-") && k !== modelKey)
         .map(k => tx.store.delete(k))
     );
     await Promise.all(
       keys
-        .filter(k => typeof k === "string" && k.startsWith("tokenizer-") && !k.startsWith(tokenizerKey))
+        .filter(k => typeof k === "string" && k.startsWith("tokenizer-") && k !== tokenizerKey)
         .map(k => tx.store.delete(k))
     );
     await Promise.all(
       keys
-        .filter(k => typeof k === "string" && k.startsWith("config-") && !k.startsWith(configKey))
+        .filter(k => typeof k === "string" && k.startsWith("config-") && k !== configKey)
         .map(k => tx.store.delete(k))
     );
     await tx.done;
   };
+
+  // Migrate the pre-encoded keys used by older Studio releases before quota checks.
+  const legacyKeys = ["gliner2-guardrails-pii-model", "gliner2-guardrails-pii-tokenizer", "gliner2-guardrails-pii-config"];
+  const newKeys = [modelKey, tokenizerKey, configKey];
+  const migration = db.transaction(MODEL_STORE, "readwrite");
+  for (let i = 0; i < legacyKeys.length; i++) {
+    const value = await migration.store.get(legacyKeys[i]);
+    if (value) await migration.store.put(value, newKeys[i]);
+    if (value) await migration.store.delete(legacyKeys[i]);
+  }
+  await migration.done;
 
   // Check cache first
   const [model, tokenizer, config] = await Promise.all([
@@ -487,7 +520,7 @@ export async function loadNerModel(
   ]);
 
   if (model && tokenizer && config) {
-    // Verify digest placeholder - in production compute hash and compare to MODEL_DIGESTS[MODEL_ID]
+    await verifyAssetDigests({ model, tokenizer, encoderConfig: config });
     return { ok: true, assets: { model, tokenizer, encoderConfig: config } };
   }
 
@@ -524,6 +557,7 @@ export async function loadNerModel(
       ]);
       const downloadMs = performance.now() - downloadStart;
       console.log(`[PERF] Download: ${downloadMs.toFixed(0)}ms (${(modelData.byteLength / 1024 / 1024).toFixed(1)} MB)`);
+      await verifyAssetDigests({ model: modelData, tokenizer: tokenizerData, encoderConfig: configData });
 
       // Cache in IndexedDB with model-specific keys
       const tx = db.transaction(MODEL_STORE, "readwrite");

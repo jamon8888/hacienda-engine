@@ -51,7 +51,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
     // instead of reindexing every column after this one. This is still a breaking
     // change to an unversioned format — see CHANGELOG.md.
     output.extend_from_slice(
-        b"id,timestamp,category,action,span_hash,span_length,confidence,source,pipeline_version,config_hash,chain_hash,vertical\n",
+        b"id,timestamp,category,action,span_hash,span_length,confidence,source,pipeline_version,config_hash,chain_hash,vertical,model\n",
     );
 
     for entry in chain.entries() {
@@ -60,6 +60,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
         let span_length = entry.span_length.to_string();
         let source = entry.source.to_string();
         let vertical = entry.vertical.clone().unwrap_or_default();
+        let model = entry.model.clone().unwrap_or_default();
 
         write_csv_row(
             &mut output,
@@ -76,6 +77,7 @@ pub fn export_csv(chain: &AuditChain) -> Result<Vec<u8>, AuditError> {
                 &entry.config_hash,
                 &entry.chain_hash,
                 &vertical,
+                &model,
             ],
         );
     }

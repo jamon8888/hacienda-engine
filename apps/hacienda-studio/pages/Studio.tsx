@@ -212,7 +212,7 @@ export function Studio({
              <div className="mb-4">
                <h2 className="text-[15px] font-semibold tracking-tight">Traitement</h2>
                <p className="mt-1 text-xs text-white/50">
-                 {processedCount} sur {totalCount} terminés · chaque fichier passe par le pipeline complet indépendamment.
+                 {processedCount} sur {totalCount} terminé{processedCount === 1 ? "" : "s"} · chaque fichier passe par le pipeline complet indépendamment.
                </p>
              </div>
 
@@ -289,7 +289,7 @@ export function Studio({
 
         {pendingFiles.length > 0 && isProcessing && (
           <div className="mt-3 rounded-lg border border-amber-500/15 bg-amber-500/[0.04] px-4 py-3 text-xs text-amber-200/70">
-            {pendingFiles.length} autre(s) fichier(s) en file d'attente de révision — pas encore envoyés au pipeline.
+            {pendingFiles.length} autre fichier{pendingFiles.length === 1 ? "" : "s"} en file d'attente de révision — pas encore envoyés au pipeline.
           </div>
         )}
       </div>
