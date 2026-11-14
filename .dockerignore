@@ -15,6 +15,9 @@ docker-compose*
 # `config/production.toml` (COPY'd separately into the runtime stage) needs the same
 # exception for the same reason - it would otherwise silently be an empty COPY.
 *.json
+# SQLx's checked query metadata is required for the offline Docker build.
+!.sqlx/
+!.sqlx/*.json
 *.yaml
 *.yml
 *.sh

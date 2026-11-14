@@ -32,6 +32,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 # 2. BUILDER - Compile deps (cached)
 FROM rust:1.99-slim-bookworm AS builder
 WORKDIR /app
+# The build has no Postgres service; use the checked-in SQLx metadata instead.
+ENV SQLX_OFFLINE=true
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
 # Root Cargo.toml's `[patch.crates-io]` path dependencies have to exist before
