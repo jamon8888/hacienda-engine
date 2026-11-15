@@ -1493,7 +1493,12 @@ fn redact_provider_response<R: RedactionAdapter>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+    };
 
     // Synthetic sentinels keep this test focused on the redaction boundary
     // without placing realistic PII in a provider fixture.
@@ -1858,6 +1863,102 @@ mod tests {
         assert_eq!(response.chunks[1].content.references[0].token, PERSON_TOKEN);
         assert!(format!("{response:?}").contains("<token-only>"));
         assert!(!format!("{response:?}").contains("[PERSON:opaque-1]"));
+    }
+
+    #[test]
+    fn gateway_transport_uses_loopback_http_for_claude_and_codex() {
+        for provider in [ProviderKind::ClaudeDesktop, ProviderKind::Codex] {
+            let response_body = match provider {
+                ProviderKind::ClaudeDesktop => concat!(
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Reply ",
+                    "[PERSON:opaque-1]",
+                    "\"}}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+                ProviderKind::Codex => concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Reply ",
+                    "[PERSON:opaque-1]",
+                    "\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local gateway fixture");
+            let address = listener.local_addr().expect("fixture address");
+            let response_body = response_body.to_owned();
+            let server = thread::spawn(move || {
+                let (socket, _) = listener.accept().expect("accept gateway request");
+                let mut reader = BufReader::new(socket);
+                let mut request_head = String::new();
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read request line");
+                request_head.push_str(&line);
+                let mut content_length = 0_usize;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).expect("read request headers");
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().expect("content length");
+                        }
+                    }
+                    request_head.push_str(&line);
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).expect("read request body");
+                let request = format!(
+                    "{request_head}{}",
+                    String::from_utf8(body).expect("provider request JSON")
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .expect("write gateway response");
+                request
+            });
+
+            let config = ProviderTransportConfig::new(
+                format!("http://{address}/v1/messages"),
+                "local-fixture",
+                64,
+                "gateway-secret",
+            );
+            let mut transport = GatewayProviderTransport::new(config).expect("valid local gateway");
+            let response = transport
+                .stream(&redacted_request(provider))
+                .expect("real reqwest loopback exchange succeeds");
+            let request = server.join().expect("gateway fixture thread");
+            let request_headers = request.to_ascii_lowercase();
+            assert!(request.starts_with("POST /v1/messages HTTP/1.1\r\n"));
+            assert!(request.contains("[PERSON:opaque-1]"), "{request}");
+            assert!(!request.contains(PERSON), "{request}");
+            match provider {
+                ProviderKind::ClaudeDesktop => {
+                    assert!(request_headers.contains("x-api-key: gateway-secret"));
+                }
+                ProviderKind::Codex => {
+                    assert!(request_headers.contains("authorization: bearer gateway-secret"));
+                }
+            }
+            match response {
+                ProviderResponse::ClaudeDesktop(response)
+                    if provider == ProviderKind::ClaudeDesktop =>
+                {
+                    assert_eq!(response.chunks[0].content.text, "Reply [PERSON:opaque-1]");
+                }
+                ProviderResponse::Codex(response) if provider == ProviderKind::Codex => {
+                    assert_eq!(response.chunks[0].content.text, "Reply [PERSON:opaque-1]");
+                }
+                _ => panic!("gateway returned the wrong provider response variant"),
+            }
+        }
     }
 
     #[test]
