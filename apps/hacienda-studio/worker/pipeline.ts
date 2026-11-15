@@ -30,7 +30,12 @@ import {
   isBridgeEntityArray,
   type BridgeEntity,
 } from "../lib/ner-bridge";
-import { createNerBackend, loadNerModel, loadTessdata } from "../lib/asset-loader";
+import {
+  MODEL_PROVENANCE,
+  createNerBackend,
+  loadNerModel,
+  loadTessdata,
+} from "../lib/asset-loader";
 import { extractPdfWithLiteParse, toLiteParseOcrEngine } from "../lib/pdf-liteparse";
 import {
   initPiiEngine,
@@ -987,7 +992,11 @@ async function processFile(
 
       const piiMs = performance.now() - piiStart;
       console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
-      piiFindings = result.entities;
+      piiFindings = result.entities.map((entity) =>
+        entity.source === "model"
+          ? { ...entity, model_provenance: MODEL_PROVENANCE }
+          : entity,
+      );
       piiEntitiesFound = piiFindings.length;
       console.log(`[Worker] Found ${piiEntitiesFound} PII entities in ${input.name}`);
     } catch (piiError) {

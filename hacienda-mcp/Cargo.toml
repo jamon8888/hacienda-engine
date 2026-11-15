@@ -21,16 +21,13 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 xberg = { workspace = true }
 
-# Same MCP SDK generation xberg 1.3.10 uses (`crates/xberg/Cargo.toml`), and expressed
-# as the same `"3.5.1"` requirement rather than exact-pinned — not to
-# match it for its own sake, but because it means both servers speak the same generation
-# of the protocol against the same Rust SDK, which is the thing worth keeping in sync; an
-# exact pin here could drift from whatever xberg's own unpinned requirement resolves to.
+# Keep this in the same non-exact SDK generation as xberg. The 3.6.0 minimum is
+# required for `with_max_line_length`; an exact pin could drift from xberg's resolution.
 # `server` + `macros` for the `#[tool_router]`/`#[tool]` attribute macros, `transport-io`
 # for the stdio transport `hacienda mcp serve` uses (M1a). HTTP/streamable transport
 # (`transport-streamable-http-server`, `server-side-http`) is deferred to M1b — see the
 # crate's module doc.
-rmcp = { version = "3.5.1", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

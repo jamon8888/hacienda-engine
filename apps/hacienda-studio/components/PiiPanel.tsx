@@ -123,7 +123,12 @@ function RevealableFinding({ finding }: { finding: PiiEntity }) {
     // audit write fails the call" philosophy (`lib/pii-engine.ts`): a compliance feature
     // that can silently reveal PII without recording it is worse than one that refuses.
     try {
-      await recordPiiReveal(value, finding.category, finding.source);
+      await recordPiiReveal(
+        value,
+        finding.category,
+        finding.source,
+        finding.model_provenance,
+      );
     } catch {
       setError(
         "Your passphrase was correct, but the reveal could not be written to the audit chain, so the value is not shown. Try again — revealing PII without an audit record is not permitted.",

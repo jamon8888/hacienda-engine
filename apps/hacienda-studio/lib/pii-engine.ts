@@ -35,6 +35,8 @@ export interface PiiEntity {
   end: number;
   confidence: number;
   source: string;
+  /** Model that detected this entity; absent on legacy findings and regex entities. */
+  model_provenance?: string;
   format_preserving: boolean;
   redact_template: string;
 }
@@ -340,10 +342,13 @@ export async function recordPiiReveal(
   revealedText: string,
   category: string,
   source: string,
+  modelProvenance?: string,
 ): Promise<string> {
   await initPiiEngine();
   const handle = await getAuditHandle();
-  return handle.recordReveal(revealedText, category, source, MODEL_PROVENANCE);
+  // Older persisted model findings have no provenance. Record that absence as null
+  // instead of attributing the reveal to whichever model a later build selected.
+  return handle.recordReveal(revealedText, category, source, modelProvenance ?? null);
 }
 
 /** One row of `hacienda-core`'s `AuditEntry` (`hacienda-core/src/audit/entry.rs`),

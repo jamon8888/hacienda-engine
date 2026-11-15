@@ -15,7 +15,7 @@ pub enum XbergSurfaceError {
     #[error("MIME input exceeds the 8 MiB limit")]
     MimeInputTooLarge,
     #[error(
-        "MIME detection failed: the input bytes are not a supported document; suggestion: provide a supported format or an explicit filename hint"
+        "MIME detection failed: the input bytes are not a supported document; suggestion: provide a supported format with recognizable content"
     )]
     Mime(#[source] xberg::XbergError),
     #[error(
@@ -69,15 +69,30 @@ pub fn detect_mime_type(bytes: &[u8], filename: Option<&str>) -> Result<String, 
     if bytes.len() > MAX_MIME_INPUT_BYTES {
         return Err(XbergSurfaceError::MimeInputTooLarge);
     }
-    let filename_hint = filename.and_then(filename_mime_hint);
+    let filename_hint = filename
+        .and_then(filename_mime_hint)
+        .filter(|mime| filename_hint_matches_content(mime, bytes));
     match xberg::detect_mime_type_from_bytes(bytes) {
-        // Xberg uses `text/plain` as a generic fallback for ambiguous bytes. A
-        // supported, more specific filename hint is more useful in that case.
-        Ok(mime) if mime == "text/plain" => Ok(filename_hint
-            .filter(|hint| hint != "text/plain")
-            .unwrap_or(mime)),
+        // Never let an extension turn arbitrary text into a different document type.
+        // A hint is accepted only when the bytes carry that format's signature.
+        Ok(mime) if mime == "text/plain" => Ok(filename_hint.unwrap_or(mime)),
         Ok(mime) => Ok(mime),
         Err(error) => filename_hint.ok_or(XbergSurfaceError::Mime(error)),
+    }
+}
+
+fn filename_hint_matches_content(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "application/pdf" => bytes.starts_with(b"%PDF-"),
+        "application/rtf" | "text/rtf" => bytes.starts_with(b"{\\rtf"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/tiff" => bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"),
+        "image/webp" => {
+            bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+        }
+        _ => false,
     }
 }
 
@@ -313,11 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn mime_detection_uses_supported_filename_as_fallback() {
-        let result = detect_mime_type(&[0, 1, 2], Some("document.pdf"));
-        assert_eq!(
-            result.expect("supported extension fallback"),
-            "application/pdf"
-        );
+    fn mime_detection_does_not_trust_filename_without_matching_content() {
+        let detected = detect_mime_type(b"hello world\n", Some("invoice.pdf"));
+        assert!(detected.is_ok_and(|mime| mime == "text/plain"));
+        assert!(detect_mime_type(&[0, 1, 2], Some("document.pdf")).is_err());
     }
 }

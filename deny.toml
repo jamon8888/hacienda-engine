@@ -34,9 +34,6 @@ ignore = [
   # digest 0.11.3 is pinned transitively by rusty-s3, lopdf, and the xberg
   # document stack; cargo update reports no compatible newer release.
   "RUSTSEC-2026-0385",
-  # pulldown-cmark is transitively pinned by unhwp/xberg; the vulnerable
-  # wikilink options are disabled by default and no compatible fix is available.
-  "RUSTSEC-2026-0414",
   "RUSTSEC-2026-0433",
   # quinn/rustls certificate issues are transitive through reqwest and xberg's
   # HTTP stack; current compatible versions remain affected in this graph.
@@ -44,9 +41,7 @@ ignore = [
   "RUSTSEC-2026-0346",
   "RUSTSEC-2026-0348",
   "RUSTSEC-2026-0349",
-  "RUSTSEC-2026-0382",
   "RUSTSEC-2026-0383",
-  "RUSTSEC-2026-0381",
   # serde_yaml_ng currently exposes unsafe-libyaml transitively; no compatible
   # replacement is available without changing the CLI configuration format.
   "RUSTSEC-2024-0449",
