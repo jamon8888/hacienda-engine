@@ -2026,7 +2026,7 @@ pub(crate) mod tests {
     /// same not-found contract as `GET /v1/rag/collections/{name}` itself.
     #[tokio::test]
     async fn rag_list_documents_paginates_and_404s_on_unknown_collection() {
-        let app = build_router(state_with_rag());
+        let app = build_router(state_with_rag_and_pii());
         assert_eq!(create_collection(&app, "c1", 3).await, 201);
 
         for i in 0..3 {
