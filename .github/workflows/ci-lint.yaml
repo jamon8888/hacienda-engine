@@ -39,6 +39,7 @@ jobs:
         with:
           node-version: "20"
           cache: pnpm
+          cache-dependency-path: apps/hacienda-studio/pnpm-lock.yaml
 
       - name: Install Studio dependencies
         run: pnpm --dir apps/hacienda-studio install --frozen-lockfile

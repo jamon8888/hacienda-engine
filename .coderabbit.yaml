@@ -37,10 +37,8 @@ reviews:
     base_branches:
       - ".*"
 
-    # Drafts are excluded on purpose: PR #9 is a draft, and on the Free plan every
-    # review of an in-progress branch burns quota needed for real PRs. Flip to true if
-    # you want drafts covered too.
-    drafts: false
+    # Review draft feature slices so findings can be fixed before marking them ready.
+    drafts: true
 
     # Re-reviewing on every push burns Free-plan quota fastest, but leaving this off
     # turned out worse in practice: the manual fallback ("@coderabbitai review") is
