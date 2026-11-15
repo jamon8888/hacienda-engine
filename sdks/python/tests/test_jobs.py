@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import time
 
 from hacienda_sdk import HaciendaClient
 from hacienda_sdk._generated.models.document_input import DocumentInput
@@ -19,6 +20,12 @@ def test_get_job_result_matches_get_job_status(client: HaciendaClient) -> None:
     job_id = _submit_background_job(client)
 
     job = client.jobs.get_job(job_id)
+    deadline = time.monotonic() + 10
+    while job.status not in {"succeeded", "failed", "cancelled"} and time.monotonic() < deadline:
+        time.sleep(0.05)
+        job = client.jobs.get_job(job_id)
+
+    assert job.status in {"succeeded", "failed", "cancelled"}, "background job did not finish"
     result = client.jobs.get_job_result(job_id)
 
     assert result.status == job.status
