@@ -70,9 +70,7 @@ const MAX_PAGE_LIMIT: usize = 1000;
 #[derive(Clone)]
 pub struct HaciendaMcp {
     facade: Arc<HaciendaFacade>,
-    // Read by the `#[tool_handler]`-generated `ServerHandler::{list_tools,call_tool}` —
-    // rustc's dead-code pass does not see through that macro expansion.
-    #[allow(dead_code)]
+    // Used by the `#[tool_handler(router = self.tool_router)]` dispatch methods.
     tool_router: ToolRouter<HaciendaMcp>,
 }
 
@@ -245,7 +243,7 @@ impl HaciendaMcp {
                     "`limit` must be at least 1: a limit of 0 returns an empty page, \
                      indistinguishable from having reached the end of the history",
                     None,
-                ))
+                ));
             }
             Some(n) => n.min(MAX_PAGE_LIMIT),
         };
@@ -316,9 +314,9 @@ impl HaciendaMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for HaciendaMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let capabilities = ServerCapabilities::builder().enable_tools().build();
 
         let server_info = Implementation::new("hacienda-mcp", env!("CARGO_PKG_VERSION"))

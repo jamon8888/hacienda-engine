@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Protocol Buffers compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-08-06
@@ -43,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Protocol Buffers compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-08-06
@@ -62,7 +62,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Protocol Buffers compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-08-06
@@ -87,7 +87,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Protocol Buffers compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-08-06

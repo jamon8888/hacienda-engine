@@ -30,7 +30,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM rust:1.99.1-slim-bookworm AS builder
 WORKDIR /app
 RUN cargo install cargo-chef --locked
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /app/recipe.json recipe.json
 # Root Cargo.toml's `[patch.crates-io]` path dependencies have to exist before

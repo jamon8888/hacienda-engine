@@ -54,6 +54,7 @@ const MAX_RAG_DOCUMENT_LIST_LIMIT: u32 = 200;
 /// through a collection's documents via `RagStore::list_documents`. Not
 /// caller-configurable — an implementation detail of the background job, not
 /// a wire parameter.
+#[cfg(feature = "rag-embeddings")]
 const MIGRATE_PAGE_SIZE: u32 = 50;
 
 /// Returns the configured store, or a client-safe error if RAG is disabled.

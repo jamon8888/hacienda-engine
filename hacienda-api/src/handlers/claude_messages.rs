@@ -755,16 +755,15 @@ impl ResponseRelay {
     async fn accept(&mut self, event: ProviderSseEvent) -> Result<(), ()> {
         let action = self.validator.accept(&event)?;
         match action {
-            ValidationAction::BlockStart { index, kind } => {
+            ValidationAction::BlockStart { kind } => {
                 self.active = Some(BufferedBlock {
                     kind,
                     joined: String::new(),
                     deltas: Vec::new(),
                 });
                 self.pending.push_back(event);
-                let _ = index;
             }
-            ValidationAction::BlockDelta { kind, .. } => {
+            ValidationAction::BlockDelta { kind } => {
                 let value: Value = serde_json::from_str(&event.data).map_err(|_| ())?;
                 let fragment = match kind {
                     BlockKind::Text => value.pointer("/delta/text").and_then(Value::as_str),
@@ -880,8 +879,8 @@ struct ResponseValidator {
 
 enum ValidationAction {
     Immediate,
-    BlockStart { index: u64, kind: BlockKind },
-    BlockDelta { index: u64, kind: BlockKind },
+    BlockStart { kind: BlockKind },
+    BlockDelta { kind: BlockKind },
     BlockStop,
     Error,
 }
@@ -968,10 +967,7 @@ impl ResponseValidator {
                 };
                 self.active = Some((index, block_kind));
                 self.phase = ResponsePhase::InBlock;
-                Ok(ValidationAction::BlockStart {
-                    index,
-                    kind: block_kind,
-                })
+                Ok(ValidationAction::BlockStart { kind: block_kind })
             }
             "content_block_delta" => {
                 if self.phase != ResponsePhase::InBlock {
@@ -1002,10 +998,7 @@ impl ResponseValidator {
                         }
                     }
                 }
-                Ok(ValidationAction::BlockDelta {
-                    index,
-                    kind: block_kind,
-                })
+                Ok(ValidationAction::BlockDelta { kind: block_kind })
             }
             "content_block_stop" => {
                 if self.phase != ResponsePhase::InBlock {
@@ -1107,101 +1100,101 @@ fn is_hacienda_token_only(value: &str) -> bool {
     rest.is_empty()
 }
 
-fn redact_and_validate_provider_events<'a>(
-    events: &'a [ProviderSseEvent],
-    facade: &'a HaciendaFacade,
-    caller: Caller<'a>,
-) -> impl std::future::Future<Output = Result<Vec<ProviderSseEvent>, ApiError>> + 'a {
-    async move {
-        let mut validator = ResponseValidator::default();
-        let mut output = Vec::new();
-        let mut active: Option<BufferedBlock> = None;
-        for event in events {
-            let action = validator.accept(event).map_err(|_| ApiError::internal())?;
-            match action {
-                ValidationAction::BlockStart { kind, .. } => {
-                    active = Some(BufferedBlock {
-                        kind,
-                        joined: String::new(),
-                        deltas: Vec::new(),
-                    });
-                    output.push(event.clone());
-                }
-                ValidationAction::BlockDelta { kind, .. } => {
-                    let value: Value =
-                        serde_json::from_str(&event.data).map_err(|_| ApiError::internal())?;
-                    let pointer = if kind == BlockKind::Text {
-                        "/delta/text"
-                    } else {
-                        "/delta/partial_json"
-                    };
-                    let fragment = value
-                        .pointer(pointer)
-                        .and_then(Value::as_str)
-                        .ok_or_else(ApiError::internal)?;
-                    let block = active.as_mut().ok_or_else(ApiError::internal)?;
-                    block.joined.push_str(fragment);
-                    if block.joined.len() > MAX_BLOCK_BUFFER {
-                        return Err(ApiError::internal());
-                    }
-                    block.deltas.push(event.clone());
-                }
-                ValidationAction::BlockStop => {
-                    let block = active.take().ok_or_else(ApiError::internal)?;
-                    let joined = if block.kind == BlockKind::ToolUse {
-                        serde_json::from_str::<Value>(&block.joined)
-                            .ok()
-                            .filter(Value::is_object)
-                            .ok_or_else(ApiError::internal)?;
-                        block.joined.clone()
-                    } else {
-                        block.joined.clone()
-                    };
-                    let redacted = facade
-                        .redact_text_with_auth(caller, &joined)
-                        .await
-                        .map_err(ApiError::from)?
-                        .redacted_text;
-                    if block.kind == BlockKind::ToolUse
-                        && !serde_json::from_str::<Value>(&redacted)
-                            .ok()
-                            .is_some_and(|value| value.is_object())
-                    {
-                        return Err(ApiError::internal());
-                    }
-                    output.extend(
-                        redact_block_deltas(block.deltas, block.kind, redacted)
-                            .map_err(|_| ApiError::internal())?,
-                    );
-                    output.push(event.clone());
-                }
-                ValidationAction::Error => {
-                    let mut value: Value =
-                        serde_json::from_str(&event.data).map_err(|_| ApiError::internal())?;
-                    let message = value
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .ok_or_else(ApiError::internal)?;
-                    let redacted = facade
-                        .redact_text_with_auth(caller, message)
-                        .await
-                        .map_err(ApiError::from)?
-                        .redacted_text;
-                    *value
-                        .pointer_mut("/error/message")
-                        .ok_or_else(ApiError::internal)? = Value::String(redacted);
-                    let mut safe = event.clone();
-                    safe.data = serde_json::to_string(&value).map_err(|_| ApiError::internal())?;
-                    output.push(safe);
-                }
-                ValidationAction::Immediate => output.push(event.clone()),
+#[cfg(test)]
+async fn redact_and_validate_provider_events(
+    events: &[ProviderSseEvent],
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+) -> Result<Vec<ProviderSseEvent>, ApiError> {
+    let mut validator = ResponseValidator::default();
+    let mut output = Vec::new();
+    let mut active: Option<BufferedBlock> = None;
+    for event in events {
+        let action = validator.accept(event).map_err(|_| ApiError::internal())?;
+        match action {
+            ValidationAction::BlockStart { kind } => {
+                active = Some(BufferedBlock {
+                    kind,
+                    joined: String::new(),
+                    deltas: Vec::new(),
+                });
+                output.push(event.clone());
             }
+            ValidationAction::BlockDelta { kind } => {
+                let value: Value =
+                    serde_json::from_str(&event.data).map_err(|_| ApiError::internal())?;
+                let pointer = if kind == BlockKind::Text {
+                    "/delta/text"
+                } else {
+                    "/delta/partial_json"
+                };
+                let fragment = value
+                    .pointer(pointer)
+                    .and_then(Value::as_str)
+                    .ok_or_else(ApiError::internal)?;
+                let block = active.as_mut().ok_or_else(ApiError::internal)?;
+                block.joined.push_str(fragment);
+                if block.joined.len() > MAX_BLOCK_BUFFER {
+                    return Err(ApiError::internal());
+                }
+                block.deltas.push(event.clone());
+            }
+            ValidationAction::BlockStop => {
+                let block = active.take().ok_or_else(ApiError::internal)?;
+                let joined = if block.kind == BlockKind::ToolUse {
+                    serde_json::from_str::<Value>(&block.joined)
+                        .ok()
+                        .filter(Value::is_object)
+                        .ok_or_else(ApiError::internal)?;
+                    block.joined.clone()
+                } else {
+                    block.joined.clone()
+                };
+                let redacted = facade
+                    .redact_text_with_auth(caller, &joined)
+                    .await
+                    .map_err(ApiError::from)?
+                    .redacted_text;
+                if block.kind == BlockKind::ToolUse
+                    && !serde_json::from_str::<Value>(&redacted)
+                        .ok()
+                        .is_some_and(|value| value.is_object())
+                {
+                    return Err(ApiError::internal());
+                }
+                output.extend(
+                    redact_block_deltas(block.deltas, block.kind, redacted)
+                        .map_err(|_| ApiError::internal())?,
+                );
+                output.push(event.clone());
+            }
+            ValidationAction::Error => {
+                let mut value: Value =
+                    serde_json::from_str(&event.data).map_err(|_| ApiError::internal())?;
+                let message = value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .ok_or_else(ApiError::internal)?;
+                let redacted = facade
+                    .redact_text_with_auth(caller, message)
+                    .await
+                    .map_err(ApiError::from)?
+                    .redacted_text;
+                *value
+                    .pointer_mut("/error/message")
+                    .ok_or_else(ApiError::internal)? = Value::String(redacted);
+                let mut safe = event.clone();
+                safe.data = serde_json::to_string(&value).map_err(|_| ApiError::internal())?;
+                output.push(safe);
+            }
+            ValidationAction::Immediate => output.push(event.clone()),
         }
-        validator.finish().map_err(|_| ApiError::internal())?;
-        Ok(output)
     }
+    validator.finish().map_err(|_| ApiError::internal())?;
+    Ok(output)
 }
 
+#[cfg(test)]
 fn validate_provider_events(events: &[ProviderSseEvent]) -> Result<(), ()> {
     if events.is_empty() {
         return Err(());
@@ -1213,19 +1206,14 @@ fn validate_provider_events(events: &[ProviderSseEvent]) -> Result<(), ()> {
     validator.finish()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ResponsePhase {
+    #[default]
     AwaitMessageStart,
     ReadyForBlock,
     InBlock,
     AfterMessageDelta,
     Done,
-}
-
-impl Default for ResponsePhase {
-    fn default() -> Self {
-        Self::AwaitMessageStart
-    }
 }
 
 fn validate_usage(value: &Value) -> Result<(), ()> {

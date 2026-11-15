@@ -44,7 +44,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Protocol Buffers compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       # Pinned date: see ci-rust.yaml's top-of-file comment for why an unpinned
       # nightly channel broke CI on 2026-08-08.
       - uses: dtolnay/rust-toolchain@nightly
@@ -98,7 +98,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Protocol Buffers compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       # Pinned date: see ci-rust.yaml's top-of-file comment for why an unpinned
       # nightly channel broke CI on 2026-08-08.
       - uses: dtolnay/rust-toolchain@nightly

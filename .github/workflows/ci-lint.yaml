@@ -29,7 +29,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            protobuf-compiler
+            protobuf-compiler \
+            libprotobuf-dev
 
       - uses: pnpm/action-setup@v4
         with:

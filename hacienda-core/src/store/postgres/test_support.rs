@@ -5,29 +5,170 @@
 //! no longer need a human to export `DATABASE_URL` before running them. The container
 //! and its `PgPool` are returned together: the pool must not outlive the container (the
 //! container stops on drop, which then refuses new connections), so callers keep both
-//! alive for the duration of the test rather than discarding the `ContainerAsync` handle.
+//! alive for the duration of the test rather than discarding the container handle.
 //!
-//! `#[cfg(test)]`-only: this module — and the `testcontainers`/`testcontainers-modules`
-//! dev-dependencies it needs — only exist for `cargo test`, never for a published build.
+//! `#[cfg(test)]`-only: this module requires a local Docker CLI and daemon for
+//! `cargo test`, never for a published build.
 
 use super::connection;
 use crate::tenancy::TenantId;
 use sqlx::PgPool;
-use std::sync::OnceLock;
-use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
-use testcontainers_modules::postgres::Postgres as PostgresImage;
+use std::{
+    process::{Command, Stdio},
+    sync::OnceLock,
+    time::Duration,
+};
 use tokio::sync::OnceCell;
+
+/// Owns the container from successful `docker run` until fixture setup fails or the
+/// fixture is dropped. In both cases, cleanup runs even during a panic.
+struct DockerContainer {
+    id: String,
+}
+
+impl DockerContainer {
+    fn start() -> Self {
+        let container = Self {
+            id: format!("hacienda-core-pg-{}", uuid::Uuid::new_v4()),
+        };
+        let output = Command::new("docker")
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                &container.id,
+                "--publish",
+                "127.0.0.1::5432",
+                "--env",
+                "POSTGRES_PASSWORD=postgres",
+                "postgres:16-alpine",
+            ])
+            .output()
+            .expect("failed to execute Docker CLI; install Docker and start its daemon");
+        assert!(
+            output.status.success(),
+            "failed to start disposable Postgres 16 container {}: {}",
+            container.id,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        assert!(
+            !output.stdout.is_empty(),
+            "docker run returned no container ID for {}",
+            container.id
+        );
+        // `SHARED` is static and Rust does not drop statics at process exit.
+        // A detached child removes the container once this test process exits;
+        // `Drop` still handles failures and short-lived fixtures immediately.
+        let parent_pid = std::process::id().to_string();
+        Command::new("sh")
+            .args([
+                "-c",
+                "while kill -0 \"$1\" 2>/dev/null; do sleep 2; done; docker rm --force \"$2\" >/dev/null 2>&1",
+                "hacienda-postgres-reaper",
+                &parent_pid,
+                &container.id,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to start Postgres test container cleanup process");
+        container
+    }
+
+    fn command(&self, args: &[&str]) -> std::process::Output {
+        Command::new("docker")
+            .args(args)
+            .arg(&self.id)
+            .output()
+            .expect("Docker CLI stopped working while preparing the Postgres fixture")
+    }
+
+    fn host_port(&self) -> u16 {
+        let output = self.command(&["port"]);
+        assert!(
+            output.status.success(),
+            "failed to read Postgres container port: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let ports = String::from_utf8_lossy(&output.stdout);
+        let mapping = ports
+            .lines()
+            .find_map(|line| line.strip_prefix("5432/tcp -> 127.0.0.1:"))
+            .unwrap_or_else(|| panic!("Docker did not publish Postgres on loopback: {ports}"));
+        mapping.parse().expect("invalid mapped Postgres port")
+    }
+
+    fn logs(&self) -> String {
+        let output = self.command(&["logs"]);
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    async fn wait_ready(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let output = Command::new("docker")
+                .args([
+                    "exec",
+                    &self.id,
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-U",
+                    "postgres",
+                    "-d",
+                    "postgres",
+                ])
+                .output()
+                .expect("Docker CLI stopped working while waiting for Postgres");
+            if output.status.success() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Postgres 16 container {} did not become ready within 60s; pg_isready: {}; logs:\n{}",
+                self.id,
+                String::from_utf8_lossy(&output.stderr).trim(),
+                self.logs()
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+impl Drop for DockerContainer {
+    fn drop(&mut self) {
+        match Command::new("docker")
+            .args(["rm", "--force", &self.id])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => eprintln!(
+                "failed to remove Postgres test container {}: {}",
+                self.id,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => eprintln!(
+                "failed to remove Postgres test container {}: {error}",
+                self.id
+            ),
+        }
+    }
+}
 
 /// A running disposable Postgres container plus a migrated pool connected to it.
 ///
 /// Keep this value alive for as long as the pool is used — dropping it stops the
 /// container, and any pool connection acquired afterwards fails.
 pub struct PostgresFixture {
-    /// Held only to keep the container alive; the pool and URL are the actual test
-    /// surface.
-    _container: ContainerAsync<PostgresImage>,
     database_url: String,
     pool: PgPool,
+    /// Dropped after the pool; the pool and URL are the actual test surface.
+    _container: DockerContainer,
 }
 
 impl PostgresFixture {
@@ -39,26 +180,11 @@ impl PostgresFixture {
     /// built on top of it fail with a misleading assertion instead of the real cause, so
     /// this fails loudly at setup time instead.
     pub async fn start() -> Self {
-        // `testcontainers-modules`' default Postgres tag is `11-alpine` (pre-PG13), which
-        // predates `gen_random_uuid()` becoming a core built-in — the migrations in
-        // `hacienda-core/migrations/0001_init.sql` use it unqualified, with no `pgcrypto`
-        // extension, matching PG13+. Pin `16-alpine` to track the same major version as
-        // the `pgvector/pgvector:pg16` container used for local/CI Postgres testing
-        // elsewhere in this repo.
-        let container = PostgresImage::default()
-            .with_tag("16-alpine")
-            .start()
-            .await
-            .expect("failed to start disposable Postgres container");
-        let host = container
-            .get_host()
-            .await
-            .expect("failed to resolve container host");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("failed to resolve mapped Postgres port");
-        let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+        // Match the Postgres 16 major used by the local/CI pgvector service.
+        let container = DockerContainer::start();
+        let port = container.host_port();
+        container.wait_ready().await;
+        let database_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
         let pool = connection::connect(&database_url)
             .await
@@ -68,9 +194,9 @@ impl PostgresFixture {
             .expect("failed to run migrations against disposable Postgres container");
 
         Self {
-            _container: container,
             database_url,
             pool,
+            _container: container,
         }
     }
 
