@@ -41,6 +41,11 @@ run_gate secrecy-client-npm-ci \
 run_gate secrecy-client-check \
     npm run check --prefix apps/hacienda-secrecy-client
 
+# Tauri resolves bundle resources in its build script even for `cargo clippy`.
+# Stage the checksum-verified native runtime before the client Cargo gate.
+run_gate secrecy-client-onnxruntime \
+    npm run prepare:onnxruntime --prefix apps/hacienda-secrecy-client
+
 run_gate client-tests cargo test -p hacienda-client-core
 run_gate rag-tests cargo test -p hacienda-rag --features lancedb
 run_gate backend-tests cargo test -p hacienda-backend --all-targets

@@ -357,9 +357,9 @@ describe("loadNerModel storage-quota preflight", () => {
         if (!db.objectStoreNames.contains("models")) db.createObjectStore("models");
       },
     });
-    await db.put("models", new Uint8Array([1]), "gliner2-guardrails-pii-model");
-    await db.put("models", new Uint8Array([2]), "gliner2-guardrails-pii-tokenizer");
-    await db.put("models", new Uint8Array([3]), "gliner2-guardrails-pii-config");
+    await db.put("models", new Uint8Array([1]), "model-jamon8888-gliner2-guardrails-pii-f16");
+    await db.put("models", new Uint8Array([2]), "tokenizer-jamon8888-gliner2-guardrails-pii-f16");
+    await db.put("models", new Uint8Array([3]), "config-jamon8888-gliner2-guardrails-pii-f16");
     db.close();
 
     // Quota deliberately reports far too little space — if the preflight ran before the

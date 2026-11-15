@@ -577,6 +577,8 @@ impl Backend {
         if dossier_id.trim().is_empty()
             || document_id.trim().is_empty()
             || version_id.trim().is_empty()
+            || document_id.contains(':')
+            || version_id.contains(':')
         {
             return Err(BackendError::InvalidScope);
         }
@@ -706,6 +708,9 @@ impl Backend {
         self.profile
             .validate_rehydration(request)
             .map_err(|_| BackendError::RehydrationDenied)?;
+        if document.tenant_scope != self.tenant_scope() {
+            return Err(BackendError::RehydrationDenied);
+        }
         if !request.document_ids.iter().any(|id| {
             id == document
                 .rag_document
@@ -1043,7 +1048,38 @@ impl Backend {
                     idempotent: true,
                 });
             }
-            return Err(BackendError::ImmutableVersionConflict);
+            // A failed LanceDB write can leave the document row without all of its
+            // chunks. Only an exact document and exact prefix of expected chunks may
+            // be repaired. A complete immutable version is handled above.
+            if existing.0 != candidate.rag_document
+                || existing.1.len() >= candidate.chunks.len()
+                || !candidate.chunks.starts_with(&existing.1)
+            {
+                return Err(BackendError::ImmutableVersionConflict);
+            }
+        }
+
+        // Reject collection/provenance failures before recording a successful save
+        // attempt in the audit chain. The base version already requires this collection.
+        if let Some(embedder) = embedder {
+            let metadata = embedder.metadata();
+            let spec = metadata.collection_spec(collection.clone());
+            if let Some(existing) = store.get_collection(&collection).await? {
+                if existing.embedding_dim != spec.embedding_dim
+                    || existing.embedding_source.as_deref().is_some_and(|source| {
+                        source != spec.embedding_source.as_deref().unwrap_or_default()
+                    })
+                    || (existing.embedding_source.is_some()
+                        && existing.embedding_version != spec.embedding_version)
+                {
+                    return Err(BackendError::EmbeddingProvenanceMismatch);
+                }
+            }
+            store.ensure_collection(&spec).await?;
+        } else {
+            store
+                .ensure_collection(&CollectionSpec::new(&collection, 0))
+                .await?;
         }
 
         let tenant = TenantId::new(self.tenant_scope().unwrap_or_else(|| "local".into()));
@@ -1078,25 +1114,6 @@ impl Backend {
         // plus the serialized equality check above prevents ordinary overwrites; the lock
         // closes races between saves through this Backend instance. A store-level
         // create-only primitive is still required to make this atomic across processes.
-        if let Some(embedder) = embedder {
-            let metadata = embedder.metadata();
-            let spec = metadata.collection_spec(collection.clone());
-            if let Some(existing) = store.get_collection(&collection).await?
-                && (existing.embedding_dim != spec.embedding_dim
-                    || existing.embedding_source.as_deref().is_some_and(|source| {
-                        source != spec.embedding_source.as_deref().unwrap_or_default()
-                    })
-                    || (existing.embedding_source.is_some()
-                        && existing.embedding_version != spec.embedding_version))
-            {
-                return Err(BackendError::EmbeddingProvenanceMismatch);
-            }
-            store.ensure_collection(&spec).await?;
-        } else {
-            store
-                .ensure_collection(&CollectionSpec::new(&collection, 0))
-                .await?;
-        }
         let rag_document_id = store
             .upsert_document(&collection, &candidate.rag_document, &candidate.chunks)
             .await?;
@@ -1390,6 +1407,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn document_references_cannot_collide_at_the_external_id() {
+        let backend = Backend::new(local()).unwrap();
+        let source = RedactedXbergDocument::test(document("text/plain"));
+        assert!(matches!(
+            backend.project(&source, "case", "case:doc", "v1"),
+            Err(BackendError::InvalidScope)
+        ));
+        assert!(matches!(
+            backend.project(&source, "case", "case", "doc:v1"),
+            Err(BackendError::InvalidScope)
+        ));
+    }
+
+    #[test]
+    fn rehydration_rejects_another_tenants_document() {
+        let backend_a = Backend::new(team("tenant-a")).unwrap();
+        let backend_b = Backend::new(team("tenant-b")).unwrap();
+        let record = backend_b
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let request = RehydrationRequest {
+            document_ids: vec!["doc:v1".into()],
+            tenant_scope: Some(TenantScope("tenant-a".into())),
+            capability: RehydrationCapability::AuditedServer {
+                gateway: GatewayId("team".into()),
+                audit: AuditReference("audit".into()),
+            },
+        };
+        assert!(matches!(
+            backend_a.rehydrate(&request, &record, &record.rag_document().full_text),
+            Err(BackendError::RehydrationDenied)
+        ));
+    }
+
     #[tokio::test]
     async fn persistence_is_idempotent_and_provider_content_is_tokenized() {
         let backend = Backend::new(local()).unwrap();
@@ -1675,6 +1732,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_candidate_write_is_repaired_after_audit() {
+        let backend = Backend::new(local()).unwrap();
+        let base = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let store = InMemoryVectorStore::default();
+        backend
+            .persist_to(&store, "contracts", &base)
+            .await
+            .unwrap();
+        let issuer = TrustedEditorRevisionIssuer::new(ready_pipeline()).unwrap();
+        let revision = issuer.issue(&base, &base.editor().editor).await.unwrap();
+        let version = revision_version_id(&base, &revision).unwrap();
+        let candidate =
+            build_editor_revision_document(&backend, &base, &revision, &version).unwrap();
+        let candidate_id = store
+            .upsert_document("local:contracts", &candidate.rag_document, &[])
+            .await
+            .unwrap();
+        let audit = InMemoryAuditStore::new("default");
+        let saved = backend
+            .append_editor_revision(&audit, &store, "contracts", &base, &revision)
+            .await
+            .unwrap();
+        assert_eq!(saved.rag_document_id, candidate_id);
+        assert!(!saved.idempotent);
+        assert_eq!(
+            audit.entries(&TenantId::new("local")).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store
+                .get_document_chunks("local:contracts", &candidate_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            candidate.chunks
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_paragraphs_are_kept_without_empty_embedding_inputs() {
+        let backend = Backend::new(local()).unwrap();
+        let base = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let changed = json!({"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Alpha"}]},
+            {"type": "paragraph"},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Beta"}]}
+        ]});
+        let issuer = TrustedEditorRevisionIssuer::new(ready_pipeline()).unwrap();
+        let revision = issuer.issue(&base, &changed).await.unwrap();
+        let candidate = backend
+            .document_for_editor_revision(&base, &revision, "v2")
+            .unwrap();
+        assert_eq!(candidate.rag_document.full_text, "Alpha\n\nBeta");
+        assert!(
+            candidate
+                .chunks
+                .iter()
+                .all(|chunk| !chunk.content.is_empty())
+        );
+        validate_backend_document(&backend, &candidate).unwrap();
+    }
+
+    #[cfg(feature = "chunking")]
+    #[tokio::test]
+    async fn long_single_line_revision_validates_overlapping_chunks() {
+        let backend = Backend::new(local()).unwrap();
+        let base = backend
+            .project(
+                &RedactedXbergDocument::test(document("text/plain")),
+                "case",
+                "doc",
+                "v1",
+            )
+            .unwrap();
+        let long_text = "A legal sentence with no sensitive details. ".repeat(100);
+        let changed = json!({"type": "doc", "content": [{"type": "paragraph", "content": [
+            {"type": "text", "text": long_text}
+        ]}]});
+        let issuer = TrustedEditorRevisionIssuer::new(ready_pipeline()).unwrap();
+        let revision = issuer.issue(&base, &changed).await.unwrap();
+        let candidate = backend
+            .document_for_editor_revision(&base, &revision, "v2")
+            .unwrap();
+        assert!(candidate.chunks.len() > 1);
+        validate_backend_document(&backend, &candidate).unwrap();
+    }
+
+    #[tokio::test]
     async fn trusted_issuer_redacts_changed_plaintext_before_attestation() {
         let backend = Backend::new(local()).unwrap();
         let base = backend
@@ -1901,6 +2061,10 @@ fn revision_version_id(
     base: &BackendDocument,
     revision: &PipelineAttestedEditorRevision,
 ) -> Result<String, BackendError> {
+    validate_editor_envelope(&revision.editor)?;
+    if base.editor.document_ref.contains(':') || base.editor.version_ref.contains(':') {
+        return Err(BackendError::InvalidScope);
+    }
     let payload = serde_json::to_vec(&(
         base.editor.document_ref.as_str(),
         base.editor.version_ref.as_str(),
@@ -1919,6 +2083,8 @@ fn validate_backend_document(
         || document.dossier_id.trim().is_empty()
         || document.editor.document_ref.trim().is_empty()
         || document.editor.version_ref.trim().is_empty()
+        || document.editor.document_ref.contains(':')
+        || document.editor.version_ref.contains(':')
     {
         return Err(BackendError::InvalidScope);
     }
@@ -1931,24 +2097,51 @@ fn validate_backend_document(
     if projected_text != document.rag_document.full_text
         || blake3::hash(projected_text.as_bytes()).to_hex().to_string() != document.source_hash
         || document.rag_document.external_id.as_deref() != Some(expected_external_id.as_str())
+        || document.rag_document.labels["tenant_scope"] != json!(backend.tenant_scope())
+        || document.rag_document.labels["dossier_id"] != document.dossier_id
+        || document.rag_document.labels["document_id"] != document.editor.document_ref
+        || document.rag_document.labels["version_id"] != document.editor.version_ref
+        || document.rag_document.labels["source_hash"] != document.source_hash
     {
         return Err(BackendError::InvalidEditorRevision(
             "document content is not derived from its validated editor projection".into(),
         ));
     }
+    #[cfg(feature = "chunking")]
+    let expected_chunks = hacienda_rag::chunk_full_text(
+        &projected_text,
+        &xberg::ChunkingConfig {
+            max_characters: 1024,
+            overlap: 100,
+            ..Default::default()
+        },
+    )?;
+    #[cfg(not(feature = "chunking"))]
+    let expected_chunks = vec![ChunkRecord {
+        external_id: None,
+        ordinal: 0,
+        content: projected_text.clone(),
+        embedding: Vec::new(),
+        sparse_embedding: None,
+        multi_vector: None,
+        chunk_metadata: Value::Null,
+    }];
     if document.chunks.is_empty()
         || document
             .chunks
             .iter()
             .enumerate()
             .any(|(ordinal, chunk)| chunk.ordinal != ordinal as u32)
+        || document.chunks.len() != expected_chunks.len()
         || document
             .chunks
             .iter()
-            .map(|chunk| chunk.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-            != projected_text
+            .zip(&expected_chunks)
+            .any(|(actual, expected)| {
+                actual.content != expected.content
+                    || actual.external_id.as_deref()
+                        != Some(format!("{expected_external_id}:{}", actual.ordinal).as_str())
+            })
     {
         return Err(BackendError::InvalidEditorRevision(
             "document chunks are not derived from its editor projection".into(),
@@ -2015,6 +2208,9 @@ fn build_editor_revision_document(
     revision: &PipelineAttestedEditorRevision,
     version_id: &str,
 ) -> Result<BackendDocument, BackendError> {
+    if version_id.trim().is_empty() || version_id.contains(':') {
+        return Err(BackendError::InvalidScope);
+    }
     let mut editor = revision.editor.clone();
     editor.version_ref = version_id.to_owned();
     let full_text = editor_text(&editor.editor)?;
@@ -2070,19 +2266,15 @@ fn build_editor_revision_document(
         },
     )?;
     #[cfg(not(feature = "chunking"))]
-    let mut chunks = full_text
-        .split('\n')
-        .enumerate()
-        .map(|(ordinal, content)| ChunkRecord {
-            external_id: None,
-            ordinal: ordinal as u32,
-            content: content.to_owned(),
-            embedding: Vec::new(),
-            sparse_embedding: None,
-            multi_vector: None,
-            chunk_metadata: Value::Null,
-        })
-        .collect::<Vec<_>>();
+    let mut chunks = vec![ChunkRecord {
+        external_id: None,
+        ordinal: 0,
+        content: full_text.clone(),
+        embedding: Vec::new(),
+        sparse_embedding: None,
+        multi_vector: None,
+        chunk_metadata: Value::Null,
+    }];
     for chunk in &mut chunks {
         chunk.external_id = Some(format!(
             "{}:{}:{}",
@@ -2160,7 +2352,11 @@ fn validate_editor_envelope(editor: &EditorEnvelope) -> Result<(), BackendError>
             "unsupported editor schema".into(),
         ));
     }
-    if editor.document_ref.trim().is_empty() || editor.version_ref.trim().is_empty() {
+    if editor.document_ref.trim().is_empty()
+        || editor.version_ref.trim().is_empty()
+        || editor.document_ref.contains(':')
+        || editor.version_ref.contains(':')
+    {
         return Err(BackendError::InvalidEditorRevision(
             "document and version references are required".into(),
         ));

@@ -8,7 +8,7 @@
 //! with `wasm-bindgen-test-runner` configured as the target runner).
 
 use hacienda_core::audit::{AuditEntryInput, AuditStore, InMemoryAuditStore};
-#[cfg(feature = "ner-candle-wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
 use hacienda_core::pii::NerDetector;
 use hacienda_core::pii::{PiiPipeline, PipelineConfig};
 use hacienda_core::tenancy::TenantId;
@@ -108,7 +108,7 @@ async fn redaction_round_trip_has_a_real_clock_and_uuid_on_wasm32() {
 /// Real GLiNER2 weights are ~600MB — infeasible as a CI fixture — so this only exercises
 /// the error path; model-accuracy verification with real weights is manual (see the
 /// 2026-08-09 wasm NER plan).
-#[cfg(feature = "ner-candle-wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
 #[wasm_bindgen_test]
 fn from_candle_bytes_rejects_garbage_input_on_wasm32() {
     let result = NerDetector::from_candle_bytes(&[], &[], &[]);

@@ -560,9 +560,8 @@ pub(crate) mod tests {
 
     /// A state with auth disabled, PII detection enabled (mask mode — no key
     /// resolver needed), and an in-memory RAG store attached. Used by the
-    /// streaming-answer tests: `handlers::rag_stream::answer` calls
-    /// `redact_text_with_auth` unconditionally, which fails closed with
-    /// `PiiDisabled` against the plain `state_with_rag()` facade.
+    /// streaming-answer and retrieval tests, whose response paths call
+    /// `redact_text_with_auth` and fail closed without a PII pipeline.
     fn state_with_rag_and_pii() -> ApiState {
         use hacienda_rag::{InMemoryVectorStore, RagStore};
 
@@ -1452,7 +1451,7 @@ pub(crate) mod tests {
     /// real router (not the store directly), so a routing/DTO wiring bug fails here.
     #[tokio::test]
     async fn rag_collection_document_retrieve_and_delete_round_trip() {
-        let app = build_router(state_with_rag());
+        let app = build_router(state_with_rag_and_pii());
 
         let create = app
             .clone()

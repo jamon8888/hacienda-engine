@@ -17,7 +17,7 @@ use axum::{
 };
 use hacienda_core::tenancy::TenantCtx;
 use hacienda_core::{auth::Caller, jobs::JobStatus, HaciendaFacade};
-use hacienda_rag::{CollectionSpec, DocumentId, RetrieveOutput, RetrieveQuery};
+use hacienda_rag::{CollectionSpec, DocumentId, DocumentSummary, RetrieveOutput, RetrieveQuery};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -165,6 +165,29 @@ async fn redact_retrieval_json(
     Ok(())
 }
 
+async fn redact_document_summary(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    document: &mut DocumentSummary,
+) -> Result<(), ApiError> {
+    if let Some(external_id) = &mut document.external_id {
+        *external_id = redact_retrieval_text(facade, caller, external_id).await?;
+    }
+    if let Some(title) = &mut document.title {
+        *title = redact_retrieval_text(facade, caller, title).await?;
+    }
+    if let Some(mime) = &mut document.mime {
+        *mime = redact_retrieval_text(facade, caller, mime).await?;
+    }
+    for keyword in &mut document.keywords {
+        *keyword = redact_retrieval_text(facade, caller, keyword).await?;
+    }
+    redact_retrieval_json(facade, caller, &mut document.labels).await?;
+    redact_retrieval_json(facade, caller, &mut document.entities).await?;
+    redact_retrieval_json(facade, caller, &mut document.metadata).await?;
+    Ok(())
+}
+
 async fn redact_retrieval_output(
     facade: &HaciendaFacade,
     caller: Caller<'_>,
@@ -180,21 +203,7 @@ async fn redact_retrieval_output(
         redact_retrieval_json(facade, caller, &mut chunk.chunk_metadata).await?;
 
         if let Some(document) = &mut chunk.document {
-            if let Some(external_id) = &mut document.external_id {
-                *external_id = redact_retrieval_text(facade, caller, external_id).await?;
-            }
-            if let Some(title) = &mut document.title {
-                *title = redact_retrieval_text(facade, caller, title).await?;
-            }
-            if let Some(mime) = &mut document.mime {
-                *mime = redact_retrieval_text(facade, caller, mime).await?;
-            }
-            for keyword in &mut document.keywords {
-                *keyword = redact_retrieval_text(facade, caller, keyword).await?;
-            }
-            redact_retrieval_json(facade, caller, &mut document.labels).await?;
-            redact_retrieval_json(facade, caller, &mut document.entities).await?;
-            redact_retrieval_json(facade, caller, &mut document.metadata).await?;
+            redact_document_summary(facade, caller, document).await?;
         }
     }
     Ok(output)
@@ -637,10 +646,13 @@ pub async fn list_documents(
         .unwrap_or(DEFAULT_RAG_DOCUMENT_LIST_LIMIT)
         .min(MAX_RAG_DOCUMENT_LIST_LIMIT);
     let offset = query.offset.unwrap_or(0);
-    let (documents, total) = store
+    let (mut documents, total) = store
         .list_documents(&scope_collection_name(&tenant_ctx, &name), limit, offset)
         .await
         .map_err(ApiError::from)?;
+    for document in &mut documents {
+        redact_document_summary(&state.facade, caller, document).await?;
+    }
     Ok(Json(ListDocumentsResponse { documents, total }))
 }
 
@@ -1351,7 +1363,7 @@ mod tests {
     async fn default_tenant_rejects_colon_prefixed_collection_names_before_store_access() {
         let state = state_with_rag();
         let other_tenant_name = "acme:contracts".to_string();
-        create_collection(
+        let _ = create_collection(
             State(state.clone()),
             parts_for("acme"),
             SafeJson(CollectionSpec::new("contracts", 3)),

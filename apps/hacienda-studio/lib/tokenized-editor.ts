@@ -293,6 +293,7 @@ export function buildTokenizedEditorEnvelope({
   mimeType,
   originalRef,
   viewerRef,
+  capabilityRef,
   metadata,
   markdown,
   findings,

@@ -15,13 +15,19 @@ def _submit_background_job(client: HaciendaClient) -> str:
     return client.documents.process_documents_background(request).job_id
 
 
-def test_get_job_result_matches_get_job_status(client: HaciendaClient) -> None:
+def test_get_job_result_reflects_current_or_later_status(client: HaciendaClient) -> None:
     job_id = _submit_background_job(client)
 
     job = client.jobs.get_job(job_id)
     result = client.jobs.get_job_result(job_id)
 
-    assert result.status == job.status
+    # These are separate HTTP reads while the background worker is running.
+    # The second response may have advanced to a later state.
+    rank = {"queued": 0, "running": 1, "succeeded": 2, "failed": 2}
+    assert job.id == job_id
+    assert rank[result.status] >= rank[job.status]
+    if job.status in {"succeeded", "failed"}:
+        assert result.status == job.status
 
 
 def test_list_jobs_includes_a_submitted_job(client: HaciendaClient) -> None:

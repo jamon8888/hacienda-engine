@@ -19,6 +19,7 @@ const ENGINE_CATEGORIES = new Set(
 describe("NER category vocabulary", () => {
   it("mirrors every non-custom variant of the engine's enum", () => {
     const mirrored: NerCategory[] = [
+      "custom",
       "person",
       "organization",
       "location",

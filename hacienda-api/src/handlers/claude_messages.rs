@@ -248,6 +248,20 @@ where
 }
 
 /// `POST /v1/messages`.
+#[utoipa::path(
+    post,
+    path = "/v1/messages",
+    tag = "messages",
+    operation_id = "claudeMessages",
+    security(("bearerAuth" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Redacted Anthropic Messages Server-Sent Events", content_type = "text/event-stream"),
+        (status = 400, description = "Invalid or unsupported Messages request"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
 pub async fn messages(
     State(state): State<ApiState>,
     parts: Parts,

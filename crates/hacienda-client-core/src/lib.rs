@@ -73,12 +73,13 @@ impl ServiceEndpoint {
     }
 
     fn is_loopback_http(&self) -> bool {
-        let Some(authority) = self.0.strip_prefix("http://") else {
+        let Ok(url) = reqwest::Url::parse(&self.0) else {
             return false;
         };
-        let host = authority.split('/').next().unwrap_or_default();
-        let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
-        matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+        url.scheme() == "http"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
     }
 
     fn is_https(&self) -> bool {
@@ -619,6 +620,24 @@ mod tests {
                 gateway: GatewayId("local-gateway".into()),
             },
         })
+    }
+
+    #[test]
+    fn local_endpoint_rejects_userinfo_with_remote_host() {
+        for malicious in [
+            "http://127.0.0.1:x@attacker.example/",
+            "http://localhost:@attacker.example/",
+        ] {
+            let InstallationConfig::LocalFull(mut profile) = local_config() else {
+                unreachable!();
+            };
+            profile.hacienda = Some(ServiceEndpoint::new(malicious));
+            assert_eq!(
+                InstallationConfig::LocalFull(profile).validate(),
+                Err(ConfigurationError::InsecureEndpoint)
+            );
+        }
+        assert!(ServiceEndpoint::new("http://[::1]").is_loopback_http());
     }
 
     fn team_config() -> InstallationConfig {

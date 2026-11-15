@@ -1498,32 +1498,41 @@ fn redact_provider_response<R: RedactionAdapter>(
     redactor: &R,
     response: ProviderResponse,
 ) -> Result<ProviderResponse, RedactionError> {
-    let redact = |mut chunk: ProviderStreamChunk| {
-        let original_references = chunk.content.references.clone();
-        let mut content = redactor.redact_text(&chunk.content.text)?;
-        for reference in original_references {
-            if !content.references.contains(&reference) {
-                content.references.push(reference);
+    let redact =
+        |chunks: Vec<ProviderStreamChunk>| -> Result<Vec<ProviderStreamChunk>, RedactionError> {
+            let Some(first) = chunks.first() else {
+                return Ok(chunks);
+            };
+            if chunks.iter().any(|chunk| {
+                chunk.conversation_id != first.conversation_id
+                    || chunk.context_id != first.context_id
+            }) {
+                return Err(RedactionError::Rejected);
             }
-        }
-        chunk.content = content;
-        Ok(chunk)
-    };
+            let joined: String = chunks
+                .iter()
+                .map(|chunk| chunk.content.text.as_str())
+                .collect();
+            let mut content = redactor.redact_text(&joined)?;
+            for reference in chunks.iter().flat_map(|chunk| &chunk.content.references) {
+                if !content.references.contains(reference) {
+                    content.references.push(reference.clone());
+                }
+            }
+            Ok(vec![ProviderStreamChunk {
+                conversation_id: first.conversation_id.clone(),
+                context_id: first.context_id.clone(),
+                sequence: first.sequence,
+                content,
+            }])
+        };
     Ok(match response {
         ProviderResponse::ClaudeDesktop(mut response) => {
-            response.chunks = response
-                .chunks
-                .into_iter()
-                .map(redact)
-                .collect::<Result<_, _>>()?;
+            response.chunks = redact(response.chunks)?;
             ProviderResponse::ClaudeDesktop(response)
         }
         ProviderResponse::Codex(mut response) => {
-            response.chunks = response
-                .chunks
-                .into_iter()
-                .map(redact)
-                .collect::<Result<_, _>>()?;
+            response.chunks = redact(response.chunks)?;
             ProviderResponse::Codex(response)
         }
     })
@@ -1715,6 +1724,46 @@ mod tests {
             };
             assert!(!text.contains(PERSON));
             assert!(text.contains(PERSON_TOKEN));
+        }
+    }
+
+    #[test]
+    fn response_redaction_catches_pii_split_across_provider_chunks() {
+        for provider in [ProviderKind::ClaudeDesktop, ProviderKind::Codex] {
+            let conversation_id = ConversationId::new("conversation");
+            let context_id = ContextId::new("context");
+            let chunks: Vec<ProviderStreamChunk> = ["Unexpected <per", "son-fixture>"]
+                .into_iter()
+                .enumerate()
+                .map(|(sequence, text)| ProviderStreamChunk {
+                    conversation_id: conversation_id.clone(),
+                    context_id: context_id.clone(),
+                    sequence: sequence as u64,
+                    content: TokenizedText::new(text, Vec::new()),
+                })
+                .collect();
+            let response = match provider {
+                ProviderKind::ClaudeDesktop => {
+                    ProviderResponse::ClaudeDesktop(ClaudeDesktopResponse {
+                        conversation_id: conversation_id.clone(),
+                        context_id: context_id.clone(),
+                        chunks,
+                    })
+                }
+                ProviderKind::Codex => ProviderResponse::Codex(CodexResponse {
+                    conversation_id: conversation_id.clone(),
+                    context_id: context_id.clone(),
+                    chunks,
+                }),
+            };
+            let response = redact_provider_response(&TestRedactor, response).unwrap();
+            let chunks = match response {
+                ProviderResponse::ClaudeDesktop(response) => response.chunks,
+                ProviderResponse::Codex(response) => response.chunks,
+            };
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].content.text, format!("Unexpected {PERSON_TOKEN}"));
+            assert!(!chunks[0].content.text.contains(PERSON));
         }
     }
 

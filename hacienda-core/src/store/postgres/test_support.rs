@@ -27,6 +27,9 @@ struct DockerContainer {
 }
 
 impl DockerContainer {
+    // The child deliberately outlives this test process so it can clean up a
+    // container held in a static fixture after Rust skips static destructors.
+    #[allow(clippy::zombie_processes)]
     fn start() -> Self {
         let container = Self {
             id: format!("hacienda-core-pg-{}", uuid::Uuid::new_v4()),

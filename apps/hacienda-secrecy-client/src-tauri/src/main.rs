@@ -26,6 +26,7 @@ use std::{
 #[cfg(not(test))]
 use tauri::Manager;
 use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
 
 use hacienda_client_core::{
@@ -478,16 +479,22 @@ struct LocalFullDocumentService {
 
 impl LocalFullDocumentService {
     async fn new(root: &Path, audit: Arc<dyn AuditStore>) -> Result<Self, String> {
-        let key = OsCredentialKeyStore
-            .load_or_create()
-            .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
-        let (facade, issuer) = configured_document_runtime(&key, root)?;
+        let runtime_root = root.to_path_buf();
+        let (facade, issuer) = tokio::task::spawn_blocking(move || {
+            let key = OsCredentialKeyStore
+                .load_or_create()
+                .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
+            configured_document_runtime(&key, &runtime_root)
+        })
+        .await
+        .map_err(|_| "LocalFull document runtime initialization failed".to_owned())??;
         let profile = local_full_profile(&root.join("lancedb"));
         let (backend, store) = Backend::connect_configured_lancedb(profile)
             .await
             .map_err(|_| "LocalFull LanceDB is unavailable".to_owned())?;
         let embedding_cache = root.join("models/xberg-embeddings");
-        std::fs::create_dir_all(&embedding_cache)
+        tokio::fs::create_dir_all(&embedding_cache)
+            .await
             .map_err(|_| "LocalFull embedding cache is unavailable".to_owned())?;
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         let acceleration = Some(xberg::AccelerationConfig {
@@ -535,8 +542,7 @@ impl LocalFullDocumentService {
             .ok_or_else(|| "Selected document filename is invalid".to_owned())?
             .to_owned();
         let mime_type = mime_type_for_filename(&filename);
-        let bytes =
-            std::fs::read(&path).map_err(|_| "Selected document could not be read".to_owned())?;
+        let bytes = read_selected_document(&path).await?;
         let result = self
             .facade
             .process(xberg::ExtractInput::from_bytes(
@@ -749,6 +755,29 @@ impl LocalFullDocumentService {
     }
 }
 
+async fn read_selected_document(path: &Path) -> Result<Vec<u8>, String> {
+    let limit = xberg::SecurityLimits::default().max_archive_size;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| "Selected document could not be read".to_owned())?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| "Selected document could not be read".to_owned())?;
+    if metadata.len() > limit as u64 {
+        return Err("Selected document exceeds the size limit".to_owned());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| "Selected document could not be read".to_owned())?;
+    if bytes.len() > limit {
+        return Err("Selected document exceeds the size limit".to_owned());
+    }
+    Ok(bytes)
+}
+
 fn opaque_reference(prefix: &str) -> String {
     let digest = blake3::hash(format!("{prefix}:{}", uuid::Uuid::new_v4()).as_bytes()).to_hex();
     format!("{prefix}_{}", &digest[..24])
@@ -830,6 +859,13 @@ impl LocalFullDocumentState {
 }
 
 const MAIN_WINDOW_LABEL: &str = "main";
+fn require_main_window(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() == MAIN_WINDOW_LABEL {
+        Ok(())
+    } else {
+        Err("Main window access is required".to_owned())
+    }
+}
 const LOCAL_VIEWER_PREFIX: &str = "local-viewer-";
 const VIEWER_SESSION_TTL: Duration = Duration::from_secs(60);
 /// Rust-only one-shot authority minted after the caller window, session, and token
@@ -1519,11 +1555,38 @@ impl NativeOriginalViewer {
 }
 
 trait OriginalViewerAdapter: Send + Sync {
+    fn authorize_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError>;
     fn open_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError>;
     fn register_original(&self, binding: OriginalBinding, path: PathBuf);
 }
 
 impl OriginalViewerAdapter for NativeOriginalViewer {
+    fn authorize_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError> {
+        let refs = [
+            &request.document_ref,
+            &request.version_ref,
+            &request.original_ref,
+            &request.viewer_ref,
+            &request.capability_ref,
+        ];
+        if refs.iter().any(|reference| reference.trim().is_empty()) {
+            return Err(OriginalViewerError::InvalidRequest);
+        }
+        let binding = OriginalBinding::from(request);
+        let bindings = self
+            .bindings
+            .lock()
+            .map_err(|_| OriginalViewerError::Unavailable)?;
+        let entry = bindings
+            .get(&binding)
+            .filter(|entry| !entry.consumed && entry.expires_at > Instant::now())
+            .ok_or(OriginalViewerError::Unauthorized)?;
+        if !entry.path.is_file() {
+            return Err(OriginalViewerError::Unavailable);
+        }
+        Ok(())
+    }
+
     fn open_original(&self, request: &OpenOriginalRequest) -> Result<(), OriginalViewerError> {
         let refs = [
             &request.document_ref,
@@ -1555,10 +1618,11 @@ impl OriginalViewerAdapter for NativeOriginalViewer {
         if !path.is_file() {
             return Err(OriginalViewerError::Unavailable);
         }
+        entry.consumed = true;
+        drop(bindings);
         self.opener
             .open(&path)
             .map_err(|_| OriginalViewerError::OpenFailed)?;
-        entry.consumed = true;
         Ok(())
     }
 
@@ -1570,6 +1634,13 @@ impl OriginalViewerAdapter for NativeOriginalViewer {
 struct FailClosedOriginalViewer;
 
 impl OriginalViewerAdapter for FailClosedOriginalViewer {
+    fn authorize_original(
+        &self,
+        _request: &OpenOriginalRequest,
+    ) -> Result<(), OriginalViewerError> {
+        Err(OriginalViewerError::Unavailable)
+    }
+
     fn open_original(&self, _request: &OpenOriginalRequest) -> Result<(), OriginalViewerError> {
         Err(OriginalViewerError::Unavailable)
     }
@@ -1578,21 +1649,21 @@ impl OriginalViewerAdapter for FailClosedOriginalViewer {
 }
 
 struct OriginalViewerCommandState {
-    adapter: Box<dyn OriginalViewerAdapter>,
+    adapter: Arc<dyn OriginalViewerAdapter>,
     audit_store: Option<Arc<dyn AuditStore>>,
 }
 
 impl OriginalViewerCommandState {
     fn fail_closed() -> Self {
         Self {
-            adapter: Box::new(FailClosedOriginalViewer),
+            adapter: Arc::new(FailClosedOriginalViewer),
             audit_store: None,
         }
     }
 
     fn native(audit_store: Arc<dyn AuditStore>) -> Self {
         Self {
-            adapter: Box::new(NativeOriginalViewer::new(Arc::new(SystemDesktopOpener))),
+            adapter: Arc::new(NativeOriginalViewer::new(Arc::new(SystemDesktopOpener))),
             audit_store: Some(audit_store),
         }
     }
@@ -1604,56 +1675,74 @@ impl OriginalViewerCommandState {
 
 #[tauri::command(rename = "open-original")]
 async fn open_original(
+    window: WebviewWindow,
     state: tauri::State<'_, OriginalViewerCommandState>,
     request: OpenOriginalRequest,
 ) -> Result<OpenOriginalResponse, String> {
-    state
-        .adapter
-        .open_original(&request)
+    require_main_window(&window)?;
+    let adapter = Arc::clone(&state.adapter);
+    let authorization = OpenOriginalRequest {
+        document_ref: request.document_ref.clone(),
+        version_ref: request.version_ref.clone(),
+        original_ref: request.original_ref.clone(),
+        viewer_ref: request.viewer_ref.clone(),
+        capability_ref: request.capability_ref.clone(),
+    };
+    let check_adapter = Arc::clone(&adapter);
+    tokio::task::spawn_blocking(move || check_adapter.authorize_original(&authorization))
+        .await
+        .map_err(|_| "Original viewer authorization task failed".to_owned())?
         .map_err(|error| error.to_string())?;
-    if let Some(audit) = &state.audit_store {
-        let digest = blake3::hash(
-            format!(
-                "{}:{}:{}:{}:{}",
-                request.document_ref,
-                request.version_ref,
-                request.original_ref,
-                request.viewer_ref,
-                request.capability_ref
-            )
-            .as_bytes(),
+    let audit = state
+        .audit_store
+        .as_ref()
+        .ok_or_else(|| "Original viewer audit failed closed".to_owned())?;
+    let digest = blake3::hash(
+        format!(
+            "{}:{}:{}:{}:{}",
+            request.document_ref,
+            request.version_ref,
+            request.original_ref,
+            request.viewer_ref,
+            request.capability_ref
         )
-        .to_hex()
-        .to_string();
-        audit
-            .append(
-                &TenantId::new("local-full"),
-                vec![AuditEntryInput {
-                    id: opaque_reference("audit"),
-                    category: "original_viewer".into(),
-                    action: RedactionAction::Reveal,
-                    span_hash: digest,
-                    span_length: 0,
-                    confidence: None,
-                    source: EntitySource::Manual,
-                    pipeline_version: "hacienda-secrecy-client-viewer-v1".into(),
-                    config_hash: LOCAL_AUDIT_CONFIG_HASH.into(),
-                    principal: None,
-                    vertical: None,
-                    model: None,
-                }],
-            )
-            .await
-            .map_err(|_| "Original viewer audit failed closed".to_owned())?;
-    }
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    audit
+        .append(
+            &TenantId::new("local-full"),
+            vec![AuditEntryInput {
+                id: opaque_reference("audit"),
+                category: "original_viewer".into(),
+                action: RedactionAction::Reveal,
+                span_hash: digest,
+                span_length: 0,
+                confidence: None,
+                source: EntitySource::Manual,
+                pipeline_version: "hacienda-secrecy-client-viewer-v1".into(),
+                config_hash: LOCAL_AUDIT_CONFIG_HASH.into(),
+                principal: None,
+                vertical: None,
+                model: None,
+            }],
+        )
+        .await
+        .map_err(|_| "Original viewer audit failed closed".to_owned())?;
+    tokio::task::spawn_blocking(move || adapter.open_original(&request))
+        .await
+        .map_err(|_| "Original viewer launch task failed".to_owned())?
+        .map_err(|error| error.to_string())?;
     Ok(OpenOriginalResponse { opened: true })
 }
 
 /// Tauri state for the transient provider path. Both adapters are injected so
 /// production can use a loopback gateway while tests can use a memory seam.
+#[derive(Clone)]
 pub struct ProviderCommandState {
-    transport: Mutex<Box<dyn ProviderTransport + Send>>,
-    redactor: Mutex<Option<Box<dyn RedactionAdapter + Send + Sync>>>,
+    transport: Arc<Mutex<Box<dyn ProviderTransport + Send>>>,
+    redactor: Arc<Mutex<Option<Box<dyn RedactionAdapter + Send + Sync>>>>,
     pii_detection_ready: bool,
 }
 
@@ -1666,11 +1755,10 @@ impl ProviderCommandState {
         R: RedactionAdapter + Send + Sync + 'static,
     {
         Self {
-            transport: Mutex::new(Box::new(transport)),
-            redactor: Mutex::new(
-                redactor
-                    .map(|redactor| Box::new(redactor) as Box<dyn RedactionAdapter + Send + Sync>),
-            ),
+            transport: Arc::new(Mutex::new(Box::new(transport))),
+            redactor: Arc::new(Mutex::new(redactor.map(|redactor| {
+                Box::new(redactor) as Box<dyn RedactionAdapter + Send + Sync>
+            }))),
             pii_detection_ready: false,
         }
     }
@@ -1962,22 +2050,41 @@ fn validate_response(
 }
 
 #[tauri::command(rename = "stream-claude")]
-fn stream_claude(
+async fn stream_claude(
+    window: WebviewWindow,
     state: tauri::State<'_, ProviderCommandState>,
     request: ClaudeDesktopRequest,
 ) -> Result<ClaudeDesktopResponse, ClientError> {
-    match state.stream(&ProviderRequest::ClaudeDesktop(request))? {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err(ClientError::RedactionUnavailable);
+    }
+    let provider = state.inner().clone();
+    let response = tokio::task::spawn_blocking(move || {
+        provider.stream(&ProviderRequest::ClaudeDesktop(request))
+    })
+    .await
+    .map_err(|_| ClientError::Transport(TransportError::Failed))??;
+    match response {
         ProviderResponse::ClaudeDesktop(response) => Ok(response),
         ProviderResponse::Codex(_) => Err(ClientError::Transport(TransportError::Failed)),
     }
 }
 
 #[tauri::command(rename = "stream-codex")]
-fn stream_codex(
+async fn stream_codex(
+    window: WebviewWindow,
     state: tauri::State<'_, ProviderCommandState>,
     request: CodexRequest,
 ) -> Result<CodexResponse, ClientError> {
-    match state.stream(&ProviderRequest::Codex(request))? {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err(ClientError::RedactionUnavailable);
+    }
+    let provider = state.inner().clone();
+    let response =
+        tokio::task::spawn_blocking(move || provider.stream(&ProviderRequest::Codex(request)))
+            .await
+            .map_err(|_| ClientError::Transport(TransportError::Failed))??;
+    match response {
         ProviderResponse::Codex(response) => Ok(response),
         ProviderResponse::ClaudeDesktop(_) => Err(ClientError::Transport(TransportError::Failed)),
     }
@@ -2055,9 +2162,11 @@ fn local_pii_status(
 /// the selected path and bytes remain inside the LocalFull runtime.
 #[tauri::command(rename = "pick-document")]
 async fn pick_document(
+    window: WebviewWindow,
     state: tauri::State<'_, LocalFullDocumentState>,
     originals: tauri::State<'_, OriginalViewerCommandState>,
 ) -> Result<DocumentProjectionResponse, String> {
+    require_main_window(&window)?;
     let Some(file) = rfd::AsyncFileDialog::new().pick_file().await else {
         return Err("Document selection was cancelled".to_owned());
     };
@@ -2081,8 +2190,10 @@ struct LocalEmbeddingStatusResponse {
 /// Document text is never passed to this model-installation operation.
 #[tauri::command(rename = "install-local-rag-model")]
 async fn install_local_rag_model(
+    window: WebviewWindow,
     state: tauri::State<'_, LocalFullDocumentState>,
 ) -> Result<LocalEmbeddingStatusResponse, String> {
+    require_main_window(&window)?;
     let mut service = state.service().await?;
     let service = service
         .as_mut()
@@ -2098,9 +2209,11 @@ async fn install_local_rag_model(
 /// and returns token-only hybrid-search snippets for the renderer.
 #[tauri::command(rename = "search-local-documents")]
 async fn search_local_documents(
+    window: WebviewWindow,
     state: tauri::State<'_, LocalFullDocumentState>,
     request: LocalSearchRequest,
 ) -> Result<LocalSearchResponse, String> {
+    require_main_window(&window)?;
     let service = state.service().await?;
     service
         .as_ref()
@@ -2111,9 +2224,11 @@ async fn search_local_documents(
 
 #[tauri::command(rename = "load-document")]
 async fn load_document(
+    window: WebviewWindow,
     state: tauri::State<'_, LocalFullDocumentState>,
     request: LoadDocumentRequest,
 ) -> Result<DocumentProjectionResponse, String> {
+    require_main_window(&window)?;
     let service = state.service().await?;
     service
         .as_ref()
@@ -2123,10 +2238,12 @@ async fn load_document(
 
 #[tauri::command(rename = "save-document")]
 async fn save_document(
+    window: WebviewWindow,
     state: tauri::State<'_, LocalFullDocumentState>,
     originals: tauri::State<'_, OriginalViewerCommandState>,
     request: SaveDocumentRequest,
 ) -> Result<SaveDocumentResponse, String> {
+    require_main_window(&window)?;
     let mut service = state.service().await?;
     let service = service
         .as_mut()
@@ -2830,6 +2947,14 @@ mod tests {
         }
     }
 
+    struct FailingOpener;
+
+    impl DesktopOpener for FailingOpener {
+        fn open(&self, _path: &Path) -> Result<(), ()> {
+            Err(())
+        }
+    }
+
     fn request() -> OpenOriginalRequest {
         OpenOriginalRequest {
             document_ref: "doc-opaque".into(),
@@ -2881,5 +3006,42 @@ mod tests {
             viewer.open_original(&request),
             Err(OriginalViewerError::InvalidRequest)
         );
+    }
+
+    #[test]
+    fn failed_original_launch_still_consumes_one_shot_binding() {
+        let viewer = NativeOriginalViewer::new(Arc::new(FailingOpener));
+        let path =
+            std::env::temp_dir().join(format!("hacienda-viewer-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"synthetic fixture").expect("fixture");
+        viewer.register(OriginalBinding::from(&request()), path.clone());
+
+        viewer.authorize_original(&request()).expect("authorized");
+        assert_eq!(
+            viewer.open_original(&request()),
+            Err(OriginalViewerError::OpenFailed)
+        );
+        assert_eq!(
+            viewer.open_original(&request()),
+            Err(OriginalViewerError::Unauthorized)
+        );
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn selected_document_rejects_oversize_before_reading() {
+        tauri::async_runtime::block_on(async {
+            let path =
+                std::env::temp_dir().join(format!("hacienda-size-{}.bin", uuid::Uuid::new_v4()));
+            let file = File::create(&path).expect("fixture");
+            file.set_len(xberg::SecurityLimits::default().max_archive_size as u64 + 1)
+                .expect("sparse file");
+            drop(file);
+            assert_eq!(
+                read_selected_document(&path).await,
+                Err("Selected document exceeds the size limit".to_owned())
+            );
+            std::fs::remove_file(path).expect("cleanup");
+        });
     }
 }

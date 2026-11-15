@@ -64,6 +64,7 @@ pub struct LanceDbStore {
     db: Connection,
     fts_ready: Arc<AtomicBool>,
     fts_lock: Arc<futures::lock::Mutex<()>>,
+    write_lock: Arc<futures::lock::Mutex<()>>,
 }
 
 impl LanceDbStore {
@@ -78,6 +79,7 @@ impl LanceDbStore {
             db,
             fts_ready: Arc::new(AtomicBool::new(false)),
             fts_lock: Arc::new(futures::lock::Mutex::new(())),
+            write_lock: Arc::new(futures::lock::Mutex::new(())),
         };
         store.refresh_fts_status().await?;
         Ok(store)
@@ -407,15 +409,29 @@ impl LanceDbStore {
             .map_err(backend_err)
     }
 
-    async fn merge_chunks(&self, table: &Table, rows: &[StoredChunk], dim: u32) -> RagResult<()> {
+    async fn replace_chunks(
+        &self,
+        table: &Table,
+        document: &DocumentId,
+        rows: &[StoredChunk],
+        dim: u32,
+    ) -> RagResult<()> {
         if rows.is_empty() {
-            return Ok(());
+            return table
+                .delete(&format!("doc_id = '{}'", sql_quote(&document.0)))
+                .await
+                .map(|_| ())
+                .map_err(backend_err);
         }
         let batch = chunk_batch(rows, dim)?;
         let mut merge = table.merge_insert(&["chunk_id"]);
         merge
             .when_matched_update_all(None)
-            .when_not_matched_insert_all();
+            .when_not_matched_insert_all()
+            .when_not_matched_by_source_delete(Some(format!(
+                "doc_id = '{}'",
+                sql_quote(&document.0)
+            )));
         merge
             .execute(Box::new(one_batch(batch, chunk_schema(dim))))
             .await
@@ -443,6 +459,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> RagResult<()> {
+        let _write = self.write_lock.lock().await;
         if let Some(existing) = self.spec(&spec.name).await? {
             if existing.embedding_dim != spec.embedding_dim
                 || existing.distance_metric != spec.distance_metric
@@ -457,17 +474,32 @@ impl RagStore for LanceDbStore {
         }
         let docs_name = Self::table_name(&spec.name, "documents");
         let chunks_name = Self::table_name(&spec.name, "chunks");
-        self.db
-            .create_empty_table(&docs_name, document_schema())
-            .execute()
-            .await
-            .map_err(backend_err)?;
-        self.db
-            .create_empty_table(&chunks_name, chunk_schema(spec.embedding_dim))
-            .execute()
-            .await
-            .map_err(backend_err)?;
+        if !self.has_table(&docs_name).await? {
+            self.db
+                .create_empty_table(&docs_name, document_schema())
+                .execute()
+                .await
+                .map_err(backend_err)?;
+        }
+        if !self.has_table(&chunks_name).await? {
+            self.db
+                .create_empty_table(&chunks_name, chunk_schema(spec.embedding_dim))
+                .execute()
+                .await
+                .map_err(backend_err)?;
+        }
+        // A previous attempt may have created only one table. Refuse a
+        // mismatched schema rather than publishing unusable collection metadata.
+        let docs = self.open_table(&docs_name).await?;
         let chunks = self.open_table(&chunks_name).await?;
+        if docs.schema().await.map_err(backend_err)?.as_ref() != document_schema().as_ref()
+            || chunks.schema().await.map_err(backend_err)?.as_ref()
+                != chunk_schema(spec.embedding_dim).as_ref()
+        {
+            return Err(RagError::InvalidQuery(
+                "incompatible partial LanceDB collection".into(),
+            ));
+        }
         self.ensure_fts_index(&chunks, false).await?;
         let mut persisted = spec.clone();
         persisted.created_at = Some(now_secs());
@@ -475,17 +507,14 @@ impl RagStore for LanceDbStore {
     }
 
     async fn drop_collection(&self, collection: &str) -> RagResult<()> {
+        let _write = self.write_lock.lock().await;
         self.require_spec(collection).await?;
-        let _ = self
-            .db
-            .drop_table(Self::table_name(collection, "documents"), &[])
-            .await
-            .map_err(backend_err)?;
-        let _ = self
-            .db
-            .drop_table(Self::table_name(collection, "chunks"), &[])
-            .await
-            .map_err(backend_err)?;
+        for suffix in ["documents", "chunks"] {
+            let name = Self::table_name(collection, suffix);
+            if self.has_table(&name).await? {
+                self.db.drop_table(name, &[]).await.map_err(backend_err)?;
+            }
+        }
         let meta = self.ensure_metadata_table().await?;
         meta.delete(&format!("name = '{}'", sql_quote(collection)))
             .await
@@ -503,6 +532,7 @@ impl RagStore for LanceDbStore {
         document: &DocumentRecord,
         chunks: &[ChunkRecord],
     ) -> RagResult<DocumentId> {
+        let _write = self.write_lock.lock().await;
         let spec = self.require_spec(collection).await?;
         for chunk in chunks {
             validate_chunk_side_vectors(chunk)?;
@@ -524,11 +554,20 @@ impl RagStore for LanceDbStore {
                     .find(|d| d.record.external_id.as_ref() == Some(external))
                     .map(|d| d.id.clone())
             })
-            .unwrap_or_else(|| DocumentId(format!("doc-{}", Uuid::new_v4())));
-        self.delete_doc_rows(collection, &HashSet::from([id.0.clone()]))
-            .await?;
-        self.merge_document(&docs, &id, document, now_secs())
-            .await?;
+            .unwrap_or_else(|| {
+                document.external_id.as_ref().map_or_else(
+                    || DocumentId(format!("doc-{}", Uuid::new_v4())),
+                    |external| {
+                        let mut key = collection.as_bytes().to_vec();
+                        key.push(0);
+                        key.extend_from_slice(external.as_bytes());
+                        DocumentId(format!(
+                            "doc-ext-{}",
+                            Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
+                        ))
+                    },
+                )
+            });
         let rows = chunks
             .iter()
             .map(|record| StoredChunk {
@@ -537,13 +576,16 @@ impl RagStore for LanceDbStore {
                 record: record.clone(),
             })
             .collect::<Vec<_>>();
-        self.merge_chunks(&chunk_table, &rows, spec.embedding_dim)
+        self.replace_chunks(&chunk_table, &id, &rows, spec.embedding_dim)
+            .await?;
+        self.merge_document(&docs, &id, document, now_secs())
             .await?;
         self.ensure_fts_index(&chunk_table, true).await?;
         Ok(id)
     }
 
     async fn delete_documents(&self, collection: &str, ids: &[DocumentId]) -> RagResult<u64> {
+        let _write = self.write_lock.lock().await;
         self.require_spec(collection).await?;
         let count = self
             .delete_doc_rows(collection, &ids.iter().map(|id| id.0.clone()).collect())
@@ -556,6 +598,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn delete_by_filter(&self, collection: &str, filter: &Filter) -> RagResult<u64> {
+        let _write = self.write_lock.lock().await;
         filter.validate()?;
         let (_, docs, chunks) = self.read_collection_rows(collection).await?;
         let ids = docs
@@ -564,7 +607,7 @@ impl RagStore for LanceDbStore {
                 chunks
                     .iter()
                     .filter(|chunk| chunk.document_id == doc.id)
-                    .any(|chunk| eval_filter(filter, &doc.record, &chunk.record))
+                    .any(|chunk| eval_filter(filter, doc, &chunk.record))
             })
             .map(|d| d.id.0.clone())
             .collect::<HashSet<_>>();
@@ -613,141 +656,148 @@ impl RagStore for LanceDbStore {
         } else {
             HashMap::new()
         };
-        let docs_by_id = docs
-            .into_iter()
-            .map(|d| (d.id.0.clone(), d))
-            .collect::<HashMap<_, _>>();
-        let started = std::time::Instant::now();
-        let mut scored = Vec::new();
-        for chunk in chunks {
-            let Some(doc) = docs_by_id.get(&chunk.document_id.0) else {
-                continue;
-            };
-            if query
-                .filter
-                .as_ref()
-                .is_some_and(|filter| !eval_filter(filter, &doc.record, &chunk.record))
-            {
-                continue;
-            }
-            let vector_score = query
-                .query_vector
-                .as_ref()
-                .map(|v| dense_score(spec.distance_metric, v, &chunk.record.embedding));
-            let text_score = if native_text {
-                fts_scores.get(&chunk.id.0).copied().unwrap_or(0.0)
-            } else {
-                query
-                    .query_text
-                    .as_ref()
-                    .map(|q| text_score(q, &chunk.record.content))
-                    .unwrap_or(0.0)
-            };
-            if query.mode == RetrieveMode::FullText && text_score == 0.0 {
-                continue;
-            }
-            let (score, primary) = match query.mode {
-                RetrieveMode::Vector => (
-                    vector_score.unwrap_or(text_score),
-                    PrimaryScore::Vector {
-                        score: vector_score.unwrap_or(text_score),
-                    },
-                ),
-                RetrieveMode::FullText => {
-                    (text_score, PrimaryScore::FullText { score: text_score })
-                }
-                RetrieveMode::Hybrid => {
-                    let vector = vector_score.unwrap_or(0.0);
-                    (
-                        0.0,
-                        PrimaryScore::Hybrid {
-                            vector,
-                            full_text: text_score,
-                            sparse: 0.0,
-                            rrf: 0.0,
-                        },
-                    )
-                }
-                RetrieveMode::Sparse | RetrieveMode::LateInteraction => unreachable!(),
-            };
-            scored.push((score, chunk, doc.clone(), primary));
-        }
-        if query.mode == RetrieveMode::Hybrid {
-            let candidate_limit =
-                query.top_k as usize * query.candidate_multiplier.unwrap_or(1) as usize;
-            let mut vector_order = (0..scored.len()).collect::<Vec<_>>();
-            vector_order.sort_by(|a, b| {
-                let score = |index: usize| match scored[index].3 {
-                    PrimaryScore::Hybrid { vector, .. } => vector,
-                    _ => unreachable!("hybrid query only produces hybrid score components"),
-                };
-                score(*b).partial_cmp(&score(*a)).unwrap_or(Ordering::Equal)
-            });
-            vector_order.truncate(candidate_limit);
-
-            let mut text_order = (0..scored.len())
-                .filter(|index| match scored[*index].3 {
-                    PrimaryScore::Hybrid { full_text, .. } => full_text > 0.0,
-                    _ => unreachable!("hybrid query only produces hybrid score components"),
-                })
-                .collect::<Vec<_>>();
-            text_order.sort_by(|a, b| {
-                let score = |index: usize| match scored[index].3 {
-                    PrimaryScore::Hybrid { full_text, .. } => full_text,
-                    _ => unreachable!("hybrid query only produces hybrid score components"),
-                };
-                score(*b).partial_cmp(&score(*a)).unwrap_or(Ordering::Equal)
-            });
-            text_order.truncate(candidate_limit);
-
-            let mut fused = vec![0.0_f64; scored.len()];
-            let mut included = vec![false; scored.len()];
-            for (rank, index) in vector_order.into_iter().enumerate() {
-                fused[index] += 1.0 / (RRF_K + rank as f64 + 1.0);
-                included[index] = true;
-            }
-            for (rank, index) in text_order.into_iter().enumerate() {
-                fused[index] += 1.0 / (RRF_K + rank as f64 + 1.0);
-                included[index] = true;
-            }
-            for (index, entry) in scored.iter_mut().enumerate() {
-                let rrf = fused[index] as f32;
-                entry.0 = rrf;
-                if let PrimaryScore::Hybrid { rrf: score, .. } = &mut entry.3 {
-                    *score = rrf;
-                }
-            }
-            scored = scored
+        let query = query.clone();
+        tokio::task::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let docs_by_id = docs
                 .into_iter()
-                .enumerate()
-                .filter_map(|(index, entry)| included[index].then_some(entry))
+                .map(|d| (d.id.0.clone(), d))
+                .collect::<HashMap<_, _>>();
+            let mut scored = Vec::new();
+            for chunk in chunks {
+                let Some(doc) = docs_by_id.get(&chunk.document_id.0) else {
+                    continue;
+                };
+                if query
+                    .filter
+                    .as_ref()
+                    .is_some_and(|filter| !eval_filter(filter, doc, &chunk.record))
+                {
+                    continue;
+                }
+                let vector_score = query
+                    .query_vector
+                    .as_ref()
+                    .map(|v| dense_score(spec.distance_metric, v, &chunk.record.embedding));
+                let text_score = if native_text {
+                    fts_scores.get(&chunk.id.0).copied().unwrap_or(0.0)
+                } else {
+                    query
+                        .query_text
+                        .as_ref()
+                        .map(|q| text_score(q, &chunk.record.content))
+                        .unwrap_or(0.0)
+                };
+                if query.mode == RetrieveMode::FullText && text_score == 0.0 {
+                    continue;
+                }
+                let (score, primary) = match query.mode {
+                    RetrieveMode::Vector => (
+                        vector_score.unwrap_or(text_score),
+                        PrimaryScore::Vector {
+                            score: vector_score.unwrap_or(text_score),
+                        },
+                    ),
+                    RetrieveMode::FullText => {
+                        (text_score, PrimaryScore::FullText { score: text_score })
+                    }
+                    RetrieveMode::Hybrid => {
+                        let vector = vector_score.unwrap_or(0.0);
+                        (
+                            0.0,
+                            PrimaryScore::Hybrid {
+                                vector,
+                                full_text: text_score,
+                                sparse: 0.0,
+                                rrf: 0.0,
+                            },
+                        )
+                    }
+                    RetrieveMode::Sparse | RetrieveMode::LateInteraction => unreachable!(),
+                };
+                scored.push((score, chunk, doc.id.0.clone(), primary));
+            }
+            if query.mode == RetrieveMode::Hybrid {
+                let candidate_limit =
+                    query.top_k as usize * query.candidate_multiplier.unwrap_or(1) as usize;
+                let mut vector_order = (0..scored.len()).collect::<Vec<_>>();
+                vector_order.sort_by(|a, b| {
+                    let score = |index: usize| match scored[index].3 {
+                        PrimaryScore::Hybrid { vector, .. } => vector,
+                        _ => unreachable!("hybrid query only produces hybrid score components"),
+                    };
+                    score(*b).partial_cmp(&score(*a)).unwrap_or(Ordering::Equal)
+                });
+                vector_order.truncate(candidate_limit);
+
+                let mut text_order = (0..scored.len())
+                    .filter(|index| match scored[*index].3 {
+                        PrimaryScore::Hybrid { full_text, .. } => full_text > 0.0,
+                        _ => unreachable!("hybrid query only produces hybrid score components"),
+                    })
+                    .collect::<Vec<_>>();
+                text_order.sort_by(|a, b| {
+                    let score = |index: usize| match scored[index].3 {
+                        PrimaryScore::Hybrid { full_text, .. } => full_text,
+                        _ => unreachable!("hybrid query only produces hybrid score components"),
+                    };
+                    score(*b).partial_cmp(&score(*a)).unwrap_or(Ordering::Equal)
+                });
+                text_order.truncate(candidate_limit);
+
+                let mut fused = vec![0.0_f64; scored.len()];
+                let mut included = vec![false; scored.len()];
+                for (rank, index) in vector_order.into_iter().enumerate() {
+                    fused[index] += 1.0 / (RRF_K + rank as f64 + 1.0);
+                    included[index] = true;
+                }
+                for (rank, index) in text_order.into_iter().enumerate() {
+                    fused[index] += 1.0 / (RRF_K + rank as f64 + 1.0);
+                    included[index] = true;
+                }
+                for (index, entry) in scored.iter_mut().enumerate() {
+                    let rrf = fused[index] as f32;
+                    entry.0 = rrf;
+                    if let PrimaryScore::Hybrid { rrf: score, .. } = &mut entry.3 {
+                        *score = rrf;
+                    }
+                }
+                scored = scored
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| included[index].then_some(entry))
+                    .collect();
+            }
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+            if query.group_by_document {
+                let mut seen = HashSet::new();
+                scored.retain(|(_, chunk, _, _)| seen.insert(chunk.document_id.0.clone()));
+            }
+            let chunks = scored
+                .into_iter()
+                .take(query.top_k as usize)
+                .map(|(score, chunk, doc_id, primary)| RetrievedChunk {
+                    id: chunk.id,
+                    document_id: chunk.document_id,
+                    ordinal: chunk.record.ordinal,
+                    external_id: chunk.record.external_id,
+                    content: query.include_content.then_some(chunk.record.content),
+                    score,
+                    primary_score: primary,
+                    chunk_metadata: chunk.record.chunk_metadata,
+                    document: query
+                        .include_document
+                        .then(|| summarize(&docs_by_id[&doc_id])),
+                })
                 .collect();
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-        if query.group_by_document {
-            let mut seen = HashSet::new();
-            scored.retain(|(_, chunk, _, _)| seen.insert(chunk.document_id.0.clone()));
-        }
-        let chunks = scored
-            .into_iter()
-            .take(query.top_k as usize)
-            .map(|(score, chunk, doc, primary)| RetrievedChunk {
-                id: chunk.id,
-                document_id: chunk.document_id,
-                ordinal: chunk.record.ordinal,
-                external_id: chunk.record.external_id,
-                content: query.include_content.then_some(chunk.record.content),
-                score,
-                primary_score: primary,
-                chunk_metadata: chunk.record.chunk_metadata,
-                document: query.include_document.then(|| summarize(&doc)),
+            Ok(RetrieveOutput {
+                mode: query.mode,
+                chunks,
+                primary_latency_ms: started.elapsed().as_millis() as u64,
             })
-            .collect();
-        Ok(RetrieveOutput {
-            mode: query.mode,
-            chunks,
-            primary_latency_ms: started.elapsed().as_millis() as u64,
         })
+        .await
+        .map_err(backend_err)?
     }
 
     async fn collection_stats(&self, collection: &str) -> RagResult<CollectionStats> {
@@ -829,7 +879,8 @@ impl RagStore for LanceDbStore {
         document: &DocumentId,
         embeddings: &[(u32, Vec<f32>)],
     ) -> RagResult<()> {
-        let (spec, _, mut chunks) = self.read_collection_rows(collection).await?;
+        let _write = self.write_lock.lock().await;
+        let spec = self.require_spec(collection).await?;
         for (_, embedding) in embeddings {
             if embedding.len() as u32 != spec.embedding_dim {
                 return Err(RagError::EmbeddingDimMismatch {
@@ -837,26 +888,34 @@ impl RagStore for LanceDbStore {
                     got: embedding.len() as u32,
                 });
             }
-        }
-        let updates = embeddings
-            .iter()
-            .map(|(ordinal, embedding)| (*ordinal, embedding.clone()))
-            .collect::<HashMap<_, _>>();
-        for chunk in &mut chunks {
-            if chunk.document_id == *document {
-                if let Some(embedding) = updates.get(&chunk.record.ordinal) {
-                    chunk.record.embedding = embedding.clone();
-                }
+            if embedding.iter().any(|value| !value.is_finite()) {
+                return Err(RagError::InvalidQuery(
+                    "embedding contains a non-finite value".into(),
+                ));
             }
         }
         let table = self.collection_tables(collection).await?.1;
-        let changed = chunks
-            .into_iter()
-            .filter(|c| c.document_id == *document)
-            .collect::<Vec<_>>();
-        self.merge_chunks(&table, &changed, spec.embedding_dim)
-            .await?;
-        self.ensure_fts_index(&table, true).await
+        for (ordinal, embedding) in embeddings {
+            let expression = format!(
+                "[{}]",
+                embedding
+                    .iter()
+                    .map(|value| format!("{value:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            table
+                .update()
+                .only_if(format!(
+                    "doc_id = '{}' AND ordinal = {ordinal}",
+                    sql_quote(&document.0)
+                ))
+                .column("embedding", expression)
+                .execute()
+                .await
+                .map_err(backend_err)?;
+        }
+        Ok(())
     }
 }
 
@@ -1194,21 +1253,23 @@ fn summarize(doc: &StoredDocument) -> DocumentSummary {
 
 fn resolve_field(
     field: &FilterField,
-    doc: &DocumentRecord,
+    doc: &StoredDocument,
     chunk: &ChunkRecord,
 ) -> Option<serde_json::Value> {
     let parsed = field.parse().ok()?;
+    let record = &doc.record;
     match parsed.namespace {
         FilterNamespace::Doc => match parsed.path.as_str() {
-            "full_text" => Some(serde_json::Value::String(doc.full_text.clone())),
-            "title" => doc.title.clone().map(serde_json::Value::String),
-            "mime" => doc.mime.clone().map(serde_json::Value::String),
-            "external_id" => doc.external_id.clone().map(serde_json::Value::String),
-            "source_uri" => doc.source_uri.clone().map(serde_json::Value::String),
-            "keywords" => serde_json::to_value(&doc.keywords).ok(),
-            "labels" => Some(doc.labels.clone()),
-            "entities" => Some(doc.entities.clone()),
-            path if path.starts_with("metadata.") => json_pointer(&doc.metadata, &path[9..]),
+            "full_text" => Some(serde_json::Value::String(record.full_text.clone())),
+            "title" => record.title.clone().map(serde_json::Value::String),
+            "mime" => record.mime.clone().map(serde_json::Value::String),
+            "external_id" => record.external_id.clone().map(serde_json::Value::String),
+            "source_uri" => record.source_uri.clone().map(serde_json::Value::String),
+            "ingested_at" => Some(serde_json::Value::from(doc.ingested_at)),
+            "keywords" => serde_json::to_value(&record.keywords).ok(),
+            "labels" => Some(record.labels.clone()),
+            "entities" => Some(record.entities.clone()),
+            path if path.starts_with("metadata.") => json_pointer(&record.metadata, &path[9..]),
             _ => None,
         },
         FilterNamespace::Chunk => match parsed.path.as_str() {
@@ -1235,7 +1296,7 @@ fn json_cmp(a: &serde_json::Value, b: &serde_json::Value) -> Option<Ordering> {
         _ => Some(a.as_str()?.cmp(b.as_str()?)),
     }
 }
-fn eval_filter(filter: &Filter, doc: &DocumentRecord, chunk: &ChunkRecord) -> bool {
+fn eval_filter(filter: &Filter, doc: &StoredDocument, chunk: &ChunkRecord) -> bool {
     match filter {
         Filter::Eq { field, value } => resolve_field(field, doc, chunk).as_ref() == Some(value),
         Filter::In { field, values } => resolve_field(field, doc, chunk)
@@ -1345,6 +1406,88 @@ mod tests {
         assert_eq!(store.delete_documents("docs", &[first]).await.unwrap(), 1);
         assert_eq!(store.collection_stats("docs").await.unwrap().documents, 0);
         assert_eq!(store.collection_stats("docs").await.unwrap().chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn replacing_with_no_chunks_removes_only_target_chunks() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+        let first = DocumentRecord {
+            external_id: Some("first".into()),
+            ..Default::default()
+        };
+        let second = DocumentRecord {
+            external_id: Some("second".into()),
+            ..Default::default()
+        };
+        let first_id = store
+            .upsert_document("docs", &first, &[chunk("old", 0, vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        store
+            .upsert_document("docs", &second, &[chunk("keep", 0, vec![0.0, 1.0])])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.upsert_document("docs", &first, &[]).await.unwrap(),
+            first_id
+        );
+        assert_eq!(store.collection_stats("docs").await.unwrap().chunks, 1);
+    }
+
+    #[tokio::test]
+    async fn embedding_update_preserves_chunk_fields_and_ingestion_filter() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+        let doc = DocumentRecord {
+            external_id: Some("one".into()),
+            ..Default::default()
+        };
+        let id = store
+            .upsert_document("docs", &doc, &[chunk("unchanged", 0, vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        store
+            .update_chunk_embeddings("docs", &id, &[(0, vec![0.0, 1.0])])
+            .await
+            .unwrap();
+        let (_, chunks) = store
+            .get_document_chunks("docs", &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunks[0].content, "unchanged");
+        assert_eq!(chunks[0].embedding, vec![0.0, 1.0]);
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    filter: Some(Filter::Range {
+                        field: FilterField("doc.ingested_at".into()),
+                        gte: Some(serde_json::json!(0)),
+                        gt: None,
+                        lte: None,
+                        lt: None,
+                    }),
+                    query_vector: Some(vec![0.0, 1.0]),
+                    ..RetrieveQuery::vector(5)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.chunks.len(), 1);
     }
 
     #[tokio::test]
