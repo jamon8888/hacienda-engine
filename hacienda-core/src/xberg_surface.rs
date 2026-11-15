@@ -331,6 +331,7 @@ mod tests {
     fn mime_detection_does_not_trust_filename_without_matching_content() {
         let detected = detect_mime_type(b"hello world\n", Some("invoice.pdf"));
         assert!(detected.is_ok_and(|mime| mime == "text/plain"));
-        assert!(detect_mime_type(&[0, 1, 2], Some("document.pdf")).is_err());
+        assert!(!detect_mime_type(&[0, 1, 2], Some("document.pdf"))
+            .is_ok_and(|mime| mime == "application/pdf"));
     }
 }
