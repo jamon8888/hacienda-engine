@@ -155,7 +155,7 @@ pub enum GatewayConfig {
     },
 }
 
-/// LanceDB topology and the authority allowed to access it.
+/// `LanceDB` topology and the authority allowed to access it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LanceDbTopology {
     /// An embedded local `LanceDB` store, never addressed by a client network route.

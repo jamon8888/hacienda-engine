@@ -64,7 +64,7 @@ impl fmt::Debug for ContextId {
 pub enum ProviderKind {
     /// Claude Desktop / Anthropic-compatible Messages transport.
     ClaudeDesktop,
-    /// OpenAI Codex-compatible transport.
+    /// `OpenAI` Codex-compatible transport.
     Codex,
 }
 
@@ -746,7 +746,7 @@ impl<H> AnthropicProviderTransport<H> {
                 Ok(())
             },
         )?;
-        decoder.finish(&mut events)?;
+        decoder.finish(&events)?;
         if !matches!(
             events.last().and_then(|event| event.event.as_deref()),
             Some("message_stop" | "error")
@@ -1416,6 +1416,10 @@ fn openai_text(value: &Value) -> Option<String> {
 /// Adapter seam for explicit, authorized human display rehydration.
 pub trait RehydrationAdapter {
     /// Resolve token-only content for a viewer that supplied a capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the capability is invalid or token resolution fails.
     fn rehydrate(
         &self,
         capability: &DisplayCapability,
@@ -1448,6 +1452,10 @@ where
     }
 
     /// Redact and stream a request through the only provider transport seam.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when redaction or the provider transport fails.
     pub fn stream(&mut self, request: &ProviderRequest) -> Result<ProviderResponse, ClientError> {
         let redactor = self
             .redactor
@@ -1462,6 +1470,10 @@ where
     }
 
     /// Rehydrate one response chunk only for an explicitly authorized display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when display authorization or token resolution fails.
     pub fn rehydrate_for_display(
         &self,
         chunk: &ProviderStreamChunk,
