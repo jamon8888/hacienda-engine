@@ -11,8 +11,9 @@
 /** @typedef {{ tokenized: TokenizedText, references: OpaqueTokenReference[] }} OpenLocalViewerRequest */
 /** @typedef {{ provider_send_enabled: boolean, detector: "local_model" | "regex_only" }} LocalPiiStatus */
 /** @typedef {{ schema_version: string, document_id: string, version_id: string, source: { mime_type: string, original_ref: string, viewer_ref: string, capability_ref: string }, metadata_token_only: Record<string, unknown>, editor: Record<string, unknown>, search_projection: Record<string, unknown>, provenance: Record<string, unknown> }} DocumentProjection */
-/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } } | { token: string }} InvokePayload */
-/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "install-local-rag-model" | "load-document" | "save-document", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
+/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { query: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } } | { token: string }} InvokePayload */
+/** @typedef {{ title_token_only: string, content_token_only: string, ordinal: number, score: number }} LocalSearchResult */
+/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "install-local-rag-model" | "search-local-documents" | "load-document" | "save-document", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
 /** @typedef {{ sequence: number, text: string, references: OpaqueTokenReference[] }} TokenizedChunk */
 
 const PROVIDER_COMMANDS = Object.freeze({
@@ -251,6 +252,23 @@ function readLocalViewerContent(response) {
   return { tokenized: response.tokenized, references: response.references };
 }
 
+/** @param {unknown} response @returns {LocalSearchResult[]} */
+function readLocalSearchResults(response) {
+  if (!isRecord(response) || !Array.isArray(response.results) || response.results.length > 8) {
+    throw new Error("Invalid local search response");
+  }
+  return response.results.map((result) => {
+    if (!isRecord(result) || typeof result.title_token_only !== "string" ||
+        result.title_token_only.trim().length === 0 || typeof result.content_token_only !== "string" ||
+        result.content_token_only.trim().length === 0 || typeof result.ordinal !== "number" ||
+        !Number.isInteger(result.ordinal) || result.ordinal < 0 || typeof result.score !== "number" ||
+        !Number.isFinite(result.score)) {
+      throw new Error("Invalid local search response");
+    }
+    return /** @type {LocalSearchResult} */ (result);
+  });
+}
+
 /** Provider egress follows the backend's explicit capability flag. @param {LocalPiiStatus | null | undefined} status */
 export function canSendToProvider(status) {
   return status?.provider_send_enabled === true;
@@ -334,6 +352,7 @@ export function tokenizedTextToDocument(tokenizedText) {
  *   localPiiStatus: () => Promise<LocalPiiStatus>,
  *   pickDocument: () => Promise<DocumentProjection>,
  *   installLocalRagModel: () => Promise<{ ready: true, model: "xberg:preset:multilingual" }>,
+ *   searchLocalDocuments: (query: string) => Promise<LocalSearchResult[]>,
  *   loadDocument: (request: { documentRef: string, versionRef: string }) => Promise<DocumentProjection>,
  *   saveDocument: (request: { documentRef: string, versionRef: string, editor: Record<string, unknown> }) => Promise<{ document_id: string, version_id: string, parent_version_id: string, idempotent: boolean }>,
  * }}
@@ -367,6 +386,9 @@ export function createRendererBridge(invoke) {
       },
       installLocalRagModel: async () => {
         throw new Error("Local retrieval model is unavailable");
+      },
+      searchLocalDocuments: async () => {
+        throw new Error("Local document search is unavailable");
       },
       loadDocument: async () => {
         throw new Error("Local document loading is unavailable");
@@ -439,6 +461,12 @@ export function createRendererBridge(invoke) {
         throw new Error("Local multilingual retrieval model is unavailable");
       }
       return /** @type {{ ready: true, model: "xberg:preset:multilingual" }} */ (response);
+    },
+    async searchLocalDocuments(query) {
+      if (typeof query !== "string" || query.trim().length === 0 || [...query].length > 16_000) {
+        throw new Error("Search query is empty or too long");
+      }
+      return readLocalSearchResults(await invoke("search-local-documents", { request: { query } }));
     },
     async loadDocument({ documentRef, versionRef }) {
       if (!isOpaqueReference(documentRef) || !isOpaqueReference(versionRef)) {

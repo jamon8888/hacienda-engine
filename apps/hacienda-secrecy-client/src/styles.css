@@ -29,6 +29,13 @@ h1 { margin-bottom: 0; font-size: 19px; font-weight: 600; letter-spacing: -.03em
 .document-workspace { margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
 .document-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .document-actions button { padding: 7px 10px; font-size: 10px; }
+.local-search { display: grid; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line, #dedbd5); }
+.local-search label { font-weight: 600; }
+.local-search input { flex: 1 1 280px; min-width: 0; }
+.local-search-results { display: grid; gap: 10px; padding-left: 20px; }
+.local-search-results li { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line, #dedbd5); border-radius: 8px; }
+.local-search-results p { margin: 0; white-space: pre-wrap; }
+.local-search-results small { color: var(--muted, #69645e); }
 .document-meta { margin: -12px 0 10px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 10px; }
 .document-editor-frame { min-height: 150px; padding: 13px; border: 1px solid #e2e6e0; border-radius: 8px; background: #fff; }
 .document-editor { min-height: 120px; outline: none; color: var(--ink); font-size: 13px; line-height: 1.65; }

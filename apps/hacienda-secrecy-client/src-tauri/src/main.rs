@@ -41,7 +41,10 @@ use hacienda_client_core::{
 };
 #[cfg(not(test))]
 use hacienda_core::audit::{FileAuditStore, NodeId};
-use hacienda_rag::{LanceDbStore, XbergTokenEmbedder};
+use hacienda_rag::{
+    LanceDbStore, RagStore, RetrieveMode, RetrieveQuery, TokenOnlyText, TokenTextEmbedder,
+    XbergTokenEmbedder,
+};
 
 /// Opaque references are resolved inside the desktop process.  The renderer is
 /// intentionally unable to send source bytes or extracted content here.
@@ -107,6 +110,24 @@ struct SaveDocumentResponse {
     version_id: String,
     parent_version_id: String,
     idempotent: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalSearchRequest {
+    query: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalSearchResult {
+    title_token_only: String,
+    content_token_only: String,
+    ordinal: u32,
+    score: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalSearchResponse {
+    results: Vec<LocalSearchResult>,
 }
 
 const LOCAL_KEYRING_SERVICE: &str = "org.hacienda.secrecy-client";
@@ -610,6 +631,94 @@ impl LocalFullDocumentService {
             .map_err(|_| "LocalFull multilingual embedding model could not be loaded".to_owned())?;
         self.embedding_ready = true;
         Ok(())
+    }
+
+    async fn redact_local_text(&self, text: &str) -> Result<String, String> {
+        if text.trim().is_empty() || text.chars().count() > 16_000 {
+            return Err("Local search text is empty or exceeds the supported length".to_owned());
+        }
+        let result = self
+            .facade
+            .process(xberg::ExtractInput::from_bytes(
+                text.as_bytes().to_vec(),
+                "text/plain",
+                None,
+            ))
+            .await
+            .map_err(|_| "Local search redaction failed closed".to_owned())?;
+        if !result.metadata.pii_enabled || result.pii.len() != 1 {
+            return Err("Complete local redaction is unavailable for search".to_owned());
+        }
+        result
+            .pii
+            .first()
+            .map(|pipeline| pipeline.redacted_text.clone())
+            .filter(|redacted| !redacted.trim().is_empty())
+            .ok_or_else(|| "Local search redaction returned no safe text".to_owned())
+    }
+
+    async fn search(&self, request: LocalSearchRequest) -> Result<LocalSearchResponse, String> {
+        if !self.embedding_ready {
+            return Err("Activate the local multilingual retrieval model first".to_owned());
+        }
+        let tokenized_query = self.redact_local_text(&request.query).await?;
+        let query_vector = self
+            .embedder
+            .embed(&[TokenOnlyText::from_token_only(tokenized_query.clone())])
+            .await
+            .map_err(|_| "Local search embedding failed closed".to_owned())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Local search model returned no vector".to_owned())?;
+        let collection = self
+            .backend
+            .collection_name(LOCAL_EMBEDDING_COLLECTION)
+            .map_err(|_| "Local search collection is unavailable".to_owned())?;
+        let output = self
+            .store
+            .retrieve(
+                &collection,
+                &RetrieveQuery {
+                    mode: RetrieveMode::Hybrid,
+                    query_text: Some(tokenized_query),
+                    query_vector: Some(query_vector),
+                    top_k: 8,
+                    filter: None,
+                    candidate_multiplier: Some(4),
+                    group_by_document: true,
+                    include_content: true,
+                    include_document: true,
+                    ..RetrieveQuery::vector(8)
+                },
+            )
+            .await
+            .map_err(|_| "Local hybrid search failed closed".to_owned())?;
+        let mut results = Vec::with_capacity(output.chunks.len());
+        for chunk in output.chunks {
+            let Some(content) = chunk.content else {
+                continue;
+            };
+            // Re-redact data read from LanceDB before it crosses IPC. This guards the
+            // renderer and provider path against stale, malformed, or externally altered rows.
+            let content_token_only = self.redact_local_text(&content).await?;
+            let title = chunk
+                .document
+                .as_ref()
+                .and_then(|document| document.title.as_deref())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("Document sans titre");
+            let title_token_only = self.redact_local_text(title).await?;
+            if !chunk.score.is_finite() {
+                return Err("Local search returned an invalid score".to_owned());
+            }
+            results.push(LocalSearchResult {
+                title_token_only,
+                content_token_only,
+                ordinal: chunk.ordinal,
+                score: chunk.score,
+            });
+        }
+        Ok(LocalSearchResponse { results })
     }
 }
 
@@ -1958,6 +2067,21 @@ async fn install_local_rag_model(
     })
 }
 
+/// Redacts a possibly sensitive query locally, embeds only its tokenized form,
+/// and returns token-only hybrid-search snippets for the renderer.
+#[tauri::command(rename = "search-local-documents")]
+async fn search_local_documents(
+    state: tauri::State<'_, LocalFullDocumentState>,
+    request: LocalSearchRequest,
+) -> Result<LocalSearchResponse, String> {
+    let service = state.service().await?;
+    service
+        .as_ref()
+        .ok_or_else(|| "LocalFull document service is unavailable".to_owned())?
+        .search(request)
+        .await
+}
+
 #[tauri::command(rename = "load-document")]
 async fn load_document(
     state: tauri::State<'_, LocalFullDocumentState>,
@@ -2038,6 +2162,7 @@ fn main() {
             local_pii_status,
             pick_document,
             install_local_rag_model,
+            search_local_documents,
             load_document,
             save_document
         ])

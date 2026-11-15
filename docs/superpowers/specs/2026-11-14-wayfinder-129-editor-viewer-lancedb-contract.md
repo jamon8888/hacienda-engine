@@ -418,14 +418,25 @@ du modèle est explicite depuis l’interface ; aucun contenu documentaire n’e
 du chargement/téléchargement du modèle. La collection est versionnée
 `documents-multilingual-v1` pour isoler son schéma vectoriel.
 
+Le chemin de requête RAG est maintenant branché dans le client : la question est redacted par le
+runtime Hacienda local, seul son texte tokenisé est envoyé à l’embedder et au retrieval hybride
+dense + FTS de LanceDB, et les titres/extraits sont revalidés localement avant de traverser IPC.
+L’interface affiche les extraits tokenisés et permet à l’utilisateur d’ajouter explicitement un
+extrait au contexte de la prochaine requête Claude/Codex. Le gateway du fournisseur repasse ensuite
+prompt et contexte dans sa redaction avant l’egress. Les tests du bridge couvrent la forme du DTO,
+les limites et le rejet des réponses malformées.
+
 La compilation Tauri Intel avec `ort-dynamic`, Clippy ciblé, le format Rust et le contrôle
 TypeScript/bridge passent. Cette machine ne possède pas de bibliothèque ONNX Runtime exploitable
-(le chemin Homebrew présent est vide), donc le chargement réel du modèle n’a pas encore été
-vérifié. La distribution doit fournir une bibliothèque compatible et définir le chemin de
-chargement pour chaque plateforme ; le bouton échoue fermé si le modèle ne peut pas démarrer.
-Le chemin de requête RAG (embedding de la question, retrieval hybride dense + FTS filtré, puis
-injection de chunks token-only dans Claude/Codex) et son expérience UI restent à implémenter.
-La recherche dense/hybride n’est donc pas encore livrée de bout en bout.
+(le chemin Homebrew présent est vide), donc le chargement réel du modèle d’embedding n’a pas encore
+été vérifié. La distribution doit fournir une bibliothèque compatible et définir le chemin de
+chargement pour chaque plateforme ; l’activation échoue fermé si le modèle ne peut pas démarrer.
+La recherche est compilée mais son exécution avec le modèle réel reste non vérifiée. Cette tranche
+ne livre pas encore une sélection/scoping de dossier dans l’interface, ni les viewers intégrés
+PDF/DOCX/XLSX/PPTX, ni la restauration durable des références de l’original après redémarrage.
+Le service garde encore la liaison document/version/chemin dans l’état de session en mémoire.
+Les décisions sur stockage durable chiffré, conflits concurrents, rétention et formats de viewer
+restent ouvertes ; ne pas annoncer le contrat complet comme achevé.
 
 Cette tranche ne livre pas encore les viewers intégrés PDF/DOCX/XLSX/PPTX du tableau, ni
 la restauration durable des références de l’original après redémarrage. Le service garde

@@ -153,10 +153,12 @@ function ManualPseudonymizationPanel({ category, onCategoryChange, disabled, onP
   );
 }
 
-function LocalDocumentWorkspace({ bridge }) {
+function LocalDocumentWorkspace({ bridge, onAddSearchContext }) {
   const [projection, setProjection] = useState(null);
   const [busy, setBusy] = useState(false);
   const [embeddingReady, setEmbeddingReady] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
   const [status, setStatus] = useState("");
   const editor = useEditor({
     extensions: [StarterKit.configure({ history: true }), SensitiveMark],
@@ -224,6 +226,23 @@ function LocalDocumentWorkspace({ bridge }) {
     }
   }
 
+  async function searchDocuments(event) {
+    event.preventDefault();
+    if (busy || !embeddingReady || !searchQuery.trim()) return;
+    setBusy(true);
+    setStatus("Recherche hybride locale. La requête est redacted avant embedding et recherche lexicale.");
+    try {
+      const results = await bridge.searchLocalDocuments(searchQuery);
+      setSearchResults(results);
+      setStatus(results.length ? `${results.length} extrait(s) tokenisé(s) trouvé(s).` : "Aucun extrait pertinent trouvé.");
+    } catch {
+      setSearchResults([]);
+      setStatus("Recherche locale indisponible ou redaction incomplète. Aucun extrait n’a été transmis.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function openOriginal() {
     if (!projection || busy) return;
     try {
@@ -262,6 +281,25 @@ function LocalDocumentWorkspace({ bridge }) {
           <div className="document-editor-frame"><EditorContent editor={editor} /></div>
         </>
       )}
+      <form className="local-search" onSubmit={(event) => void searchDocuments(event)}>
+        <label htmlFor="local-search-query">Rechercher dans les documents tokenisés</label>
+        <div className="document-actions">
+          <input id="local-search-query" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)}
+            maxLength={16_000} placeholder="Question ou mots-clés, y compris des PII" disabled={busy || !embeddingReady} />
+          <button type="submit" disabled={busy || !embeddingReady || !searchQuery.trim()}>Rechercher localement</button>
+        </div>
+        <p className="status">La requête peut contenir des informations sensibles : elle est traitée par le détecteur local avant l’index lexical et vectoriel.</p>
+      </form>
+      {searchResults.length > 0 && <ol className="local-search-results" aria-label="Résultats de recherche locale">
+        {searchResults.map((result, index) => <li key={`${result.ordinal}-${index}`}>
+          <strong>{result.title_token_only}</strong>
+          <p>{result.content_token_only}</p>
+          <small>Extrait {result.ordinal + 1} · score {result.score.toFixed(3)}</small>
+          <button type="button" disabled={busy} onClick={() => onAddSearchContext(result)}>
+            Ajouter au contexte de Claude / Codex
+          </button>
+        </li>)}
+      </ol>}
       {status && <p className="status" role="status">{status}</p>}
       {!projection && <p className="empty-history">{embeddingReady
         ? "Choisissez un document : seuls sa projection Tiptap tokenisée et ses références opaques entreront dans le renderer."
@@ -395,6 +433,7 @@ function App() {
   const [provider, setProvider] = useState("claude");
   const [turns, setTurns] = useState([]);
   const [conversationContext, setConversationContext] = useState([]);
+  const [retrievedContext, setRetrievedContext] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [hasContent, setHasContent] = useState(false);
@@ -504,7 +543,7 @@ function App() {
     setBusy(true);
     setError("");
     try {
-      const request = createTurnRequest({ ...ids, prompt, context: conversationContext });
+      const request = createTurnRequest({ ...ids, prompt, context: [...conversationContext, ...retrievedContext] });
       const response = await bridge.stream(provider, request);
       const chunks = readTokenizedChunks(response, ids.conversationId, ids.contextId)
         .sort((left, right) => left.sequence - right.sequence);
@@ -534,7 +573,10 @@ function App() {
       </header>
 
       <section className="workspace" aria-label="Conversation sécurisée">
-        <LocalDocumentWorkspace bridge={bridge} />
+        <LocalDocumentWorkspace bridge={bridge} onAddSearchContext={(result) => setRetrievedContext((current) => [
+          ...current.filter((item) => item.content !== result.content_token_only),
+          { label: result.title_token_only, content: result.content_token_only },
+        ])} />
         <div className="section-title">
           <div>
             <p className="eyebrow">ESPACE DE TRAVAIL</p>

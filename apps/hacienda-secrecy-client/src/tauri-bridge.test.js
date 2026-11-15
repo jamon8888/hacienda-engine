@@ -133,6 +133,37 @@ test("document bridge accepts token-only projections and appends editor versions
   );
 });
 
+test("local hybrid search sends the query only to the local Tauri command and validates token-only results", async () => {
+  const calls = [];
+  const bridge = createRendererBridge(async (...args) => {
+    calls.push(args);
+    return { results: [{
+      title_token_only: "Dossier [PERSON:k1:ABC]",
+      content_token_only: "Facture [EMAIL:k1:DEF]",
+      ordinal: 2,
+      score: 0.81,
+    }] };
+  });
+  const results = await bridge.searchLocalDocuments("adresse de [PERSON:k1:ABC]");
+  assert.deepEqual(calls, [["search-local-documents", { request: { query: "adresse de [PERSON:k1:ABC]" } }]]);
+  assert.equal(results[0].ordinal, 2);
+  assert.equal(results[0].score, 0.81);
+  await assert.rejects(bridge.searchLocalDocuments(" "), /empty or too long/);
+  await assert.rejects(bridge.searchLocalDocuments("x".repeat(16_001)), /empty or too long/);
+});
+
+test("local hybrid search rejects malformed or oversized responses", async () => {
+  for (const response of [
+    { results: [{ title_token_only: "", content_token_only: "snippet", ordinal: 0, score: 0.1 }] },
+    { results: [{ title_token_only: "title", content_token_only: "snippet", ordinal: -1, score: 0.1 }] },
+    { results: [{ title_token_only: "title", content_token_only: "snippet", ordinal: 0, score: Number.NaN }] },
+    { results: Array.from({ length: 9 }, () => ({ title_token_only: "title", content_token_only: "snippet", ordinal: 0, score: 0.1 })) },
+  ]) {
+    const bridge = createRendererBridge(async () => response);
+    await assert.rejects(bridge.searchLocalDocuments("query"), /Invalid local search response/);
+  }
+});
+
 test("local RAG activation accepts only the pinned multilingual preset", async () => {
   const bridge = createRendererBridge(async (command) => {
     assert.equal(command, "install-local-rag-model");
