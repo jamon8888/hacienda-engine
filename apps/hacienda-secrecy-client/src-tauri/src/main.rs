@@ -2321,6 +2321,10 @@ mod tests {
             |config, pseudonymiser| PiiPipeline::with_pseudonymiser(config, Some(pseudonymiser)),
         )
         .expect("load and validate the pinned Candle GLiNER2 model");
+        let redactor = Arc::new(redactor);
+        let status = LocalViewerState::new(Some(Arc::clone(&redactor))).pii_status();
+        assert!(status.provider_send_enabled);
+        assert_eq!(status.detector, "local_model");
 
         let source = "Maître Élodie Martin travaille à Paris pour le dossier.";
         // Exercise the exact request adapter used before provider egress with the
