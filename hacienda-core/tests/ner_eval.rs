@@ -396,6 +396,48 @@ fn score(gold: &[Span], pred: &[Span], mode: MatchMode) -> Metrics {
     Metrics { per_label, micro }
 }
 
+/// Scores each document independently before summing its counts. Offsets are local to
+/// each document, so flattening cases first lets a prediction from one document match
+/// (or consume) a gold span from another document in overlap mode.
+fn score_cases(cases: &[(Vec<Span>, Vec<Span>)], mode: MatchMode) -> Metrics {
+    let mut per_label: BTreeMap<String, (usize, usize, Counts)> = BTreeMap::new();
+    let mut micro_gold = 0;
+    let mut micro_predicted = 0;
+    let mut micro_counts = Counts::default();
+
+    for (gold, predicted) in cases {
+        let metrics = score(gold, predicted, mode);
+        micro_gold += metrics.micro.gold_count;
+        micro_predicted += metrics.micro.predicted_count;
+        micro_counts.true_positives += metrics.micro.counts.true_positives;
+        micro_counts.false_positives += metrics.micro.counts.false_positives;
+        micro_counts.false_negatives += metrics.micro.counts.false_negatives;
+
+        for (label, metric) in metrics.per_label {
+            let (gold_count, predicted_count, counts) =
+                per_label.entry(label).or_insert((0, 0, Counts::default()));
+            *gold_count += metric.gold_count;
+            *predicted_count += metric.predicted_count;
+            counts.true_positives += metric.counts.true_positives;
+            counts.false_positives += metric.counts.false_positives;
+            counts.false_negatives += metric.counts.false_negatives;
+        }
+    }
+
+    Metrics {
+        per_label: per_label
+            .into_iter()
+            .map(|(label, (gold_count, predicted_count, counts))| {
+                (
+                    label.clone(),
+                    LabelMetrics::new(label, gold_count, predicted_count, counts),
+                )
+            })
+            .collect(),
+        micro: LabelMetrics::new(MICRO_LABEL, micro_gold, micro_predicted, micro_counts),
+    }
+}
+
 #[cfg(test)]
 mod metric_unit_tests {
     use super::*;
@@ -418,6 +460,32 @@ mod metric_unit_tests {
         assert_eq!(m.micro.counts.false_negatives, 0);
         assert_eq!(m.micro.f1, 1.0);
         assert_eq!(m.per_label["person"].f1, 1.0);
+    }
+
+    #[test]
+    fn should_not_match_or_consume_spans_across_document_boundaries() {
+        // The ranges are exact within each case. Flattening them first and greedily
+        // matching by overlap can cross-match [0,1) to the first [0,2) gold span and
+        // leave a later prediction unmatched, despite all three cases being perfect.
+        let cases = [
+            (vec![span(0, 2, "iban")], vec![span(0, 2, "iban")]),
+            (vec![span(0, 3, "iban")], vec![span(0, 3, "iban")]),
+            (vec![span(0, 1, "iban")], vec![span(0, 1, "iban")]),
+        ];
+
+        let flattened_gold: Vec<Span> = cases.iter().flat_map(|(g, _)| g.clone()).collect();
+        let flattened_predicted: Vec<Span> = cases.iter().flat_map(|(_, p)| p.clone()).collect();
+        let flattened = score(
+            &flattened_gold,
+            &flattened_predicted,
+            MatchMode::Overlap { min_ratio: 0.5 },
+        );
+        let per_case = score_cases(&cases, MatchMode::Overlap { min_ratio: 0.5 });
+
+        assert_eq!(flattened.micro.counts.true_positives, 2);
+        assert_eq!(per_case.micro.counts.true_positives, 3);
+        assert_eq!(per_case.micro.counts.false_positives, 0);
+        assert_eq!(per_case.micro.counts.false_negatives, 0);
     }
 
     #[test]
@@ -570,9 +638,7 @@ fn bootstrap_micro_f1_ci(
     seed: u64,
 ) -> BootstrapCi {
     let n = cases.len();
-    let point_gold: Vec<Span> = cases.iter().flat_map(|(g, _)| g.iter().cloned()).collect();
-    let point_pred: Vec<Span> = cases.iter().flat_map(|(_, p)| p.iter().cloned()).collect();
-    let point_estimate = score(&point_gold, &point_pred, mode).micro.f1;
+    let point_estimate = score_cases(cases, mode).micro.f1;
 
     if n == 0 || resamples == 0 {
         return BootstrapCi {
@@ -586,14 +652,12 @@ fn bootstrap_micro_f1_ci(
     let mut rng = Xorshift64::new(seed);
     let mut samples = Vec::with_capacity(resamples);
     for _ in 0..resamples {
-        let mut gold_acc = Vec::new();
-        let mut pred_acc = Vec::new();
+        let mut sampled_cases = Vec::with_capacity(n);
         for _ in 0..n {
             let idx = rng.next_index(n);
-            gold_acc.extend(cases[idx].0.iter().cloned());
-            pred_acc.extend(cases[idx].1.iter().cloned());
+            sampled_cases.push(cases[idx].clone());
         }
-        samples.push(score(&gold_acc, &pred_acc, mode).micro.f1);
+        samples.push(score_cases(&sampled_cases, mode).micro.f1);
     }
     samples.sort_by(|a, b| a.partial_cmp(b).expect("F1 is never NaN"));
 
@@ -789,10 +853,20 @@ mod runner {
     }
 
     #[derive(Debug, Clone, Serialize)]
+    struct CaseMismatch {
+        case_id: String,
+        gold: Vec<Span>,
+        predicted: Vec<Span>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
     struct FixtureReport {
         fixture: String,
         label_set: Vec<String>,
         case_count: usize,
+        /// Cases where the predicted labelled spans differ from the fixture gold.
+        /// The report keeps IDs and offsets only, never the source text.
+        mismatches: Vec<CaseMismatch>,
         /// Scored at the default threshold (0.5) — see the module's top-level recall
         /// note; this is the number that would appear in a normal report, before the
         /// sweep below characterises how much is sitting right at the ceiling.
@@ -813,6 +887,7 @@ mod runner {
         model_dir: String,
         model_safetensors_blake3: String,
         default_threshold: f32,
+        threshold_sweep_skipped: bool,
         recall_caveat: String,
         fixtures: Vec<FixtureReport>,
     }
@@ -838,6 +913,8 @@ mod runner {
 
         let default_threshold: f32 = 0.5;
         let model_safetensors_blake3 = blake3_digest(&model_dir.join("model.safetensors"));
+        let threshold_sweep_skipped =
+            std::env::var("HACIENDA_EVAL_SKIP_SWEEP").is_ok_and(|value| value == "1");
 
         let mut fixtures_report = Vec::new();
 
@@ -867,24 +944,22 @@ mod runner {
                 .with_threshold(default_threshold);
 
             let mut per_case = Vec::with_capacity(fixture.cases.len());
+            let mut mismatches = Vec::new();
             for case in &fixture.cases {
                 let gold = gold_spans(case);
                 let pred = predicted_spans(&detector, &case.text).await;
+                if gold != pred {
+                    mismatches.push(CaseMismatch {
+                        case_id: case.id.clone(),
+                        gold: gold.clone(),
+                        predicted: pred.clone(),
+                    });
+                }
                 per_case.push((gold, pred));
             }
 
-            let gold_all: Vec<Span> = per_case
-                .iter()
-                .flat_map(|(g, _)| g.iter().cloned())
-                .collect();
-            let pred_all: Vec<Span> = per_case
-                .iter()
-                .flat_map(|(_, p)| p.iter().cloned())
-                .collect();
-
-            let metrics_exact = score(&gold_all, &pred_all, MatchMode::Exact);
-            let metrics_overlap =
-                score(&gold_all, &pred_all, MatchMode::Overlap { min_ratio: 0.5 });
+            let metrics_exact = score_cases(&per_case, MatchMode::Exact);
+            let metrics_overlap = score_cases(&per_case, MatchMode::Overlap { min_ratio: 0.5 });
             let bootstrap_micro_f1_exact =
                 bootstrap_micro_f1_ci(&per_case, MatchMode::Exact, 1000, 0xC0FFEE);
             let bootstrap_micro_f1_overlap = bootstrap_micro_f1_ci(
@@ -895,24 +970,26 @@ mod runner {
             );
 
             let mut threshold_sweep = Vec::new();
-            for threshold in threshold_sweep_values() {
+            let thresholds = if threshold_sweep_skipped {
+                Vec::new()
+            } else {
+                threshold_sweep_values()
+            };
+            for threshold in thresholds {
                 let swept = NerDetector::from_candle_local(&model_dir, None)
                     .expect("loading the Candle GLiNER2 backend from HACIENDA_EVAL_MODEL_DIR")
                     .with_categories(categories.clone())
                     .with_threshold(threshold);
 
-                let mut swept_gold = Vec::new();
-                let mut swept_pred = Vec::new();
+                let mut swept_cases = Vec::with_capacity(fixture.cases.len());
                 for case in &fixture.cases {
-                    swept_gold.extend(gold_spans(case));
-                    swept_pred.extend(predicted_spans(&swept, &case.text).await);
+                    swept_cases.push((gold_spans(case), predicted_spans(&swept, &case.text).await));
                 }
                 threshold_sweep.push(ThresholdSweepPoint {
                     threshold,
-                    metrics_exact: score(&swept_gold, &swept_pred, MatchMode::Exact),
-                    metrics_overlap: score(
-                        &swept_gold,
-                        &swept_pred,
+                    metrics_exact: score_cases(&swept_cases, MatchMode::Exact),
+                    metrics_overlap: score_cases(
+                        &swept_cases,
                         MatchMode::Overlap { min_ratio: 0.5 },
                     ),
                 });
@@ -922,6 +999,7 @@ mod runner {
                 fixture: fixture_name.to_string(),
                 label_set,
                 case_count: fixture.cases.len(),
+                mismatches,
                 metrics_exact,
                 metrics_overlap,
                 bootstrap_micro_f1_exact,
@@ -934,6 +1012,7 @@ mod runner {
             model_dir: model_dir.display().to_string(),
             model_safetensors_blake3,
             default_threshold,
+            threshold_sweep_skipped,
             recall_caveat: "CandleBackend::detect (xberg v1.0.2) hardcodes threshold 0.5 \
                 internally before NerDetector's own threshold filters the result. Every \
                 recall figure in this report is therefore TRUNCATED RECALL AT 0.5, not \

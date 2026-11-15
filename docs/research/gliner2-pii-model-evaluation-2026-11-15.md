@@ -16,16 +16,24 @@ recall over real client files.
 - Exact per-label F1: `bank_account` **1.000** (6/6), `swift_code` **1.000** (6/6),
   `iban` **0.833** (5/6; one false positive and one false negative).
 - Exact-match case-bootstrap 95% interval: **[0.833, 1.000]** (1,000 resamples).
+- Overlap-at-0.5 micro score: precision/recall/F1 **1.000**; overlap bootstrap interval
+  **[1.000, 1.000]** (1,000 resamples).
 
 GLiNER returns the requested `account_number` label, and Hacienda maps it to the
 canonical `bank_account` category before scoring. The fixture now uses that canonical
 category for gold spans; before the correction, all six correctly detected accounts
 were incorrectly scored as category mismatches.
 
-The overlap score is **0.833**. Its percentile-bootstrap interval was **[0.889, 1.000]**,
-which excludes the point estimate. With only 18 cases this interval is unstable and is
-not used as an acceptance result; the bootstrap implementation or interval method
-needs further statistical review before relying on overlap intervals.
+The only span mismatch is `fin-004`: GLiNER predicts bytes `[25, 57)`, including the
+preceding `IBAN ` prefix, while the gold span is `[30, 57)`. Its IoU is above 0.5, so it
+is an overlap match but remains an exact-match error.
+
+This run also fixed an evaluation-harness defect: it had flattened spans from different
+documents before overlap matching, even though offsets are document-local. Greedy
+matching could then consume a gold span from another case. The earlier overlap score
+**0.833** and interval **[0.889, 1.000]** are invalid and withdrawn. Scoring, bootstrap
+resampling, and threshold sweeps now preserve each case boundary. The corrected model
+run skipped the threshold sweep to keep this targeted regression run short.
 
 ## Limits and next work
 
@@ -49,6 +57,7 @@ needs further statistical review before relying on overlap intervals.
 ```sh
 HACIENDA_EVAL_MODEL_DIR="$HOME/Library/Application Support/io.hacienda.secrecy-client/models/gliner2-pii" \
 HACIENDA_EVAL_FIXTURE=vertical-finance.json \
+HACIENDA_EVAL_SKIP_SWEEP=1 \
 HACIENDA_EVAL_OUT="$HOME/.cargo/target/ner-eval/gliner2-pii-finance-canonical-2026-11-15.json" \
 cargo test --release -p hacienda-core --features ner-candle --test ner_eval \
   should_score_ner_eval_fixtures_against_a_local_model -- --ignored --nocapture

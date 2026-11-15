@@ -109,6 +109,9 @@ HACIENDA_EVAL_MODEL_DIR=~/model_f16 cargo test -p hacienda-core --features ner-c
 
 Set `HACIENDA_EVAL_FIXTURE=vertical-finance.json` to run only one fixture when iterating
 on its labels or model behavior. It must match one of the fixture filenames exactly.
+Set `HACIENDA_EVAL_SKIP_SWEEP=1` to omit the 0.50–0.95 threshold sweep and report only
+the configured 0.5 threshold; this is useful when the fixture or scoring implementation
+changes and a quick model-backed score is needed.
 
 `HACIENDA_EVAL_MODEL_DIR` must point at a local model directory in the shape
 `from_candle_local` expects (`config.json`, `encoder_config/`, `tokenizer.json`,
