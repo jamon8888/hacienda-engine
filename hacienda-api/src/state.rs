@@ -81,6 +81,9 @@ pub struct ApiState {
     /// Anthropic Messages provider used by the authenticated Claude Code gateway.
     /// `None` keeps the route registered but disabled, which is the safe default.
     pub(crate) claude_messages_provider: Option<Arc<dyn ClaudeMessagesProvider>>,
+    /// Server-owned destinations permitted for RAG answer synthesis.
+    /// `None` is fail-closed: the request cannot choose an LLM destination.
+    pub(crate) rag_egress_allowlist: Option<Vec<String>>,
 }
 
 impl ApiState {
@@ -102,6 +105,7 @@ impl ApiState {
             usage_store: None,
             quota_store: None,
             claude_messages_provider: None,
+            rag_egress_allowlist: None,
         }
     }
 
@@ -163,6 +167,20 @@ impl ApiState {
         provider: Arc<dyn ClaudeMessagesProvider>,
     ) -> Self {
         self.claude_messages_provider = Some(provider);
+        self
+    }
+
+    /// Configure the server-owned RAG LLM egress allowlist.
+    ///
+    /// The list is copied into each answer request and cannot be supplied by the
+    /// caller. Leaving it unset deliberately disables outbound RAG model calls.
+    #[must_use]
+    pub fn with_rag_egress_allowlist<I, S>(mut self, destinations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.rag_egress_allowlist = Some(destinations.into_iter().map(Into::into).collect());
         self
     }
 }

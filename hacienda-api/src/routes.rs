@@ -577,7 +577,9 @@ pub(crate) mod tests {
         let jobs = InMemoryJobStore::new().into_arc();
         let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
         let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
-        ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(store)
+        ApiState::new(facade, jobs, auth, ApiLimits::default())
+            .with_rag_store(store)
+            .with_rag_egress_allowlist(["http://127.0.0.1:1"])
     }
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
@@ -1791,7 +1793,7 @@ pub(crate) mod tests {
         let answer_body = r#"{
             "prompt": "what is this?",
             "retrieve": {"mode":"vector","query_vector":[1.0,0.0,0.0],"top_k":5},
-            "llm": {"model": "not-a-real-provider/does-not-exist"}
+            "llm": {"model": "not-a-real-provider/does-not-exist", "base_url": "http://127.0.0.1:1"}
         }"#;
         let answer = app
             .clone()

@@ -39,6 +39,7 @@ use xberg::ExtractInput;
 const ANTHROPIC_MESSAGES_API_KEY_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_API_KEY";
 const ANTHROPIC_MESSAGES_ENDPOINT_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_ENDPOINT";
 const DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const RAG_LLM_BASE_URL_ENV: &str = "HACIENDA_RAG_LLM_BASE_URL";
 
 fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
     args.concurrency.unwrap_or_else(num_cpus::get)
@@ -1596,6 +1597,7 @@ pub async fn run_serve(
     let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
     let auth_enabled = config.auth.enabled;
     let claude_messages_provider = build_anthropic_messages_provider()?;
+    let rag_egress = read_optional_env(RAG_LLM_BASE_URL_ENV)?;
 
     let facade = Arc::new(build_facade(config).context("building the facade")?);
     let jobs = InMemoryJobStore::new().into_arc();
@@ -1603,6 +1605,10 @@ pub async fn run_serve(
     // decision (embed a `PgVectorStore` instead), not this command's to make.
     let rag_store: Arc<dyn hacienda_rag::RagStore> = Arc::new(InMemoryVectorStore::new("default"));
     let state = ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(rag_store);
+    let state = match rag_egress {
+        Some(endpoint) => state.with_rag_egress_allowlist([endpoint]),
+        None => state,
+    };
     let state = match claude_messages_provider {
         Some(provider) => state.with_claude_messages_provider(provider),
         None => state,

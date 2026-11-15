@@ -150,7 +150,9 @@ pub async fn answer(
     let config = LlmAnswerConfig {
         llm: body.llm,
         system_prompt: body.system_prompt,
-        egress_allowlist: None, // wired from server egress configuration when strict mode is enabled
+        // The API is always strict. An absent server policy becomes an empty
+        // allowlist, never the permissive `None` used by lower-level callers.
+        egress_allowlist: Some(state.rag_egress_allowlist.clone().unwrap_or_default()),
     };
     let redactor = FacadeRedactor {
         facade: &state.facade,
