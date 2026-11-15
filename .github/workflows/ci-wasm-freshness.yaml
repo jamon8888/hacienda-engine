@@ -89,13 +89,6 @@ jobs:
             --remap-path-prefix=/home/runner/.cargo=/cargo-home
         run: cd crates/hacienda-wasm && wasm-pack build --target web --no-default-features --features ner-candle-wasm
 
-      - name: Export rebuilt package for deterministic refresh
-        uses: actions/upload-artifact@v4
-        with:
-          name: hacienda-wasm-pkg
-          path: crates/hacienda-wasm/pkg/
-          if-no-files-found: error
-
       - name: Fail if committed pkg/ output is stale
         run: |
           # `git diff --exit-code` alone only catches changes to files git already
