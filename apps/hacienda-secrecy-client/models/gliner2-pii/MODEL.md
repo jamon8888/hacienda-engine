@@ -32,27 +32,32 @@ path in status.
 
 The desktop Tauri package enables its `ner-candle` feature by default. Loading
 the model is intentionally eager at startup and may consume roughly 1.2 GiB
-of disk-read bandwidth plus the Candle model's resident memory; the remaining
-remaining runtime smoke check is to inspect the packaged desktop UI and confirm
-it displays `local_model` for the installed checkpoint.
+of disk-read bandwidth plus the Candle model's resident memory. The remaining
+runtime smoke check is to inspect the packaged desktop UI and confirm its
+detector and gateway status for the installed checkpoint.
 
 ## Local runtime verification
 
 On 2026-11-15, the ignored Tauri test
-`pinned_gliner2_model_runs_french_detection_and_redaction` loaded the installed
-checkpoint on an Intel Core i7-3520M (2 cores / 4 logical CPUs, 16 GiB RAM).
-It passed in both test profiles: 269.13 s in the debug profile and 25.53 s in
-the optimized release profile. The test sends French text containing a person
-and a city through the same `ProviderRequest` redaction adapter used before
-egress, and verifies the serialized request contains only reversible
-`[PERSON:local:…]` and `[ADDRESS:local:…]` tokens, with neither source value.
-The same loaded redactor also produces `provider_send_enabled: true` and
-`detector: "local_model"` through the status object used by the Tauri command.
+`pinned_gliner2_model_redacts_claude_codex_requests_and_responses` loaded the
+installed checkpoint on an Intel Core i7-3520M (2 cores / 4 logical CPUs,
+16 GiB RAM). The earlier request-only version passed in both test profiles:
+269.13 s in debug and 25.53 s in optimized release. The current test passed in
+optimized release in 27.12 s.
 
-This proves model loading, French inference, and the provider DTO redaction
-boundary in the Rust test binary. It does not verify GUI startup, OS keychain
-integration, or the status shown by a packaged desktop app; those remain the
-packaged-runtime smoke check.
+The current test drives the real local model through `ProviderCommandState::stream`
+for both Claude Desktop and Codex, using a recording transport instead of network
+I/O. It verifies the transport receives model-tokenized prompt and context with no
+source person, city, or email; a simulated provider response containing a person
+and email is redacted before it returns to the renderer, and the existing person
+token remains stable across the request and response. The status contract reports
+the model as ready but keeps sending disabled until the provider runtime is also
+configured.
+
+This proves model loading, French detection, both provider DTO paths, and outbound
+and response redaction boundaries in the Rust test binary. It does not verify GUI
+startup, OS keychain integration, the production gateway's network connectivity,
+or the status rendered by the packaged desktop app; those remain runtime checks.
 
 The Tauri release build completed for the macOS `.app` target, and that app's
 native process started and remained alive. The Rust status contract is verified

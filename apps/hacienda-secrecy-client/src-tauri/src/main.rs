@@ -2001,6 +2001,40 @@ mod tests {
         }
     }
 
+    struct RecordingProviderTransport {
+        outbound: Arc<Mutex<Option<RedactedProviderRequest>>>,
+        response_text: String,
+    }
+
+    impl ProviderTransport for RecordingProviderTransport {
+        fn stream(
+            &mut self,
+            request: &RedactedProviderRequest,
+        ) -> Result<ProviderResponse, TransportError> {
+            *self.outbound.lock().map_err(|_| TransportError::Failed)? = Some(request.clone());
+            let chunk = ProviderStreamChunk {
+                conversation_id: request.conversation_id.clone(),
+                context_id: request.context_id.clone(),
+                sequence: 0,
+                content: TokenizedText::new(self.response_text.clone(), Vec::new()),
+            };
+            Ok(match request.provider {
+                ProviderKind::ClaudeDesktop => {
+                    ProviderResponse::ClaudeDesktop(ClaudeDesktopResponse {
+                        conversation_id: request.conversation_id.clone(),
+                        context_id: request.context_id.clone(),
+                        chunks: vec![chunk],
+                    })
+                }
+                ProviderKind::Codex => ProviderResponse::Codex(CodexResponse {
+                    conversation_id: request.conversation_id.clone(),
+                    context_id: request.context_id.clone(),
+                    chunks: vec![chunk],
+                }),
+            })
+        }
+    }
+
     #[derive(Default)]
     struct TestKeyStore(Mutex<Option<[u8; hacienda_core::redaction::KEY_BYTES]>>);
 
@@ -2296,7 +2330,7 @@ mod tests {
     #[cfg(feature = "ner-candle")]
     #[test]
     #[ignore = "loads the pinned GLiNER2 checkpoint; set HACIENDA_NER_MODEL_DIR"]
-    fn pinned_gliner2_model_runs_french_detection_and_redaction() {
+    fn pinned_gliner2_model_redacts_claude_codex_requests_and_responses() {
         let model_dir = env::var_os(NER_MODEL_DIR_ENV)
             .map(PathBuf::from)
             .expect("HACIENDA_NER_MODEL_DIR must point to the installed checkpoint");
@@ -2316,35 +2350,100 @@ mod tests {
         assert!(configured_provider_status.provider_send_enabled);
         assert_eq!(configured_provider_status.detector, "local_model");
 
-        let source = "Maître Élodie Martin travaille à Paris pour le dossier.";
-        // Exercise the exact request adapter used before provider egress with the
-        // loaded model rather than the regex-only test seam above.
-        let request = ProviderRequest::ClaudeDesktop(ClaudeDesktopRequest {
-            conversation_id: hacienda_client_core::ConversationId::new("model-smoke-conversation"),
-            context_id: hacienda_client_core::ContextId::new("model-smoke-context"),
-            prompt: source.into(),
-            context: Vec::new(),
-        });
-        let safe_request = redactor
-            .redact(&request)
-            .expect("tokenize provider request with the pinned model");
-        let provider_payload =
-            serde_json::to_string(&safe_request).expect("serialize provider DTO");
-        assert!(
-            provider_payload.contains("[PERSON:local:"),
-            "{provider_payload}"
-        );
-        assert!(
-            // The pinned GLiNER2 model currently classifies the French city mention
-            // as ADDRESS; assert the emitted contract rather than assuming LOCATION.
-            provider_payload.contains("[ADDRESS:local:"),
-            "{provider_payload}"
-        );
-        assert!(
-            !provider_payload.contains("Élodie Martin"),
-            "{provider_payload}"
-        );
-        assert!(!provider_payload.contains("Paris"), "{provider_payload}");
+        let prompt = "Maître Élodie Martin travaille à Paris pour le dossier.";
+        let context = vec![hacienda_client_core::PromptContext::new(
+            "Dossier Élodie Martin",
+            "Élodie Martin vit à Paris ; contact elodie.martin@example.fr",
+        )];
+        let requests = [
+            ProviderRequest::ClaudeDesktop(
+                ClaudeDesktopRequest::new(
+                    hacienda_client_core::ConversationId::new("model-smoke-claude"),
+                    hacienda_client_core::ContextId::new("model-smoke-context-claude"),
+                    prompt,
+                )
+                .with_context(context.clone()),
+            ),
+            ProviderRequest::Codex(
+                CodexRequest::new(
+                    hacienda_client_core::ConversationId::new("model-smoke-codex"),
+                    hacienda_client_core::ContextId::new("model-smoke-context-codex"),
+                    prompt,
+                )
+                .with_context(context),
+            ),
+        ];
+
+        for request in requests {
+            let outbound = Arc::new(Mutex::new(None));
+            let state = ProviderCommandState::new(
+                RecordingProviderTransport {
+                    outbound: Arc::clone(&outbound),
+                    response_text: "Élodie Martin replied from elodie.martin@example.fr in Paris."
+                        .into(),
+                },
+                Some(SharedHaciendaRedactor(Arc::clone(&redactor))),
+            )
+            .with_complete_pii_detector();
+            assert!(
+                viewer
+                    .pii_status(state.pii_detection_ready)
+                    .provider_send_enabled
+            );
+            let response = state
+                .stream(&request)
+                .expect("run the model-backed request/response provider path");
+            let outbound = outbound
+                .lock()
+                .expect("recorded outbound request lock")
+                .clone()
+                .expect("provider transport received a request");
+            assert_eq!(outbound.provider, request.provider());
+
+            let provider_payload =
+                serde_json::to_string(&outbound).expect("serialize redacted provider DTO");
+            assert!(
+                provider_payload.contains("[PERSON:local:"),
+                "{provider_payload}"
+            );
+            assert!(
+                // The pinned model currently classifies this French city as ADDRESS.
+                provider_payload.contains("[ADDRESS:local:"),
+                "{provider_payload}"
+            );
+            assert!(
+                provider_payload.contains("[EMAIL:local:"),
+                "{provider_payload}"
+            );
+            for plaintext in ["Élodie Martin", "Paris", "elodie.martin@example.fr"] {
+                assert!(!provider_payload.contains(plaintext), "{provider_payload}");
+            }
+            let person_token = outbound
+                .prompt
+                .references
+                .iter()
+                .find(|reference| reference.class == "PERSON")
+                .expect("model emits a person token in the prompt")
+                .token
+                .clone();
+
+            let chunks = match response {
+                ProviderResponse::ClaudeDesktop(response) => response.chunks,
+                ProviderResponse::Codex(response) => response.chunks,
+            };
+            let reply = chunks
+                .iter()
+                .map(|chunk| chunk.content.text.as_str())
+                .collect::<Vec<_>>()
+                .join("");
+            assert!(reply.contains("[PERSON:local:"), "{reply}");
+            assert!(reply.contains(&person_token), "{reply}");
+            assert!(reply.contains("[EMAIL:local:"), "{reply}");
+            assert!(reply.contains("[ADDRESS:local:"), "{reply}");
+            assert!(!reply.contains("Élodie Martin"), "{reply}");
+            assert!(!reply.contains("elodie.martin@example.fr"), "{reply}");
+            assert!(!reply.contains("Paris"), "{reply}");
+        }
     }
 
     #[test]
