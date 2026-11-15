@@ -408,6 +408,17 @@ projection Tiptap token-only, persistance LanceDB et append de révisions avec v
 par pipeline (`6e6f9eb`). L’ouverture de l’original passe par une commande native avec
 références opaques et contrôle côté processus.
 
+Cette persistance est actuellement **lexicale uniquement** : le client appelle
+`Backend::persist_to`, qui crée une collection sans dimension d’embedding, et les chunks
+sont construits avec `embedding: Vec::new()`. Le client Tauri n’active pas la feature
+`hacienda-rag/embeddings`/Xberg ONNX ; aucun modèle d’embedding n’est installé dans le cache
+LocalFull. La présence du modèle GLiNER2 valide la détection/redaction, pas le retrieval
+dense ni une recherche hybride. Le preset Xberg `multilingual` est candidat pour les dossiers
+français/multilingues, mais son modèle, sa politique d’installation hors ligne, ses dimensions
+et son comportement sur le corpus juridique cible restent à valider avant d’activer les
+vecteurs. Tant que cette étape n’est pas livrée, l’interface et les spécifications ne doivent
+pas présenter le RAG LocalFull comme hybride/vectorisé.
+
 Cette tranche ne livre pas encore les viewers intégrés PDF/DOCX/XLSX/PPTX du tableau, ni
 la restauration durable des références de l’original après redémarrage. Le service garde
 encore la liaison document/version/chemin dans l’état de session en mémoire. Les décisions
