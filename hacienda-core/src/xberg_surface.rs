@@ -69,11 +69,15 @@ pub fn detect_mime_type(bytes: &[u8], filename: Option<&str>) -> Result<String, 
     if bytes.len() > MAX_MIME_INPUT_BYTES {
         return Err(XbergSurfaceError::MimeInputTooLarge);
     }
+    let filename_hint = filename.and_then(filename_mime_hint);
     match xberg::detect_mime_type_from_bytes(bytes) {
+        // Xberg uses `text/plain` as a generic fallback for ambiguous bytes. A
+        // supported, more specific filename hint is more useful in that case.
+        Ok(mime) if mime == "text/plain" => Ok(filename_hint
+            .filter(|hint| hint != "text/plain")
+            .unwrap_or(mime)),
         Ok(mime) => Ok(mime),
-        Err(error) => filename
-            .and_then(filename_mime_hint)
-            .ok_or(XbergSurfaceError::Mime(error)),
+        Err(error) => filename_hint.ok_or(XbergSurfaceError::Mime(error)),
     }
 }
 
