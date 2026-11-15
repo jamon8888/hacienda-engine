@@ -51,3 +51,10 @@ This proves model loading, French inference, and the provider DTO redaction
 boundary in the Rust test binary. It does not verify GUI startup, OS keychain
 integration, or the status shown by a packaged desktop app; those remain the
 packaged-runtime smoke check.
+
+The Tauri release build completed for the macOS `.app` target, and that app's
+native process started and remained alive. The GUI status could not be observed
+in this run because the computer-use native pipe failed to start, so do not
+interpret the process launch as proof that the UI reported `local_model`. The
+default DMG target also failed in Tauri's `bundle_dmg.sh`; the `.app` target
+itself completed successfully.
