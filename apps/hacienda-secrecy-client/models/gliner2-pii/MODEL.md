@@ -34,5 +34,20 @@ The desktop Tauri package enables its `ner-candle` feature by default. Loading
 the model is intentionally eager at startup and may consume roughly 1.2 GiB
 of disk-read bandwidth plus the Candle model's resident memory; the remaining
 runtime smoke test is to launch the packaged desktop app with the installed
-checkpoint and confirm the status reports `local_model` and provider redaction
-still emits reversible tokens.
+checkpoint and confirm the status reports `local_model`.
+
+## Local runtime verification
+
+On 2026-11-15, the ignored Tauri test
+`pinned_gliner2_model_runs_french_detection_and_redaction` loaded the installed
+checkpoint on an Intel Core i7-3520M (2 cores / 4 logical CPUs, 16 GiB RAM).
+It passed in both test profiles: 269.13 s in the debug profile and 25.98 s in
+the optimized release profile. The test sends French text containing a person
+and a city through the same `ProviderRequest` redaction adapter used before
+egress, and verifies the serialized request contains only reversible
+`[PERSON:local:…]` and `[ADDRESS:local:…]` tokens, with neither source value.
+
+This proves model loading, French inference, and the provider DTO redaction
+boundary in the Rust test binary. It does not verify GUI startup, OS keychain
+integration, or the status shown by a packaged desktop app; those remain the
+packaged-runtime smoke check.
