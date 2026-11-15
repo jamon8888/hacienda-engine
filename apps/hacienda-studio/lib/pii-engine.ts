@@ -294,16 +294,17 @@ export async function redactPii(text: string): Promise<PiiPipelineResult> {
 export async function recordPiiAudit(
   result: PiiPipelineResult,
   appliedMode: "mask" | "hash" | "pseudonymize" | "remove",
+  modelProvenance: string | null = MODEL_PROVENANCE,
 ): Promise<void> {
   const handle = await getAuditHandle();
   if (!result.audit_log || result.audit_log.length === 0) {
-    await handle.recordResult(result, MODEL_PROVENANCE);
+    await handle.recordResult(result, modelProvenance);
     return;
   }
   await handle.recordResult({
     ...result,
     audit_log: result.audit_log.map((entry) => ({ ...entry, action: appliedMode })),
-  }, MODEL_PROVENANCE);
+  }, modelProvenance);
 }
 
 /**
