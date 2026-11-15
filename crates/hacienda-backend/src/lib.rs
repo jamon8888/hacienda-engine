@@ -645,15 +645,29 @@ impl Backend {
             }),
             metadata: rag_metadata,
         };
-        let chunks = vec![ChunkRecord {
-            external_id: Some(format!("{document_id}:{version_id}:0")),
+        #[cfg(feature = "chunking")]
+        let mut chunks = hacienda_rag::chunk_full_text(
+            &full_text,
+            &xberg::ChunkingConfig {
+                max_characters: 1024,
+                overlap: 100,
+                ..Default::default()
+            },
+        )?;
+        #[cfg(not(feature = "chunking"))]
+        let mut chunks = vec![ChunkRecord {
+            external_id: None,
             ordinal: 0,
             content: full_text,
             embedding: Vec::new(),
             sparse_embedding: None,
             multi_vector: None,
-            chunk_metadata: json!({"document_id": document_id, "version_id": version_id}),
+            chunk_metadata: Value::Null,
         }];
+        for chunk in &mut chunks {
+            chunk.external_id = Some(format!("{document_id}:{version_id}:{}", chunk.ordinal));
+            chunk.chunk_metadata = json!({"document_id": document_id, "version_id": version_id});
+        }
         Ok(BackendDocument {
             editor,
             rag_document,
@@ -2046,28 +2060,42 @@ fn build_editor_revision_document(
         }),
         metadata: rag_metadata,
     };
-    let chunks = full_text
+    #[cfg(feature = "chunking")]
+    let mut chunks = hacienda_rag::chunk_full_text(
+        &full_text,
+        &xberg::ChunkingConfig {
+            max_characters: 1024,
+            overlap: 100,
+            ..Default::default()
+        },
+    )?;
+    #[cfg(not(feature = "chunking"))]
+    let mut chunks = full_text
         .split('\n')
         .enumerate()
         .map(|(ordinal, content)| ChunkRecord {
-            external_id: Some(format!(
-                "{}:{}:{}",
-                base.editor.document_ref, version_id, ordinal
-            )),
+            external_id: None,
             ordinal: ordinal as u32,
             content: content.to_owned(),
             embedding: Vec::new(),
             sparse_embedding: None,
             multi_vector: None,
-            chunk_metadata: json!({
-                "tenant_scope": backend.tenant_scope(),
-                "dossier_id": base.dossier_id.clone(),
-                "document_id": base.editor.document_ref.clone(),
-                "version_id": version_id,
-                "source_hash": source_hash.clone(),
-            }),
+            chunk_metadata: Value::Null,
         })
         .collect::<Vec<_>>();
+    for chunk in &mut chunks {
+        chunk.external_id = Some(format!(
+            "{}:{}:{}",
+            base.editor.document_ref, version_id, chunk.ordinal
+        ));
+        chunk.chunk_metadata = json!({
+            "tenant_scope": backend.tenant_scope(),
+            "dossier_id": base.dossier_id.clone(),
+            "document_id": base.editor.document_ref.clone(),
+            "version_id": version_id,
+            "source_hash": source_hash.clone(),
+        });
+    }
     let token_references = editor
         .search
         .tokens

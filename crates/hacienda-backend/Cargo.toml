@@ -9,6 +9,8 @@ description = "Token-only Xberg projection and profile-scoped RAG integration"
 [features]
 default = []
 lancedb = ["hacienda-rag/lancedb"]
+embeddings = ["hacienda-rag/embeddings"]
+chunking = ["hacienda-rag/chunking"]
 
 [dependencies]
 async-trait = { workspace = true }

@@ -41,7 +41,7 @@ use hacienda_client_core::{
 };
 #[cfg(not(test))]
 use hacienda_core::audit::{FileAuditStore, NodeId};
-use hacienda_rag::LanceDbStore;
+use hacienda_rag::{LanceDbStore, XbergTokenEmbedder};
 
 /// Opaque references are resolved inside the desktop process.  The renderer is
 /// intentionally unable to send source bytes or extracted content here.
@@ -115,6 +115,9 @@ const NER_MODEL_DIR_ENV: &str = "HACIENDA_NER_MODEL_DIR";
 const NER_MODEL_APP_DATA_RELATIVE_DIR: &str = "models/gliner2-pii";
 const PINNED_NER_MODEL_ID: &str = "fastino/gliner2-privacy-filter-PII-multi";
 const PINNED_NER_MODEL_REVISION: &str = "1cb4166094dc58fa8d836429f060d6c95f62b495";
+const LOCAL_EMBEDDING_PRESET: &str = "multilingual";
+const LOCAL_EMBEDDING_VERSION: u32 = 1;
+const LOCAL_EMBEDDING_COLLECTION: &str = "documents-multilingual-v1";
 
 #[derive(Clone, Copy)]
 struct PinnedModelAsset {
@@ -424,6 +427,9 @@ struct StoredLocalDocument {
 struct LocalFullDocumentService {
     backend: Backend,
     store: Arc<LanceDbStore>,
+    embedding_config: xberg::EmbeddingConfig,
+    embedder: XbergTokenEmbedder,
+    embedding_ready: bool,
     audit: Arc<dyn AuditStore>,
     facade: hacienda_core::HaciendaFacade,
     issuer: TrustedEditorRevisionIssuer,
@@ -440,9 +446,25 @@ impl LocalFullDocumentService {
         let (backend, store) = Backend::connect_configured_lancedb(profile)
             .await
             .map_err(|_| "LocalFull LanceDB is unavailable".to_owned())?;
+        let embedding_cache = root.join("models/xberg-embeddings");
+        std::fs::create_dir_all(&embedding_cache)
+            .map_err(|_| "LocalFull embedding cache is unavailable".to_owned())?;
+        let embedding_config = xberg::EmbeddingConfig {
+            model: xberg::EmbeddingModelType::Preset {
+                name: LOCAL_EMBEDDING_PRESET.to_owned(),
+            },
+            cache_dir: Some(embedding_cache),
+            ..Default::default()
+        };
+        let embedder =
+            XbergTokenEmbedder::from_config(embedding_config.clone(), LOCAL_EMBEDDING_VERSION)
+                .map_err(|_| "LocalFull embedding model configuration is unavailable".to_owned())?;
         Ok(Self {
             backend,
             store: Arc::new(store),
+            embedding_config,
+            embedder,
+            embedding_ready: false,
             audit,
             facade,
             issuer,
@@ -454,6 +476,11 @@ impl LocalFullDocumentService {
         &mut self,
         path: PathBuf,
     ) -> Result<(DocumentProjectionResponse, OriginalBinding, PathBuf), String> {
+        if !self.embedding_ready {
+            return Err(
+                "Install or activate the local multilingual retrieval model first".to_owned(),
+            );
+        }
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -485,9 +512,14 @@ impl LocalFullDocumentService {
             )
             .map_err(|_| "Token-only document projection failed".to_owned())?;
         self.backend
-            .persist_to(self.store.as_ref(), "documents", &document)
+            .persist_to_with_embedder(
+                self.store.as_ref(),
+                LOCAL_EMBEDDING_COLLECTION,
+                &document,
+                &self.embedder,
+            )
             .await
-            .map_err(|_| "Token-only document persistence failed".to_owned())?;
+            .map_err(|_| "Token-only document embedding or persistence failed".to_owned())?;
         let binding = OriginalBinding {
             document_ref: document_ref.clone(),
             version_ref: version_ref.clone(),
@@ -542,12 +574,13 @@ impl LocalFullDocumentService {
             .map_err(|_| "Editor save failed closed at the PII pipeline".to_owned())?;
         let saved = self
             .backend
-            .append_editor_revision(
+            .append_editor_revision_with_embedder(
                 self.audit.as_ref(),
                 self.store.as_ref(),
-                "documents",
+                LOCAL_EMBEDDING_COLLECTION,
                 &base_document,
                 &revision,
+                &self.embedder,
             )
             .await
             .map_err(|_| "Editor version could not be appended".to_owned())?;
@@ -566,6 +599,17 @@ impl LocalFullDocumentService {
             parent_version_id: request.version_ref,
             idempotent: saved.idempotent,
         })
+    }
+
+    async fn install_embedding_model(&mut self) -> Result<(), String> {
+        let model = self.embedding_config.model.clone();
+        let cache_dir = self.embedding_config.cache_dir.clone();
+        tokio::task::spawn_blocking(move || xberg::embeddings::warm_model(&model, cache_dir))
+            .await
+            .map_err(|_| "LocalFull embedding model initialization failed".to_owned())?
+            .map_err(|_| "LocalFull multilingual embedding model could not be loaded".to_owned())?;
+        self.embedding_ready = true;
+        Ok(())
     }
 }
 
@@ -1891,6 +1935,29 @@ async fn pick_document(
     Ok(projection)
 }
 
+#[derive(Debug, Serialize)]
+struct LocalEmbeddingStatusResponse {
+    ready: bool,
+    model: &'static str,
+}
+
+/// Explicitly downloads or loads the pinned Xberg multilingual embedding model.
+/// Document text is never passed to this model-installation operation.
+#[tauri::command(rename = "install-local-rag-model")]
+async fn install_local_rag_model(
+    state: tauri::State<'_, LocalFullDocumentState>,
+) -> Result<LocalEmbeddingStatusResponse, String> {
+    let mut service = state.service().await?;
+    let service = service
+        .as_mut()
+        .ok_or_else(|| "LocalFull document service is unavailable".to_owned())?;
+    service.install_embedding_model().await?;
+    Ok(LocalEmbeddingStatusResponse {
+        ready: service.embedding_ready,
+        model: "xberg:preset:multilingual",
+    })
+}
+
 #[tauri::command(rename = "load-document")]
 async fn load_document(
     state: tauri::State<'_, LocalFullDocumentState>,
@@ -1970,6 +2037,7 @@ fn main() {
             pseudonymize_selection,
             local_pii_status,
             pick_document,
+            install_local_rag_model,
             load_document,
             save_document
         ])

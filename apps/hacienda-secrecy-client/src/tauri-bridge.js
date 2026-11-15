@@ -12,7 +12,7 @@
 /** @typedef {{ provider_send_enabled: boolean, detector: "local_model" | "regex_only" }} LocalPiiStatus */
 /** @typedef {{ schema_version: string, document_id: string, version_id: string, source: { mime_type: string, original_ref: string, viewer_ref: string, capability_ref: string }, metadata_token_only: Record<string, unknown>, editor: Record<string, unknown>, search_projection: Record<string, unknown>, provenance: Record<string, unknown> }} DocumentProjection */
 /** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } } | { token: string }} InvokePayload */
-/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "load-document" | "save-document", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
+/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "install-local-rag-model" | "load-document" | "save-document", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
 /** @typedef {{ sequence: number, text: string, references: OpaqueTokenReference[] }} TokenizedChunk */
 
 const PROVIDER_COMMANDS = Object.freeze({
@@ -333,6 +333,7 @@ export function tokenizedTextToDocument(tokenizedText) {
  *   pseudonymizeSelection: (request: { category: string, value: string }) => Promise<TokenizedText>,
  *   localPiiStatus: () => Promise<LocalPiiStatus>,
  *   pickDocument: () => Promise<DocumentProjection>,
+ *   installLocalRagModel: () => Promise<{ ready: true, model: "xberg:preset:multilingual" }>,
  *   loadDocument: (request: { documentRef: string, versionRef: string }) => Promise<DocumentProjection>,
  *   saveDocument: (request: { documentRef: string, versionRef: string, editor: Record<string, unknown> }) => Promise<{ document_id: string, version_id: string, parent_version_id: string, idempotent: boolean }>,
  * }}
@@ -363,6 +364,9 @@ export function createRendererBridge(invoke) {
       },
       pickDocument: async () => {
         throw new Error("Local document picker is unavailable");
+      },
+      installLocalRagModel: async () => {
+        throw new Error("Local retrieval model is unavailable");
       },
       loadDocument: async () => {
         throw new Error("Local document loading is unavailable");
@@ -428,6 +432,13 @@ export function createRendererBridge(invoke) {
     },
     async pickDocument() {
       return readDocumentProjection(await invoke("pick-document"));
+    },
+    async installLocalRagModel() {
+      const response = await invoke("install-local-rag-model");
+      if (!isRecord(response) || response.ready !== true || response.model !== "xberg:preset:multilingual") {
+        throw new Error("Local multilingual retrieval model is unavailable");
+      }
+      return /** @type {{ ready: true, model: "xberg:preset:multilingual" }} */ (response);
     },
     async loadDocument({ documentRef, versionRef }) {
       if (!isOpaqueReference(documentRef) || !isOpaqueReference(versionRef)) {

@@ -156,6 +156,7 @@ function ManualPseudonymizationPanel({ category, onCategoryChange, disabled, onP
 function LocalDocumentWorkspace({ bridge }) {
   const [projection, setProjection] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [embeddingReady, setEmbeddingReady] = useState(false);
   const [status, setStatus] = useState("");
   const editor = useEditor({
     extensions: [StarterKit.configure({ history: true }), SensitiveMark],
@@ -170,7 +171,7 @@ function LocalDocumentWorkspace({ bridge }) {
   }, [projection, editor]);
 
   async function pick() {
-    if (busy) return;
+    if (busy || !embeddingReady) return;
     setBusy(true);
     setStatus("");
     try {
@@ -179,6 +180,22 @@ function LocalDocumentWorkspace({ bridge }) {
       setStatus("Document tokenisé chargé localement.");
     } catch (error) {
       setStatus(error?.message === "Document selection was cancelled" ? "Sélection annulée." : "Échec fermé de l’ingestion locale.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installEmbeddingModel() {
+    if (busy) return;
+    setBusy(true);
+    setStatus("Chargement ou installation du modèle multilingue Xberg. Aucun document n’est transmis pendant cette opération.");
+    try {
+      const model = await bridge.installLocalRagModel();
+      setEmbeddingReady(true);
+      setStatus(`Modèle de recherche prêt : ${model.model}.`);
+    } catch {
+      setEmbeddingReady(false);
+      setStatus("Modèle de recherche indisponible. L’ingestion reste désactivée.");
     } finally {
       setBusy(false);
     }
@@ -231,7 +248,10 @@ function LocalDocumentWorkspace({ bridge }) {
           <h2>Document tokenisé</h2>
         </div>
         <div className="document-actions">
-          <button type="button" onClick={() => void pick()} disabled={busy}>{busy ? "Traitement…" : "Choisir un fichier"}</button>
+          <button type="button" onClick={() => void installEmbeddingModel()} disabled={busy}>
+            {busy && !embeddingReady ? "Chargement du modèle…" : embeddingReady ? "Modèle RAG prêt" : "Installer / activer le modèle RAG"}
+          </button>
+          <button type="button" onClick={() => void pick()} disabled={busy || !embeddingReady}>{busy ? "Traitement…" : "Choisir un fichier"}</button>
           <button type="button" onClick={() => void save()} disabled={busy || !projection || !editor}>Enregistrer une version</button>
           <button type="button" onClick={() => void openOriginal()} disabled={busy || !projection}>Viewer natif</button>
         </div>
@@ -243,7 +263,9 @@ function LocalDocumentWorkspace({ bridge }) {
         </>
       )}
       {status && <p className="status" role="status">{status}</p>}
-      {!projection && <p className="empty-history">Choisissez un document : seuls sa projection Tiptap tokenisée et ses références opaques entreront dans le renderer.</p>}
+      {!projection && <p className="empty-history">{embeddingReady
+        ? "Choisissez un document : seuls sa projection Tiptap tokenisée et ses références opaques entreront dans le renderer."
+        : "Activez d’abord le modèle Xberg multilingue pour créer des chunks et embeddings token-only dans LanceDB."}</p>}
     </section>
   );
 }

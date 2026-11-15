@@ -133,6 +133,20 @@ test("document bridge accepts token-only projections and appends editor versions
   );
 });
 
+test("local RAG activation accepts only the pinned multilingual preset", async () => {
+  const bridge = createRendererBridge(async (command) => {
+    assert.equal(command, "install-local-rag-model");
+    return { ready: true, model: "xberg:preset:multilingual" };
+  });
+  assert.deepEqual(await bridge.installLocalRagModel(), {
+    ready: true,
+    model: "xberg:preset:multilingual",
+  });
+
+  const malformed = createRendererBridge(async () => ({ ready: true, model: "arbitrary-model" }));
+  await assert.rejects(malformed.installLocalRagModel(), /retrieval model is unavailable/);
+});
+
 test("local viewer opens only with validated tokenized DTOs and opaque references", async () => {
   let call;
   const bridge = createRendererBridge(async (...args) => {

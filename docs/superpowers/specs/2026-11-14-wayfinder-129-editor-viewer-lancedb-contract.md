@@ -408,16 +408,24 @@ projection Tiptap token-only, persistance LanceDB et append de révisions avec v
 par pipeline (`6e6f9eb`). L’ouverture de l’original passe par une commande native avec
 références opaques et contrôle côté processus.
 
-Cette persistance est actuellement **lexicale uniquement** : le client appelle
-`Backend::persist_to`, qui crée une collection sans dimension d’embedding, et les chunks
-sont construits avec `embedding: Vec::new()`. Le client Tauri n’active pas la feature
-`hacienda-rag/embeddings`/Xberg ONNX ; aucun modèle d’embedding n’est installé dans le cache
-LocalFull. La présence du modèle GLiNER2 valide la détection/redaction, pas le retrieval
-dense ni une recherche hybride. Le preset Xberg `multilingual` est candidat pour les dossiers
-français/multilingues, mais son modèle, sa politique d’installation hors ligne, ses dimensions
-et son comportement sur le corpus juridique cible restent à valider avant d’activer les
-vecteurs. Tant que cette étape n’est pas livrée, l’interface et les spécifications ne doivent
-pas présenter le RAG LocalFull comme hybride/vectorisé.
+### Évolution du pipeline embeddings — 2026-11-15
+
+L’implémentation en cours active `hacienda-rag/embeddings` et le chunking Xberg dans le client
+Tauri. Elle choisit le preset `multilingual` (E5, 768 dimensions), crée des chunks de 1 024
+caractères avec chevauchement de 100, et passe les documents et les révisions de l’éditeur à
+`Backend::persist_to_with_embedder` / `append_editor_revision_with_embedder`. L’activation
+du modèle est explicite depuis l’interface ; aucun contenu documentaire n’est utilisé lors
+du chargement/téléchargement du modèle. La collection est versionnée
+`documents-multilingual-v1` pour isoler son schéma vectoriel.
+
+La compilation Tauri Intel avec `ort-dynamic`, Clippy ciblé, le format Rust et le contrôle
+TypeScript/bridge passent. Cette machine ne possède pas de bibliothèque ONNX Runtime exploitable
+(le chemin Homebrew présent est vide), donc le chargement réel du modèle n’a pas encore été
+vérifié. La distribution doit fournir une bibliothèque compatible et définir le chemin de
+chargement pour chaque plateforme ; le bouton échoue fermé si le modèle ne peut pas démarrer.
+Le chemin de requête RAG (embedding de la question, retrieval hybride dense + FTS filtré, puis
+injection de chunks token-only dans Claude/Codex) et son expérience UI restent à implémenter.
+La recherche dense/hybride n’est donc pas encore livrée de bout en bout.
 
 Cette tranche ne livre pas encore les viewers intégrés PDF/DOCX/XLSX/PPTX du tableau, ni
 la restauration durable des références de l’original après redémarrage. Le service garde
