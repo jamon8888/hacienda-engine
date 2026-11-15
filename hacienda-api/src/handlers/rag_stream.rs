@@ -150,6 +150,7 @@ pub async fn answer(
     let config = LlmAnswerConfig {
         llm: body.llm,
         system_prompt: body.system_prompt,
+        egress_allowlist: None, // wired from server egress configuration when strict mode is enabled
     };
     let redactor = FacadeRedactor {
         facade: &state.facade,

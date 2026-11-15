@@ -106,6 +106,14 @@ pub struct LlmAnswerConfig {
     /// under its own framing). When `None`, a minimal generic system framing
     /// that injects the retrieved context is used.
     pub system_prompt: Option<String>,
+    /// Optional egress allowlist for the LLM base URL.
+    ///
+    /// When `Some` (strict egress mode), [`build_token_stream`] refuses to open
+    /// the transport unless `config.llm.base_url` is present **and** appears in
+    /// this list — fail-closed: an absent or unauthorized destination is
+    /// rejected before any connection is attempted. When `None`, no egress
+    /// restriction is applied (the caller's existing behaviour).
+    pub egress_allowlist: Option<Vec<String>>,
 }
 
 /// Redacts text before it is sent to an LLM.
@@ -165,12 +173,32 @@ impl<'a> GuardedLlm<'a> {
     /// only because of that fact about a *different* function. If `answer_stream` ever
     /// starts injecting another field into the prompt or system message, this method must
     /// redact that field too, or the guarantee this type exists for quietly stops holding.
+    ///
+    /// The `system_prompt` override, when present, is redacted through the same injected
+    /// [`Redactor`] before it ever reaches the LLM transport — a redaction failure fails
+    /// the whole call (fail-closed): the unredacted system prompt must never be sent to
+    /// the provider.
+    ///
+    /// Egress is fail-closed too: when `config.egress_allowlist` is `Some` (strict mode),
+    /// `config.llm.base_url` must be present and listed, or the call fails before any
+    /// connection is attempted.
     pub async fn stream(
         &self,
         context: RetrievedContext,
         prompt: String,
-        config: LlmAnswerConfig,
+        mut config: LlmAnswerConfig,
     ) -> RagResult<impl Stream<Item = RagResult<AnswerEvent>> + Send + 'static> {
+        // Redact the system prompt override, if any, before it reaches the transport.
+        // A redaction failure is fail-closed: the unredacted system prompt never reaches
+        // the LLM, and no stream is built.
+        if let Some(system) = config.system_prompt.take() {
+            config.system_prompt = Some(self.redactor.redact(&system).await?);
+        }
+
+        // Fail-closed egress policy: an absent or unauthorized base_url is rejected
+        // before the transport is ever constructed.
+        validate_egress(&config)?;
+
         let redacted_prompt = self.redactor.redact(&prompt).await?;
         let mut redacted_chunks = Vec::with_capacity(context.chunks.len());
         for mut chunk in context.chunks {
@@ -184,6 +212,28 @@ impl<'a> GuardedLlm<'a> {
         };
         Ok(answer_stream(redacted_context, redacted_prompt, config))
     }
+}
+
+/// Fail-closed egress policy for the LLM transport.
+///
+/// When `config.egress_allowlist` is `Some` (strict mode), `config.llm.base_url` must be
+/// present and appear in the list. Returns an [`RagError::InvalidQuery`] otherwise — the
+/// transport is never built with an absent or unauthorized destination.
+fn validate_egress(config: &LlmAnswerConfig) -> RagResult<()> {
+    let Some(allowed) = &config.egress_allowlist else {
+        return Ok(()); // egress not restricted
+    };
+    let Some(url) = &config.llm.base_url else {
+        return Err(RagError::InvalidQuery(
+            "strict egress mode requires a base_url".to_string(),
+        ));
+    };
+    if !allowed.iter().any(|a| a == url) {
+        return Err(RagError::InvalidQuery(format!(
+            "base_url not in egress allowlist: {url}"
+        )));
+    }
+    Ok(())
 }
 
 /// Stream an answer grounded in `context` for the given `prompt`.
@@ -287,6 +337,11 @@ async fn build_token_stream(
     config: LlmAnswerConfig,
 ) -> RagResult<liter_llm::BoxStream<'static, liter_llm::Result<liter_llm::ChatCompletionChunk>>> {
     use liter_llm::LlmClient as _;
+
+    // Fail-closed egress: never open the transport to an absent or unauthorized
+    // destination, even when `answer_stream` is called directly (bypassing
+    // `GuardedLlm`).
+    validate_egress(&config)?;
 
     let client = liter_llm::create_client(
         config.llm.api_key.clone().unwrap_or_default(),
@@ -455,6 +510,7 @@ mod tests {
                 ..Default::default()
             },
             system_prompt: None,
+            egress_allowlist: None,
         };
 
         let events: Vec<_> = answer_stream(context, "what is this?".to_string(), config)
@@ -534,6 +590,7 @@ mod tests {
                 ..Default::default()
             },
             system_prompt: None,
+            egress_allowlist: None,
         }
     }
 
@@ -646,5 +703,119 @@ mod tests {
              to redact, and calling redact(\"\") would misrepresent it as an empty string \
              that was actually redacted"
         );
+    }
+
+    /// The system prompt override is redacted through the injected [`Redactor`] before the
+    /// stream is built — proof the unredacted system prompt never reaches the transport.
+    #[tokio::test]
+    async fn guarded_llm_redacts_the_system_prompt_before_building_the_stream() {
+        let redactor = SpyRedactor::new();
+        let system = "system prompt with a PII value";
+        let context = RetrievedContext { chunks: vec![] };
+
+        let mut config = guarded_llm_test_config();
+        config.system_prompt = Some(system.to_string());
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(context, "harmless prompt".to_string(), config)
+            .await;
+        assert!(result.is_ok(), "redaction succeeded, stream must build");
+
+        let seen = redactor.seen.lock().unwrap();
+        assert!(
+            seen.contains(&system.to_string()),
+            "the system prompt must have reached the redactor"
+        );
+    }
+
+    /// A redactor that refuses the system prompt must stop `GuardedLlm` before any stream
+    /// is built (fail-closed): the unredacted system prompt never reaches the transport.
+    #[tokio::test]
+    async fn guarded_llm_refuses_to_stream_when_the_redactor_rejects_the_system_prompt() {
+        let redactor = SpyRedactor::failing_on("control-corpus system");
+        let context = RetrievedContext { chunks: vec![] };
+
+        let mut config = guarded_llm_test_config();
+        config.system_prompt = Some("control-corpus system".to_string());
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(context, "harmless prompt".to_string(), config)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a rejected system prompt must not reach answer_stream"
+        );
+    }
+
+    fn strict_egress_config(base_url: Option<&str>) -> LlmAnswerConfig {
+        LlmAnswerConfig {
+            llm: xberg::LlmConfig {
+                model: "not-a-real-provider/does-not-exist".to_string(),
+                base_url: base_url.map(str::to_string),
+                ..Default::default()
+            },
+            system_prompt: None,
+            egress_allowlist: Some(vec!["https://allowed.example.com".to_string()]),
+        }
+    }
+
+    /// Strict egress mode: an absent `base_url` is rejected before the transport is built.
+    #[tokio::test]
+    async fn guarded_llm_rejects_missing_base_url_in_strict_mode() {
+        let redactor = SpyRedactor::new();
+        let context = RetrievedContext { chunks: vec![] };
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "harmless prompt".to_string(),
+                strict_egress_config(None),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a missing base_url must be rejected in strict egress mode"
+        );
+    }
+
+    /// Strict egress mode: a `base_url` that is not on the allowlist is rejected before the
+    /// transport is built.
+    #[tokio::test]
+    async fn guarded_llm_rejects_unauthorized_base_url() {
+        let redactor = SpyRedactor::new();
+        let context = RetrievedContext { chunks: vec![] };
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "harmless prompt".to_string(),
+                strict_egress_config(Some("https://evil.example.com")),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "an unauthorized base_url must be rejected in strict egress mode"
+        );
+    }
+
+    /// Strict egress mode: an authorized `base_url` is accepted (the stream is built; any
+    /// later LLM failure is unrelated to egress).
+    #[tokio::test]
+    async fn guarded_llm_allows_authorized_base_url() {
+        let redactor = SpyRedactor::new();
+        let context = RetrievedContext { chunks: vec![] };
+
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "harmless prompt".to_string(),
+                strict_egress_config(Some("https://allowed.example.com")),
+            )
+            .await;
+
+        assert!(result.is_ok(), "an authorized base_url must be accepted");
     }
 }
