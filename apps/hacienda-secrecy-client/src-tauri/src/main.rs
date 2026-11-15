@@ -5,17 +5,17 @@ use hacienda_backend::{
     Backend, BackendDocument, RedactedXbergDocument, TrustedEditorRevisionIssuer,
 };
 use hacienda_core::{
-    HaciendaConfig,
     audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction},
     editor_projection::EditorEnvelope,
     pii::{PiiCategory, PiiPipeline, PipelineConfig},
-    redaction::{KEY_BYTES, KeyId, KeyResolver, PseudonymKey, Pseudonymiser, RedactionMode},
+    redaction::{KeyId, KeyResolver, PseudonymKey, Pseudonymiser, RedactionMode, KEY_BYTES},
     tenancy::TenantId,
+    HaciendaConfig,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     env,
     fs::File,
     io::{BufReader, Read},
@@ -652,8 +652,6 @@ impl LocalFullDocumentState {
 const MAIN_WINDOW_LABEL: &str = "main";
 const LOCAL_VIEWER_PREFIX: &str = "local-viewer-";
 const VIEWER_SESSION_TTL: Duration = Duration::from_secs(60);
-const MAX_VIEWER_AUDIT_ENTRIES: usize = 256;
-
 /// Rust-only one-shot authority minted after the caller window, session, and token
 /// membership have been checked. It is never serialized or accepted from a renderer.
 pub struct ViewerCapability {
@@ -686,18 +684,11 @@ impl ViewerCapability {
     }
 }
 
-#[derive(Clone)]
-struct ViewerRevealAudit {
-    token_digest: [u8; 32],
-    value_digest: [u8; 32],
-}
-
 /// LocalFull uses Hacienda's authenticated pseudonym tokens. The OS credential store
 /// supplies the stable key; failure to open it disables this adapter.
 struct HaciendaLocalRedactor {
     pipeline: PiiPipeline,
     pseudonymiser: Arc<Pseudonymiser>,
-    reveal_audit: Mutex<VecDeque<ViewerRevealAudit>>,
     pii_detection_complete: bool,
 }
 
@@ -713,10 +704,12 @@ impl HaciendaLocalRedactor {
     /// Test-only compatibility seam for viewer/token tests that do not exercise
     /// provider egress. Production construction goes through `new` and requires
     /// a validated, loaded local model before it can authorize egress.
+    #[cfg(test)]
     fn from_key_store(store: Arc<dyn LocalPseudonymKeyStore>) -> Result<Self, RedactionError> {
         Self::from_key_store_without_model(store)
     }
 
+    #[cfg(test)]
     fn from_key_store_without_model(
         store: Arc<dyn LocalPseudonymKeyStore>,
     ) -> Result<Self, RedactionError> {
@@ -738,7 +731,6 @@ impl HaciendaLocalRedactor {
         Ok(Self {
             pipeline,
             pseudonymiser,
-            reveal_audit: Mutex::new(VecDeque::new()),
             pii_detection_complete,
         })
     }
@@ -794,7 +786,6 @@ impl HaciendaLocalRedactor {
         Ok(Self {
             pipeline,
             pseudonymiser,
-            reveal_audit: Mutex::new(VecDeque::new()),
             pii_detection_complete: true,
         })
     }
@@ -817,18 +808,6 @@ impl HaciendaLocalRedactor {
             .reveal(token)
             .map(Zeroizing::new)
             .map_err(|_| RedactionError::Rejected)?;
-        let audit = ViewerRevealAudit {
-            token_digest: *blake3::hash(token.as_bytes()).as_bytes(),
-            value_digest: *blake3::hash(revealed.as_bytes()).as_bytes(),
-        };
-        let mut reveal_audit = self
-            .reveal_audit
-            .lock()
-            .map_err(|_| RedactionError::Rejected)?;
-        if reveal_audit.len() == MAX_VIEWER_AUDIT_ENTRIES {
-            reveal_audit.pop_front();
-        }
-        reveal_audit.push_back(audit);
         Ok(revealed)
     }
 }
@@ -927,17 +906,18 @@ impl LocalViewerState {
         self
     }
 
+    #[cfg(test)]
     fn fail_closed() -> Self {
         Self::new(None)
     }
 
-    fn pii_status(&self) -> LocalPiiStatusResponse {
+    fn pii_status(&self, provider_send_configured: bool) -> LocalPiiStatusResponse {
         let complete = self
             .redactor
             .as_ref()
             .is_some_and(|redactor| redactor.pii_detection_complete);
         LocalPiiStatusResponse {
-            provider_send_enabled: complete,
+            provider_send_enabled: complete && provider_send_configured,
             detector: if complete {
                 "local_model"
             } else {
@@ -1884,8 +1864,11 @@ async fn pseudonymize_selection(
 
 /// Reports whether this build/runtime has a complete local detector for provider egress.
 #[tauri::command(rename = "local-pii-status")]
-fn local_pii_status(state: tauri::State<'_, LocalViewerState>) -> LocalPiiStatusResponse {
-    state.pii_status()
+fn local_pii_status(
+    viewer: tauri::State<'_, LocalViewerState>,
+    provider: tauri::State<'_, ProviderCommandState>,
+) -> LocalPiiStatusResponse {
+    viewer.pii_status(provider.pii_detection_ready)
 }
 
 /// The picker runs in the native process. Only the redacted projection crosses IPC;
@@ -2001,9 +1984,9 @@ fn main() {}
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use xberg::Result as XbergResult;
     use xberg::text::ner::NerBackend;
     use xberg::types::entity::{Entity, EntityCategory};
+    use xberg::Result as XbergResult;
 
     struct InjectedNerBackend;
 
@@ -2170,7 +2153,11 @@ mod tests {
             .expect("redacts");
         assert_eq!(again.references[0].token, token);
         let redactor = Arc::new(reopened);
-        let viewer = audited_viewer(Some(redactor.clone()));
+        let audit_store = Arc::new(hacienda_core::audit::InMemoryAuditStore::new(
+            LOCAL_AUDIT_CONFIG_HASH,
+        ));
+        let viewer =
+            LocalViewerState::new(Some(redactor.clone())).with_audit_store(audit_store.clone());
         let label = viewer
             .open_session("main", open_viewer_request(again))
             .expect("main window opens viewer");
@@ -2185,15 +2172,14 @@ mod tests {
             futures::executor::block_on(viewer.reveal_for_viewer(&label, &token)),
             Err(ViewerCommandError::Replayed)
         ));
-        let audit = redactor.reveal_audit.lock().expect("audit lock");
+        let audit = futures::executor::block_on(audit_store.entries(&TenantId::new("local-full")))
+            .expect("persistent reveal audit");
         assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].action, RedactionAction::Reveal);
+        assert_eq!(audit[0].category, "EMAIL");
         assert_eq!(
-            audit[0].token_digest,
-            *blake3::hash(token.as_bytes()).as_bytes()
-        );
-        assert_eq!(
-            audit[0].value_digest,
-            *blake3::hash(b"alice@example.com").as_bytes()
+            audit[0].span_hash,
+            blake3::hash(b"alice@example.com").to_hex().to_string()
         );
     }
 
@@ -2322,9 +2308,13 @@ mod tests {
         )
         .expect("load and validate the pinned Candle GLiNER2 model");
         let redactor = Arc::new(redactor);
-        let status = LocalViewerState::new(Some(Arc::clone(&redactor))).pii_status();
-        assert!(status.provider_send_enabled);
-        assert_eq!(status.detector, "local_model");
+        let viewer = LocalViewerState::new(Some(Arc::clone(&redactor)));
+        let model_ready_without_gateway = viewer.pii_status(false);
+        assert!(!model_ready_without_gateway.provider_send_enabled);
+        assert_eq!(model_ready_without_gateway.detector, "local_model");
+        let configured_provider_status = viewer.pii_status(true);
+        assert!(configured_provider_status.provider_send_enabled);
+        assert_eq!(configured_provider_status.detector, "local_model");
 
         let source = "Maître Élodie Martin travaille à Paris pour le dossier.";
         // Exercise the exact request adapter used before provider egress with the
@@ -2391,7 +2381,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_detector_loader_marks_reversible_runtime_ready() {
+    fn local_model_status_requires_a_configured_provider_to_enable_send() {
         let model_dir = test_model_dir("ready");
         let redactor = HaciendaLocalRedactor::from_key_store_with_runtime(
             Arc::new(TestKeyStore::default()),
@@ -2408,10 +2398,15 @@ mod tests {
             },
         )
         .expect("injected detector loader");
-        let status = LocalViewerState::new(Some(Arc::new(redactor))).pii_status();
+        let viewer = LocalViewerState::new(Some(Arc::new(redactor)));
         let _ = std::fs::remove_dir_all(&model_dir);
-        assert!(status.provider_send_enabled);
-        assert_eq!(status.detector, "local_model");
+        let model_only = viewer.pii_status(false);
+        assert!(!model_only.provider_send_enabled);
+        assert_eq!(model_only.detector, "local_model");
+
+        let configured_gateway = viewer.pii_status(true);
+        assert!(configured_gateway.provider_send_enabled);
+        assert_eq!(configured_gateway.detector, "local_model");
     }
 
     #[test]
@@ -2440,7 +2435,7 @@ mod tests {
             HaciendaLocalRedactor::from_key_store(Arc::new(TestKeyStore::default()))
                 .expect("vault opens"),
         );
-        let status = LocalViewerState::new(Some(redactor.clone())).pii_status();
+        let status = LocalViewerState::new(Some(redactor.clone())).pii_status(true);
         assert!(!status.provider_send_enabled);
         assert_eq!(status.detector, "regex_only");
         let state =

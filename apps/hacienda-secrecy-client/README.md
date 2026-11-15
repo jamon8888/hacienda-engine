@@ -15,7 +15,9 @@ user messages and tokenized assistant replies are retained only in renderer
 memory for conversation continuity; they are cleared when the app closes or
 reloads. The renderer does not implement redaction, cryptography, HTTP requests,
 or transcript persistence. Provider send stays disabled until
-`local-pii-status` reports `provider_send_enabled: true`. Prompts are cleared
+`local-pii-status` reports `provider_send_enabled: true`, which requires both the
+complete local model redactor and a configured gateway transport. This status
+checks local configuration, not provider network reachability. Prompts are cleared
 from the editor on submission and never added to history. Provider or response
 failures show a content-free fail-closed message.
 
