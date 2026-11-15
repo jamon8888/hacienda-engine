@@ -46,6 +46,7 @@ fn should_round_trip_the_xberg_concurrency_budget() {
     // reachable, so this needs no patch to xberg.
     config.extraction.concurrency = Some(xberg::core::config::ConcurrencyConfig {
         max_threads: Some(3),
+        max_concurrent_ocr: None,
     });
     let text = round_trip(&config);
     assert!(

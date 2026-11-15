@@ -216,7 +216,7 @@ pub fn project_document(
 ) -> EditorEnvelope {
     let mut token_index = TokenIndex::default();
     let editor = prose_mirror_document(&document.content, options, &mut token_index);
-    let metadata = token_only_metadata(document, options, &mut token_index);
+    let metadata = token_only_metadata(document, &mut token_index);
     let search = SearchProjection {
         tokens: token_index.into_search_tokens(),
     };
@@ -408,7 +408,6 @@ fn token_lists(
 
 fn token_only_metadata(
     document: &xberg::ExtractedDocument,
-    options: &EditorProjectionOptions,
     index: &mut TokenIndex,
 ) -> TokenOnlyMetadata {
     let metadata = &document.metadata;
@@ -588,11 +587,9 @@ mod tests {
     const TOKEN: &str = "[PERSON:session:MFRGG2LTMVRXEZLU]";
 
     fn fixture() -> xberg::ExtractedDocument {
-        let mut document = xberg::ExtractedDocument {
-            content: format!("Agreement with {TOKEN}."),
-            mime_type: Cow::Borrowed("application/pdf"),
-            ..Default::default()
-        };
+        let mut document = xberg::ExtractedDocument::default();
+        document.content = format!("Agreement with {TOKEN}.");
+        document.mime_type = Cow::Borrowed("application/pdf");
         document.metadata.title = Some(RAW_NAME.to_owned());
         document.metadata.subject = Some("Confidential matter".to_owned());
         document.metadata.authors = Some(vec![RAW_NAME.to_owned()]);
@@ -658,14 +655,16 @@ mod tests {
         assert!(serialized.contains("\"type\":\"sensitive\""));
         assert!(serialized.contains("\"tokenClass\":\"PERSON\""));
         assert!(serialized.contains("\"tokenId\":\"[PERSON:session:MFRGG2LTMVRXEZLU]\""));
-        assert_eq!(envelope.search.tokens.len(), 2);
+        assert_eq!(envelope.search.tokens.len(), 1);
         assert_eq!(envelope.search.tokens[0].occurrences, 4);
-        assert!(envelope
-            .metadata
-            .keywords
-            .iter()
-            .flatten()
-            .any(|token| token.token_id == TOKEN));
+        assert!(
+            envelope
+                .metadata
+                .keywords
+                .iter()
+                .flatten()
+                .any(|token| token.token_id == TOKEN)
+        );
         assert_eq!(envelope.metadata.attachments.len(), 1);
         assert_eq!(envelope.metadata.attachments[0].filename[0].token_id, TOKEN);
     }

@@ -6,11 +6,11 @@
 //! Phase 1 Design Decision D3.
 
 use crate::audit::{
-    cursor::{page_from, AuditCursor, AuditPage},
+    AuditStore, GENESIS_HASH,
+    cursor::{AuditCursor, AuditPage, page_from},
     entry::{AuditEntry, AuditEntryInput, EntitySource, RedactionAction},
     error::AuditError,
-    segment::{compute_seal_hash, verify_seal_chain, SegmentSeal},
-    AuditStore, GENESIS_HASH,
+    segment::{SegmentSeal, compute_seal_hash, verify_seal_chain},
 };
 use crate::tenancy::TenantId;
 use async_trait::async_trait;
@@ -523,6 +523,9 @@ fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
         // does not persist vertical provenance. Tracked separately from this fix, which
         // only restores compilation after `AuditEntry` gained the field.
         vertical: None,
+        // The `audit_entries` table has no `model` column yet; PostgreSQL currently
+        // stores neither model id nor checkpoint provenance.
+        model: None,
         chain_hash: row.chain_hash,
     })
 }

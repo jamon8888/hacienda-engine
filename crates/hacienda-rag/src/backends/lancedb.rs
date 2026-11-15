@@ -17,9 +17,9 @@ use crate::filter::{Filter, FilterField, FilterNamespace};
 use crate::query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 use crate::store::RagStore;
 use crate::types::{
-    validate_chunk_side_vectors, ChunkId, ChunkRecord, CollectionSpec, CollectionStats,
-    DistanceMetric, DocumentId, DocumentRecord, DocumentSummary, IndexMethod, PrimaryScore,
-    RetrievedChunk,
+    ChunkId, ChunkRecord, CollectionSpec, CollectionStats, DistanceMetric, DocumentId,
+    DocumentRecord, DocumentSummary, IndexMethod, PrimaryScore, RetrievedChunk,
+    validate_chunk_side_vectors,
 };
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
@@ -35,8 +35,8 @@ use lancedb::query::QueryBase;
 use lancedb::{Connection, Table};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -165,7 +165,8 @@ impl LanceDbStore {
         limit: usize,
     ) -> RagResult<HashMap<String, f32>> {
         let fts_query = FullTextSearchQuery::new(query.to_string())
-            .columns(Some(vec!["content".to_string()]))
+            .with_columns(&["content".to_string()])
+            .map_err(backend_err)?
             .limit(Some(limit as i64));
         let batches = table
             .query()
@@ -383,6 +384,7 @@ impl LanceDbStore {
         merge
             .execute(Box::new(one_batch(batch, metadata_schema())))
             .await
+            .map(|_| ())
             .map_err(backend_err)
     }
 
@@ -401,6 +403,7 @@ impl LanceDbStore {
         merge
             .execute(Box::new(one_batch(batch, document_schema())))
             .await
+            .map(|_| ())
             .map_err(backend_err)
     }
 
@@ -416,6 +419,7 @@ impl LanceDbStore {
         merge
             .execute(Box::new(one_batch(batch, chunk_schema(dim))))
             .await
+            .map(|_| ())
             .map_err(backend_err)
     }
 }
@@ -474,12 +478,12 @@ impl RagStore for LanceDbStore {
         self.require_spec(collection).await?;
         let _ = self
             .db
-            .drop_table(Self::table_name(collection, "documents"))
+            .drop_table(Self::table_name(collection, "documents"), &[])
             .await
             .map_err(backend_err)?;
         let _ = self
             .db
-            .drop_table(Self::table_name(collection, "chunks"))
+            .drop_table(Self::table_name(collection, "chunks"), &[])
             .await
             .map_err(backend_err)?;
         let meta = self.ensure_metadata_table().await?;
@@ -677,7 +681,7 @@ impl RagStore for LanceDbStore {
                     PrimaryScore::Hybrid { vector, .. } => vector,
                     _ => unreachable!("hybrid query only produces hybrid score components"),
                 };
-                score(b).partial_cmp(&score(a)).unwrap_or(Ordering::Equal)
+                score(*b).partial_cmp(&score(*a)).unwrap_or(Ordering::Equal)
             });
             vector_order.truncate(candidate_limit);
 
@@ -692,7 +696,7 @@ impl RagStore for LanceDbStore {
                     PrimaryScore::Hybrid { full_text, .. } => full_text,
                     _ => unreachable!("hybrid query only produces hybrid score components"),
                 };
-                score(b).partial_cmp(&score(a)).unwrap_or(Ordering::Equal)
+                score(*b).partial_cmp(&score(*a)).unwrap_or(Ordering::Equal)
             });
             text_order.truncate(candidate_limit);
 
@@ -834,11 +838,14 @@ impl RagStore for LanceDbStore {
                 });
             }
         }
-        let updates = embeddings.iter().collect::<HashMap<_, _>>();
+        let updates = embeddings
+            .iter()
+            .map(|(ordinal, embedding)| (*ordinal, embedding.clone()))
+            .collect::<HashMap<_, _>>();
         for chunk in &mut chunks {
             if chunk.document_id == *document {
                 if let Some(embedding) = updates.get(&chunk.record.ordinal) {
-                    chunk.record.embedding = (*embedding).clone();
+                    chunk.record.embedding = embedding.clone();
                 }
             }
         }
@@ -943,13 +950,12 @@ fn metadata_batch(spec: &CollectionSpec) -> RagResult<RecordBatch> {
             Arc::new(UInt32Array::from(vec![spec.embedding_dim])),
             Arc::new(StringArray::from(vec![metric_str(spec.distance_metric)])),
             Arc::new(StringArray::from(vec![index_str(spec.index_method)])),
-            Arc::new(Int64Array::from(vec![spec
-                .created_at
-                .unwrap_or_else(now_secs)])),
-            Arc::new(StringArray::from(vec![spec
-                .embedding_source
-                .as_deref()
-                .unwrap_or("")])),
+            Arc::new(Int64Array::from(vec![
+                spec.created_at.unwrap_or_else(now_secs),
+            ])),
+            Arc::new(StringArray::from(vec![
+                spec.embedding_source.as_deref().unwrap_or(""),
+            ])),
             Arc::new(UInt32Array::from(vec![spec.embedding_version])),
         ],
     )
@@ -964,16 +970,14 @@ fn document_batch(
         document_schema(),
         vec![
             Arc::new(StringArray::from(vec![id.0.as_str()])),
-            Arc::new(StringArray::from(vec![doc
-                .external_id
-                .as_deref()
-                .unwrap_or("")])),
+            Arc::new(StringArray::from(vec![
+                doc.external_id.as_deref().unwrap_or(""),
+            ])),
             Arc::new(StringArray::from(vec![doc.title.as_deref().unwrap_or("")])),
             Arc::new(StringArray::from(vec![doc.mime.as_deref().unwrap_or("")])),
-            Arc::new(StringArray::from(vec![doc
-                .source_uri
-                .as_deref()
-                .unwrap_or("")])),
+            Arc::new(StringArray::from(vec![
+                doc.source_uri.as_deref().unwrap_or(""),
+            ])),
             Arc::new(StringArray::from(vec![doc.full_text.as_str()])),
             Arc::new(StringArray::from(vec![json_string(
                 &serde_json::to_value(&doc.keywords).unwrap_or_default(),
@@ -1295,7 +1299,7 @@ mod tests {
             embedding_version: 7,
         };
         let batch = metadata_batch(&spec).unwrap();
-        assert_eq!(batch.schema(), metadata_schema().as_ref());
+        assert_eq!(batch.schema(), metadata_schema());
         assert_eq!(
             string_at(&batch, "embedding_source", 0).unwrap(),
             "test-model"
@@ -1727,12 +1731,19 @@ mod tests {
                         field: FilterField("doc.title".into()),
                         value: serde_json::json!("keep"),
                     }),
+                    include_document: true,
                     ..RetrieveQuery::vector(5)
                 },
             )
             .await
             .unwrap();
         assert_eq!(output.chunks.len(), 1);
-        assert_eq!(output.chunks[0].external_id.as_deref(), Some("one"));
+        assert_eq!(
+            output.chunks[0]
+                .document
+                .as_ref()
+                .and_then(|document| document.external_id.as_deref()),
+            Some("one")
+        );
     }
 }

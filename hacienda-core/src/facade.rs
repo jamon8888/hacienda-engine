@@ -1,8 +1,8 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
 use crate::audit::{
-    export as export_chain, AuditChain, AuditCursor, AuditEntry, AuditEntryInput, AuditPage,
-    AuditStore, ExportFormat, InMemoryAuditStore, RedactionAction, SegmentSeal,
+    AuditChain, AuditCursor, AuditEntry, AuditEntryInput, AuditPage, AuditStore, ExportFormat,
+    InMemoryAuditStore, RedactionAction, SegmentSeal, export as export_chain,
 };
 use crate::auth::{ApiKeyStore, Caller, Capability, CapabilitySet};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
@@ -26,7 +26,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
-use xberg::{extract, ExtractInput, ExtractionResult};
+use xberg::{ExtractInput, ExtractionResult, extract};
 
 /// Version recorded on every audit entry so a record can be tied to the code that made it.
 const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1710,7 +1710,7 @@ impl HaciendaFacade {
                 .await?;
         }
         for value in document.metadata.additional.values_mut() {
-            self.redact_string_field(value, pipeline, audit_log).await?;
+            self.redact_json_value(value, pipeline, audit_log).await?;
         }
         if let Some(created_by) = &mut document.metadata.created_by {
             self.redact_string_field(created_by, pipeline, audit_log)
@@ -1988,6 +1988,38 @@ impl HaciendaFacade {
         Ok(())
     }
 
+    /// Redact every string nested in extractor-provided JSON metadata. Metadata is
+    /// persisted and indexed alongside document text, so arrays and objects must receive
+    /// the same treatment as top-level string fields.
+    fn redact_json_value<'a>(
+        &'a self,
+        value: &'a mut serde_json::Value,
+        pipeline: &'a Arc<PiiPipeline>,
+        audit_log: &'a mut Vec<RedactionAuditEntry>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), HaciendaError>> + Send + 'a>> {
+        Box::pin(async move {
+            match value {
+                serde_json::Value::String(text) => {
+                    self.redact_string_field(text, pipeline, audit_log).await?;
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        self.redact_json_value(item, pipeline, audit_log).await?;
+                    }
+                }
+                serde_json::Value::Object(fields) => {
+                    for item in fields.values_mut() {
+                        self.redact_json_value(item, pipeline, audit_log).await?;
+                    }
+                }
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_) => {}
+            }
+            Ok(())
+        })
+    }
+
     /// Submit every low-confidence detection for human review, returning how many were
     /// accepted by the store.
     ///
@@ -2201,12 +2233,12 @@ mod tests {
     use super::*;
     use crate::audit::store::AuditStore;
     use crate::audit::{AuditEntry, AuditEntryInput, AuditError, FileAuditStore, NodeId};
-    use crate::auth::authn::TokenResolver as _;
     use crate::auth::InMemoryApiKeyStore;
+    use crate::auth::authn::TokenResolver as _;
     use crate::glossary::GlossaryConfig;
     use crate::pii::PipelineConfig;
     use crate::redaction::{
-        EnvKeyResolver, RedactionConfig, RedactionMode, ACTIVE_KEY_VAR, KEY_BYTES,
+        ACTIVE_KEY_VAR, EnvKeyResolver, KEY_BYTES, RedactionConfig, RedactionMode,
     };
     use crate::review::{
         FileReviewStore, InMemoryReviewStore, QueueStats, ReviewConfig, ReviewDecision,
@@ -2645,10 +2677,12 @@ mod tests {
 
         // Tenant acme cannot reveal it: same failure shape an unknown token would
         // produce, per D-P3-6 — never a distinguishable "forbidden".
-        assert!(facade
-            .reveal_token_with_auth(acme, default_token)
-            .await
-            .is_err());
+        assert!(
+            facade
+                .reveal_token_with_auth(acme, default_token)
+                .await
+                .is_err()
+        );
 
         // Tenant acme mints and reveals its own token correctly, under its own,
         // different key material.
@@ -2892,9 +2926,11 @@ mod tests {
 
         assert!(result.pii.is_empty());
         assert!(!result.metadata.pii_enabled);
-        assert!(result.extraction.results[0]
-            .content
-            .contains("bob@example.com"));
+        assert!(
+            result.extraction.results[0]
+                .content
+                .contains("bob@example.com")
+        );
     }
 
     #[tokio::test]
@@ -2905,9 +2941,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.extraction.results[0]
-            .content
-            .contains("bob@example.com"));
+        assert!(
+            !result.extraction.results[0]
+                .content
+                .contains("bob@example.com")
+        );
         assert_eq!(result.pii.len(), 1);
         assert_eq!(result.pii[0].entities.len(), 1);
     }
@@ -3082,12 +3120,15 @@ mod tests {
             content: format!("page content: {P7_CORPUS_EMAIL}"),
             tables: vec![Arc::new(table.clone())],
             image_indices: Vec::new(),
+            image_preprocessing: None,
             hierarchy: None,
             is_blank: None,
             layout_regions: None,
             speaker_notes: Some(format!("presenter note: {P7_CORPUS_EMAIL}")),
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
+            native_content: None,
         };
 
         let annotation = xberg::PdfAnnotation {
@@ -3095,6 +3136,12 @@ mod tests {
             content: Some(format!("comment: {P7_CORPUS_EMAIL}")),
             page_number: 1,
             bounding_box: None,
+            author: None,
+            modified: None,
+            color: None,
+            subject: None,
+            quad_points: None,
+            marked_text: None,
         };
 
         let form_field = xberg::PdfFormField {
@@ -3185,7 +3232,10 @@ mod tests {
         document.metadata.subject = Some(format!("subject: {P7_CORPUS_EMAIL}"));
         document.metadata.additional.insert(
             "filename".into(),
-            serde_json::json!({"display": format!("filename: {P7_CORPUS_EMAIL}")}),
+            serde_json::json!({
+                "display": format!("filename: {P7_CORPUS_EMAIL}"),
+                "history": [{ "note": format!("archived from {P7_CORPUS_EMAIL}") }]
+            }),
         );
         document.metadata.authors = Some(vec![P7_CORPUS_EMAIL.to_string()]);
         document.metadata.created_by = Some(P7_CORPUS_EMAIL.to_string());
@@ -3877,9 +3927,9 @@ mod tests {
 
     use crate::auth::AuthContext;
     use crate::pii::NerDetector;
+    use xberg::Result as XbergResult;
     use xberg::text::ner::NerBackend;
     use xberg::types::entity::{Entity, EntityCategory};
-    use xberg::Result as XbergResult;
 
     /// A detector whose response is fixed at construction time. Used to inject
     /// model entities (which carry non-empty `text`) without loading a real model.
@@ -4425,10 +4475,12 @@ mod tests {
         let caller = Caller::Principal(&ctx);
 
         assert!(facade.model_card_with_auth(caller).unwrap().is_some());
-        assert!(facade
-            .compliance_checklist_with_auth(caller)
-            .unwrap()
-            .is_some());
+        assert!(
+            facade
+                .compliance_checklist_with_auth(caller)
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// A DORA report has had no path to the API at all before this change —

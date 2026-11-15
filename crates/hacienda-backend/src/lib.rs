@@ -264,12 +264,19 @@ impl TrustedEditorRevisionIssuer {
                 "new token assertions require a separately authorized manual operation".into(),
             ));
         }
-        let pipeline_result = self.pipeline.process(&changed_text).await?;
-        let extracted = xberg::ExtractedDocument {
-            content: pipeline_result.redacted_text.clone(),
-            mime_type: base.editor.metadata.legal.mime_type.clone(),
-            ..Default::default()
-        };
+        // Hacienda tokens are already opaque, reversible references. Running them
+        // through the detector again can misclassify token segments as fresh PII and
+        // mint a different token, breaking the editor marks and later rehydration. Keep
+        // them out of inference with single private-use sentinels, then restore the exact
+        // token strings before building the new editor projection.
+        let (pipeline_input, token_sentinels) =
+            mask_trusted_tokens(&changed_text, &trusted_tokens)?;
+        let pipeline_result = self.pipeline.process(&pipeline_input).await?;
+        let redacted_text =
+            restore_trusted_tokens(&pipeline_result.redacted_text, &token_sentinels)?;
+        let mut extracted = xberg::ExtractedDocument::default();
+        extracted.content = redacted_text.clone();
+        extracted.mime_type = base.editor.metadata.legal.mime_type.clone().into();
         // Metadata is carried only from the already token-only server projection. The
         // caller has no metadata input path here.
         let options = EditorProjectionOptions::new(
@@ -301,12 +308,9 @@ impl TrustedEditorRevisionIssuer {
                 )
             })
             .collect();
-        let pipeline_digest = blake3::hash(&serde_json::to_vec(&(
-            &pipeline_result.redacted_text,
-            stable_audit,
-        ))?)
-        .to_hex()
-        .to_string();
+        let pipeline_digest = blake3::hash(&serde_json::to_vec(&(&redacted_text, stable_audit))?)
+            .to_hex()
+            .to_string();
         PipelineAttestedEditorRevision::from_pipeline_result(
             editor,
             self.pipeline_version.clone(),
@@ -664,12 +668,16 @@ impl Backend {
     pub fn provider_prompt(&self, document: &BackendDocument) -> ProviderPrompt {
         TokenizedText::new(
             document.rag_document.full_text.clone(),
-            document.token_references.iter().map(|reference| {
-                hacienda_client_core::OpaqueTokenReference::new(
-                    reference.token_id.clone(),
-                    reference.token_class.clone(),
-                )
-            }),
+            document
+                .token_references
+                .iter()
+                .map(|reference| {
+                    hacienda_client_core::OpaqueTokenReference::new(
+                        reference.token_id.clone(),
+                        reference.token_class.clone(),
+                    )
+                })
+                .collect(),
         )
     }
 
@@ -974,8 +982,11 @@ impl Backend {
             .external_id
             .clone()
             .ok_or(BackendError::RevisionBaseMissing)?;
+        let base_id = find_document_id_by_external_id(store, &collection, &base_id)
+            .await?
+            .ok_or(BackendError::RevisionBaseMissing)?;
         let stored_base = store
-            .get_document_chunks(&collection, &DocumentId(base_id))
+            .get_document_chunks(&collection, &base_id)
             .await?
             .ok_or(BackendError::RevisionBaseMissing)?;
         let expected_base_chunks = match embedder {
@@ -993,20 +1004,21 @@ impl Backend {
             Some(embedder) => embed_backend_document(&candidate, embedder).await?,
             None => candidate,
         };
-        let candidate_id = DocumentId(
-            candidate
-                .rag_document
-                .external_id
-                .clone()
-                .ok_or(BackendError::ImmutableVersionConflict)?,
-        );
+        let candidate_external_id = candidate
+            .rag_document
+            .external_id
+            .as_deref()
+            .ok_or(BackendError::ImmutableVersionConflict)?;
 
         // The only permitted repeat is an exact replay of the same immutable version. The
         // preflight also avoids producing a second audit event for a retry.
-        if let Some(existing) = store
-            .get_document_chunks(&collection, &candidate_id)
-            .await?
+        if let Some(candidate_id) =
+            find_document_id_by_external_id(store, &collection, candidate_external_id).await?
         {
+            let existing = store
+                .get_document_chunks(&collection, &candidate_id)
+                .await?
+                .ok_or(BackendError::ImmutableVersionConflict)?;
             if existing.0 == candidate.rag_document && existing.1 == candidate.chunks {
                 return Ok(EditorRevisionSave {
                     document_id: base.editor.document_ref.clone(),
@@ -1165,11 +1177,9 @@ mod tests {
     }
 
     fn document(mime: &str) -> xberg::ExtractedDocument {
-        let mut document = xberg::ExtractedDocument {
-            content: "Contact [PERSON:k1:IFBEGRCF]".into(),
-            mime_type: mime.into(),
-            ..Default::default()
-        };
+        let mut document = xberg::ExtractedDocument::default();
+        document.content = "Contact [PERSON:k1:IFBEGRCF]".into();
+        document.mime_type = mime.to_owned().into();
         document.metadata.title = Some("[PERSON:k1:MFRGG2LTMVRXEZLU]".into());
         document.metadata.subject = Some("Jane Doe".into());
         document.metadata.additional.insert(
@@ -1191,11 +1201,9 @@ mod tests {
     }
 
     fn no_pii_document(mime: &str) -> xberg::ExtractedDocument {
-        let mut document = xberg::ExtractedDocument {
-            content: "Quarterly report".into(),
-            mime_type: mime.into(),
-            ..Default::default()
-        };
+        let mut document = xberg::ExtractedDocument::default();
+        document.content = "Quarterly report".into();
+        document.mime_type = mime.to_owned().into();
         document.metadata.title = Some("Quarterly report".into());
         document
             .metadata
@@ -1269,21 +1277,21 @@ mod tests {
                 .contains_key("raw_contact")
         );
 
-        let serialized = serde_json::to_string(record).unwrap();
+        let serialized = serde_json::to_string(&record).unwrap();
         assert!(serialized.contains("[FILENAME:k1:IFBEGRCF]"));
         assert!(serialized.contains("[EMAIL:k1:IFBEGRCF]"));
         assert!(!serialized.contains("Jane Doe"));
         assert!(!serialized.contains("jane@example.com"));
         assert_eq!(
-            record.rag_document().metadata["token_only"]["filename"][0]["token_id"],
+            record.rag_document().metadata["token_only"]["filename"][0]["tokenId"],
             "[FILENAME:k1:IFBEGRCF]"
         );
         assert_eq!(record.chunks()[0].chunk_metadata["document_id"], "doc");
         assert_eq!(
-            backend.provider_prompt(record).text,
+            backend.provider_prompt(&record).text,
             record.rag_document().full_text
         );
-        assert!(!backend.provider_prompt(record).text.contains("Jane Doe"));
+        assert!(!backend.provider_prompt(&record).text.contains("Jane Doe"));
     }
 
     #[test]
@@ -1305,7 +1313,7 @@ mod tests {
         let serialized_metadata = serde_json::to_string(&record.rag_document().metadata).unwrap();
         assert!(!serialized_metadata.contains("quarterly-report.pdf"));
         assert!(!serialized_metadata.contains("Quarterly report"));
-        assert_eq!(backend.provider_prompt(record).text, "Quarterly report");
+        assert_eq!(backend.provider_prompt(&record).text, "Quarterly report");
     }
 
     #[test]
@@ -1355,7 +1363,12 @@ mod tests {
         let response = backend
             .rehydrate(&authorized, &record, &record.rag_document().full_text)
             .unwrap();
-        assert_eq!(response.references[0].token_id, "[PERSON:k1:IFBEGRCF]");
+        assert!(
+            response
+                .references
+                .iter()
+                .any(|reference| reference.token_id == "[PERSON:k1:IFBEGRCF]")
+        );
         assert!(
             backend
                 .rehydrate(&authorized, &record, "raw plaintext")
@@ -1406,7 +1419,7 @@ mod tests {
             Some("[PERSON:k1:MFRGG2LTMVRXEZLU]")
         );
         assert_eq!(
-            persisted.metadata["token_only"]["filename"][0]["token_id"],
+            persisted.metadata["token_only"]["filename"][0]["tokenId"],
             "[FILENAME:k1:IFBEGRCF]"
         );
         assert_eq!(persisted_chunks[0].content, "Contact [PERSON:k1:IFBEGRCF]");
@@ -1842,6 +1855,31 @@ mod tests {
                 .documents,
             1
         );
+    }
+}
+
+async fn find_document_id_by_external_id(
+    store: &dyn RagStore,
+    collection: &str,
+    external_id: &str,
+) -> Result<Option<DocumentId>, BackendError> {
+    const PAGE_SIZE: u32 = 512;
+    let mut offset = 0_u32;
+    loop {
+        let (documents, total) = store.list_documents(collection, PAGE_SIZE, offset).await?;
+        if let Some(document) = documents
+            .iter()
+            .find(|document| document.external_id.as_deref() == Some(external_id))
+        {
+            return Ok(Some(document.id.clone()));
+        }
+        if documents.is_empty() || u64::from(offset) + documents.len() as u64 >= total {
+            return Ok(None);
+        }
+        let Some(next_offset) = offset.checked_add(documents.len() as u32) else {
+            return Ok(None);
+        };
+        offset = next_offset;
     }
 }
 
@@ -2349,6 +2387,65 @@ fn extract_hacienda_tokens(text: &str) -> Vec<String> {
         cursor = end;
     }
     tokens
+}
+
+fn mask_trusted_tokens(
+    text: &str,
+    trusted_tokens: &std::collections::BTreeSet<&str>,
+) -> Result<(String, Vec<(char, String)>), BackendError> {
+    let mut output = String::with_capacity(text.len());
+    let mut sentinels = Vec::new();
+    let mut occupied = text.chars().collect::<std::collections::HashSet<_>>();
+    let mut cursor = 0;
+    while let Some(relative_start) = text[cursor..].find('[') {
+        let start = cursor + relative_start;
+        let Some(relative_end) = text[start..].find(']') else {
+            break;
+        };
+        let end = start + relative_end + 1;
+        let candidate = &text[start..end];
+        output.push_str(&text[cursor..start]);
+        if trusted_tokens.contains(candidate) {
+            let sentinel = private_use_sentinel(&occupied).ok_or_else(|| {
+                BackendError::InvalidEditorRevision(
+                    "unable to reserve a safe marker for an existing token".into(),
+                )
+            })?;
+            occupied.insert(sentinel);
+            output.push(sentinel);
+            sentinels.push((sentinel, candidate.to_owned()));
+        } else {
+            output.push_str(candidate);
+        }
+        cursor = end;
+    }
+    output.push_str(&text[cursor..]);
+    Ok((output, sentinels))
+}
+
+fn private_use_sentinel(occupied: &std::collections::HashSet<char>) -> Option<char> {
+    (0xE000..=0xF8FF)
+        .chain(0xF0000..=0xFFFFD)
+        .chain(0x100000..=0x10FFFD)
+        .filter_map(char::from_u32)
+        .find(|candidate| !occupied.contains(candidate))
+}
+
+fn restore_trusted_tokens(
+    text: &str,
+    sentinels: &[(char, String)],
+) -> Result<String, BackendError> {
+    let mut restored = text.to_owned();
+    for (sentinel, token) in sentinels {
+        let marker = sentinel.to_string();
+        if restored.matches(&marker).count() != 1 {
+            return Err(BackendError::InvalidEditorRevision(
+                "PII pipeline changed an existing opaque token marker".into(),
+            ));
+        }
+        restored = restored.replacen(&marker, token, 1);
+    }
+    Ok(restored)
 }
 
 fn validate_token_id(token: &str) -> Result<(), BackendError> {

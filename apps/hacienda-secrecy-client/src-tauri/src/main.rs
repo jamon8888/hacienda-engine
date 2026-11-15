@@ -5,12 +5,12 @@ use hacienda_backend::{
     Backend, BackendDocument, RedactedXbergDocument, TrustedEditorRevisionIssuer,
 };
 use hacienda_core::{
-    audit::{AuditEntryInput, AuditStore, EntitySource, FileAuditStore, NodeId, RedactionAction},
+    HaciendaConfig,
+    audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction},
     editor_projection::EditorEnvelope,
     pii::{PiiCategory, PiiPipeline, PipelineConfig},
-    redaction::{KeyId, KeyResolver, PseudonymKey, Pseudonymiser, RedactionMode, KEY_BYTES},
+    redaction::{KEY_BYTES, KeyId, KeyResolver, PseudonymKey, Pseudonymiser, RedactionMode},
     tenancy::TenantId,
-    HaciendaConfig,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,7 +39,9 @@ use hacienda_client_core::{
     ClientSurface, EncryptedLocalVault, GatewayId, LanceDbTopology, LocalFullConfig,
     LocalStorageTopology, ProviderRoute, ServiceEndpoint, StoragePath, TrustBoundary, VaultId,
 };
-use hacienda_rag::{LanceDbStore, RagStore};
+#[cfg(not(test))]
+use hacienda_core::audit::{FileAuditStore, NodeId};
+use hacienda_rag::LanceDbStore;
 
 /// Opaque references are resolved inside the desktop process.  The renderer is
 /// intentionally unable to send source bytes or extracted content here.
@@ -147,7 +149,7 @@ const PINNED_NER_MODEL_ASSETS: &[PinnedModelAsset] = &[
     PinnedModelAsset {
         relative_path: "tokenizer_config.json",
         size: 711,
-        sha256: "233beed1f1095cccfc7907cde31a8d90c0a6aa4fdfaf6493f8e55fd162e81ae6",
+        sha256: "233beed1f1095cccfc7907cde31a8d90a0c6aa4fdfaf6493f8e55fd162e81ae6",
     },
 ];
 
@@ -384,7 +386,7 @@ fn configured_document_runtime(
     pipeline_config.redaction.mode = RedactionMode::Pseudonymize;
     pipeline_config.model.enabled = true;
     pipeline_config.model.model_dir = Some(model_dir);
-    let resolver = Arc::new(LocalKeyResolver(Zeroizing::new(*key.as_ref())));
+    let resolver = Arc::new(LocalKeyResolver(Zeroizing::new(**key)));
     let facade = HaciendaConfig::default().with_pii(pipeline_config.clone());
     let facade = hacienda_core::HaciendaFacade::with_key_resolver(
         facade,
@@ -493,7 +495,7 @@ impl LocalFullDocumentService {
             viewer_ref: opaque_reference("viewer"),
             capability_ref: opaque_reference("cap"),
         };
-        let projection = document_projection(&document.editor(), &binding)?;
+        let projection = document_projection(document.editor(), &binding)?;
         self.documents.insert(
             document_ref,
             StoredLocalDocument {
@@ -1898,6 +1900,9 @@ async fn pick_document(
     };
     let path = file.path().to_path_buf();
     let mut service = state.service().await?;
+    let service = service
+        .as_mut()
+        .ok_or_else(|| "LocalFull document service is unavailable".to_owned())?;
     let (projection, binding, original_path) = service.ingest_path(path).await?;
     originals.register_original(binding, original_path);
     Ok(projection)
@@ -1909,7 +1914,10 @@ async fn load_document(
     request: LoadDocumentRequest,
 ) -> Result<DocumentProjectionResponse, String> {
     let service = state.service().await?;
-    service.load(&request)
+    service
+        .as_ref()
+        .ok_or_else(|| "LocalFull document service is unavailable".to_owned())?
+        .load(&request)
 }
 
 #[tauri::command(rename = "save-document")]
@@ -1919,6 +1927,9 @@ async fn save_document(
     request: SaveDocumentRequest,
 ) -> Result<SaveDocumentResponse, String> {
     let mut service = state.service().await?;
+    let service = service
+        .as_mut()
+        .ok_or_else(|| "LocalFull document service is unavailable".to_owned())?;
     let document_ref = request.document_ref.clone();
     let saved = service.save(request).await?;
     let (binding, path) = service.binding_for(&document_ref)?;
@@ -1990,9 +2001,9 @@ fn main() {}
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use xberg::Result as XbergResult;
     use xberg::text::ner::NerBackend;
     use xberg::types::entity::{Entity, EntityCategory};
-    use xberg::Result as XbergResult;
 
     struct InjectedNerBackend;
 
@@ -2294,6 +2305,52 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("test model directory");
         path
+    }
+
+    #[cfg(feature = "ner-candle")]
+    #[test]
+    #[ignore = "loads the pinned GLiNER2 checkpoint; set HACIENDA_NER_MODEL_DIR"]
+    fn pinned_gliner2_model_runs_french_detection_and_redaction() {
+        let model_dir = env::var_os(NER_MODEL_DIR_ENV)
+            .map(PathBuf::from)
+            .expect("HACIENDA_NER_MODEL_DIR must point to the installed checkpoint");
+        let redactor = HaciendaLocalRedactor::from_key_store_with_runtime(
+            Arc::new(TestKeyStore::default()),
+            &model_dir,
+            validate_ner_model_assets,
+            |config, pseudonymiser| PiiPipeline::with_pseudonymiser(config, Some(pseudonymiser)),
+        )
+        .expect("load and validate the pinned Candle GLiNER2 model");
+
+        let source = "Maître Élodie Martin travaille à Paris pour le dossier.";
+        // Exercise the exact request adapter used before provider egress with the
+        // loaded model rather than the regex-only test seam above.
+        let request = ProviderRequest::ClaudeDesktop(ClaudeDesktopRequest {
+            conversation_id: hacienda_client_core::ConversationId::new("model-smoke-conversation"),
+            context_id: hacienda_client_core::ContextId::new("model-smoke-context"),
+            prompt: source.into(),
+            context: Vec::new(),
+        });
+        let safe_request = redactor
+            .redact(&request)
+            .expect("tokenize provider request with the pinned model");
+        let provider_payload =
+            serde_json::to_string(&safe_request).expect("serialize provider DTO");
+        assert!(
+            provider_payload.contains("[PERSON:local:"),
+            "{provider_payload}"
+        );
+        assert!(
+            // The pinned GLiNER2 model currently classifies the French city mention
+            // as ADDRESS; assert the emitted contract rather than assuming LOCATION.
+            provider_payload.contains("[ADDRESS:local:"),
+            "{provider_payload}"
+        );
+        assert!(
+            !provider_payload.contains("Élodie Martin"),
+            "{provider_payload}"
+        );
+        assert!(!provider_payload.contains("Paris"), "{provider_payload}");
     }
 
     #[test]
