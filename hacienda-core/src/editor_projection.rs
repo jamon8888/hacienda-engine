@@ -657,14 +657,12 @@ mod tests {
         assert!(serialized.contains("\"tokenId\":\"[PERSON:session:MFRGG2LTMVRXEZLU]\""));
         assert_eq!(envelope.search.tokens.len(), 1);
         assert_eq!(envelope.search.tokens[0].occurrences, 4);
-        assert!(
-            envelope
-                .metadata
-                .keywords
-                .iter()
-                .flatten()
-                .any(|token| token.token_id == TOKEN)
-        );
+        assert!(envelope
+            .metadata
+            .keywords
+            .iter()
+            .flatten()
+            .any(|token| token.token_id == TOKEN));
         assert_eq!(envelope.metadata.attachments.len(), 1);
         assert_eq!(envelope.metadata.attachments[0].filename[0].token_id, TOKEN);
     }

@@ -36,12 +36,12 @@ mod routes;
 mod state;
 
 pub use error::{ApiError, ApiErrorCode};
+pub use hacienda_client_core::ProviderSseEvent;
 pub use handlers::claude_messages::{
     AnthropicMessagesProvider, ClaudeMessagesEventStream, ClaudeMessagesProvider,
     ClaudeMessagesProviderRequest, ClaudeMessagesProviderResponse, ClaudeMessagesProviderStream,
     ProviderGatewayError,
 };
-pub use hacienda_client_core::ProviderSseEvent;
 pub use quota::{InMemoryQuotaStore, QuotaLimits};
 pub use state::{ApiLimits, ApiState};
 

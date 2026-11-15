@@ -17,9 +17,9 @@ use crate::filter::{Filter, FilterField, FilterNamespace};
 use crate::query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 use crate::store::RagStore;
 use crate::types::{
-    ChunkId, ChunkRecord, CollectionSpec, CollectionStats, DistanceMetric, DocumentId,
-    DocumentRecord, DocumentSummary, IndexMethod, PrimaryScore, RetrievedChunk,
-    validate_chunk_side_vectors,
+    validate_chunk_side_vectors, ChunkId, ChunkRecord, CollectionSpec, CollectionStats,
+    DistanceMetric, DocumentId, DocumentRecord, DocumentSummary, IndexMethod, PrimaryScore,
+    RetrievedChunk,
 };
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
@@ -35,8 +35,8 @@ use lancedb::query::QueryBase;
 use lancedb::{Connection, Table};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -950,12 +950,13 @@ fn metadata_batch(spec: &CollectionSpec) -> RagResult<RecordBatch> {
             Arc::new(UInt32Array::from(vec![spec.embedding_dim])),
             Arc::new(StringArray::from(vec![metric_str(spec.distance_metric)])),
             Arc::new(StringArray::from(vec![index_str(spec.index_method)])),
-            Arc::new(Int64Array::from(vec![
-                spec.created_at.unwrap_or_else(now_secs),
-            ])),
-            Arc::new(StringArray::from(vec![
-                spec.embedding_source.as_deref().unwrap_or(""),
-            ])),
+            Arc::new(Int64Array::from(vec![spec
+                .created_at
+                .unwrap_or_else(now_secs)])),
+            Arc::new(StringArray::from(vec![spec
+                .embedding_source
+                .as_deref()
+                .unwrap_or("")])),
             Arc::new(UInt32Array::from(vec![spec.embedding_version])),
         ],
     )
@@ -970,14 +971,16 @@ fn document_batch(
         document_schema(),
         vec![
             Arc::new(StringArray::from(vec![id.0.as_str()])),
-            Arc::new(StringArray::from(vec![
-                doc.external_id.as_deref().unwrap_or(""),
-            ])),
+            Arc::new(StringArray::from(vec![doc
+                .external_id
+                .as_deref()
+                .unwrap_or("")])),
             Arc::new(StringArray::from(vec![doc.title.as_deref().unwrap_or("")])),
             Arc::new(StringArray::from(vec![doc.mime.as_deref().unwrap_or("")])),
-            Arc::new(StringArray::from(vec![
-                doc.source_uri.as_deref().unwrap_or(""),
-            ])),
+            Arc::new(StringArray::from(vec![doc
+                .source_uri
+                .as_deref()
+                .unwrap_or("")])),
             Arc::new(StringArray::from(vec![doc.full_text.as_str()])),
             Arc::new(StringArray::from(vec![json_string(
                 &serde_json::to_value(&doc.keywords).unwrap_or_default(),

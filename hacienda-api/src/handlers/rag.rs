@@ -672,8 +672,9 @@ pub async fn list_documents(
 /// not portable to every build host. Without it, validation above still runs
 /// (preset lookup only needs the always-on, ORT-free `embedding-presets`
 /// feature), the job is created and transitions to `Running`, and then fails
-/// with a clear "requires the `embeddings` ... feature" error from
-/// `xberg::embed_texts_async`'s stub — never a silent no-op.
+/// with a clear `rag-embeddings` requirement — never a silent no-op. The
+/// non-feature build uses a local error implementation because Xberg only
+/// exports `embed_texts_async` when its runtime embedding feature is enabled.
 #[utoipa::path(
     post,
     path = "/v1/rag/collections/{name}/migrate-embeddings",
@@ -858,6 +859,7 @@ async fn run_migrate_embeddings_job(
 /// Returns `Err(message)` — a short, client-safe (no document content)
 /// description — on the first failure; `run_migrate_embeddings_job` records
 /// it via `JobStore::fail`.
+#[cfg(feature = "rag-embeddings")]
 async fn migrate_embeddings_work(
     store: &Arc<dyn hacienda_rag::RagStore>,
     jobs: &Arc<dyn hacienda_core::jobs::JobStore>,
@@ -948,6 +950,18 @@ async fn migrate_embeddings_work(
     }
 
     Ok(())
+}
+
+#[cfg(not(feature = "rag-embeddings"))]
+async fn migrate_embeddings_work(
+    _store: &Arc<dyn hacienda_rag::RagStore>,
+    _jobs: &Arc<dyn hacienda_core::jobs::JobStore>,
+    _tenant: &hacienda_core::tenancy::TenantId,
+    _job_id: &str,
+    _collection: &str,
+    _to_source: &str,
+) -> Result<(), String> {
+    Err("re-embedding requires the `rag-embeddings` build feature".to_owned())
 }
 
 /// `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}` — poll a

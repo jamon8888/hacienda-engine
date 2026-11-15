@@ -138,6 +138,25 @@ const PINNED_NER_MODEL_ID: &str = "fastino/gliner2-privacy-filter-PII-multi";
 const PINNED_NER_MODEL_REVISION: &str = "1cb4166094dc58fa8d836429f060d6c95f62b495";
 const LOCAL_EMBEDDING_PRESET: &str = "multilingual";
 const LOCAL_EMBEDDING_VERSION: u32 = 1;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const ONNXRUNTIME_RESOURCE_TARGET: &str = "macos-x86_64";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const ONNXRUNTIME_RESOURCE_TARGET: &str = "macos-aarch64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const ONNXRUNTIME_RESOURCE_TARGET: &str = "linux-x86_64";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const ONNXRUNTIME_RESOURCE_TARGET: &str = "linux-aarch64";
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const ONNXRUNTIME_RESOURCE_TARGET: &str = "windows-x86_64";
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const ONNXRUNTIME_RESOURCE_TARGET: &str = "windows-aarch64";
+
+#[cfg(target_os = "macos")]
+const ONNXRUNTIME_LIBRARY_FILE: &str = "libonnxruntime.1.23.2.dylib";
+#[cfg(target_os = "linux")]
+const ONNXRUNTIME_LIBRARY_FILE: &str = "libonnxruntime.so.1.23.2";
+#[cfg(target_os = "windows")]
+const ONNXRUNTIME_LIBRARY_FILE: &str = "onnxruntime.dll";
 const LOCAL_EMBEDDING_COLLECTION: &str = "documents-multilingual-v1";
 
 #[derive(Clone, Copy)]
@@ -2119,10 +2138,61 @@ async fn save_document(
     Ok(saved)
 }
 
+#[cfg(all(
+    not(test),
+    any(
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+fn configure_bundled_onnxruntime(app: &tauri::App) {
+    let library = app.path().resource_dir().ok().map(|resource_dir| {
+        resource_dir
+            .join("resources/onnxruntime")
+            .join(ONNXRUNTIME_RESOURCE_TARGET)
+            .join("lib")
+            .join(ONNXRUNTIME_LIBRARY_FILE)
+    });
+    if let Some(library) = library.filter(|path| path.is_file()) {
+        // This runs during Tauri setup, before any local model is initialized.
+        env::set_var("ORT_DYLIB_PATH", library);
+    }
+}
+
+#[cfg(all(
+    not(test),
+    not(any(
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+))]
+fn configure_bundled_onnxruntime(_app: &tauri::App) {}
+
 #[cfg(not(test))]
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            configure_bundled_onnxruntime(app);
             let app_data_dir = app
                 .path()
                 .app_local_data_dir()

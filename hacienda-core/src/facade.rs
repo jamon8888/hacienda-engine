@@ -1,8 +1,8 @@
 //! One call from a document to redacted text, an audit trail, and compliance artefacts.
 
 use crate::audit::{
-    AuditChain, AuditCursor, AuditEntry, AuditEntryInput, AuditPage, AuditStore, ExportFormat,
-    InMemoryAuditStore, RedactionAction, SegmentSeal, export as export_chain,
+    export as export_chain, AuditChain, AuditCursor, AuditEntry, AuditEntryInput, AuditPage,
+    AuditStore, ExportFormat, InMemoryAuditStore, RedactionAction, SegmentSeal,
 };
 use crate::auth::{ApiKeyStore, Caller, Capability, CapabilitySet};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
@@ -26,7 +26,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
-use xberg::{ExtractInput, ExtractionResult, extract};
+use xberg::{extract, ExtractInput, ExtractionResult};
 
 /// Version recorded on every audit entry so a record can be tied to the code that made it.
 const PIPELINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -2233,12 +2233,12 @@ mod tests {
     use super::*;
     use crate::audit::store::AuditStore;
     use crate::audit::{AuditEntry, AuditEntryInput, AuditError, FileAuditStore, NodeId};
-    use crate::auth::InMemoryApiKeyStore;
     use crate::auth::authn::TokenResolver as _;
+    use crate::auth::InMemoryApiKeyStore;
     use crate::glossary::GlossaryConfig;
     use crate::pii::PipelineConfig;
     use crate::redaction::{
-        ACTIVE_KEY_VAR, EnvKeyResolver, KEY_BYTES, RedactionConfig, RedactionMode,
+        EnvKeyResolver, RedactionConfig, RedactionMode, ACTIVE_KEY_VAR, KEY_BYTES,
     };
     use crate::review::{
         FileReviewStore, InMemoryReviewStore, QueueStats, ReviewConfig, ReviewDecision,
@@ -2677,12 +2677,10 @@ mod tests {
 
         // Tenant acme cannot reveal it: same failure shape an unknown token would
         // produce, per D-P3-6 — never a distinguishable "forbidden".
-        assert!(
-            facade
-                .reveal_token_with_auth(acme, default_token)
-                .await
-                .is_err()
-        );
+        assert!(facade
+            .reveal_token_with_auth(acme, default_token)
+            .await
+            .is_err());
 
         // Tenant acme mints and reveals its own token correctly, under its own,
         // different key material.
@@ -2926,11 +2924,9 @@ mod tests {
 
         assert!(result.pii.is_empty());
         assert!(!result.metadata.pii_enabled);
-        assert!(
-            result.extraction.results[0]
-                .content
-                .contains("bob@example.com")
-        );
+        assert!(result.extraction.results[0]
+            .content
+            .contains("bob@example.com"));
     }
 
     #[tokio::test]
@@ -2941,11 +2937,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
-            !result.extraction.results[0]
-                .content
-                .contains("bob@example.com")
-        );
+        assert!(!result.extraction.results[0]
+            .content
+            .contains("bob@example.com"));
         assert_eq!(result.pii.len(), 1);
         assert_eq!(result.pii[0].entities.len(), 1);
     }
@@ -3927,9 +3921,9 @@ mod tests {
 
     use crate::auth::AuthContext;
     use crate::pii::NerDetector;
-    use xberg::Result as XbergResult;
     use xberg::text::ner::NerBackend;
     use xberg::types::entity::{Entity, EntityCategory};
+    use xberg::Result as XbergResult;
 
     /// A detector whose response is fixed at construction time. Used to inject
     /// model entities (which carry non-empty `text`) without loading a real model.
@@ -4475,12 +4469,10 @@ mod tests {
         let caller = Caller::Principal(&ctx);
 
         assert!(facade.model_card_with_auth(caller).unwrap().is_some());
-        assert!(
-            facade
-                .compliance_checklist_with_auth(caller)
-                .unwrap()
-                .is_some()
-        );
+        assert!(facade
+            .compliance_checklist_with_auth(caller)
+            .unwrap()
+            .is_some());
     }
 
     /// A DORA report has had no path to the API at all before this change —

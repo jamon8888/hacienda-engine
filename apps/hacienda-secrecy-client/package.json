@@ -7,8 +7,9 @@
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "vite build",
     "check": "tsc --project tsconfig.json && node --check src/tauri-bridge.js && node --test src/tauri-bridge.test.js",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "prepare:onnxruntime": "node scripts/prepare_onnxruntime.mjs",
+    "tauri:dev": "npm run prepare:onnxruntime && tauri dev",
+    "tauri:build": "npm run prepare:onnxruntime && tauri build"
   },
   "dependencies": {
     "@tiptap/core": "2.27.3",

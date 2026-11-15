@@ -3920,6 +3920,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "url",
  "utoipa",
  "uuid",
  "xberg",

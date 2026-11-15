@@ -23,19 +23,20 @@ use std::{
 use async_trait::async_trait;
 use axum::{
     extract::State,
-    http::{HeaderMap, HeaderName, request::Parts},
+    http::{request::Parts, HeaderMap, HeaderName},
     response::{
-        IntoResponse,
         sse::{Event, KeepAlive, Sse},
+        IntoResponse,
     },
 };
-use futures::{Stream, StreamExt, stream};
+use futures::{stream, Stream, StreamExt};
 use hacienda_client_core::{
     ProviderHttpClient, ProviderHttpRequest, ProviderSseEvent, ReqwestHttpClient, TransportError,
 };
-use hacienda_core::{HaciendaError, HaciendaFacade, auth::Caller};
+use hacienda_core::{auth::Caller, HaciendaError, HaciendaFacade};
 use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
+use url::Url;
 
 use crate::{
     error::ApiError, extract::Json as SafeJson, handlers::extract_auth_context, state::ApiState,
@@ -125,8 +126,7 @@ impl<H> AnthropicMessagesProvider<H> {
         http: H,
     ) -> Result<Self, ProviderGatewayError> {
         let endpoint = endpoint.into();
-        let parsed =
-            reqwest::Url::parse(&endpoint).map_err(|_| ProviderGatewayError::Unavailable)?;
+        let parsed = Url::parse(&endpoint).map_err(|_| ProviderGatewayError::Unavailable)?;
         let host = parsed.host_str().ok_or(ProviderGatewayError::Unavailable)?;
         let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
         if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
@@ -400,7 +400,7 @@ fn validate_and_collect_text_paths(body: &Value) -> Result<Vec<String>, ()> {
         let content = message.get("content").ok_or(())?;
         collect_content(
             content,
-            vec!["messages".into(), index.to_string(), "content"],
+            vec!["messages".into(), index.to_string(), "content".into()],
             &mut paths,
         )?;
     }
@@ -811,7 +811,7 @@ impl ResponseRelay {
         Ok(())
     }
 
-    async fn redact_block(&self, block: &BufferedBlock) -> Result<String, ()> {
+    async fn redact_block(&mut self, block: &BufferedBlock) -> Result<String, ()> {
         if block.kind == BlockKind::ToolUse
             && !serde_json::from_str::<Value>(&block.joined)
                 .ok()
@@ -1107,11 +1107,11 @@ fn is_hacienda_token_only(value: &str) -> bool {
     rest.is_empty()
 }
 
-fn redact_and_validate_provider_events(
-    events: &[ProviderSseEvent],
-    facade: &HaciendaFacade,
-    caller: Caller<'_>,
-) -> impl std::future::Future<Output = Result<Vec<ProviderSseEvent>, ApiError>> + '_ {
+fn redact_and_validate_provider_events<'a>(
+    events: &'a [ProviderSseEvent],
+    facade: &'a HaciendaFacade,
+    caller: Caller<'a>,
+) -> impl std::future::Future<Output = Result<Vec<ProviderSseEvent>, ApiError>> + 'a {
     async move {
         let mut validator = ResponseValidator::default();
         let mut output = Vec::new();
@@ -1349,7 +1349,7 @@ impl SseDecoder {
 mod tests {
     use super::*;
     use axum::http::Request;
-    use hacienda_core::{HaciendaConfig, auth::Caller, pii::PipelineConfig};
+    use hacienda_core::{auth::Caller, pii::PipelineConfig, HaciendaConfig};
 
     fn pii_facade() -> HaciendaFacade {
         HaciendaFacade::new(HaciendaConfig::default().with_pii(PipelineConfig::default()))
@@ -1517,10 +1517,9 @@ mod tests {
         let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
             .await
             .expect("provider response redaction");
-        assert!(
-            safe.iter()
-                .all(|event| !event.data.contains("bob@example.com"))
-        );
+        assert!(safe
+            .iter()
+            .all(|event| !event.data.contains("bob@example.com")));
         assert_eq!(safe[0].event.as_deref(), Some("message_start"));
         assert_eq!(safe[6].event.as_deref(), Some("message_stop"));
     }
@@ -1561,10 +1560,9 @@ mod tests {
         )
         .await
         .expect("tool arguments redaction");
-        assert!(
-            safe.iter()
-                .all(|event| !event.data.contains("bob@example.com"))
-        );
+        assert!(safe
+            .iter()
+            .all(|event| !event.data.contains("bob@example.com")));
         let final_delta = safe.iter().find_map(|event| {
             if event.event.as_deref() != Some("content_block_delta") {
                 return None;

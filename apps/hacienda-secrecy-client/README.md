@@ -55,7 +55,16 @@ npm run tauri:build
 
 The app has its own `package-lock.json`. Tauri's config starts Vite on
 `127.0.0.1:1420` for development and builds the static frontend into `dist/` for
-packaging. `npm run check` is a non-interactive command contract check for the
+packaging. Both Tauri commands first stage the matching ONNX Runtime archive,
+verify its pinned SHA-256, and include the native libraries and notices as app
+resources. The app points Xberg at that bundled runtime before any local model
+loads. Archives are cached under `~/.cache/hacienda-secrecy-client/onnxruntime/`
+(override with `HACIENDA_ORT_CACHE`); Python 3.10 or later is required for staging.
+Embedding weights are fetched into private app data when the user activates local
+search. GLiNER weights are installed separately with
+`scripts/install_gliner2_pii.py`; neither model checkpoint is included in the app
+bundle. `npm run check`
+is a non-interactive command contract check for the
 provider DTO shapes, empty and malformed references, local viewer and manual
 command payloads, detector gating, and malformed Tauri responses. TypeScript
 also checks the JavaScript bridge DTO annotations and the shared mark provenance

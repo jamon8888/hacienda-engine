@@ -416,6 +416,9 @@ pub enum ClientError {
 /// Adapter seam that turns transient raw requests into provider-safe requests.
 pub trait RedactionAdapter {
     /// Redact every prompt and context field before provider transport.
+    ///
+    /// # Errors
+    /// Returns an error if any prompt or context cannot be safely tokenized.
     fn redact(&self, request: &ProviderRequest) -> Result<RedactedProviderRequest, RedactionError>;
 
     /// Redact provider output before it is exposed to the renderer.
@@ -423,6 +426,9 @@ pub trait RedactionAdapter {
     /// Implementations must use the same local Hacienda policy as [`Self::redact`].
     /// The default rejects the operation so an adapter that has not implemented the
     /// response boundary cannot accidentally return raw provider text.
+    ///
+    /// # Errors
+    /// Returns an error when response redaction is unavailable or fails.
     fn redact_text(&self, _text: &str) -> Result<TokenizedText, RedactionError> {
         Err(RedactionError::Rejected)
     }
@@ -431,6 +437,9 @@ pub trait RedactionAdapter {
 /// Adapter seam for provider streaming. It receives token-only data only.
 pub trait ProviderTransport {
     /// Stream a complete set of chunks while preserving opaque references.
+    ///
+    /// # Errors
+    /// Returns an error if transport fails or the provider response is invalid.
     fn stream(
         &mut self,
         request: &RedactedProviderRequest,
@@ -577,6 +586,9 @@ impl fmt::Debug for ProviderHttpResponse {
 /// Small, injected HTTP seam used by the provider adapters and their tests.
 pub trait ProviderHttpClient {
     /// Send one request without logging or retaining its content.
+    ///
+    /// # Errors
+    /// Returns an error if the request cannot be sent or its response is invalid.
     fn send(
         &mut self,
         request: ProviderHttpRequest,
@@ -585,6 +597,9 @@ pub trait ProviderHttpClient {
     /// Read a response body in bounded byte chunks. Implementations with a real
     /// network body should override this method; the default keeps fixture and
     /// legacy clients source-compatible.
+    ///
+    /// # Errors
+    /// Returns an error if sending fails or either callback rejects the response.
     fn send_stream(
         &mut self,
         request: ProviderHttpRequest,
@@ -626,6 +641,9 @@ impl ProviderTransportConfig {
     }
 
     /// Validate that this route terminates at a local or authenticated gateway.
+    ///
+    /// # Errors
+    /// Returns an error if the URL, model, token limit, or credential is invalid.
     pub fn validate(&self) -> Result<(), TransportError> {
         let endpoint = reqwest::Url::parse(&self.endpoint).map_err(|_| TransportError::Failed)?;
         let host = endpoint.host_str().ok_or(TransportError::Failed)?;
@@ -673,6 +691,9 @@ impl<H> AnthropicProviderTransport<H> {
     /// retained in memory until EOF because `RedactionAdapter` has no streaming
     /// safety contract: PII may span arbitrarily many text deltas. Callbacks only
     /// receive events after joined text inspection and successful validation.
+    ///
+    /// # Errors
+    /// Returns an error if the provider, transport, event sequence, or redaction is invalid.
     pub fn collect_redacted_events<R, F>(
         &mut self,
         request: &RedactedProviderRequest,
@@ -792,14 +813,14 @@ where
         ))?;
         map_provider_response(
             request,
-            response,
+            &response,
             ProviderKind::ClaudeDesktop,
             anthropic_text,
         )
     }
 }
 
-/// OpenAI Chat Completions-compatible adapter for Codex transports.
+/// `OpenAI` Chat Completions-compatible adapter for `Codex` transports.
 pub struct OpenAiProviderTransport<H> {
     http: H,
     config: ProviderTransportConfig,
@@ -853,7 +874,7 @@ where
             ],
             serde_json::to_vec(&body).map_err(|_| TransportError::Failed)?,
         ))?;
-        map_provider_response(request, response, ProviderKind::Codex, openai_text)
+        map_provider_response(request, &response, ProviderKind::Codex, openai_text)
     }
 }
 
@@ -865,6 +886,9 @@ pub struct ReqwestHttpClient {
 
 impl ReqwestHttpClient {
     /// Build the native HTTP client with a bounded request timeout.
+    ///
+    /// # Errors
+    /// Returns an error if the native HTTP client cannot be built.
     pub fn new() -> Result<Self, TransportError> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -952,6 +976,9 @@ pub struct GatewayProviderTransport {
 
 impl GatewayProviderTransport {
     /// Construct and validate a real gateway transport.
+    ///
+    /// # Errors
+    /// Returns an error if the gateway configuration or native HTTP client is invalid.
     pub fn new(config: ProviderTransportConfig) -> Result<Self, TransportError> {
         config.validate()?;
         Ok(Self {
@@ -1009,7 +1036,7 @@ fn known_references(request: &RedactedProviderRequest) -> Vec<OpaqueTokenReferen
 
 fn map_provider_response(
     request: &RedactedProviderRequest,
-    response: ProviderHttpResponse,
+    response: &ProviderHttpResponse,
     provider: ProviderKind,
     extract_text: fn(&Value) -> Option<String>,
 ) -> Result<ProviderResponse, TransportError> {
@@ -1141,7 +1168,7 @@ impl SseDecoder {
         Ok(())
     }
 
-    fn finish(self, events: &mut Vec<ProviderSseEvent>) -> Result<(), TransportError> {
+    fn finish(self, events: &[ProviderSseEvent]) -> Result<(), TransportError> {
         // The protocol requires a blank-line terminator; incomplete UTF-8, lines,
         // and event frames are discarded as truncated input.
         if !self.pending.is_empty() || self.frame_touched {
@@ -1154,6 +1181,7 @@ impl SseDecoder {
     }
 }
 
+#[cfg(test)]
 fn decode_sse_chunks<I, S>(chunks: I) -> Result<Vec<ProviderSseEvent>, TransportError>
 where
     I: IntoIterator<Item = Result<S, TransportError>>,
@@ -1164,7 +1192,7 @@ where
     for chunk in chunks {
         decoder.push(chunk?.as_ref().as_bytes(), &mut events)?;
     }
-    decoder.finish(&mut events)?;
+    decoder.finish(&events)?;
     Ok(events)
 }
 
@@ -1184,7 +1212,7 @@ fn validate_claude_sse_events(events: &[ProviderSseEvent]) -> Result<(), Transpo
             return Err(TransportError::Failed);
         }
         match kind {
-            "ping" => require_keys(&value, &["type"])?,
+            "ping" | "message_stop" => require_keys(&value, &["type"])?,
             "content_block_delta" => {
                 require_keys(&value, &["type", "index", "delta"])?;
                 let delta = value.get("delta").ok_or(TransportError::Failed)?;
@@ -1237,7 +1265,6 @@ fn validate_claude_sse_events(events: &[ProviderSseEvent]) -> Result<(), Transpo
                 require_keys(delta, &["stop_reason", "stop_sequence"])?;
                 validate_usage(value.get("usage").ok_or(TransportError::Failed)?)?;
             }
-            "message_stop" => require_keys(&value, &["type"])?,
             "error" => {
                 require_keys(&value, &["type", "error"])?;
                 let detail = value.get("error").ok_or(TransportError::Failed)?;

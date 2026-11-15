@@ -1,7 +1,7 @@
 //! Domain contracts for the two supported Hacienda client installation profiles.
 //!
 //! This crate describes topology and authorization boundaries only. It does not
-//! implement encryption, a vault, a gateway, LanceDB, or a network client. Secret
+//! implement encryption, a vault, a gateway, `LanceDB`, or a network client. Secret
 //! material is represented by references to an external provider and is never a
 //! field in these contracts.
 
@@ -17,7 +17,7 @@ pub use provider::*;
 /// A serialized configuration for one supported installation profile.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallationConfig {
-    /// A local Tauri client and local services/storage.
+    /// A local `Tauri` client and local services/storage.
     LocalFull(LocalFullConfig),
     /// A light client connected to an authenticated, tenant-scoped on-premise gateway.
     TeamOnPremise(TeamOnPremiseConfig),
@@ -29,34 +29,34 @@ pub type ClientConfiguration = InstallationConfig;
 /// Alias using the domain term for the profile union.
 pub type InstallationProfile = InstallationConfig;
 
-/// Alias for the LocalFull profile configuration.
+/// Alias for the `LocalFull` profile configuration.
 pub type LocalFull = LocalFullConfig;
 
-/// Descriptive alias for the LocalFull profile configuration.
+/// Descriptive alias for the `LocalFull` profile configuration.
 pub type LocalFullProfile = LocalFullConfig;
 
-/// Alias for the TeamOnPremise profile configuration.
+/// Alias for the `TeamOnPremise` profile configuration.
 pub type TeamOnPremise = TeamOnPremiseConfig;
 
-/// Descriptive alias for the TeamOnPremise profile configuration.
+/// Descriptive alias for the `TeamOnPremise` profile configuration.
 pub type TeamOnPremiseProfile = TeamOnPremiseConfig;
 
 /// The client surface that is allowed to use a profile.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientSurface {
-    /// Full local Tauri client; the local process boundary is trusted.
+    /// Full local `Tauri` client; the local process boundary is trusted.
     LocalTauri,
-    /// Light Tauri client; all sensitive server operations cross the gateway.
+    /// Light `Tauri` client; all sensitive server operations cross the gateway.
     LightTauri,
 }
 
 /// The boundary at which the profile authenticates and authorizes sensitive work.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrustBoundary {
-    /// The local process boundary. This is only valid for LocalFull.
+    /// The local process boundary. This is only valid for `LocalFull`.
     LocalProcess,
     /// An authenticated gateway that enforces one tenant scope. This is only valid
-    /// for TeamOnPremise.
+    /// for `TeamOnPremise`.
     AuthenticatedTenantGateway,
 }
 
@@ -158,7 +158,7 @@ pub enum GatewayConfig {
 /// LanceDB topology and the authority allowed to access it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LanceDbTopology {
-    /// An embedded local store, never addressed by a client network route.
+    /// An embedded local `LanceDB` store, never addressed by a client network route.
     LocalEmbedded { path: StoragePath },
     /// Server-side control-plane access using an opaque token reference and tenant scope.
     ServerTokenOnly {
@@ -166,18 +166,18 @@ pub enum LanceDbTopology {
         token_reference: SecretReference,
         tenant_scope: TenantScope,
     },
-    /// Explicitly forbidden: a client reaches LanceDB directly.
+    /// Explicitly forbidden: a client reaches `LanceDB` directly.
     DirectClient { endpoint: ServiceEndpoint },
 }
 
-/// Storage topology of LocalFull.
+/// Storage topology of `LocalFull`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalStorageTopology {
     pub vault: Option<EncryptedLocalVault>,
     pub lancedb: LanceDbTopology,
 }
 
-/// Storage topology of TeamOnPremise.
+/// Storage topology of `TeamOnPremise`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamStorageTopology {
     pub lancedb: LanceDbTopology,
@@ -256,6 +256,9 @@ pub enum ConfigurationError {
 
 impl InstallationConfig {
     /// Validate every trust-boundary and storage invariant.
+    ///
+    /// # Errors
+    /// Returns the first configuration invariant that is not satisfied.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
         match self {
             Self::LocalFull(config) => config.validate(),
@@ -264,6 +267,9 @@ impl InstallationConfig {
     }
 
     /// Validate a request against this profile.
+    ///
+    /// # Errors
+    /// Returns an error when the profile or the requested rehydration capability is invalid.
     pub fn validate_rehydration(
         &self,
         request: &RehydrationRequest,
@@ -275,6 +281,9 @@ impl InstallationConfig {
 
 impl LocalFullConfig {
     /// Validate the local process trust boundary and local storage topology.
+    ///
+    /// # Errors
+    /// Returns an error when the trust boundary, gateway, storage, or provider route is invalid.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
         if self.client != ClientSurface::LocalTauri
             || self.trust_boundary != TrustBoundary::LocalProcess
@@ -341,6 +350,9 @@ impl LocalFullConfig {
 impl TeamOnPremiseConfig {
     /// Validate the tenant gateway, token-only server storage, and server rehydration
     /// boundary.
+    ///
+    /// # Errors
+    /// Returns an error when tenant scope, gateway, storage, or provider routing is invalid.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
         if self.client != ClientSurface::LightTauri
             || self.trust_boundary != TrustBoundary::AuthenticatedTenantGateway
@@ -412,8 +424,11 @@ impl TeamOnPremiseConfig {
 
 impl RehydrationRequest {
     /// Validate this request against a previously validated installation profile.
+    ///
+    /// # Errors
+    /// Returns an error when document identifiers or rehydration capabilities are invalid.
     pub fn validate_for(&self, profile: &InstallationConfig) -> Result<(), ConfigurationError> {
-        if self.document_ids.iter().any(|id| id.is_empty()) {
+        if self.document_ids.iter().any(String::is_empty) {
             return Err(ConfigurationError::EmptyIdentifier);
         }
         match profile {
@@ -430,10 +445,8 @@ impl RehydrationRequest {
                     RehydrationCapability::LocalEncryptedVault {
                         vault: request_vault,
                     } if request_vault == &vault.id => Ok(()),
-                    RehydrationCapability::LocalEncryptedVault { .. } => {
-                        Err(ConfigurationError::InvalidRehydrationCapability)
-                    }
-                    RehydrationCapability::AuditedServer { .. } => {
+                    RehydrationCapability::AuditedServer { .. }
+                    | RehydrationCapability::LocalEncryptedVault { .. } => {
                         Err(ConfigurationError::InvalidRehydrationCapability)
                     }
                 }
@@ -446,9 +459,10 @@ impl RehydrationRequest {
                 if self.tenant_scope.as_ref() != Some(tenant) {
                     return Err(ConfigurationError::MissingTenantScope);
                 }
-                let gateway = match config.gateway.as_ref() {
-                    Some(GatewayConfig::AuthenticatedTenantScoped { id, .. }) => id,
-                    _ => return Err(ConfigurationError::MissingGateway),
+                let Some(GatewayConfig::AuthenticatedTenantScoped { id: gateway, .. }) =
+                    config.gateway.as_ref()
+                else {
+                    return Err(ConfigurationError::MissingGateway);
                 };
                 match &self.capability {
                     RehydrationCapability::AuditedServer {
@@ -457,10 +471,8 @@ impl RehydrationRequest {
                     } if request_gateway == gateway => {
                         validate_id(&audit.0).map_err(|_| ConfigurationError::MissingAuditReference)
                     }
-                    RehydrationCapability::AuditedServer { .. } => {
-                        Err(ConfigurationError::InvalidRehydrationCapability)
-                    }
-                    RehydrationCapability::LocalEncryptedVault { .. } => {
+                    RehydrationCapability::AuditedServer { .. }
+                    | RehydrationCapability::LocalEncryptedVault { .. } => {
                         Err(ConfigurationError::InvalidRehydrationCapability)
                     }
                 }

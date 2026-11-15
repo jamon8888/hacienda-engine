@@ -37,6 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Protocol Buffers compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       # Matches ci-rust.yaml/ci-lint.yaml's toolchain choice — this workflow
       # builds the same hacienda-cli/hacienda-api those validate against. Pinned
       # date: see ci-rust.yaml's top-of-file comment for why an unpinned nightly

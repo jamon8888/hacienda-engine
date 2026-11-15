@@ -6,11 +6,11 @@
 //! Phase 1 Design Decision D3.
 
 use crate::audit::{
-    AuditStore, GENESIS_HASH,
-    cursor::{AuditCursor, AuditPage, page_from},
+    cursor::{page_from, AuditCursor, AuditPage},
     entry::{AuditEntry, AuditEntryInput, EntitySource, RedactionAction},
     error::AuditError,
-    segment::{SegmentSeal, compute_seal_hash, verify_seal_chain},
+    segment::{compute_seal_hash, verify_seal_chain, SegmentSeal},
+    AuditStore, GENESIS_HASH,
 };
 use crate::tenancy::TenantId;
 use async_trait::async_trait;
