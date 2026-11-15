@@ -425,3 +425,22 @@ révisions append-only et ouverture native auditée de l’original. La liaison 
 original et certaines références restent toutefois en mémoire de session ; le rechargement
 après redémarrage, le coffre documentaire durable et l’intégration TeamOnPremise de bout en
 bout ne sont pas établis par ce commit.
+
+## Validation du runtime d’embedding Xberg — 2026-11-15
+
+Le smoke test isolé du client a chargé le preset `multilingual` avec la bibliothèque officielle
+ONNX Runtime 1.23.2 pour macOS x86_64 (version utilisée car la distribution officielle ne fournit
+plus de version macOS x86_64 plus récente). Les fichiers du preset ont été téléchargés depuis la
+révision Xberg épinglée ; `model.onnx` (1,11 Go) correspond à son SHA-256 de manifeste. En forçant
+`XBERG_ORT_EP=cpu`, l’inférence a réussi sur un texte tokenisé, avec un vecteur fini de 768 éléments.
+
+Le choix automatique d’Xberg sous macOS Intel a tenté de compiler le graphe pour CoreML et n’a pas
+terminé après plus de 18 minutes. La configuration du client choisit donc explicitement le CPU sur
+macOS x86_64 et conserve l’accélération automatique sur les autres cibles. Ce constat motive le
+choix de fournisseur pour cette cible ; il ne constitue pas un benchmark comparatif.
+
+Limites : le smoke est isolé et ne couvre pas encore le paquet Tauri distribué, la découverte et le
+chargement du runtime ONNX depuis ses ressources, ni le parcours complet ingestion/recherche hybride
+dans le binaire client. Ces points restent des critères de livraison LocalFull. Le modèle GLiNER2
+dispose d’une validation séparée documentée dans l’issue #131 ; ces validations ne prouvent pas les
+viewer multi-format, la durabilité du coffre ou Team On-Premise de bout en bout.

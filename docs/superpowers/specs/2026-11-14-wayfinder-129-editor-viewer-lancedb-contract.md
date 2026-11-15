@@ -427,11 +427,20 @@ prompt et contexte dans sa redaction avant l’egress. Les tests du bridge couvr
 les limites et le rejet des réponses malformées.
 
 La compilation Tauri Intel avec `ort-dynamic`, Clippy ciblé, le format Rust et le contrôle
-TypeScript/bridge passent. Cette machine ne possède pas de bibliothèque ONNX Runtime exploitable
-(le chemin Homebrew présent est vide), donc le chargement réel du modèle d’embedding n’a pas encore
-été vérifié. La distribution doit fournir une bibliothèque compatible et définir le chemin de
-chargement pour chaque plateforme ; l’activation échoue fermé si le modèle ne peut pas démarrer.
-La recherche est compilée mais son exécution avec le modèle réel reste non vérifiée. Cette tranche
+TypeScript/bridge passent. Un smoke test isolé a ensuite chargé le preset Xberg `multilingual` avec
+ONNX Runtime 1.23.2 x86_64 et produit un vecteur fini de 768 dimensions à partir d’un texte
+tokenisé. Le cache a téléchargé le modèle et ses fichiers tokenizer depuis la révision épinglée ;
+le SHA-256 du modèle correspond au manifeste Xberg. Avec le fournisseur CPU, le chargement et
+l’inférence ont réussi. Le fournisseur automatique Intel sélectionne CoreML ; son import a encore
+été en compilation CoreML après plus de 18 minutes et a été interrompu pour éviter de bloquer la
+validation. Le client sélectionne maintenant CPU par défaut sur macOS Intel et garde le choix
+automatique sur les autres architectures.
+
+Ce smoke test ne vérifie pas encore le paquet Tauri distribué. La distribution doit fournir une
+bibliothèque ONNX Runtime compatible et définir son chemin de chargement pour chaque plateforme ;
+l’activation échoue fermé si le runtime ne peut pas démarrer. Le chemin complet ingestion → LanceDB
+→ recherche dense+FTS → injection du contexte dans Claude/Codex n’a pas encore été exercé avec ce
+modèle réel dans le client. Cette tranche
 ne livre pas encore une sélection/scoping de dossier dans l’interface, ni les viewers intégrés
 PDF/DOCX/XLSX/PPTX, ni la restauration durable des références de l’original après redémarrage.
 Le service garde encore la liaison document/version/chemin dans l’état de session en mémoire.

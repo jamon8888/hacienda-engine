@@ -470,11 +470,19 @@ impl LocalFullDocumentService {
         let embedding_cache = root.join("models/xberg-embeddings");
         std::fs::create_dir_all(&embedding_cache)
             .map_err(|_| "LocalFull embedding cache is unavailable".to_owned())?;
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        let acceleration = Some(xberg::AccelerationConfig {
+            provider: xberg::ExecutionProviderType::Cpu,
+            ..Default::default()
+        });
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        let acceleration = None;
         let embedding_config = xberg::EmbeddingConfig {
             model: xberg::EmbeddingModelType::Preset {
                 name: LOCAL_EMBEDDING_PRESET.to_owned(),
             },
             cache_dir: Some(embedding_cache),
+            acceleration,
             ..Default::default()
         };
         let embedder =
