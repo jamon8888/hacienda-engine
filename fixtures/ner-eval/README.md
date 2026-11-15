@@ -77,18 +77,14 @@ a straight comparison with no separate alias table to keep in sync:
   `address` (not `location`): the model's raw `Location` category is mapped onto
   `PiiCategory::Address` by `to_pii_category`, and `phone_number` for the same reason
   (`Phone` → `PiiCategory::PhoneNumber`).
-- `vertical-finance.json` uses `iban`, `swift_code`, `account_number` — the finance
-  vertical's zero-shot label set, matching the example in the design spec (§4.1). Of
-  these, only `iban` is aliased by `to_pii_category`'s alias table
-  (`ner.rs`'s `to_pii_category` `Custom` arm) onto an existing `PiiCategory::Iban`
-  variant; `swift_code` and `account_number` are **not** in that table and therefore
-  arrive as `PiiCategory::Custom("swift_code")` / `PiiCategory::Custom("account_number")`
-  rather than the more specific `PiiCategory::SwiftBic` / `PiiCategory::BankAccount`
-  variants that exist in the taxonomy. This is a real, pre-existing footgun (see the
-  implementation plan's Task 2.3 `should_map_an_aliased_vertical_label_to_its_taxonomy_category`
-  test and the "Alias-table collision" risk row) — the fixture deliberately exercises
-  both the aliased and non-aliased cases side by side so the harness's output makes the
-  asymmetry visible rather than hiding it.
+- `vertical-finance.json` sends the zero-shot labels `iban`, `swift_code`, and
+  `account_number` to GLiNER2. Gold labels describe the category *after* Hacienda's
+  `to_pii_category` mapping: `iban`, `swift_code`, and `bank_account`. In particular,
+  `account_number` is normalized to `PiiCategory::BankAccount`, so scoring gold as
+  `account_number` would count every correctly detected account as a false positive
+  plus a false negative. `swift_code` currently remains a custom category; mapping it
+  to the existing `SwiftBic` taxonomy variant is a separate product change and should
+  be reflected in the gold vocabulary if implemented.
 
 ## Known limitation — single annotator
 
@@ -110,6 +106,9 @@ not have a model available:
 ```sh
 HACIENDA_EVAL_MODEL_DIR=~/model_f16 cargo test -p hacienda-core --features ner-candle --test ner_eval -- --ignored --nocapture
 ```
+
+Set `HACIENDA_EVAL_FIXTURE=vertical-finance.json` to run only one fixture when iterating
+on its labels or model behavior. It must match one of the fixture filenames exactly.
 
 `HACIENDA_EVAL_MODEL_DIR` must point at a local model directory in the shape
 `from_candle_local` expects (`config.json`, `encoder_config/`, `tokenizer.json`,

@@ -100,9 +100,7 @@ fn all_fixtures() -> Vec<(&'static str, Fixture)> {
 /// its own never-predicted label instead of failing loudly.
 fn allowed_labels(fixture_name: &str) -> BTreeSet<&'static str> {
     if fixture_name.starts_with("vertical-") {
-        ["iban", "swift_code", "account_number"]
-            .into_iter()
-            .collect()
+        ["iban", "swift_code", "bank_account"].into_iter().collect()
     } else {
         ["person", "organization", "address", "email", "phone_number"]
             .into_iter()
@@ -823,7 +821,7 @@ mod runner {
         (0u8..=9).map(|i| 0.50 + f32::from(i) * 0.05).collect()
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires HACIENDA_EVAL_MODEL_DIR pointing at a local GLiNER2 model \
                 directory; see fixtures/ner-eval/README.md for the invocation"]
     async fn should_score_ner_eval_fixtures_against_a_local_model() {
@@ -843,7 +841,24 @@ mod runner {
 
         let mut fixtures_report = Vec::new();
 
-        for (fixture_name, fixture) in all_fixtures() {
+        let requested_fixture = std::env::var("HACIENDA_EVAL_FIXTURE").ok();
+        let all_fixtures = all_fixtures();
+        if let Some(name) = &requested_fixture {
+            assert!(
+                all_fixtures
+                    .iter()
+                    .any(|(fixture_name, _)| fixture_name == name),
+                "HACIENDA_EVAL_FIXTURE={name:?} does not name a known fixture"
+            );
+        }
+
+        for (fixture_name, fixture) in all_fixtures {
+            if requested_fixture
+                .as_deref()
+                .is_some_and(|requested| requested != fixture_name)
+            {
+                continue;
+            }
             let (categories, label_set) = categories_for_fixture(fixture_name);
 
             let detector = NerDetector::from_candle_local(&model_dir, None)
