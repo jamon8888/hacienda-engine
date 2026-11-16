@@ -33,10 +33,10 @@ now real code, not proposal:
   (ONNX Runtime + a HuggingFace model fetch) — those need infrastructure provisioning
   beyond a Cargo feature; tracked as follow-up, not silently dropped.
 - **`hacienda-mcp` (M1a, new crate).** Implements exactly the architecture §2–§3 below
-  describe: eight tools, each a thin wrapper over an existing `HaciendaFacade` method,
+  describe: seven tools, each a thin wrapper over an existing `HaciendaFacade` method,
   stdio transport via `rmcp` (the same MCP SDK xberg itself uses, confirmed at
   `crates/xberg/Cargo.toml`: `rmcp = "2.2.0"`), wired up as `hacienda mcp serve`. Verified
-  end-to-end by hand over stdio: `initialize` → `tools/list` (all eight, correct schemas)
+  end-to-end by hand over stdio: `initialize` → `tools/list` (all seven, correct schemas)
   → `tools/call pii_redact` on a value containing a control corpus email and IBAN returns
   `"contact me at [EMAIL], IBAN [IBAN:****]"` and two audit entries, with the corpus value
   absent from both the text content block and `structuredContent`. Four automated tests
@@ -196,6 +196,11 @@ and so on for all ~40 guarded routes. Request/response JSON Schemas come from th
 types `hacienda-api` already serializes with `utoipa`/serde — no second schema to hand-write or
 let drift (§3.3).
 
+**Security exception for stdio:** `pii_reveal` is not exposed by the agent-facing server.
+The stdio facade uses `Caller::Trusted`, so registering this operation would put recovered
+plaintext directly into Claude/Codex context. Human rehydration remains in the authenticated,
+audited Tauri viewer.
+
 ### 3.3 Reuse `hacienda-api`'s DTOs — do not fork request/response shapes
 
 `hacienda-api/src/dto.rs` (1,154 lines) already has every request/response type this needs, with
@@ -219,9 +224,10 @@ familiar with xberg's MCP server recognizes the pattern:
 
 ### 3.5 Auth: identical capability model, no new one
 
-- **Stdio transport** (`hacienda mcp serve`) runs as `Caller::Trusted`, the same precedent already
-  documented for CLI `serve` and `pii reveal`: the process boundary is the trust boundary. No
-  token is needed locally, same as today's CLI.
+- **Stdio transport** (`hacienda mcp serve`) runs as `Caller::Trusted`; no token is needed
+  locally. Because an MCP client can be an agent, `pii_reveal` is excluded from the tool
+  inventory even though the facade supports it. Human rehydration stays in the authenticated,
+  audited Tauri viewer.
 - **HTTP transport** (`/mcp/*` mounted on `hacienda-api`) requires the same bearer token and
   `Capability` the equivalent REST route requires — reusing `hacienda-api`'s existing
   `auth_middleware`/`AuthState`, not a parallel auth path. A tool call without the right capability
@@ -329,7 +335,7 @@ It can start immediately, in parallel with whatever the program's waves 2–4 ar
 
 | Slice | Content | Why this order |
 | --- | --- | --- |
-| **M1a** | **Shipped** (§0). `hacienda-mcp` crate, stdio transport, `hacienda mcp serve`. Eight hand-picked tools (`documents_process`, `pii_scan`, `pii_redact`, `pii_reveal`, `audit_verify`, `audit_entries`, `compliance_report`, `get_version`), each proven against a real `HaciendaFacade` call. **Not yet done, and honestly still open against §3.2/§3.8's original design:** the `ROUTE_TABLE`-driven generation and the `mcp_tool_set_equals_route_table` anti-drift test — this revision hand-wrote eight tools rather than deriving all ~40 guarded routes (RAG collections, presets, versions/diff, uploads, usage, auth management are not yet tools). Closing that gap is the next slice of M1a, not a new phase. | Smallest slice that's independently useful (Claude Desktop today) and fully exercises the guard (proven by the redaction/leak tests in `hacienda-mcp/src/lib.rs`) before adding a second transport |
+| **M1a** | **Shipped** (§0). `hacienda-mcp` crate, stdio transport, `hacienda mcp serve`. Seven hand-picked tools (`documents_process`, `pii_scan`, `pii_redact`, `audit_verify`, `audit_entries`, `compliance_report`, `get_version`); pseudonym rehydration is deliberately excluded because a `Caller::Trusted` stdio tool would disclose plaintext into agent context. Human rehydration stays in the authenticated, audited Tauri viewer. **Not yet done, and honestly still open against §3.2/§3.8's original design:** the `ROUTE_TABLE`-driven generation and the `mcp_tool_set_equals_route_table` anti-drift test — this revision hand-wrote seven tools rather than deriving all ~40 guarded routes (RAG collections, presets, versions/diff, uploads, usage, auth management are not yet tools). Closing that gap is the next slice of M1a, not a new phase. | Smallest slice that's independently useful (Claude Desktop today) and fully exercises the guard (proven by the redaction/leak tests in `hacienda-mcp/src/lib.rs`) before adding a second transport |
 | **M1b** | HTTP/streamable transport mounted on `hacienda-api` at `/mcp/*` | Additive once M1a's tool-handler logic is proven; reuses the existing `auth_middleware` rather than a new one |
 | **M1c** | Resources (§3.4) and the `extract_and_prove` prompt | Polish, not exit-blocking |
 | **CLI parity** (§4) | `audit {entries,seals,export,tip}`, `review`, `compliance` subcommands | **Blocked**, not merely independent — see §0's durable-store finding and §4's status line |

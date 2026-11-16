@@ -9,6 +9,7 @@ use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::RagStore;
 use std::sync::{Arc, Mutex};
 
+use crate::handlers::claude_messages::ClaudeMessagesProvider;
 use crate::quota::InMemoryQuotaStore;
 
 /// Body / batch limits applied uniformly to every request.
@@ -85,6 +86,12 @@ pub struct ApiState {
     pub(crate) quota_store: Option<Arc<InMemoryQuotaStore>>,
     /// Per-router ONNX probe state; independent API routers must not share it.
     pub(crate) probe_state: Arc<Mutex<ProbeState>>,
+    /// Anthropic Messages provider used by the authenticated Claude Code gateway.
+    /// `None` keeps the route registered but disabled, which is the safe default.
+    pub(crate) claude_messages_provider: Option<Arc<dyn ClaudeMessagesProvider>>,
+    /// Server-owned destinations permitted for RAG answer synthesis.
+    /// `None` is fail-closed: the request cannot choose an LLM destination.
+    pub(crate) rag_egress_allowlist: Option<Vec<String>>,
 }
 
 impl ApiState {
@@ -106,6 +113,8 @@ impl ApiState {
             usage_store: None,
             quota_store: None,
             probe_state: Arc::new(Mutex::new(ProbeState::Idle)),
+            claude_messages_provider: None,
+            rag_egress_allowlist: None,
         }
     }
 
@@ -157,6 +166,30 @@ impl ApiState {
     #[must_use]
     pub fn with_quota_store(mut self, quota_store: Arc<InMemoryQuotaStore>) -> Self {
         self.quota_store = Some(quota_store);
+        self
+    }
+
+    /// Enable the authenticated Claude Code Messages gateway.
+    #[must_use]
+    pub fn with_claude_messages_provider(
+        mut self,
+        provider: Arc<dyn ClaudeMessagesProvider>,
+    ) -> Self {
+        self.claude_messages_provider = Some(provider);
+        self
+    }
+
+    /// Configure the server-owned RAG LLM egress allowlist.
+    ///
+    /// The list is copied into each answer request and cannot be supplied by the
+    /// caller. Leaving it unset deliberately disables outbound RAG model calls.
+    #[must_use]
+    pub fn with_rag_egress_allowlist<I, S>(mut self, destinations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.rag_egress_allowlist = Some(destinations.into_iter().map(Into::into).collect());
         self
     }
 }

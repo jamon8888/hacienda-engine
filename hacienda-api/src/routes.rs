@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, capabilities, documents, info, jobs, keys, openapi, pii,
-        presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
+        audit, audit_review, auth, capabilities, claude_messages, documents, info, jobs, keys,
+        openapi, pii, presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
     },
     quota::quota_middleware,
     state::ApiState,
@@ -413,6 +413,15 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::AuditRead),
         make_router: || get(keys::list_keys),
     },
+    // Claude Code's Anthropic-compatible provider gateway. The same
+    // `documents:process` capability used by redaction-bearing endpoints is
+    // deliberately required here: no provider request may be made without a
+    // caller-derived tenant and Hacienda redaction pass.
+    RouteSpec {
+        path: "/v1/messages",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(claude_messages::messages),
+    },
 ];
 
 /// Build the `AuthState` from the route table.
@@ -581,9 +590,8 @@ pub(crate) mod tests {
 
     /// A state with auth disabled, PII detection enabled (mask mode — no key
     /// resolver needed), and an in-memory RAG store attached. Used by the
-    /// streaming-answer tests: `handlers::rag_stream::answer` calls
-    /// `redact_text_with_auth` unconditionally, which fails closed with
-    /// `PiiDisabled` against the plain `state_with_rag()` facade.
+    /// streaming-answer and retrieval tests, whose response paths call
+    /// `redact_text_with_auth` and fail closed without a PII pipeline.
     fn state_with_rag_and_pii() -> ApiState {
         use hacienda_rag::{InMemoryVectorStore, RagStore};
 
@@ -599,7 +607,9 @@ pub(crate) mod tests {
         let jobs = InMemoryJobStore::new().into_arc();
         let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
         let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
-        ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(store)
+        ApiState::new(facade, jobs, auth, ApiLimits::default())
+            .with_rag_store(store)
+            .with_rag_egress_allowlist(["http://127.0.0.1:1"])
     }
 
     /// Turn an axum route pattern into a concrete, requestable path by replacing every
@@ -1512,7 +1522,7 @@ pub(crate) mod tests {
     /// real router (not the store directly), so a routing/DTO wiring bug fails here.
     #[tokio::test]
     async fn rag_collection_document_retrieve_and_delete_round_trip() {
-        let app = build_router(state_with_rag());
+        let app = build_router(state_with_rag_and_pii());
 
         let create = app
             .clone()
@@ -1852,7 +1862,7 @@ pub(crate) mod tests {
         let answer_body = r#"{
             "prompt": "what is this?",
             "retrieve": {"mode":"vector","query_vector":[1.0,0.0,0.0],"top_k":5},
-            "llm": {"model": "not-a-real-provider/does-not-exist"}
+            "llm": {"model": "not-a-real-provider/does-not-exist", "base_url": "http://127.0.0.1:1"}
         }"#;
         let answer = app
             .clone()
@@ -2087,7 +2097,7 @@ pub(crate) mod tests {
     /// same not-found contract as `GET /v1/rag/collections/{name}` itself.
     #[tokio::test]
     async fn rag_list_documents_paginates_and_404s_on_unknown_collection() {
-        let app = build_router(state_with_rag());
+        let app = build_router(state_with_rag_and_pii());
         assert_eq!(create_collection(&app, "c1", 3).await, 201);
 
         for i in 0..3 {

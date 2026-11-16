@@ -165,6 +165,14 @@ pub struct DocumentRecord {
     /// Document-level metadata (free-form JSON).
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Legal dossier (folder) this document belongs to, for retrieval scoping.
+    /// `None` for documents ingested before this contract existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dossier_id: Option<String>,
+    /// Document version this record grounds on, for retrieval scoping.
+    /// `None` for documents ingested before this contract existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_ref: Option<String>,
 }
 
 /// Chunk record for upsertion.
@@ -188,6 +196,13 @@ pub struct ChunkRecord {
     /// Chunk-level metadata (free-form JSON).
     #[serde(default)]
     pub chunk_metadata: serde_json::Value,
+    /// Legal dossier (folder) the parent document belongs to, for retrieval scoping.
+    /// Denormalized on the chunk so retrieval can scope without joining the document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dossier_id: Option<String>,
+    /// Document version the parent document grounds on, for retrieval scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_ref: Option<String>,
 }
 
 /// Sparse (SPLADE-style) embedding: parallel arrays, indices sorted ascending.
@@ -283,6 +298,12 @@ pub struct DocumentSummary {
     /// Ingestion time as Unix seconds, if the backend tracks it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingested_at: Option<i64>,
+    /// Legal dossier (folder) the document belongs to, for retrieval scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dossier_id: Option<String>,
+    /// Document version the document grounds on, for retrieval scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_ref: Option<String>,
 }
 
 /// How a retrieved chunk was primarily scored.
@@ -367,4 +388,95 @@ pub struct CollectionStats {
     /// Most recent ingestion time as Unix seconds, if tracked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ingested_at: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_deserialize_document_record_without_new_fields_when_backward_compatible() {
+        let json = serde_json::json!({
+            "full_text": "hello world",
+            "keywords": [],
+            "entities": null,
+            "labels": null,
+            "metadata": null,
+        });
+        let doc: DocumentRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(doc.full_text, "hello world");
+        assert_eq!(doc.dossier_id, None);
+        assert_eq!(doc.version_ref, None);
+    }
+
+    #[test]
+    fn should_round_trip_document_record_with_dossier_and_version_when_serialized() {
+        let doc = DocumentRecord {
+            full_text: "hello world".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(json["dossier_id"], "dossier-1");
+        assert_eq!(json["version_ref"], "v-2024");
+        let back: DocumentRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back, doc);
+    }
+
+    #[test]
+    fn should_deserialize_chunk_record_without_new_fields_when_backward_compatible() {
+        let json = serde_json::json!({
+            "ordinal": 0,
+            "content": "chunk text",
+            "embedding": [0.1, 0.2],
+        });
+        let chunk: ChunkRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(chunk.ordinal, 0);
+        assert_eq!(chunk.content, "chunk text");
+        assert_eq!(chunk.dossier_id, None);
+        assert_eq!(chunk.version_ref, None);
+    }
+
+    #[test]
+    fn should_round_trip_chunk_record_with_dossier_and_version_when_serialized() {
+        let chunk = ChunkRecord {
+            external_id: None,
+            ordinal: 1,
+            content: "chunk text".to_string(),
+            embedding: vec![0.1, 0.2],
+            sparse_embedding: None,
+            multi_vector: None,
+            chunk_metadata: serde_json::Value::Null,
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["dossier_id"], "dossier-1");
+        assert_eq!(json["version_ref"], "v-2024");
+        let back: ChunkRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back, chunk);
+    }
+
+    #[test]
+    fn should_round_trip_document_summary_with_dossier_and_version_when_serialized() {
+        let summary = DocumentSummary {
+            id: DocumentId("doc-1".to_string()),
+            external_id: None,
+            title: None,
+            mime: None,
+            keywords: Vec::new(),
+            labels: serde_json::Value::Null,
+            entities: serde_json::Value::Null,
+            metadata: serde_json::Value::Null,
+            ingested_at: None,
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["dossier_id"], "dossier-1");
+        assert_eq!(json["version_ref"], "v-2024");
+        let back: DocumentSummary = serde_json::from_value(json).unwrap();
+        assert_eq!(back, summary);
+    }
 }

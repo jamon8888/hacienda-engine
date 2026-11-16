@@ -104,9 +104,9 @@ xberg = { workspace = true }
 # `docs/superpowers/plans/2026-07-30-hacienda-program-plan.md`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
-# Keep this target-specific dependency on the same public release as the workspace
-# dependency or cargo refuses to build with different source paths by target.
-xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.4.0", default-features = false, features = [
+# Keep the wasm target on the same upstream Xberg source and revision as the
+# workspace dependency; Cargo rejects different source paths per target.
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd", default-features = false, features = [
     "ner",
 ] }
 # `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"
@@ -130,14 +130,6 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 tower = { version = "0.5", features = ["util"] }
 # Only for hacienda-core/tests/lora_adapter_contract.rs's empty-directory fixture.
 tempfile = { workspace = true }
-# Disposable-Postgres fixture for the `postgres` feature's integration tests (Phase 9 Task
-# 1 Step 5) — see `store/postgres/test_support.rs`. Only ever compiled for `cargo test`, so
-# declaring it unconditionally here (Cargo has no `optional` dev-dependencies) costs
-# non-postgres consumers nothing; every call site that touches it is already behind
-# `#[cfg(feature = "postgres")]` because it lives under `store/postgres/`, which is itself
-# feature-gated (see `store/mod.rs`).
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
 
 # Note: `async-trait` is not repeated here. It used to be a dev-dependency for test doubles
 # implementing xberg's async `NerBackend` trait, but the `AuditStore`/`JobStore` traits made

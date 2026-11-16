@@ -15,9 +15,10 @@ use axum::{
     http::{request::Parts, StatusCode},
     Json,
 };
-use hacienda_core::jobs::JobStatus;
 use hacienda_core::tenancy::TenantCtx;
-use hacienda_rag::{CollectionSpec, DocumentId, RetrieveOutput, RetrieveQuery};
+use hacienda_core::{auth::Caller, jobs::JobStatus, HaciendaFacade};
+use hacienda_rag::{CollectionSpec, DocumentId, DocumentSummary, RetrieveOutput, RetrieveQuery};
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::{
@@ -53,6 +54,7 @@ const MAX_RAG_DOCUMENT_LIST_LIMIT: u32 = 200;
 /// through a collection's documents via `RagStore::list_documents`. Not
 /// caller-configurable — an implementation detail of the background job, not
 /// a wire parameter.
+#[cfg(feature = "rag-embeddings")]
 const MIGRATE_PAGE_SIZE: u32 = 50;
 
 /// Returns the configured store, or a client-safe error if RAG is disabled.
@@ -93,6 +95,120 @@ pub(crate) fn scope_collection_name(ctx: &TenantCtx, name: &str) -> String {
     }
 }
 
+/// Reject caller-facing collection names that could be mistaken for an internal
+/// tenant-scoped name. The colon is reserved for the tenant prefix added by this
+/// module; accepting it would let a default-tenant caller address another tenant's
+/// already-prefixed collection directly.
+pub(crate) fn validate_collection_name(name: &str) -> Result<(), ApiError> {
+    if name.contains(':') {
+        Err(ApiError::invalid_request(
+            "collection names must not contain ':'",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Redact one retrieval text surface before it can be put in an HTTP response.
+///
+/// `RagStore` predates the token-only editor contract and has no capability that proves a
+/// backend persisted a tokenized projection. The API therefore treats every returned text
+/// surface as untrusted and routes it through Hacienda. A missing or failing PII pipeline is
+/// an error, never a reason to return the store's value unchanged.
+async fn redact_retrieval_text(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    text: &str,
+) -> Result<String, ApiError> {
+    facade
+        .redact_text_with_auth(caller, text)
+        .await
+        .map(|result| result.redacted_text)
+        .map_err(ApiError::from)
+}
+
+fn json_contains_text(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Array(values) => values.iter().any(json_contains_text),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| !key.is_empty() || json_contains_text(value)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+/// Redact free-form metadata as one JSON string, then parse it back before serialization.
+///
+/// Redacting the serialized representation also covers object keys: metadata is caller/data
+/// plane shaped and a future backend must not be able to smuggle a raw value through a key
+/// while only sanitizing values. Hacienda's replacement tokens are JSON-safe, and a parse
+/// failure is deliberately fail-closed.
+async fn redact_retrieval_json(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    value: &mut Value,
+) -> Result<(), ApiError> {
+    if !json_contains_text(value) {
+        return Ok(());
+    }
+
+    let serialized = serde_json::to_string(value).map_err(|error| {
+        tracing::error!(error = %error, "failed to serialize RAG metadata for redaction");
+        ApiError::internal()
+    })?;
+    let redacted = redact_retrieval_text(facade, caller, &serialized).await?;
+    *value = serde_json::from_str(&redacted).map_err(|error| {
+        tracing::error!(error = %error, "Hacienda redaction produced invalid RAG metadata JSON");
+        ApiError::internal()
+    })?;
+    Ok(())
+}
+
+async fn redact_document_summary(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    document: &mut DocumentSummary,
+) -> Result<(), ApiError> {
+    if let Some(external_id) = &mut document.external_id {
+        *external_id = redact_retrieval_text(facade, caller, external_id).await?;
+    }
+    if let Some(title) = &mut document.title {
+        *title = redact_retrieval_text(facade, caller, title).await?;
+    }
+    if let Some(mime) = &mut document.mime {
+        *mime = redact_retrieval_text(facade, caller, mime).await?;
+    }
+    for keyword in &mut document.keywords {
+        *keyword = redact_retrieval_text(facade, caller, keyword).await?;
+    }
+    redact_retrieval_json(facade, caller, &mut document.labels).await?;
+    redact_retrieval_json(facade, caller, &mut document.entities).await?;
+    redact_retrieval_json(facade, caller, &mut document.metadata).await?;
+    Ok(())
+}
+
+async fn redact_retrieval_output(
+    facade: &HaciendaFacade,
+    caller: Caller<'_>,
+    mut output: RetrieveOutput,
+) -> Result<RetrieveOutput, ApiError> {
+    for chunk in &mut output.chunks {
+        if let Some(content) = &mut chunk.content {
+            *content = redact_retrieval_text(facade, caller, content).await?;
+        }
+        if let Some(external_id) = &mut chunk.external_id {
+            *external_id = redact_retrieval_text(facade, caller, external_id).await?;
+        }
+        redact_retrieval_json(facade, caller, &mut chunk.chunk_metadata).await?;
+
+        if let Some(document) = &mut chunk.document {
+            redact_document_summary(facade, caller, document).await?;
+        }
+    }
+    Ok(output)
+}
+
 /// Inverse of [`scope_collection_name`]: strip `ctx`'s tenant prefix from a name
 /// read back from the store, returning `None` if `scoped_name` does not belong to
 /// this tenant (used to filter `RagStore::list_collections`, which has no
@@ -104,8 +220,8 @@ pub(crate) fn scope_collection_name(ctx: &TenantCtx, name: &str) -> String {
 /// literally named with a `:` in it is the one edge case this cannot distinguish from
 /// another tenant's scoped name — accepted for the same reason
 /// `redaction::pseudonym::sanitize_env_suffix` accepts a narrower case-only collision:
-/// a full reserved-character validation on collection names is a larger, separate
-/// change.
+/// caller-facing collection names reject `:` before reaching any store operation,
+/// so this ambiguity cannot be introduced through the API.
 fn strip_tenant_prefix(ctx: &TenantCtx, scoped_name: &str) -> Option<String> {
     if ctx.tenant.as_str() == hacienda_core::tenancy::DEFAULT_TENANT {
         if scoped_name.contains(':') {
@@ -138,6 +254,7 @@ pub async fn create_collection(
     parts: Parts,
     SafeJson(spec): SafeJson<CollectionSpec>,
 ) -> Result<(StatusCode, Json<CollectionSpec>), ApiError> {
+    validate_collection_name(&spec.name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -171,6 +288,7 @@ pub async fn get_collection(
     parts: Parts,
     Path(name): Path<String>,
 ) -> Result<Json<CollectionSpec>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -203,6 +321,7 @@ pub async fn delete_collection(
     parts: Parts,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -242,6 +361,7 @@ pub async fn upsert_document(
     Path(name): Path<String>,
     SafeJson(body): SafeJson<UpsertDocumentRequest>,
 ) -> Result<(StatusCode, Json<UpsertDocumentResponse>), ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -316,6 +436,7 @@ pub async fn reindex_document(
     parts: Parts,
     Path((name, id)): Path<(String, String)>,
 ) -> Result<Json<UpsertDocumentResponse>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -380,6 +501,7 @@ pub async fn retrieve(
     Path(name): Path<String>,
     SafeJson(query): SafeJson<RetrieveQuery>,
 ) -> Result<Json<RetrieveOutput>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -396,6 +518,11 @@ pub async fn retrieve(
         .retrieve(&scoped_name, &query)
         .await
         .map_err(ApiError::from)?;
+    // The store contract predates the token-only editor projection and cannot prove that its
+    // rows are safe to expose. Sanitize every text-bearing retrieval field before `Json` gets
+    // a chance to serialize it; a missing PII pipeline aborts the request instead of leaking
+    // the backend's original content.
+    let output = redact_retrieval_output(&state.facade, caller, output).await?;
     Ok(Json(output))
 }
 
@@ -508,6 +635,7 @@ pub async fn list_documents(
     Path(name): Path<String>,
     Query(query): Query<RagListQuery>,
 ) -> Result<Json<ListDocumentsResponse>, ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -518,10 +646,13 @@ pub async fn list_documents(
         .unwrap_or(DEFAULT_RAG_DOCUMENT_LIST_LIMIT)
         .min(MAX_RAG_DOCUMENT_LIST_LIMIT);
     let offset = query.offset.unwrap_or(0);
-    let (documents, total) = store
+    let (mut documents, total) = store
         .list_documents(&scope_collection_name(&tenant_ctx, &name), limit, offset)
         .await
         .map_err(ApiError::from)?;
+    for document in &mut documents {
+        redact_document_summary(&state.facade, caller, document).await?;
+    }
     Ok(Json(ListDocumentsResponse { documents, total }))
 }
 
@@ -554,8 +685,9 @@ pub async fn list_documents(
 /// not portable to every build host. Without it, validation above still runs
 /// (preset lookup only needs the always-on, ORT-free `embedding-presets`
 /// feature), the job is created and transitions to `Running`, and then fails
-/// with a clear "requires the `embeddings` ... feature" error from
-/// `xberg::embed_texts_async`'s stub — never a silent no-op.
+/// with a clear `rag-embeddings` requirement — never a silent no-op. The
+/// non-feature build uses a local error implementation because Xberg only
+/// exports `embed_texts_async` when its runtime embedding feature is enabled.
 #[utoipa::path(
     post,
     path = "/v1/rag/collections/{name}/migrate-embeddings",
@@ -576,6 +708,7 @@ pub async fn migrate_embeddings(
     Path(name): Path<String>,
     SafeJson(body): SafeJson<MigrateEmbeddingsRequest>,
 ) -> Result<(StatusCode, Json<MigrateEmbeddingsResponse>), ApiError> {
+    validate_collection_name(&name)?;
     let store = require_store(&state)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
@@ -731,6 +864,16 @@ async fn run_migrate_embeddings_job(
     }
 }
 
+#[cfg(feature = "rag-embeddings")]
+async fn embed_texts_for_migration(
+    texts: Vec<String>,
+    config: &xberg::EmbeddingConfig,
+) -> Result<Vec<Vec<f32>>, String> {
+    xberg::embed_texts_async(texts, config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Pages through `collection`'s documents, re-embeds every chunk's content
 /// under `to_source`, and writes the new vectors back via
 /// `RagStore::update_chunk_embeddings`. Reports progress via
@@ -739,6 +882,7 @@ async fn run_migrate_embeddings_job(
 /// Returns `Err(message)` — a short, client-safe (no document content)
 /// description — on the first failure; `run_migrate_embeddings_job` records
 /// it via `JobStore::fail`.
+#[cfg(feature = "rag-embeddings")]
 async fn migrate_embeddings_work(
     store: &Arc<dyn hacienda_rag::RagStore>,
     jobs: &Arc<dyn hacienda_core::jobs::JobStore>,
@@ -837,14 +981,16 @@ async fn migrate_embeddings_work(
     Ok(())
 }
 
-#[cfg(feature = "rag-embeddings")]
-async fn embed_texts_for_migration(
-    texts: Vec<String>,
-    config: &xberg::EmbeddingConfig,
-) -> Result<Vec<Vec<f32>>, String> {
-    xberg::embed_texts_async(texts, config)
-        .await
-        .map_err(|error| error.to_string())
+#[cfg(not(feature = "rag-embeddings"))]
+async fn migrate_embeddings_work(
+    _store: &Arc<dyn hacienda_rag::RagStore>,
+    _jobs: &Arc<dyn hacienda_core::jobs::JobStore>,
+    _tenant: &hacienda_core::tenancy::TenantId,
+    _job_id: &str,
+    _collection: &str,
+    _to_source: &str,
+) -> Result<(), String> {
+    Err("re-embedding requires the `rag-embeddings` build feature".to_owned())
 }
 
 /// `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}` — poll a
@@ -879,8 +1025,9 @@ async fn embed_texts_for_migration(
 pub async fn get_migrate_status(
     State(state): State<ApiState>,
     parts: Parts,
-    Path((_name, job_id)): Path<(String, String)>,
+    Path((name, job_id)): Path<(String, String)>,
 ) -> Result<Json<MigrateStatusResponse>, ApiError> {
+    validate_collection_name(&name)?;
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let tenant = caller.tenant_ctx().tenant;
@@ -925,9 +1072,10 @@ mod tests {
     use super::*;
     use hacienda_core::auth::{authn::DevTokenResolver, AuthContext, AuthExtension, AuthState};
     use hacienda_core::jobs::InMemoryJobStore;
-    use hacienda_core::tenancy::{ActorId, TenantId};
+    use hacienda_core::pii::PipelineConfig;
+    use hacienda_core::tenancy::{ActorId, TenantCtx, TenantId};
     use hacienda_core::{CapabilitySet, HaciendaConfig, HaciendaFacade};
-    use hacienda_rag::{InMemoryVectorStore, RagStore};
+    use hacienda_rag::{ChunkRecord, DocumentRecord, InMemoryVectorStore, RagStore};
 
     fn tenant_ctx(tenant: &str) -> TenantCtx {
         TenantCtx::new(TenantId::new(tenant), ActorId::new("test"))
@@ -987,12 +1135,18 @@ mod tests {
         ApiState::new(facade, jobs, auth, crate::state::ApiLimits::default()).with_rag_store(store)
     }
 
+    fn state_with_rag_and_pii() -> ApiState {
+        let config = HaciendaConfig::default().with_pii(PipelineConfig::default());
+        let facade = Arc::new(HaciendaFacade::new(config).unwrap());
+        let jobs = InMemoryJobStore::new().into_arc();
+        let auth = AuthState::new(Arc::new(DevTokenResolver)).with_enabled(false);
+        let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("test"));
+        ApiState::new(facade, jobs, auth, crate::state::ApiLimits::default()).with_rag_store(store)
+    }
+
     /// Build `Parts` carrying an `AuthContext` scoped to `tenant`, the way the real auth
     /// middleware would attach one via `AuthExtension` — bypasses the token resolver
-    /// pipeline entirely so the test can exercise two different tenants without needing
-    /// `authn::Token`/`ApiKeyTokenResolver` to thread tenant identity (a separate,
-    /// pre-existing gap: today every resolved token lands on the default tenant via
-    /// `AuthContext::new` — out of scope for this RAG-collection-scoping task).
+    /// pipeline entirely so the test can exercise two different tenants directly.
     fn parts_for(tenant: &str) -> Parts {
         let ctx = AuthContext::with_tenant(
             "test-principal",
@@ -1122,5 +1276,257 @@ mod tests {
         .expect("list must succeed");
         assert_eq!(globex_list.total, 1);
         assert_eq!(globex_list.collections[0].name, "gamma");
+    }
+
+    #[tokio::test]
+    async fn retrieve_redacts_pii_before_returning_json_to_documents_process() {
+        let state = state_with_rag_and_pii();
+        let store = state.rag_store.as_ref().expect("RAG store");
+        store
+            .ensure_collection(&CollectionSpec::new("contracts", 3))
+            .await
+            .expect("collection must be created");
+        store
+            .upsert_document(
+                "contracts",
+                &DocumentRecord {
+                    title: Some("Alice alice@example.com".to_string()),
+                    full_text: "Alice alice@example.com".to_string(),
+                    metadata: serde_json::json!({"owner": "alice@example.com"}),
+                    ..Default::default()
+                },
+                &[ChunkRecord {
+                    external_id: Some("chunk-alice@example.com".to_string()),
+                    ordinal: 0,
+                    content: "Contact alice@example.com for the contract.".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::json!({"contact": "alice@example.com"}),
+                    dossier_id: None,
+                    version_ref: None,
+                }],
+            )
+            .await
+            .expect("document must be stored");
+
+        let mut query = RetrieveQuery::vector(1);
+        query.query_vector = Some(vec![1.0, 0.0, 0.0]);
+        query.include_document = true;
+        let output = retrieve(
+            State(state),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path("contracts".to_string()),
+            SafeJson(query),
+        )
+        .await
+        .expect("retrieval must succeed through Hacienda redaction")
+        .0;
+
+        let serialized = serde_json::to_string(&output).expect("retrieval output serializes");
+        assert!(
+            !serialized.contains("alice@example.com"),
+            "raw PII leaked: {serialized}"
+        );
+        assert!(
+            serialized.contains("[EMAIL]"),
+            "redaction marker missing: {serialized}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_fails_closed_when_hacienda_redaction_is_unavailable() {
+        let state = state_with_rag();
+        let store = state.rag_store.as_ref().expect("RAG store");
+        store
+            .ensure_collection(&CollectionSpec::new("contracts", 3))
+            .await
+            .expect("collection must be created");
+        store
+            .upsert_document(
+                "contracts",
+                &DocumentRecord {
+                    full_text: "alice@example.com".to_string(),
+                    ..Default::default()
+                },
+                &[ChunkRecord {
+                    external_id: None,
+                    ordinal: 0,
+                    content: "alice@example.com".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::Value::Null,
+                    dossier_id: None,
+                    version_ref: None,
+                }],
+            )
+            .await
+            .expect("document must be stored");
+
+        let mut query = RetrieveQuery::vector(1);
+        query.query_vector = Some(vec![1.0, 0.0, 0.0]);
+        let error = retrieve(
+            State(state),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path("contracts".to_string()),
+            SafeJson(query),
+        )
+        .await
+        .expect_err("raw retrieval must be refused without Hacienda redaction");
+
+        assert_eq!(error.code, crate::error::ApiErrorCode::InvalidRequest);
+        assert!(!error.message.contains("alice@example.com"));
+    }
+
+    #[tokio::test]
+    async fn default_tenant_rejects_colon_prefixed_collection_names_before_store_access() {
+        let state = state_with_rag();
+        let other_tenant_name = "acme:contracts".to_string();
+        let _ = create_collection(
+            State(state.clone()),
+            parts_for("acme"),
+            SafeJson(CollectionSpec::new("contracts", 3)),
+        )
+        .await
+        .expect("other tenant's collection must exist for the regression");
+
+        let get_error = get_collection(
+            State(state.clone()),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(get_error.code, crate::error::ApiErrorCode::InvalidRequest);
+
+        let write_error = upsert_document(
+            State(state.clone()),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name.clone()),
+            SafeJson(UpsertDocumentRequest {
+                document: hacienda_rag::DocumentRecord::default(),
+                chunks: Vec::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(write_error.code, crate::error::ApiErrorCode::InvalidRequest);
+
+        let delete_error = delete_collection(
+            State(state.clone()),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            delete_error.code,
+            crate::error::ApiErrorCode::InvalidRequest
+        );
+
+        let retrieve_error = retrieve(
+            State(state),
+            parts_for(hacienda_core::tenancy::DEFAULT_TENANT),
+            Path(other_tenant_name),
+            SafeJson(RetrieveQuery::vector(1)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            retrieve_error.code,
+            crate::error::ApiErrorCode::InvalidRequest
+        );
+    }
+
+    /// The retrieval scope carried by `RetrieveQuery` — the same struct
+    /// `AnswerRequest.retrieve` forwards to the store — reaches `RagStore`
+    /// through the handler: a `document_id`-scoped query only ever returns that
+    /// document's chunks, even though both documents share one collection.
+    #[tokio::test]
+    async fn retrieve_respects_document_id_scope_across_handler() {
+        let state = state_with_rag_and_pii();
+        let store = state.rag_store.as_ref().expect("RAG store");
+        let tenant_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
+        let scoped_name = scope_collection_name(&tenant_ctx, "contracts");
+        let mut spec = CollectionSpec::new("contracts", 3);
+        spec.name = scoped_name.clone();
+        store
+            .ensure_collection(&spec)
+            .await
+            .expect("collection must be created");
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            ..Default::default()
+        };
+        let id_a = store
+            .upsert_document(
+                &scoped_name,
+                &doc_a,
+                &[ChunkRecord {
+                    external_id: None,
+                    ordinal: 0,
+                    content: "secret of doc a".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::Value::Null,
+                    dossier_id: None,
+                    version_ref: None,
+                }],
+            )
+            .await
+            .expect("doc a must be stored");
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            ..Default::default()
+        };
+        let id_b = store
+            .upsert_document(
+                &scoped_name,
+                &doc_b,
+                &[ChunkRecord {
+                    external_id: None,
+                    ordinal: 0,
+                    content: "secret of doc b".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::Value::Null,
+                    dossier_id: None,
+                    version_ref: None,
+                }],
+            )
+            .await
+            .expect("doc b must be stored");
+
+        assert_ne!(id_a, id_b);
+
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0, 0.0]),
+            document_id: Some(id_a.clone()),
+            include_content: true,
+            ..RetrieveQuery::vector(10)
+        };
+        let output = retrieve(
+            State(state.clone()),
+            parts_for("acme"),
+            Path("contracts".to_string()),
+            SafeJson(scoped),
+        )
+        .await
+        .expect("retrieve must succeed")
+        .0;
+        assert_eq!(
+            output.chunks.len(),
+            1,
+            "sibling document's chunks must not leak"
+        );
+        assert_eq!(output.chunks[0].document_id, id_a);
+        assert_eq!(output.chunks[0].content.as_deref(), Some("secret of doc a"));
     }
 }

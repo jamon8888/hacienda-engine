@@ -115,7 +115,7 @@ fn value_from_file(path: &Path) -> Result<Value> {
     match extension.as_deref() {
         Some("toml") => toml::from_str::<Value>(&content)
             .with_context(|| format!("parsing config file {} as TOML", path.display())),
-        Some("yaml" | "yml") => serde_yaml_ng::from_str::<Value>(&content)
+        Some("yaml" | "yml") => yaml_serde::from_str::<Value>(&content)
             .with_context(|| format!("parsing config file {} as YAML", path.display())),
         Some("json") => serde_json::from_str::<Value>(&content)
             .with_context(|| format!("parsing config file {} as JSON", path.display())),

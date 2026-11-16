@@ -14,6 +14,12 @@ extend-exclude = [
   # documents belong at the `docs/` root, where they stay checked. Same reasoning for the
   # two docs/*-ia-fr.md guides.
   "docs/architecture/",
+  # `docs/research/` is the French wayfinder research corpus (one dossier per wayfinder
+  # issue: gateway contracts, redaction audit, RAG security, xberg/LanceDB rehydration).
+  # Same language class as `docs/architecture/` above: an English spell-checker only
+  # produces wrong "corrections" there ("manuels" → "manuals", "contrats" → "contrast",
+  # "garanties" → "guarantees").
+  "docs/research/",
   "docs/hacienda-guide-ia-fr.md",
   "docs/setup-harnais-ia-fr.md",
   # apps/hacienda-studio/components/extend/layout-blocks.tsx embeds verbatim excerpts from
@@ -84,6 +90,23 @@ appareil = "appareil"
 espace = "espace"
 convertis = "convertis"
 invalide = "invalide"
+# French prose outside the excluded corpora: secrecy-client UI copy
+# (apps/hacienda-secrecy-client/src/{main.jsx,tauri-bridge.test.js}), French doc comments
+# in crates/hacienda-rag, and the French guide docs/real-model-runtime.md. Same
+# false-positive class as the entries above — an English "fix" would corrupt the French.
+Adresse = "Adresse"
+adresse = "adresse"
+autorisation = "autorisation"
+autoritative = "autoritative"
+confirme = "confirme"
+explicite = "explicite"
+existant = "existant"
+informations = "informations"
+installe = "installe"
+propage = "propage"
+raison = "raison"
+respecte = "respecte"
+valide = "valide"
 # apps/hacienda-studio/lib/registry.ts's HONORIFIC_PATTERN: `ma[iî]tre` (French "maître"/"maitre",
 # the honorific in "Maître Dupont") is split by the `[iî]` character class, so the checker sees
 # the bare fragment "tre" rather than the whole word and flags it as a typo for "tree"/"the".

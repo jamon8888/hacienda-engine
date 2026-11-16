@@ -78,6 +78,8 @@ impl std::str::FromStr for RedactionAction {
 pub enum EntitySource {
     Regex,
     Model,
+    /// An explicit user action supplied the value rather than a detector finding it.
+    Manual,
 }
 
 impl std::fmt::Display for EntitySource {
@@ -85,6 +87,7 @@ impl std::fmt::Display for EntitySource {
         match self {
             EntitySource::Regex => write!(f, "regex"),
             EntitySource::Model => write!(f, "model"),
+            EntitySource::Manual => write!(f, "manual"),
         }
     }
 }
@@ -96,6 +99,7 @@ impl std::str::FromStr for EntitySource {
         match s {
             "regex" => Ok(EntitySource::Regex),
             "model" => Ok(EntitySource::Model),
+            "manual" => Ok(EntitySource::Manual),
             other => Err(format!("unknown entity source '{other}'")),
         }
     }

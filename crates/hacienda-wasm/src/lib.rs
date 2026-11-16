@@ -244,30 +244,25 @@ mod audit_handle {
                 let inputs: Vec<AuditEntryInput> = result
                     .audit_log
                     .into_iter()
-                    .map(|entry| {
-                        let source: EntitySource = entry.source.into();
-                        AuditEntryInput {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            category: entry.category,
-                            action: entry.action,
-                            span_hash: entry.span_hash,
-                            span_length: entry.span_length,
-                            confidence: entry.confidence,
-                            source,
-                            pipeline_version: PIPELINE_VERSION.to_string(),
-                            // The store owns config_hash — AuditChain::push overwrites this
-                            // with the chain's own value (chain.rs). No local principal
-                            // concept exists in Studio today, so this is always `None`.
-                            config_hash: String::new(),
-                            principal: None,
-                            // Studio hardcodes `PipelineConfig::default()` (no config
-                            // surface exists in the browser today), so no vertical is ever
-                            // configured here either.
-                            vertical: None,
-                            model: (source == EntitySource::Model)
-                                .then(|| model.clone())
-                                .flatten(),
-                        }
+                    .map(|entry| AuditEntryInput {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        category: entry.category,
+                        action: entry.action,
+                        span_hash: entry.span_hash,
+                        span_length: entry.span_length,
+                        confidence: entry.confidence,
+                        source: entry.source.into(),
+                        pipeline_version: PIPELINE_VERSION.to_string(),
+                        // The store owns config_hash — AuditChain::push overwrites this
+                        // with the chain's own value (chain.rs). No local principal
+                        // concept exists in Studio today, so this is always `None`.
+                        config_hash: String::new(),
+                        principal: None,
+                        // Studio hardcodes `PipelineConfig::default()` (no config
+                        // surface exists in the browser today), so no vertical is ever
+                        // configured here either.
+                        vertical: None,
+                        model: None,
                     })
                     .collect();
 

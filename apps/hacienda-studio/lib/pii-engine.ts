@@ -35,8 +35,8 @@ export interface PiiEntity {
   end: number;
   confidence: number;
   source: string;
-  /** Model that detected this entity; absent on legacy findings and regex entities. */
-  model_provenance?: string;
+  /** Model that detected this entity; null on legacy findings, absent on regex entities. */
+  model_provenance?: string | null;
   format_preserving: boolean;
   redact_template: string;
 }
@@ -343,7 +343,7 @@ export async function recordPiiReveal(
   revealedText: string,
   category: string,
   source: string,
-  modelProvenance?: string,
+  modelProvenance?: string | null,
 ): Promise<string> {
   await initPiiEngine();
   const handle = await getAuditHandle();

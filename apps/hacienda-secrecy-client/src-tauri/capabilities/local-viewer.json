@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local-viewer",
+  "description": "Minimal close and local IPC access for isolated expiring viewer windows.",
+  "windows": ["local-viewer-*"],
+  "permissions": ["core:default", "core:window:allow-close"]
+}

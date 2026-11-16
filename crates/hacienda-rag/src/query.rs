@@ -4,7 +4,7 @@
 
 use crate::error::{RagError, RagResult};
 use crate::filter::Filter;
-use crate::types::{CollectionSpec, MultiVector, RetrievedChunk, SparseVector};
+use crate::types::{CollectionSpec, DocumentId, MultiVector, RetrievedChunk, SparseVector};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of results a single query may request.
@@ -79,6 +79,33 @@ pub struct RetrieveQuery {
     /// Optional filter constraint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<Filter>,
+    /// Hard retrieval boundary: when set, only chunks whose parent document id
+    /// equals this value are eligible, regardless of mode, filter, or top_k.
+    ///
+    /// This is the retrieval-layer isolation seam: a caller that knows the
+    /// document it wants to ground on can scope the query to it so a retrieval
+    /// can never surface chunks from a sibling document in the same collection.
+    ///
+    /// Hard retrieval boundary: when set, only chunks whose parent document's
+    /// [`DocumentRecord::dossier_id`] equals this value are eligible, regardless
+    /// of mode, filter, or top_k. Complements [`document_id`](Self::document_id)
+    /// and [`version_ref`](Self::version_ref): all three combine with a logical AND.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dossier_id: Option<String>,
+    /// Hard retrieval boundary: when set, only chunks whose parent document's
+    /// [`DocumentRecord::version_ref`] equals this value are eligible, regardless
+    /// of mode, filter, or top_k. Complements [`document_id`](Self::document_id)
+    /// and [`dossier_id`](Self::dossier_id): all three combine with a logical AND.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_ref: Option<String>,
+    /// Hard retrieval boundary: when set, only chunks whose parent document id
+    /// equals this value are eligible, regardless of mode, filter, or top_k.
+    ///
+    /// This is the retrieval-layer isolation seam: a caller that knows the
+    /// document it wants to ground on can scope the query to it so a retrieval
+    /// can never surface chunks from a sibling document in the same collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<DocumentId>,
     /// Candidate-pool multiplier (pull `top_k * multiplier` before rerank/fusion).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_multiplier: Option<u32>,
@@ -104,6 +131,9 @@ impl RetrieveQuery {
             query_multi_vector: None,
             top_k,
             filter: None,
+            dossier_id: None,
+            version_ref: None,
+            document_id: None,
             candidate_multiplier: None,
             group_by_document: false,
             include_content: true,
@@ -225,6 +255,7 @@ pub struct RetrieveOutput {
 mod tests {
     use super::*;
     use crate::types::DistanceMetric;
+    use serde_json;
 
     fn collection(dim: u32) -> CollectionSpec {
         CollectionSpec {
@@ -356,5 +387,45 @@ mod tests {
             ..RetrieveQuery::vector(10)
         };
         assert!(q.validate(&collection(768)).is_ok());
+    }
+
+    #[test]
+    fn should_accept_validate_when_dossier_id_and_version_ref_are_set() {
+        let q = RetrieveQuery {
+            query_text: Some("hi".to_string()),
+            query_vector: Some(vec![0.0; 768]),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        assert!(q.validate(&collection(768)).is_ok());
+    }
+
+    #[test]
+    fn should_deserialize_retrieve_query_without_new_fields_when_backward_compatible() {
+        let json = serde_json::json!({
+            "mode": "vector",
+            "top_k": 5,
+        });
+        let q: RetrieveQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(q.top_k, 5);
+        assert_eq!(q.dossier_id, None);
+        assert_eq!(q.version_ref, None);
+    }
+
+    #[test]
+    fn should_round_trip_retrieve_query_with_dossier_and_version_when_serialized() {
+        let q = RetrieveQuery {
+            query_text: Some("hi".to_string()),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        let json = serde_json::to_value(&q).unwrap();
+        assert_eq!(json["dossier_id"], "dossier-1");
+        assert_eq!(json["version_ref"], "v-2024");
+        let back: RetrieveQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(back.dossier_id, q.dossier_id);
+        assert_eq!(back.version_ref, q.version_ref);
     }
 }

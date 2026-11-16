@@ -21,13 +21,14 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 xberg = { workspace = true }
 
-# Keep this in the same non-exact SDK generation as xberg. The 3.6.0 minimum is
-# required for `with_max_line_length`; an exact pin could drift from xberg's resolution.
+# Use the maintained 3.x SDK for the agent-facing server. Xberg's own MCP feature
+# remains disabled by the workspace, so its separate SDK requirement is irrelevant
+# to this server's transport and redaction boundary.
 # `server` + `macros` for the `#[tool_router]`/`#[tool]` attribute macros, `transport-io`
 # for the stdio transport `hacienda mcp serve` uses (M1a). HTTP/streamable transport
 # (`transport-streamable-http-server`, `server-side-http`) is deferred to M1b — see the
 # crate's module doc.
-rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.10.0", features = ["server", "macros", "transport-io"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

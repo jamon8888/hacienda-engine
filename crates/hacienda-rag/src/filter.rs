@@ -77,6 +77,8 @@ impl FilterField {
             "external_id",
             "source_uri",
             "ingested_at",
+            "dossier_id",
+            "version_ref",
         ];
         if DOC_FIELDS.contains(&path) || path.starts_with("metadata.") {
             return Ok(());
@@ -87,7 +89,14 @@ impl FilterField {
     }
 
     fn validate_chunk_field(path: &str) -> RagResult<()> {
-        const CHUNK_FIELDS: &[&str] = &["ordinal", "external_id", "content", "chunk_metadata"];
+        const CHUNK_FIELDS: &[&str] = &[
+            "ordinal",
+            "external_id",
+            "content",
+            "chunk_metadata",
+            "dossier_id",
+            "version_ref",
+        ];
         if CHUNK_FIELDS.contains(&path) || path.starts_with("chunk_metadata.") {
             return Ok(());
         }

@@ -81,6 +81,7 @@ const RRF_K: f64 = 60.0;
 /// by every retrieval mode.
 const CHUNK_DOC_COLUMNS: &str =
     "c.id, c.document_id, c.ordinal, c.external_id, c.content, c.chunk_metadata, \
+     c.dossier_id AS doc_dossier_id, c.version_ref AS doc_version_ref, \
      d.external_id AS doc_external_id, d.title AS doc_title, d.mime AS doc_mime, \
      d.keywords AS doc_keywords, d.labels AS doc_labels, d.entities AS doc_entities, \
      d.metadata AS doc_metadata, d.ingested_at AS doc_ingested_at";
@@ -404,7 +405,8 @@ impl RagStore for PgVectorStore {
         let doc_id: Uuid = if let Some(id) = existing_id {
             sqlx::query(
                 "UPDATE rag_documents SET title = $1, mime = $2, source_uri = $3, full_text = $4, \
-                 keywords = $5, entities = $6, labels = $7, metadata = $8 WHERE id = $9",
+                 keywords = $5, entities = $6, labels = $7, metadata = $8, dossier_id = $9, \
+                 version_ref = $10 WHERE id = $11",
             )
             .bind(&document.title)
             .bind(&document.mime)
@@ -414,6 +416,8 @@ impl RagStore for PgVectorStore {
             .bind(&document.entities)
             .bind(&document.labels)
             .bind(&document.metadata)
+            .bind(&document.dossier_id)
+            .bind(&document.version_ref)
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -428,8 +432,9 @@ impl RagStore for PgVectorStore {
         } else {
             sqlx::query_scalar(
                 "INSERT INTO rag_documents \
-                 (collection, external_id, title, mime, source_uri, full_text, keywords, entities, labels, metadata) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+                 (collection, external_id, title, mime, source_uri, full_text, keywords, entities, labels, metadata, \
+                  dossier_id, version_ref) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
             )
             .bind(collection)
             .bind(&document.external_id)
@@ -441,6 +446,8 @@ impl RagStore for PgVectorStore {
             .bind(&document.entities)
             .bind(&document.labels)
             .bind(&document.metadata)
+            .bind(&document.dossier_id)
+            .bind(&document.version_ref)
             .fetch_one(&mut *tx)
             .await
             .map_err(pg_err)?
@@ -461,10 +468,17 @@ impl RagStore for PgVectorStore {
                 .transpose()
                 .map_err(json_err)?;
 
+            // Le document est la source autoritative du scoping juridique : un
+            // chunk produit par le chunking côté API (dossier_id / version_ref
+            // à None) hérite du scope de son document parent, sinon une
+            // requête dossier/version retournerait zéro résultat.
+            let effective_dossier_id = chunk.dossier_id.as_ref().or(document.dossier_id.as_ref());
+            let effective_version_ref =
+                chunk.version_ref.as_ref().or(document.version_ref.as_ref());
             sqlx::query(
                 "INSERT INTO rag_chunks \
-                 (document_id, collection, external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 (document_id, collection, external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata, dossier_id, version_ref) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             )
             .bind(doc_id)
             .bind(collection)
@@ -475,6 +489,8 @@ impl RagStore for PgVectorStore {
             .bind(&sparse_json)
             .bind(&multi_vector_json)
             .bind(&chunk.chunk_metadata)
+            .bind(effective_dossier_id.map(|s| s.as_str()))
+            .bind(effective_version_ref.map(|s| s.as_str()))
             .execute(&mut *tx)
             .await
             .map_err(pg_err)?;
@@ -624,7 +640,8 @@ impl RagStore for PgVectorStore {
                 .map_err(pg_err)?;
 
         let rows = sqlx::query(
-            "SELECT id, external_id, title, mime, keywords, labels, entities, metadata, ingested_at \
+            "SELECT id, external_id, title, mime, keywords, labels, entities, metadata, ingested_at, \
+             dossier_id, version_ref \
              FROM rag_documents WHERE collection = $1 \
              ORDER BY ingested_at DESC, id DESC LIMIT $2 OFFSET $3",
         )
@@ -680,7 +697,8 @@ impl RagStore for PgVectorStore {
         };
 
         let doc_row = sqlx::query(
-            "SELECT external_id, title, mime, source_uri, full_text, keywords, entities, labels, metadata \
+            "SELECT external_id, title, mime, source_uri, full_text, keywords, entities, labels, metadata, \
+             dossier_id, version_ref \
              FROM rag_documents WHERE id = $1 AND collection = $2",
         )
         .bind(doc_uuid)
@@ -696,7 +714,8 @@ impl RagStore for PgVectorStore {
         let document_record = document_row_to_record(&doc_row)?;
 
         let chunk_rows = sqlx::query(
-            "SELECT external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata \
+            "SELECT external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata, \
+             dossier_id, version_ref \
              FROM rag_chunks WHERE document_id = $1 ORDER BY ordinal",
         )
         .bind(doc_uuid)
@@ -834,6 +853,7 @@ impl PgVectorStore {
         qb.push(") AS rank_value FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id WHERE c.collection = ");
         qb.push_bind(collection.to_string());
         push_optional_filter(&mut qb, query)?;
+        push_scope_filter(&mut qb, query)?;
         qb.push(" ORDER BY ");
         qb.push(&embedding_cast);
         qb.push(" ");
@@ -955,6 +975,7 @@ impl PgVectorStore {
         qb.push(") AS rank_value FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id WHERE c.collection = ");
         qb.push_bind(collection.to_string());
         push_optional_filter(&mut qb, query)?;
+        push_scope_filter(&mut qb, query)?;
         qb.push(" ORDER BY c.embedding ");
         qb.push(op);
         qb.push(" ");
@@ -992,6 +1013,7 @@ impl PgVectorStore {
         qb.push_bind(text.to_string());
         qb.push(")");
         push_optional_filter(&mut qb, query)?;
+        push_scope_filter(&mut qb, query)?;
         qb.push(" ORDER BY rank_value DESC LIMIT ");
         qb.push_bind(limit);
 
@@ -1013,6 +1035,36 @@ fn push_optional_filter(
         qb.push(" AND (");
         push_filter_sql(qb, filter)?;
         qb.push(")");
+    }
+    Ok(())
+}
+
+/// Hard retrieval boundary: scopes a retrieval to one document, one dossier
+/// (folder), and/or one version. Chunks whose parent document does not match
+/// every set boundary are excluded, whatever mode, filter, or top_k. A
+/// malformed document id (not a UUID) matches nothing rather than erroring,
+/// mirroring `get_document_chunks`'s tolerance for foreign ids.
+fn push_scope_filter(qb: &mut QueryBuilder<'_, Postgres>, query: &RetrieveQuery) -> RagResult<()> {
+    if let Some(document_id) = &query.document_id {
+        if let Ok(doc_uuid) = Uuid::parse_str(&document_id.0) {
+            qb.push(" AND c.document_id = ");
+            qb.push_bind(doc_uuid);
+        } else {
+            qb.push(" AND 1 = 0");
+        }
+    }
+    // `push_bind` prend possession de la valeur liée : cloner le `&str` en
+    // `String` (possédé localement) lève l'emprunt de `query` qui, autrement,
+    // serait considéré comme vivant aussi longtemps que `qb` et serait rejeté
+    // par le borrow checker (les références mutables sont invariantes sur leur
+    // paramètre de durée de vie).
+    if let Some(dossier_id) = &query.dossier_id {
+        qb.push(" AND c.dossier_id = ");
+        qb.push_bind(dossier_id.clone());
+    }
+    if let Some(version_ref) = &query.version_ref {
+        qb.push(" AND c.version_ref = ");
+        qb.push_bind(version_ref.clone());
     }
     Ok(())
 }
@@ -1089,6 +1141,8 @@ fn document_row_to_summary(row: &PgRow) -> RagResult<DocumentSummary> {
         entities: row.try_get("entities").map_err(pg_err)?,
         metadata: row.try_get("metadata").map_err(pg_err)?,
         ingested_at: ingested_at.map(|t| t.timestamp()),
+        dossier_id: row.try_get("dossier_id").map_err(pg_err)?,
+        version_ref: row.try_get("version_ref").map_err(pg_err)?,
     })
 }
 
@@ -1108,6 +1162,8 @@ fn document_row_to_record(row: &PgRow) -> RagResult<DocumentRecord> {
         entities: row.try_get("entities").map_err(pg_err)?,
         labels: row.try_get("labels").map_err(pg_err)?,
         metadata: row.try_get("metadata").map_err(pg_err)?,
+        dossier_id: row.try_get("dossier_id").map_err(pg_err)?,
+        version_ref: row.try_get("version_ref").map_err(pg_err)?,
     })
 }
 
@@ -1134,6 +1190,8 @@ fn chunk_row_to_record(row: &PgRow) -> RagResult<ChunkRecord> {
             .transpose()
             .map_err(json_err)?,
         chunk_metadata: row.try_get("chunk_metadata").map_err(pg_err)?,
+        dossier_id: row.try_get("dossier_id").map_err(pg_err)?,
+        version_ref: row.try_get("version_ref").map_err(pg_err)?,
     })
 }
 
@@ -1162,6 +1220,8 @@ struct RowFields {
     doc_entities: serde_json::Value,
     doc_metadata: serde_json::Value,
     doc_ingested_at: Option<chrono::DateTime<chrono::Utc>>,
+    doc_dossier_id: Option<String>,
+    doc_version_ref: Option<String>,
 }
 
 impl RowFields {
@@ -1181,6 +1241,8 @@ impl RowFields {
             doc_entities: row.try_get("doc_entities").map_err(pg_err)?,
             doc_metadata: row.try_get("doc_metadata").map_err(pg_err)?,
             doc_ingested_at: row.try_get("doc_ingested_at").map_err(pg_err)?,
+            doc_dossier_id: row.try_get("doc_dossier_id").map_err(pg_err)?,
+            doc_version_ref: row.try_get("doc_version_ref").map_err(pg_err)?,
         })
     }
 
@@ -1210,6 +1272,8 @@ impl RowFields {
                 entities: self.doc_entities,
                 metadata: self.doc_metadata,
                 ingested_at: self.doc_ingested_at.map(|t| t.timestamp()),
+                dossier_id: self.doc_dossier_id.clone(),
+                version_ref: self.doc_version_ref.clone(),
             }),
         }
     }
@@ -1555,6 +1619,8 @@ mod live_tests {
             sparse_embedding: None,
             multi_vector: None,
             chunk_metadata: serde_json::Value::Null,
+            dossier_id: None,
+            version_ref: None,
         }
     }
 

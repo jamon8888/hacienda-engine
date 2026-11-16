@@ -523,9 +523,9 @@ fn row_to_entry(row: AuditEntryRow) -> Result<AuditEntry, AuditError> {
         // does not persist vertical provenance. Tracked separately from this fix, which
         // only restores compilation after `AuditEntry` gained the field.
         vertical: None,
-        // Legacy rows decode as NULL; new rows retain the provenance covered by
-        // their chain hash.
-        model: row.model,
+        // The `audit_entries` table has no `model` column yet; PostgreSQL currently
+        // stores neither model id nor checkpoint provenance.
+        model: None,
         chain_hash: row.chain_hash,
     })
 }
@@ -577,6 +577,10 @@ struct AuditEntryRow {
     pipeline_version: String,
     config_hash: String,
     principal: Option<String>,
+    // Part of the SELECT column list and of the audit provenance contract, but
+    // Postgres currently stores neither model id nor checkpoint provenance (see
+    // `model: None` at the insert site), so nothing reads it back yet.
+    #[expect(dead_code)]
     model: Option<String>,
     chain_hash: String,
     created_at: DateTime<Utc>,

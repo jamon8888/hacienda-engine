@@ -118,6 +118,8 @@ fn resolve_field(
             "mime" => doc.mime.clone().map(serde_json::Value::String),
             "external_id" => doc.external_id.clone().map(serde_json::Value::String),
             "source_uri" => doc.source_uri.clone().map(serde_json::Value::String),
+            "dossier_id" => doc.dossier_id.clone().map(serde_json::Value::String),
+            "version_ref" => doc.version_ref.clone().map(serde_json::Value::String),
             "keywords" => serde_json::to_value(&doc.keywords).ok(),
             "labels" => Some(doc.labels.clone()),
             "entities" => Some(doc.entities.clone()),
@@ -130,6 +132,8 @@ fn resolve_field(
             "content" => Some(serde_json::Value::String(chunk.content.clone())),
             "ordinal" => Some(serde_json::Value::from(chunk.ordinal)),
             "external_id" => chunk.external_id.clone().map(serde_json::Value::String),
+            "dossier_id" => chunk.dossier_id.clone().map(serde_json::Value::String),
+            "version_ref" => chunk.version_ref.clone().map(serde_json::Value::String),
             path if path.starts_with("chunk_metadata.") => {
                 json_pointer(&chunk.chunk_metadata, &path["chunk_metadata.".len()..])
             }
@@ -231,6 +235,8 @@ fn summarize(id: &DocumentId, doc: &DocumentRecord) -> DocumentSummary {
         entities: doc.entities.clone(),
         metadata: doc.metadata.clone(),
         ingested_at: None,
+        dossier_id: doc.dossier_id.clone(),
+        version_ref: doc.version_ref.clone(),
     }
 }
 
@@ -336,10 +342,22 @@ impl RagStore for InMemoryVectorStore {
             coll.document_order.push(doc_id.clone());
         }
         for chunk in chunks {
+            // Le document est la source autoritative du scoping juridique :
+            // les chunks produits par le chunking côté API (dossier_id /
+            // version_ref à None) héritent du scope de leur document parent
+            // à l'upsert, sinon une requête dossier/version retournerait
+            // zéro résultat malgré un document correctement scopé.
+            let mut record = chunk.clone();
+            if record.dossier_id.is_none() {
+                record.dossier_id = document.dossier_id.clone();
+            }
+            if record.version_ref.is_none() {
+                record.version_ref = document.version_ref.clone();
+            }
             coll.chunks.push(StoredChunk {
                 id: ChunkId(format!("{}:{}", doc_id.0, chunk.ordinal)),
                 document_id: doc_id.clone(),
-                record: chunk.clone(),
+                record,
             });
         }
         Ok(doc_id)
@@ -419,6 +437,28 @@ impl RagStore for InMemoryVectorStore {
             .chunks
             .iter()
             .filter(|c| {
+                // Hard document boundary: a retrieval scoped to one document must
+                // never surface a sibling document's chunks, whatever the mode,
+                // filter, or top_k.
+                if let Some(document_id) = &query.document_id {
+                    if &c.document_id != document_id {
+                        return false;
+                    }
+                }
+                // Hard dossier/version boundary: never surface chunks from a
+                // sibling dossier or version, whatever the mode, filter, or
+                // top_k. Chunks carry these fields denormalized so no document
+                // join is needed here.
+                if let Some(dossier_id) = &query.dossier_id {
+                    if c.record.dossier_id.as_deref() != Some(dossier_id.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(version_ref) = &query.version_ref {
+                    if c.record.version_ref.as_deref() != Some(version_ref.as_str()) {
+                        return false;
+                    }
+                }
                 query.filter.as_ref().is_none_or(|f| {
                     coll.documents
                         .get(&c.document_id)
@@ -649,6 +689,8 @@ mod tests {
             sparse_embedding: None,
             multi_vector: None,
             chunk_metadata: serde_json::Value::Null,
+            dossier_id: None,
+            version_ref: None,
         }
     }
 
@@ -667,6 +709,8 @@ mod tests {
             sparse_embedding,
             multi_vector,
             chunk_metadata: serde_json::Value::Null,
+            dossier_id: None,
+            version_ref: None,
         }
     }
 
@@ -1237,5 +1281,490 @@ mod tests {
             .unwrap()
             .expect("document should exist");
         assert_eq!(chunks[0].embedding, vec![1.0, 0.0]);
+    }
+
+    /// Retrieval scoped to one document must never surface a sibling document's
+    /// chunks — the retrieval-layer isolation seam. Both documents live in the
+    /// same collection, so a collection-scoped query would mix them; a
+    /// `document_id`-scoped query must not.
+    #[tokio::test]
+    async fn should_retrieve_only_scoped_document_when_document_id_is_set() {
+        let store = store_with_collection(2).await;
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            ..Default::default()
+        };
+        let id_a = store
+            .upsert_document(
+                "docs",
+                &doc_a,
+                &[chunk(0, "chunk of doc a", vec![1.0, 0.0])],
+            )
+            .await
+            .unwrap();
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            ..Default::default()
+        };
+        let id_b = store
+            .upsert_document(
+                "docs",
+                &doc_b,
+                &[chunk(0, "chunk of doc b", vec![1.0, 0.0])],
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(id_a, id_b);
+
+        // Unscoped: both documents' chunks are eligible.
+        let unscoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &unscoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 2);
+
+        // Scoped to doc A: only doc A's chunk survives, even though doc B's
+        // chunk is equally similar and sits in the same collection.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            document_id: Some(id_a.clone()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_a);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc a"));
+
+        // Scoped to doc B: the converse holds.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            document_id: Some(id_b.clone()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_b);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc b"));
+    }
+
+    fn chunk_scoped(
+        ordinal: u32,
+        content: &str,
+        embedding: Vec<f32>,
+        dossier_id: Option<&str>,
+        version_ref: Option<&str>,
+    ) -> ChunkRecord {
+        ChunkRecord {
+            external_id: None,
+            ordinal,
+            content: content.to_string(),
+            embedding,
+            sparse_embedding: None,
+            multi_vector: None,
+            chunk_metadata: serde_json::Value::Null,
+            dossier_id: dossier_id.map(String::from),
+            version_ref: version_ref.map(String::from),
+        }
+    }
+
+    /// Anti-mélange : retrieval scoped à un dossier ne doit jamais remonter un
+    /// chunk d'un autre dossier, même dans la même collection et avec un
+    /// embedding identique.
+    #[tokio::test]
+    async fn should_retrieve_only_scoped_dossier_when_dossier_id_is_set() {
+        let store = store_with_collection(2).await;
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: None,
+            ..Default::default()
+        };
+        let id_a = store
+            .upsert_document(
+                "docs",
+                &doc_a,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc a",
+                    vec![1.0, 0.0],
+                    Some("dossier-1"),
+                    None,
+                )],
+            )
+            .await
+            .unwrap();
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            dossier_id: Some("dossier-2".to_string()),
+            version_ref: None,
+            ..Default::default()
+        };
+        let id_b = store
+            .upsert_document(
+                "docs",
+                &doc_b,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc b",
+                    vec![1.0, 0.0],
+                    Some("dossier-2"),
+                    None,
+                )],
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(id_a, id_b);
+
+        // Unscoped: both documents' chunks are eligible.
+        let unscoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &unscoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 2);
+
+        // Scoped to dossier-1: only doc a's chunk survives.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            dossier_id: Some("dossier-1".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_a);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc a"));
+
+        // Scoped to dossier-2: the converse holds.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            dossier_id: Some("dossier-2".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_b);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc b"));
+    }
+
+    /// Anti-mélange : retrieval scoped à une version ne doit jamais remonter un
+    /// chunk d'une autre version, même dans le même dossier.
+    #[tokio::test]
+    async fn should_retrieve_only_scoped_version_when_version_ref_is_set() {
+        let store = store_with_collection(2).await;
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..Default::default()
+        };
+        let id_a = store
+            .upsert_document(
+                "docs",
+                &doc_a,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc a v2024",
+                    vec![1.0, 0.0],
+                    Some("dossier-1"),
+                    Some("v-2024"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2025".to_string()),
+            ..Default::default()
+        };
+        let id_b = store
+            .upsert_document(
+                "docs",
+                &doc_b,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc b v2025",
+                    vec![1.0, 0.0],
+                    Some("dossier-1"),
+                    Some("v-2025"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(id_a, id_b);
+
+        // Scoped to v-2024: only doc a's chunk survives, same dossier but
+        // different version.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            version_ref: Some("v-2024".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_a);
+        assert_eq!(
+            out.chunks[0].content.as_deref(),
+            Some("chunk of doc a v2024")
+        );
+
+        // Scoped to v-2025: the converse holds.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            version_ref: Some("v-2025".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_b);
+        assert_eq!(
+            out.chunks[0].content.as_deref(),
+            Some("chunk of doc b v2025")
+        );
+    }
+
+    /// Anti-mélange : dossier et version s'ANDent ensemble ; un chunk doit
+    /// matcher les deux pour survivre, et un filtre doc.* ne lève pas la
+    /// barrière dossier/version.
+    #[tokio::test]
+    async fn should_and_dossier_and_version_when_both_scopes_are_set() {
+        let store = store_with_collection(2).await;
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_document(
+                "docs",
+                &doc_a,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc a",
+                    vec![1.0, 0.0],
+                    Some("dossier-1"),
+                    Some("v-2024"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2025".to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_document(
+                "docs",
+                &doc_b,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc b",
+                    vec![1.0, 0.0],
+                    Some("dossier-1"),
+                    Some("v-2025"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let doc_c = DocumentRecord {
+            title: Some("doc-c".to_string()),
+            full_text: "doc c".to_string(),
+            dossier_id: Some("dossier-2".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_document(
+                "docs",
+                &doc_c,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc c",
+                    vec![1.0, 0.0],
+                    Some("dossier-2"),
+                    Some("v-2024"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        // dossier-1 AND v-2024 → only doc a.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc a"));
+    }
+
+    /// Un filtre `doc.dossier_id` / `doc.version_ref` respecte les mêmes
+    /// barrières que les champs de scopage de requête.
+    #[tokio::test]
+    async fn should_filter_by_doc_dossier_id_and_version_ref_when_fields_are_allowlisted() {
+        let store = store_with_collection(2).await;
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_document(
+                "docs",
+                &doc_a,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc a",
+                    vec![1.0, 0.0],
+                    Some("dossier-1"),
+                    Some("v-2024"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            dossier_id: Some("dossier-2".to_string()),
+            version_ref: Some("v-2025".to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_document(
+                "docs",
+                &doc_b,
+                &[chunk_scoped(
+                    0,
+                    "chunk of doc b",
+                    vec![1.0, 0.0],
+                    Some("dossier-2"),
+                    Some("v-2025"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let q = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            filter: Some(Filter::Eq {
+                field: FilterField("doc.dossier_id".to_string()),
+                value: serde_json::json!("dossier-1"),
+            }),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &q).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc a"));
+
+        let q = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            filter: Some(Filter::Eq {
+                field: FilterField("doc.version_ref".to_string()),
+                value: serde_json::json!("v-2025"),
+            }),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &q).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc b"));
+    }
+
+    /// End-to-end : chunks produits par le chunking côté API (dossier_id /
+    /// version_ref à None) héritent du scope de leur document parent à
+    /// l'upsert, et une requête dossier/version les retrouve.
+    #[tokio::test]
+    async fn should_propagate_document_scope_to_chunks_when_chunk_fields_are_none() {
+        let store = store_with_collection(2).await;
+
+        let document = DocumentRecord {
+            title: Some("contrat".to_string()),
+            full_text: "texte du contrat".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..Default::default()
+        };
+        // Les chunks n'ont aucun scope : ils doivent l'hériter du document.
+        let chunks = vec![chunk(0, "clause de confidentialité", vec![1.0, 0.0])];
+        let id = store
+            .upsert_document("docs", &document, &chunks)
+            .await
+            .unwrap();
+
+        // Le document stocké conserve ses scopes.
+        let (stored, stored_chunks) = store
+            .get_document_chunks("docs", &id)
+            .await
+            .unwrap()
+            .expect("document should exist");
+        assert_eq!(stored.dossier_id.as_deref(), Some("dossier-1"));
+        assert_eq!(stored.version_ref.as_deref(), Some("v-2024"));
+        assert_eq!(stored_chunks[0].dossier_id.as_deref(), Some("dossier-1"));
+        assert_eq!(stored_chunks[0].version_ref.as_deref(), Some("v-2024"));
+
+        // Retrieve par dossier : retrouve le chunk malgré des champs chunk
+        // vides à l'upsert.
+        let q = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            dossier_id: Some("dossier-1".to_string()),
+            include_content: true,
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &q).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id);
+        assert_eq!(
+            out.chunks[0].content.as_deref(),
+            Some("clause de confidentialité")
+        );
+
+        // Retrieve par version : idem.
+        let q = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            version_ref: Some("v-2024".to_string()),
+            include_content: true,
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &q).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id);
+
+        // Retrieve par un mauvais dossier : zéro résultat (anti-mélange).
+        let q = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            dossier_id: Some("dossier-9".to_string()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &q).await.unwrap();
+        assert!(out.chunks.is_empty());
     }
 }

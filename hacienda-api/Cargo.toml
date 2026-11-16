@@ -17,6 +17,7 @@ data-encoding = { workspace = true }
 # because this crate's own handler code calls `StreamExt` methods, which Cargo
 # does not resolve through a transitive dependency.
 futures = { workspace = true }
+hacienda-client-core = { path = "../crates/hacienda-client-core" }
 hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres", "s3", "ner-candle"] }
 # `streaming` is always on here (unlike `rag-embeddings` below): it pulls
 # `liter-llm`'s `native-http` (reqwest/rustls) and `futures`, both already
@@ -32,6 +33,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 utoipa = { version = "5.5.0", features = ["axum_extras", "uuid", "chrono"] }
 uuid = { workspace = true }
+url = { workspace = true }
 # `embedding-presets` is xberg's lightweight, ORT-free feature (`= []`, just
 # unlocks `get_embedding_preset`/`list_embedding_presets`/the real
 # `EmbeddingPreset` type — no ONNX Runtime, no extra deps). Always on so

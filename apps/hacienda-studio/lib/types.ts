@@ -96,6 +96,7 @@ export interface ProgressUpdate {
  * pinned in the type system rather than left as `string`.
  */
 export type NerCategory =
+  | "custom"
   | "person"
   | "organization"
   | "location"

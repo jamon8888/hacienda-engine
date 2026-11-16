@@ -35,6 +35,11 @@ tasks:
       - task lint:check
       - task test
 
+  verify:secrecy-client:
+    desc: Verify the secrecy-client foundation before CI
+    cmds:
+      - bash scripts/ci/rust/run-secrecy-client-gate.sh
+
   # Building
   build:
     desc: Build Rust core (debug)

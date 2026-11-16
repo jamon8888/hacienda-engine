@@ -40,6 +40,7 @@ use crate::state::ApiState;
         crate::handlers::xberg_surface::cache_warm,
         crate::handlers::documents::process_documents,
         crate::handlers::documents::process_documents_async,
+        crate::handlers::claude_messages::messages,
         crate::handlers::pii::scan_text,
         crate::handlers::pii::redact_text,
         crate::handlers::pii::pii_config,

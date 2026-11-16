@@ -98,3 +98,36 @@ early without knowing.
 `tip` is deliberately the exception. It is an opaque hash that reveals nothing about the entries
 behind it, and gating it would stop a caller holding `documents:process` from obtaining the
 chain evidence for **its own** result.
+
+## Anthropic Messages gateway
+
+`POST /v1/messages` is the Anthropic-compatible gateway used by the Hacienda secrecy client and
+Claude Code. It is disabled unless an application attaches a `ClaudeMessagesProvider` to
+`ApiState`. The route always requires an authenticated principal with `documents:process`, even
+when the API's general authentication middleware is disabled. Tenant routing comes from that
+principal; the request body cannot select a tenant.
+
+The CLI's TeamOnPremise server configures the gateway from environment variables:
+`HACIENDA_ANTHROPIC_MESSAGES_API_KEY` enables it, and
+`HACIENDA_ANTHROPIC_MESSAGES_ENDPOINT` optionally overrides the default
+`https://api.anthropic.com/v1/messages`. With neither variable configured, the gateway remains
+disabled. A key without a custom endpoint uses the default; an endpoint without a key, an empty
+value, or an invalid endpoint refuses server startup. Endpoints must use HTTPS, except that HTTP
+is accepted for loopback hosts (`localhost`, `127.0.0.1`, or `::1`). The API key is used only by
+the outbound provider request and is never accepted from or forwarded from incoming requests.
+
+The gateway accepts streaming requests (`stream: true`) with a supported subset of the Messages
+schema. It redacts text in user and system content, tool definitions and tool results, and
+metadata before calling the configured provider. Images, files, unknown content blocks, unknown
+fields, and unsupported non-text payloads fail closed. Only selected Anthropic routing headers
+are forwarded. Provider responses must follow the validated Anthropic event contract; response
+text and error messages pass through redaction before they are exposed. Authentication, invalid
+request, provider, and redaction failures use generic client-visible errors.
+
+The response is relayed incrementally as SSE. The gateway buffers at most the active content
+block (up to 1 MiB), redacts the complete text or tool-argument value so PII split across deltas
+cannot escape, then forwards that block. It does not buffer the entire provider response. Unknown
+provider events are forwarded only when their payload satisfies the token-only contract; malformed
+events fail closed. A provider error before streaming begins returns a generic API error; a
+validation failure after the stream begins terminates the stream without exposing the rejected
+payload. This bounded block relay can add latency until a content block closes.

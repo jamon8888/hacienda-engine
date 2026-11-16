@@ -12,9 +12,25 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            protobuf-compiler \
+            libprotobuf-dev
 
       # Pinned date: see ci-rust.yaml's top-of-file comment for why an unpinned
       # nightly channel broke CI on 2026-08-08.
@@ -23,6 +39,11 @@ jobs:
         with:
           toolchain: nightly-2026-08-06
           components: rustfmt, clippy
+
+      # Run the focused secrecy-client gate before generic repository linting so
+      # token-boundary and clippy failures remain attributable to this surface.
+      - name: Verify secrecy-client foundation
+        run: bash scripts/ci/rust/run-secrecy-client-gate.sh
 
       - name: Install rumdl
         run: cargo install rumdl --locked
@@ -37,11 +58,10 @@ jobs:
       # 8af0998, never added here) is the same category under a different
       # root — vendored skill reference docs (e.g. `impeccable`), not this
       # repo's own prose.
-      # Same reasoning for `apps/hacienda-studio/tests/e2e/fixtures`:
-      # PII-detection test fixture content, not documentation — MD041 (first
-      # line must be a heading) doesn't apply to it.
+      # Studio is not part of this CI; research notes are working documents,
+      # not reviewed prose, so neither is checked by the markdown linter.
       - name: Lint markdown
-        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,apps/hacienda-studio/tests/e2e/fixtures" -d MD013
+        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,docs/research,apps/hacienda-studio" -d MD013
 
       - name: Check spelling
         run: typos . --config _typos.toml

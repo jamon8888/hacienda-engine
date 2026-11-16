@@ -143,3 +143,4 @@ CLAUDE.md
 .tmp-npmcache/
 .vercel
 .env*
+apps/hacienda-secrecy-client/src-tauri/resources/onnxruntime/

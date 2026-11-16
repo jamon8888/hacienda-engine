@@ -16,7 +16,7 @@ import { DocumentOutline } from "@/components/DocumentOutline";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { PiiPanel } from "@/components/PiiPanel";
 import { ViewerErrorBoundary } from "@/components/ViewerErrorBoundary";
-import { RedactedEditor } from "@/components/RedactedEditor";
+import { TokenizedDocumentEditor } from "@/components/TokenizedDocumentEditor";
 // Lazy, not a static import: `@extend-ai/react-{docx,pptx,xlsx}` each ship their own
 // import-workers and CJS/UMD dependencies (utif, pako, regl — see vite.config.ts's
 // optimizeDeps comment) that a bad interaction with Vite's dep optimizer can throw on at
@@ -24,20 +24,38 @@ import { RedactedEditor } from "@/components/RedactedEditor";
 // app on first load (any document, not just docx/xlsx/pptx ones) — same reasoning as
 // App.tsx's own lazy `Documents` import.
 const DocxViewerPreview = lazy(() =>
-  import("@/components/extend/docx-viewer").then((m) => ({ default: m.DocxViewerPreview })),
+  import("@/components/extend/docx-viewer").then((m) => ({
+    default: m.DocxViewerPreview,
+  })),
 );
 const XlsxViewerPreview = lazy(() =>
-  import("@/components/extend/xlsx-viewer").then((m) => ({ default: m.XlsxViewerPreview })),
+  import("@/components/extend/xlsx-viewer").then((m) => ({
+    default: m.XlsxViewerPreview,
+  })),
 );
 const PptxViewerPreview = lazy(() =>
-  import("@/components/extend/pptx-viewer").then((m) => ({ default: m.PptxViewerPreview })),
+  import("@/components/extend/pptx-viewer").then((m) => ({
+    default: m.PptxViewerPreview,
+  })),
 );
 import { PDFViewer } from "@/components/extend/pdf-viewer";
 import { renderAnnotatedMarkdown } from "@/lib/annotate";
 import { getViewerKind } from "@/lib/viewer-kind";
+import { getViewerPlan } from "@/lib/viewer-fallback";
+import { createRendererBridge } from "@/lib/renderer-bridge";
 import { computeContentHash } from "@/lib/content-hash";
-import { loadDraft, saveDraft } from "@/lib/redaction-store";
-import { getAuditChainTip, listAuditEntries, verifyAuditChain, type AuditEntryRow } from "@/lib/pii-engine";
+import { saveTokenizedEnvelope } from "@/lib/redaction-store";
+import {
+  buildTokenizedEditorEnvelope,
+  textFromTokenizedDocument,
+  type TokenizedEditorDocument,
+} from "@/lib/tokenized-editor";
+import {
+  getAuditChainTip,
+  listAuditEntries,
+  verifyAuditChain,
+  type AuditEntryRow,
+} from "@/lib/pii-engine";
 import {
   REDACTION_MODES,
   applyRedactionMode,
@@ -71,13 +89,25 @@ export function DocumentDetail({
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
   const [contentHash, setContentHash] = useState<string | undefined>(undefined);
   const [draft, setDraft] = useState<string | undefined>(undefined);
+  const [tokenizedDocument, setTokenizedDocument] = useState<
+    TokenizedEditorDocument | undefined
+  >(undefined);
   const [activeTab, setActiveTab] = useState<DetailTab>("redacted");
+  const rendererBridge = useMemo(() => createRendererBridge(), []);
 
-  const modeResult = useMemo(() => applyRedactionMode(findings, mode), [findings, mode]);
+  const modeResult = useMemo(
+    () => applyRedactionMode(findings, mode),
+    [findings, mode],
+  );
   const docPath = `documents/${result.name}`;
   const computedMarkdown =
     "findings" in modeResult
-      ? renderAnnotatedMarkdown(result.rawMarkdown, result.entities, modeResult.findings, docPath)
+      ? renderAnnotatedMarkdown(
+          result.rawMarkdown,
+          result.entities,
+          modeResult.findings,
+          docPath,
+        )
       : null;
 
   const viewerKind = getViewerKind(result.frontmatter.source);
@@ -123,51 +153,68 @@ export function DocumentDetail({
     };
   }, [originalFile]);
 
-  useEffect(() => {
-    if (!contentHash) return;
-    let cancelled = false;
-    loadDraft(contentHash).then((saved) => {
-      if (!cancelled && saved !== undefined) {
-        // Toast only when the saved draft is actually adopted (`prev` was still unset).
-        // If the user typed an edit before this resolved, `prev ?? saved` correctly
-        // keeps their edit — but the toast previously fired unconditionally, telling
-        // them a draft was restored even though their own edit was what's shown.
-        setDraft((prev) => {
-          if (prev === undefined) toast("Restored your last redacted draft for this file");
-          return prev ?? saved;
-        });
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [contentHash]);
-
-  const pendingSaveRef = useRef<{ hash: string; draft: string } | null>(null);
-  useEffect(() => {
-    if (!contentHash || draft === undefined) return;
-    pendingSaveRef.current = { hash: contentHash, draft };
-    const timer = setTimeout(() => {
-      pendingSaveRef.current = null;
-      saveDraft(contentHash, draft)
-        .then(() => toast.success("Redacted draft saved"))
-        .catch(() => toast.error("Couldn't save the redacted draft"));
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [contentHash, draft]);
-  useEffect(
-    () => () => {
-      const pending = pendingSaveRef.current;
-      if (pending) void saveDraft(pending.hash, pending.draft);
-    },
-    [result.name],
+  const tokenizedEnvelope = useMemo(
+    () =>
+      buildTokenizedEditorEnvelope({
+        documentId: contentHash ? `doc-${contentHash}` : "doc-session",
+        versionId: contentHash ? `version-${contentHash}` : "version-session",
+        mimeType: result.frontmatter.type || "application/octet-stream",
+        originalRef: contentHash
+          ? `original-${contentHash}`
+          : "original-session",
+        viewerRef: "viewer-session-capability",
+        capabilityRef: contentHash
+          ? `capability-${contentHash}`
+          : "capability-session",
+        metadata: { title: result.name, filename: result.frontmatter.source },
+        markdown: result.rawMarkdown,
+        findings,
+        createdBy: "local-user",
+        auditEventId: "audit-session",
+      }),
+    [
+      contentHash,
+      findings,
+      result.frontmatter.source,
+      result.frontmatter.type,
+      result.name,
+      result.rawMarkdown,
+    ],
   );
+
+  useEffect(() => {
+    setTokenizedDocument(tokenizedEnvelope.editor);
+  }, [tokenizedEnvelope]);
+
+  useEffect(() => {
+    if (!contentHash || !tokenizedDocument) return;
+    const timer = setTimeout(() => {
+      void saveTokenizedEnvelope(contentHash, {
+        ...tokenizedEnvelope,
+        editor: tokenizedDocument,
+        search_projection: {
+          ...tokenizedEnvelope.search_projection,
+          text_token_only: textFromTokenizedDocument(tokenizedDocument),
+        },
+      }).catch(() =>
+        toast.error("Impossible d'enregistrer la version tokenisée"),
+      );
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [contentHash, tokenizedDocument, tokenizedEnvelope]);
 
   function selectMode(next: RedactionMode) {
     setMode(next);
     const nextResult = applyRedactionMode(findings, next);
     if ("findings" in nextResult) {
-      setDraft(renderAnnotatedMarkdown(result.rawMarkdown, result.entities, nextResult.findings, docPath));
+      setDraft(
+        renderAnnotatedMarkdown(
+          result.rawMarkdown,
+          result.entities,
+          nextResult.findings,
+          docPath,
+        ),
+      );
     } else {
       // e.g. "pseudonymize" without reversible tokens available. Without this, `draft`
       // keeps the *previous* mode's rendered text, so `redactedBody` below stays defined
@@ -179,6 +226,30 @@ export function DocumentDetail({
   }
 
   const redactedBody = draft ?? computedMarkdown ?? undefined;
+  const fallbackMarkdown = tokenizedDocument
+    ? textFromTokenizedDocument(tokenizedDocument)
+    : (redactedBody ?? result.markdown);
+  const viewerPlan = getViewerPlan(
+    result.frontmatter.source,
+    fallbackMarkdown,
+    {
+      canOpenOriginal: rendererBridge.canOpenOriginal,
+    },
+  );
+
+  function openOriginal() {
+    void rendererBridge
+      .openOriginal({
+        documentRef: tokenizedEnvelope.document_id,
+        versionRef: tokenizedEnvelope.version_id,
+        originalRef: tokenizedEnvelope.source.original_ref,
+        viewerRef: tokenizedEnvelope.source.viewer_ref,
+        capabilityRef: tokenizedEnvelope.source.capability_ref,
+      })
+      .catch(() => {
+        toast.error("Le visualiseur original est indisponible");
+      });
+  }
 
   const isPseudonymizeActive = mode === "pseudonymize";
   const modeButtonClass = (value: RedactionMode) =>
@@ -202,7 +273,9 @@ export function DocumentDetail({
             Documents
           </button>
           <span className="hidden h-4 w-px bg-border sm:block" aria-hidden />
-          <span className="truncate text-sm font-semibold tracking-tight">{result.name}</span>
+          <span className="truncate text-sm font-semibold tracking-tight">
+            {result.name}
+          </span>
           <span className="inline-flex shrink-0 items-center rounded-full border border-border bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
             {findings.length} détection{findings.length === 1 ? "" : "s"}
           </span>
@@ -220,15 +293,17 @@ export function DocumentDetail({
             </button>
           ))}
           <div className="ml-1 h-4 w-px bg-border" aria-hidden />
-            <Button
-              size="sm"
-              className="h-7 gap-1.5 rounded-md bg-foreground px-3 text-xs font-medium text-background hover:bg-foreground/90"
-              disabled={redactedBody === undefined}
-              onClick={() => redactedBody !== undefined && onExportBody(redactedBody)}
-            >
-              <Download className="size-3.5" />
-              Masqué
-            </Button>
+          <Button
+            size="sm"
+            className="h-7 gap-1.5 rounded-md bg-foreground px-3 text-xs font-medium text-background hover:bg-foreground/90"
+            disabled={redactedBody === undefined}
+            onClick={() =>
+              redactedBody !== undefined && onExportBody(redactedBody)
+            }
+          >
+            <Download className="size-3.5" />
+            Masqué
+          </Button>
           <Button
             size="sm"
             variant="ghost"
@@ -248,8 +323,15 @@ export function DocumentDetail({
             !
           </span>
           <span>
-            <span className="font-medium text-amber-300">Original non disponible dans cette session</span>
-            <span className="text-amber-200/60"> — La sortie traitée est mise en cache localement, mais le fichier source n'est conservé qu'en mémoire. Ré-ajoutez le fichier pour voir l'aperçu natif.</span>
+            <span className="font-medium text-amber-300">
+              Original non disponible dans cette session
+            </span>
+            <span className="text-amber-200/60">
+              {" "}
+              — La sortie traitée est mise en cache localement, mais le fichier
+              source n'est conservé qu'en mémoire. Ré-ajoutez le fichier pour
+              voir l'aperçu natif.
+            </span>
           </span>
         </div>
       )}
@@ -259,7 +341,11 @@ export function DocumentDetail({
         {/* LEFT PANEL — document */}
         <div className="flex min-h-[420px] min-w-0 flex-1 flex-col border-b border-border bg-[#0a0e13] lg:border-b-0 lg:border-r">
           {activeTab !== "layout" && (
-            <DocumentOutline markdown={result.rawMarkdown} findings={findings} containerRef={leftPanelRef} />
+            <DocumentOutline
+              markdown={result.rawMarkdown}
+              findings={findings}
+              containerRef={leftPanelRef}
+            />
           )}
           <div ref={leftPanelRef} className="flex-1 overflow-auto">
             {activeTab === "source" ? (
@@ -267,32 +353,40 @@ export function DocumentDetail({
                 <div className="h-full min-h-[520px] bg-[#0a0e13] p-2">
                   <div className="h-full overflow-hidden rounded-lg border border-border bg-background">
                     <ViewerErrorBoundary fileName={result.frontmatter.source}>
-                    <Suspense fallback={<ViewerLoadingFallback />}>
-                      {(viewerKind === "docx" || viewerKind === "doc") && (
-                        <DocxViewerPreview
-                          src={previewUrl}
-                          fileName={result.frontmatter.source}
-                          isDark
-                          showUpload={false}
-                          onIsDarkChange={() => {}}
-                        />
-                      )}
-                      {(viewerKind === "xlsx" || viewerKind === "xls") && (
-                        <XlsxViewerPreview
-                          src={previewUrl}
-                          fileName={result.frontmatter.source}
-                          isDark
-                          showUpload={false}
-                          onIsDarkChange={() => {}}
-                        />
-                      )}
-                      {(viewerKind === "pptx" || viewerKind === "ppt") && (
-                        <PptxViewerPreview src={previewUrl} fileName={result.frontmatter.source} showUpload={false} />
-                      )}
-                    </Suspense>
+                      <Suspense fallback={<ViewerLoadingFallback />}>
+                        {(viewerKind === "docx" || viewerKind === "doc") && (
+                          <DocxViewerPreview
+                            src={previewUrl}
+                            fileName={result.frontmatter.source}
+                            isDark
+                            showUpload={false}
+                            onIsDarkChange={() => {}}
+                          />
+                        )}
+                        {(viewerKind === "xlsx" || viewerKind === "xls") && (
+                          <XlsxViewerPreview
+                            src={previewUrl}
+                            fileName={result.frontmatter.source}
+                            isDark
+                            showUpload={false}
+                            onIsDarkChange={() => {}}
+                          />
+                        )}
+                        {(viewerKind === "pptx" || viewerKind === "ppt") && (
+                          <PptxViewerPreview
+                            src={previewUrl}
+                            fileName={result.frontmatter.source}
+                            showUpload={false}
+                          />
+                        )}
+                      </Suspense>
                     </ViewerErrorBoundary>
                     {viewerKind === "pdf" && (
-                      <PDFViewer src={previewUrl} fileName={result.frontmatter.source} showUpload={false} />
+                      <PDFViewer
+                        src={previewUrl}
+                        fileName={result.frontmatter.source}
+                        showUpload={false}
+                      />
                     )}
                   </div>
                 </div>
@@ -302,11 +396,12 @@ export function DocumentDetail({
                   fileName={result.frontmatter.source}
                   onFilePicked={(file) => {
                     const url = URL.createObjectURL(file);
-                    if (manualUrlRef.current) URL.revokeObjectURL(manualUrlRef.current);
+                    if (manualUrlRef.current)
+                      URL.revokeObjectURL(manualUrlRef.current);
                     manualUrlRef.current = url;
                     setPreviewUrl(url);
                   }}
-                  fallbackMarkdown={result.rawMarkdown}
+                  fallbackMarkdown={fallbackMarkdown}
                 />
               ) : (
                 <div className="p-5">
@@ -318,20 +413,34 @@ export function DocumentDetail({
                     </span>
                   </div>
                   <div className="rounded-lg border border-border bg-card">
-                    <CodeLines text={result.rawMarkdown} />
+                    <CodeLines text={viewerPlan.markdown} />
                   </div>
                   <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                    No native preview for this file type. The extracted markdown above is what the pipeline redacted.
+                    Aucun aperçu natif pour ce format. Voici le fallback
+                    Markdown tokenisé ; l’original reste hors de l’index et du
+                    contexte agent.
                   </p>
+                  <button
+                    type="button"
+                    disabled={!viewerPlan.originalLink.available}
+                    onClick={openOriginal}
+                    className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {viewerPlan.originalLink.label}
+                  </button>
                 </div>
               )
             ) : activeTab === "layout" ? (
               <div className="p-8">
                 <div className="mx-auto max-w-lg rounded-lg border border-dashed border-border bg-card/50 p-8 text-center">
                   <LayoutGrid className="mx-auto size-6 text-muted-foreground" />
-                  <p className="mt-3 text-sm font-medium">No layout map for this document</p>
+                  <p className="mt-3 text-sm font-medium">
+                    No layout map for this document
+                  </p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Layout block and bounding-box positions are produced for scanned PDFs and image documents. This document was processed as plain text — nothing to show here.
+                    Layout block and bounding-box positions are produced for
+                    scanned PDFs and image documents. This document was
+                    processed as plain text — nothing to show here.
                   </p>
                 </div>
               </div>
@@ -346,10 +455,14 @@ export function DocumentDetail({
                   </span>
                 </div>
                 <div className="rounded-lg border border-border bg-[#0f1419] p-5">
-                  <PiiAnnotatedView text={result.rawMarkdown} findings={findings} />
+                  <PiiAnnotatedView
+                    text={result.rawMarkdown}
+                    findings={findings}
+                  />
                 </div>
                 <p className="mt-3 text-xs text-muted-foreground">
-                  Click a highlighted span to reveal its category. Manage false positives in the Findings panel →
+                  Click a highlighted span to reveal its category. Manage false
+                  positives in the Findings panel →
                 </p>
               </div>
             ) : activeTab === "audit" ? (
@@ -362,7 +475,10 @@ export function DocumentDetail({
                   </span>
                 </div>
                 <div className="rounded-lg border border-border bg-[#0f1419] p-5">
-                  <PiiAnnotatedView text={result.rawMarkdown} findings={findings} />
+                  <PiiAnnotatedView
+                    text={result.rawMarkdown}
+                    findings={findings}
+                  />
                 </div>
               </div>
             ) : (
@@ -376,7 +492,11 @@ export function DocumentDetail({
                       Drag to select, then tag the span
                     </span>
                   </p>
-                  <MarkdownEditor value={result.rawMarkdown} findings={findings} onAddFinding={onAddFinding} />
+                  <MarkdownEditor
+                    value={result.rawMarkdown}
+                    findings={findings}
+                    onAddFinding={onAddFinding}
+                  />
                 </div>
 
                 <div>
@@ -391,8 +511,14 @@ export function DocumentDetail({
                     <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
                       {"reason" in modeResult ? modeResult.reason : ""}
                     </div>
-                  ) : originalFile ? (
-                    <RedactedEditor value={redactedBody} onChange={setDraft} />
+                  ) : originalFile && tokenizedDocument ? (
+                    <TokenizedDocumentEditor
+                      value={tokenizedDocument}
+                      onChange={(next) => {
+                        setTokenizedDocument(next);
+                        setDraft(textFromTokenizedDocument(next));
+                      }}
+                    />
                   ) : (
                     <div className="rounded-lg border border-border bg-card">
                       <CodeLines text={redactedBody} />
@@ -401,11 +527,16 @@ export function DocumentDetail({
                 </div>
 
                 <p className="border-t border-border pt-3 text-xs leading-relaxed text-muted-foreground">
-                  <span className="font-medium text-foreground">Astuce :</span> Basculez les modes de rédaction ci-dessus —{" "}
-                  <span className="font-mono text-[11px]">Masquer</span> remplace par [CATÉGORIE],{" "}
-                  <span className="font-mono text-[11px]">Hacher</span> par une empreinte,{" "}
-                  <span className="font-mono text-[11px]">Pseudonymiser</span> par des jetons réversibles,{" "}
-                  <span className="font-mono text-[11px]">Supprimer</span> supprime la portion.
+                  <span className="font-medium text-foreground">Astuce :</span>{" "}
+                  Basculez les modes de rédaction ci-dessus —{" "}
+                  <span className="font-mono text-[11px]">Masquer</span>{" "}
+                  remplace par [CATÉGORIE],{" "}
+                  <span className="font-mono text-[11px]">Hacher</span> par une
+                  empreinte,{" "}
+                  <span className="font-mono text-[11px]">Pseudonymiser</span>{" "}
+                  par des jetons réversibles,{" "}
+                  <span className="font-mono text-[11px]">Supprimer</span>{" "}
+                  supprime la portion.
                 </p>
               </div>
             )}
@@ -426,7 +557,9 @@ export function DocumentDetail({
               aria-label="Document sections"
               className="inline-flex w-full items-center gap-0.5 rounded-lg border border-border bg-[#1a212c] p-1"
             >
-              {(["redacted", "source", "findings", "layout", "audit"] as const).map((tab) => {
+              {(
+                ["redacted", "source", "findings", "layout", "audit"] as const
+              ).map((tab) => {
                 const active = activeTab === tab;
                 return (
                   <button
@@ -466,9 +599,13 @@ export function DocumentDetail({
                 </div>
                 {findings.length > 0 && (
                   <div className="mt-3 rounded-lg border border-amber-500/15 bg-amber-500/[0.04] p-3">
-                    <p className="text-xs font-medium text-amber-200">À propos de ces détections</p>
+                    <p className="text-xs font-medium text-amber-200">
+                      À propos de ces détections
+                    </p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      Les catégories proviennent du détecteur sur appareil. Les portions de faible confiance sont signalées — vérifiez avant d'exporter.
+                      Les catégories proviennent du détecteur sur appareil. Les
+                      portions de faible confiance sont signalées — vérifiez
+                      avant d'exporter.
                     </p>
                   </div>
                 )}
@@ -476,30 +613,49 @@ export function DocumentDetail({
             ) : activeTab === "source" ? (
               <div className="space-y-3 p-3">
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Fichier source</p>
-                  <p className="mt-1 break-all font-mono text-xs text-foreground">{result.frontmatter.source}</p>
+                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+                    Fichier source
+                  </p>
+                  <p className="mt-1 break-all font-mono text-xs text-foreground">
+                    {result.frontmatter.source}
+                  </p>
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                     <div className="rounded-md bg-muted/40 px-2.5 py-2">
-                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Viewer</p>
-                      <p className="mt-0.5 font-mono text-foreground">{viewerKind ?? "none"}</p>
+                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
+                        Viewer
+                      </p>
+                      <p className="mt-0.5 font-mono text-foreground">
+                        {viewerKind ?? "none"}
+                      </p>
                     </div>
                     <div className="rounded-md bg-muted/40 px-2.5 py-2">
-                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Bytes</p>
-                      <p className="mt-0.5 font-mono text-foreground">{originalFile ? `${originalFile.size.toLocaleString()} B` : "—"}</p>
+                      <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
+                        Bytes
+                      </p>
+                      <p className="mt-0.5 font-mono text-foreground">
+                        {originalFile
+                          ? `${originalFile.size.toLocaleString()} B`
+                          : "—"}
+                      </p>
                     </div>
                   </div>
                   {!hasViewer && (
                     <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                      L'aperçu natif prend en charge <span className="font-mono text-[11px]">pdf</span>,{" "}
+                      L'aperçu natif prend en charge{" "}
+                      <span className="font-mono text-[11px]">pdf</span>,{" "}
                       <span className="font-mono text-[11px]">docx</span>,{" "}
                       <span className="font-mono text-[11px]">xlsx</span>,{" "}
-                      <span className="font-mono text-[11px]">pptx</span> (et doc/xls/ppt hérités). Les autres formats s'affichent sous forme de markdown extrait.
+                      <span className="font-mono text-[11px]">pptx</span> (et
+                      doc/xls/ppt hérités). Les autres formats s'affichent sous
+                      forme de markdown extrait.
                     </p>
                   )}
                 </div>
                 {hasViewer && (
                   <p className="px-1 text-xs text-muted-foreground">
-                    L'aperçu natif défile dans le panneau gauche. Utilisez la barre d'outils du visualiseur pour zoomer, rechercher et paginer.
+                    L'aperçu natif défile dans le panneau gauche. Utilisez la
+                    barre d'outils du visualiseur pour zoomer, rechercher et
+                    paginer.
                   </p>
                 )}
               </div>
@@ -508,7 +664,10 @@ export function DocumentDetail({
                 <div className="rounded-lg border border-border bg-card p-4">
                   <p className="text-sm font-medium">Mise en page</p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Les blocs et positions des encadrés sont produits pour les PDF scannés et les images. Ce document n'a pas de carte de mise en page — le markdown extrait dans le panneau gauche est l'extraction complète.
+                    Les blocs et positions des encadrés sont produits pour les
+                    PDF scannés et les images. Ce document n'a pas de carte de
+                    mise en page — le markdown extrait dans le panneau gauche
+                    est l'extraction complète.
                   </p>
                 </div>
               </div>
@@ -516,16 +675,28 @@ export function DocumentDetail({
               // redacted — right summary
               <div className="space-y-3 p-3">
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Détections</p>
+                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+                    Détections
+                  </p>
                   <p className="mt-1 flex items-baseline gap-2">
-                    <span className="text-2xl font-semibold tabular-nums">{findings.length}</span>
-                    <span className="text-xs text-muted-foreground">portion{findings.length === 1 ? "" : "s"} détectée{findings.length === 1 ? "" : "s"}</span>
+                    <span className="text-2xl font-semibold tabular-nums">
+                      {findings.length}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      portion{findings.length === 1 ? "" : "s"} détectée
+                      {findings.length === 1 ? "" : "s"}
+                    </span>
                   </p>
                   {findings.length > 0 ? (
                     <ul className="mt-3 space-y-1.5">
                       {findings.slice(0, 6).map((f, i) => (
-                        <li key={i} className="flex items-center justify-between gap-2 rounded-md bg-muted/30 px-2.5 py-1.5">
-                          <span className="truncate font-mono text-xs">{f.redact_template || `[${f.category}]`}</span>
+                        <li
+                          key={i}
+                          className="flex items-center justify-between gap-2 rounded-md bg-muted/30 px-2.5 py-1.5"
+                        >
+                          <span className="truncate font-mono text-xs">
+                            {f.redact_template || `[${f.category}]`}
+                          </span>
                           <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-300">
                             {f.category}
                           </span>
@@ -533,18 +704,27 @@ export function DocumentDetail({
                       ))}
                       {findings.length > 6 && (
                         <li className="px-2.5 py-1 text-xs text-muted-foreground">
-                          +{findings.length - 6} de plus — ouvrez l'onglet Détections pour tout voir
+                          +{findings.length - 6} de plus — ouvrez l'onglet
+                          Détections pour tout voir
                         </li>
                       )}
                     </ul>
                   ) : (
-                    <p className="mt-2 text-xs text-muted-foreground">Aucune PII détectée. Utilisez l'éditeur pour marquer les portions manuellement.</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Aucune PII détectée. Utilisez l'éditeur pour marquer les
+                      portions manuellement.
+                    </p>
                   )}
                 </div>
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-xs font-medium">Les exports sont déterministes</p>
+                  <p className="text-xs font-medium">
+                    Les exports sont déterministes
+                  </p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    <span className="font-mono text-[11px]">Masquer</span> et <span className="font-mono text-[11px]">Hacher</span> se redérivent instantanément. La pseudonymisation nécessite une clé définie au moment du traitement.
+                    <span className="font-mono text-[11px]">Masquer</span> et{" "}
+                    <span className="font-mono text-[11px]">Hacher</span> se
+                    redérivent instantanément. La pseudonymisation nécessite une
+                    clé définie au moment du traitement.
                   </p>
                 </div>
               </div>
@@ -603,19 +783,35 @@ function SourceReAddPrompt({
         <div className="mx-auto flex size-9 items-center justify-center rounded-lg border border-border bg-card">
           <FileText className="size-4 text-muted-foreground" />
         </div>
-        <p className="mt-3 text-sm font-medium">Aperçu natif {viewerKind.toUpperCase()} indisponible</p>
-        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          L'original <span className="font-mono text-[11px]">{fileName}</span> n'est conservé qu'en mémoire pour la session qui l'a traité. Ré-ajoutez-le pour afficher le visualiseur source pour{" "}
-          <span className="font-mono text-[11px]">pdf</span>, <span className="font-mono text-[11px]">docx</span>,{" "}
-          <span className="font-mono text-[11px]">pptx</span>, <span className="font-mono text-[11px]">xlsx</span> (et doc/xls/ppt hérités) — xslt correspond au visualiseur de feuille.
+        <p className="mt-3 text-sm font-medium">
+          Aperçu natif {viewerKind.toUpperCase()} indisponible
         </p>
-        <Button size="sm" className="mt-4" onClick={() => inputRef.current?.click()}>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          L'original <span className="font-mono text-[11px]">{fileName}</span>{" "}
+          n'est conservé qu'en mémoire pour la session qui l'a traité.
+          Ré-ajoutez-le pour afficher le visualiseur source pour{" "}
+          <span className="font-mono text-[11px]">pdf</span>,{" "}
+          <span className="font-mono text-[11px]">docx</span>,{" "}
+          <span className="font-mono text-[11px]">pptx</span>,{" "}
+          <span className="font-mono text-[11px]">xlsx</span> (et doc/xls/ppt
+          hérités) — xslt correspond au visualiseur de feuille.
+        </p>
+        <Button
+          size="sm"
+          className="mt-4"
+          onClick={() => inputRef.current?.click()}
+        >
           Ré-ajouter le fichier {ext}
         </Button>
-        <p className="mt-2 text-[11px] text-muted-foreground">Ou déposez le fichier n'importe où — le traitement reste sur l'appareil.</p>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Ou déposez le fichier n'importe où — le traitement reste sur
+          l'appareil.
+        </p>
       </div>
       <div className="mt-6 w-full max-w-md text-left">
-        <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">Fallback — extracted markdown</p>
+        <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+          Fallback — extracted markdown
+        </p>
         <div className="mt-2 max-h-48 overflow-auto rounded-lg border border-border bg-card">
           <CodeLines text={fallbackMarkdown} />
         </div>
@@ -625,9 +821,19 @@ function SourceReAddPrompt({
 }
 
 /** Inline annotated view — original markdown with PII spans rendered as labelled chips. */
-function PiiAnnotatedView({ text, findings }: { text: string; findings: PiiEntity[] }) {
+function PiiAnnotatedView({
+  text,
+  findings,
+}: {
+  text: string;
+  findings: PiiEntity[];
+}) {
   if (findings.length === 0) {
-    return <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground/90">{text}</pre>;
+    return (
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground/90">
+        {text}
+      </pre>
+    );
   }
   const sorted = [...findings]
     .filter((f) => f.start >= 0 && f.end <= text.length && f.start < f.end)
@@ -695,7 +901,9 @@ function actionLabel(action: AuditEntryRow["action"]): string {
 function AuditTab() {
   const [tip, setTip] = useState<string | null>(null);
   const [entries, setEntries] = useState<AuditEntryRow[] | null>(null);
-  const [status, setStatus] = useState<"idle" | "checking" | "ok" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "checking" | "ok" | "error">(
+    "idle",
+  );
   const [error, setError] = useState<string | null>(null);
 
   async function load() {
@@ -721,7 +929,8 @@ function AuditTab() {
       toast.success("Chain verified — no tampering detected");
     } catch (e) {
       setStatus("error");
-      const message = e instanceof Error ? e.message : "Chain verification failed";
+      const message =
+        e instanceof Error ? e.message : "Chain verification failed";
       setError(message);
       toast.error(message);
     }

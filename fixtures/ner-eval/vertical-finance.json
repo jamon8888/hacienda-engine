@@ -32,7 +32,7 @@
         {
           "start": 31,
           "end": 42,
-          "label": "account_number"
+          "label": "bank_account"
         }
       ]
     },
@@ -68,7 +68,7 @@
         {
           "start": 23,
           "end": 32,
-          "label": "account_number"
+          "label": "bank_account"
         }
       ]
     },
@@ -104,7 +104,7 @@
         {
           "start": 53,
           "end": 64,
-          "label": "account_number"
+          "label": "bank_account"
         }
       ]
     },
@@ -116,7 +116,7 @@
         {
           "start": 34,
           "end": 44,
-          "label": "account_number"
+          "label": "bank_account"
         }
       ]
     },
@@ -164,7 +164,7 @@
         {
           "start": 38,
           "end": 48,
-          "label": "account_number"
+          "label": "bank_account"
         }
       ]
     },
@@ -200,7 +200,7 @@
         {
           "start": 29,
           "end": 38,
-          "label": "account_number"
+          "label": "bank_account"
         }
       ]
     },

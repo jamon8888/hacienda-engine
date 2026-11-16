@@ -29,13 +29,6 @@ pub struct TextParams {
     pub text: String,
 }
 
-/// Parameters for `pii_reveal`.
-#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct RevealParams {
-    /// The pseudonym token to reverse, e.g. `[EMAIL:k1:base32...]`.
-    pub token: String,
-}
-
 /// Parameters for `audit_entries`.
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct AuditEntriesParams {

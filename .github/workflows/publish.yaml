@@ -38,7 +38,7 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
           # Determine which targets to release based on changed files
-          targets="python,node,wasm,ffi,go,java,csharp,elixir,dart,kotlin_android,swift,zig,ruby,php,cli"
+          targets="python,node,ffi,go,java,csharp,elixir,dart,kotlin_android,swift,zig,ruby,php,cli"
           echo "release_targets=$targets" >> $GITHUB_OUTPUT
 
   validate-versions:
@@ -63,9 +63,6 @@ jobs:
           - { lang: node, runner: ubuntu-24.04-arm }
           - { lang: node, runner: macos-14 }
           - { lang: node, runner: windows-2022 }
-
-          # WASM
-          - { lang: wasm, runner: ubuntu-24.04-arm }
 
           # Ruby
           - { lang: ruby, runner: ubuntu-24.04-arm }

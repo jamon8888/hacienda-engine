@@ -10,6 +10,7 @@ pub mod audit;
 pub mod audit_review;
 pub mod auth;
 pub mod capabilities;
+pub mod claude_messages;
 pub mod documents;
 pub mod info;
 pub mod jobs;

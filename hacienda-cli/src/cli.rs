@@ -80,9 +80,9 @@ pub enum Command {
     /// local MCP clients.
     ///
     /// Runs the same `HaciendaFacade` `hacienda serve` would build from this
-    /// configuration, over stdio instead of HTTP. Like `pii reveal`, this process is
-    /// `Caller::Trusted` — the process boundary is the trust boundary, appropriate for a
-    /// locally spawned MCP server, not for a network-reachable one.
+    /// configuration, over stdio instead of HTTP. Calls use `Caller::Trusted`, but the
+    /// agent-facing tool inventory excludes pseudonym rehydration; human rehydration is
+    /// reserved for the authenticated, audited Tauri viewer.
     Mcp(McpArgs),
     /// Operations on the human review queue (AI Act Art. 14 human oversight).
     Review {

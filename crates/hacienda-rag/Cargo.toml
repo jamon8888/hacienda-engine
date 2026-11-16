@@ -27,6 +27,17 @@ embeddings = ["xberg/embeddings"]
 # `liter-llm` feature — see the `liter-llm` dependency's doc comment in the workspace
 # root `Cargo.toml` for why that would be the wrong lever here.
 streaming = ["dep:liter-llm", "dep:futures"]
+# Embedded LanceDB backend.  The adapter is deliberately opt-in because the
+# Lance/Arrow dependency tree is substantial and is not needed by callers that
+# use the in-memory or Postgres stores.
+lancedb = [
+    "dep:lancedb",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:futures",
+    "dep:tokio",
+    "dep:uuid",
+]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -42,11 +53,19 @@ sqlx = { workspace = true, optional = true }
 # Postgres `vector` column type. Not a workspace dependency yet (this is its
 # first consumer in the workspace).
 pgvector = { version = "=0.4.1", features = ["sqlx"], optional = true }
-uuid = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true, features = ["v5"] }
 chrono = { workspace = true, optional = true }
 # Streaming answer synthesis (Phase 12 Track 3). Gated behind the `streaming` feature.
 liter-llm = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt"] }
+# 0.37 is selected because upstream xberg requires half 2.7.x; older LanceDB
+# releases pin half 2.4.x and cannot resolve beside it.
+lancedb = { version = "=0.37.1", optional = true, default-features = false }
+# Keep Arrow on LanceDB's 58.x API line while allowing DataFusion's compatible
+# patch release to resolve one shared Arrow version.
+arrow-array = { version = "58.0.0", optional = true }
+arrow-schema = { version = "58.0.0", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
@@ -56,3 +75,4 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 # `hacienda-core/migrations/README.md`). Dev-only: hacienda-core does not
 # depend on hacienda-rag, so this is a one-way, test-only edge.
 hacienda-core = { path = "../../hacienda-core", features = ["postgres"] }
+tempfile = { workspace = true }

@@ -1,0 +1,31 @@
+[package]
+name = "hacienda-backend"
+version.workspace = true
+edition = "2024"
+rust-version = "1.85"
+license.workspace = true
+description = "Token-only Xberg projection and profile-scoped RAG integration"
+
+[features]
+default = []
+lancedb = ["hacienda-rag/lancedb"]
+embeddings = ["hacienda-rag/embeddings"]
+chunking = ["hacienda-rag/chunking"]
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+hacienda-client-core = { path = "../hacienda-client-core" }
+hacienda-core = { path = "../../hacienda-core" }
+hacienda-rag = { path = "../hacienda-rag" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+xberg = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
