@@ -11,8 +11,8 @@ use crate::config::load_config;
 use anyhow::{Context, Result};
 use clap::CommandFactory;
 use hacienda::audit::{
-    AuditChain, AuditEntry, AuditStore, ExportFormat, FileAuditStore, GENESIS_HASH, NodeId,
-    export_json, verify_entries,
+    export_json, verify_entries, AuditChain, AuditEntry, AuditStore, ExportFormat, FileAuditStore,
+    NodeId, GENESIS_HASH,
 };
 use hacienda::compliance::{
     ChecklistItem, ComplianceChecklist, ComplianceGenerator, ComplianceReport, DoraReport,
@@ -1678,7 +1678,7 @@ pub async fn run_serve(
 
 #[cfg(test)]
 mod tests {
-    use super::{PLACEHOLDER_STATIC_TOKEN, check_bind_policy};
+    use super::{check_bind_policy, PLACEHOLDER_STATIC_TOKEN};
     use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
     use std::net::SocketAddr;
 
@@ -1769,12 +1769,10 @@ mod tests {
     /// the token is only required once the API is actually network-reachable.
     #[test]
     fn should_allow_loopback_even_with_the_placeholder_token() {
-        assert!(
-            check_bind_policy(
-                addr("127.0.0.1:8787"),
-                &auth_with_token(PLACEHOLDER_STATIC_TOKEN)
-            )
-            .is_ok()
-        );
+        assert!(check_bind_policy(
+            addr("127.0.0.1:8787"),
+            &auth_with_token(PLACEHOLDER_STATIC_TOKEN)
+        )
+        .is_ok());
     }
 }

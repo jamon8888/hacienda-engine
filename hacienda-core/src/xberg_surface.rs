@@ -89,9 +89,7 @@ fn filename_hint_matches_content(mime: &str, bytes: &[u8]) -> bool {
         "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
         "image/tiff" => bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"),
-        "image/webp" => {
-            bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
-        }
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
         _ => false,
     }
 }

@@ -43,7 +43,9 @@ pub async fn detect_mime(
     SafeJson(body): SafeJson<MimeDetectRequest>,
 ) -> Result<Json<MimeDetectResponse>, ApiError> {
     if body.content_base64.len() > hacienda_core::xberg_surface::MAX_MIME_INPUT_BASE64_BYTES {
-        return Err(ApiError::invalid_request("content_base64 exceeds the 8 MiB limit."));
+        return Err(ApiError::invalid_request(
+            "content_base64 exceeds the 8 MiB limit.",
+        ));
     }
     let bytes = data_encoding::BASE64
         .decode(body.content_base64.as_bytes())
@@ -139,7 +141,9 @@ pub async fn cache_warm(
         | hacienda_core::xberg_surface::XbergSurfaceError::Cache(_)
         | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot
         | hacienda_core::xberg_surface::XbergSurfaceError::CacheBusy => ApiError::internal(),
-        hacienda_core::xberg_surface::XbergSurfaceError::MimeInputTooLarge => ApiError::invalid_request("input too large"),
+        hacienda_core::xberg_surface::XbergSurfaceError::MimeInputTooLarge => {
+            ApiError::invalid_request("input too large")
+        }
     })?;
     tracing::info!(operation = "xberg_cache_warm", preset = %result.preset);
     Ok(Json(CacheWarmResponse {

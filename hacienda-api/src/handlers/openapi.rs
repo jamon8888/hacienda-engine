@@ -16,7 +16,7 @@
 //! `#[utoipa::path]` — the failure mode this module replaces (a path present with no
 //! method, no schema, no operation at all).
 
-use axum::{Json, extract::State};
+use axum::{extract::State, Json};
 use serde_json::Value;
 use utoipa::OpenApi;
 

@@ -12,14 +12,14 @@
 //! silently omit a capability requirement.
 
 use axum::{
-    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, post},
+    Router,
 };
 use hacienda_core::{
     auth::authz::AuthRouterBuilder,
-    auth::{AuthState, Capability, CapabilitySet, authz::auth_middleware},
+    auth::{authz::auth_middleware, AuthState, Capability, CapabilitySet},
 };
 
 use crate::{
@@ -472,11 +472,11 @@ pub(crate) mod tests {
     use crate::state::{ApiLimits, ApiState};
     use axum::{body::Body, http::Request};
     use hacienda_core::{
-        HaciendaConfig, HaciendaFacade,
-        auth::{AuthState, authn::DevTokenResolver},
+        auth::{authn::DevTokenResolver, AuthState},
         jobs::InMemoryJobStore,
         pii::PipelineConfig,
         redaction::{EnvKeyResolver, RedactionConfig, RedactionMode},
+        HaciendaConfig, HaciendaFacade,
     };
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -2388,13 +2388,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
-        assert!(
-            list_json["presets"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|p| p["id"].as_str().unwrap() == id)
-        );
+        assert!(list_json["presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"].as_str().unwrap() == id));
 
         let get = app
             .clone()
@@ -2660,21 +2658,15 @@ pub(crate) mod tests {
             .unwrap();
         let diff_json: serde_json::Value = serde_json::from_slice(&diff_bytes).unwrap();
         let lines = diff_json["lines"].as_array().unwrap();
-        assert!(
-            lines
-                .iter()
-                .any(|l| l["op"] == "equal" && l["text"] == "line one")
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l["op"] == "delete" && l["text"] == "line two")
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l["op"] == "insert" && l["text"] == "line three")
-        );
+        assert!(lines
+            .iter()
+            .any(|l| l["op"] == "equal" && l["text"] == "line one"));
+        assert!(lines
+            .iter()
+            .any(|l| l["op"] == "delete" && l["text"] == "line two"));
+        assert!(lines
+            .iter()
+            .any(|l| l["op"] == "insert" && l["text"] == "line three"));
     }
 
     /// Diffing an out-of-range version sequence must be 404, not 500 or a panic.
@@ -3124,12 +3116,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(
-            json["report"]["processing_description"]
-                .as_str()
-                .unwrap()
-                .contains("hacienda-pii")
-        );
+        assert!(json["report"]["processing_description"]
+            .as_str()
+            .unwrap()
+            .contains("hacienda-pii"));
 
         // GET /v1/compliance/report
         let response = app

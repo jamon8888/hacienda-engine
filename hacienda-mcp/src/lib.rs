@@ -65,11 +65,11 @@ use params::{
     MimeDetectParams, RevealParams, TextParams,
 };
 use rmcp::{
-    RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router,
     transport::{async_rw::AsyncRwTransport, stdio},
+    RoleServer, ServerHandler, ServiceExt,
 };
 use xberg::ExtractInput;
 
@@ -410,7 +410,10 @@ impl HaciendaMcp {
         Parameters(params): Parameters<MimeDetectParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if params.content_base64.len() > hacienda_core::xberg_surface::MAX_MIME_INPUT_BASE64_BYTES {
-            return Err(rmcp::ErrorData::invalid_params("content_base64 exceeds the 8 MiB limit", None));
+            return Err(rmcp::ErrorData::invalid_params(
+                "content_base64 exceeds the 8 MiB limit",
+                None,
+            ));
         }
         let bytes = data_encoding::BASE64
             .decode(params.content_base64.as_bytes())

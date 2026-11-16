@@ -745,7 +745,7 @@ async fn migrate_embeddings_work(
     tenant: &hacienda_core::tenancy::TenantId,
     job_id: &str,
     collection: &str,
-    to_source: &str,
+    _to_source: &str,
 ) -> Result<(), String> {
     let (_, total) = store
         .list_documents(collection, 1, 0)
@@ -755,7 +755,7 @@ async fn migrate_embeddings_work(
     #[cfg(feature = "rag-embeddings")]
     let config = xberg::EmbeddingConfig {
         model: xberg::EmbeddingModelType::Preset {
-            name: to_source.to_string(),
+            name: _to_source.to_string(),
         },
         ..Default::default()
     };
