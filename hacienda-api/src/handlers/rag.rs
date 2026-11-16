@@ -752,6 +752,7 @@ async fn migrate_embeddings_work(
         .await
         .map_err(|e| format!("failed to read collection document count: {e}"))?;
 
+    #[cfg(feature = "rag-embeddings")]
     let config = xberg::EmbeddingConfig {
         model: xberg::EmbeddingModelType::Preset {
             name: to_source.to_string(),
@@ -844,14 +845,6 @@ async fn embed_texts_for_migration(
     xberg::embed_texts_async(texts, config)
         .await
         .map_err(|error| error.to_string())
-}
-
-#[cfg(not(feature = "rag-embeddings"))]
-async fn embed_texts_for_migration(
-    _texts: Vec<String>,
-    _config: &xberg::EmbeddingConfig,
-) -> Result<Vec<Vec<f32>>, String> {
-    Err("embedding migration requires the `rag-embeddings` feature".to_owned())
 }
 
 /// `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}` — poll a
