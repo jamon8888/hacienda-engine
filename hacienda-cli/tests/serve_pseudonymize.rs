@@ -8,8 +8,8 @@
 //! that point: it exited before printing its "serving on" line. This is regression-tested by
 //! process behaviour alone, no HTTP client needed.
 
-use std::io::{BufRead, BufReader};
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;

@@ -3,7 +3,7 @@ import { FileUpload } from "@/components/extend/file-upload";
 import { Button } from "@/components/ui/button";
 import { effectiveFileName } from "@/lib/file-filter";
 import { exportDocumentsZip } from "@/lib/export-zip";
-import type { ProcessedFile, ProgressUpdate } from "@/lib/types";
+import type { AppConfig, ProcessedFile, ProgressUpdate } from "@/lib/types";
 
 const UPLOAD_ACCEPT =
   ".pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.eml,.msg,.pst,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.svg,.srt,.vtt,.txt,.md,.json,.csv,.xml,.html,.mp3,.wav,.m4a,.ogg,.flac,.aac,.mp4,.mov,.webm,.mkv";
@@ -96,6 +96,7 @@ export function Studio({
   results,
   fileErrors,
   onOpenDocument,
+  outputFormat,
 }: {
   workerReady: boolean;
   folderMode: boolean;
@@ -110,6 +111,7 @@ export function Studio({
   results: ProcessedFile[];
   fileErrors: Map<string, string>;
   onOpenDocument: (name: string) => void;
+  outputFormat: AppConfig["outputFormat"];
 }) {
   const resultsByInput = new Map(results.map((r) => [r.frontmatter.source, r] as const));
   const isProcessing = files.length > 0;
@@ -132,7 +134,7 @@ export function Studio({
                    size="sm"
                    variant="outline"
                    className="h-8 border-white/10 bg-white/[0.04] hover:bg-white/[0.08]"
-                   onClick={() => exportDocumentsZip(results.map((result) => ({ result })))}
+                   onClick={() => exportDocumentsZip(results.map((result) => ({ result })), undefined, outputFormat)}
                  >
                    <Archive className="size-3.5" /> Télécharger
                  </Button>

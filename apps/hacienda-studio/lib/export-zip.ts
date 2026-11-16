@@ -4,16 +4,21 @@
  * the whole folder" once a batch finishes), so both stay byte-identical instead of two
  * copies of the same JSZip call drifting apart.
  */
-import type { ProcessedFile } from "./types";
+import type { AppConfig, ProcessedFile } from "./types";
+import { formatExportContent, outputFileName } from "./output-format";
 
 export async function exportDocumentsZip(
   documents: { result: ProcessedFile }[],
   fileName?: string,
+  outputFormat: AppConfig["outputFormat"] = "markdown",
 ): Promise<void> {
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
   for (const doc of documents) {
-    zip.file(doc.result.name, doc.result.markdown);
+    zip.file(
+      outputFileName(doc.result.name, outputFormat),
+      formatExportContent(doc.result, doc.result.markdown, outputFormat),
+    );
   }
   const blob = await zip.generateAsync({ type: "blob" });
   const url = URL.createObjectURL(blob);

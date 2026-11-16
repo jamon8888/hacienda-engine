@@ -37,6 +37,7 @@ fn entry(id: &str, category: &str) -> AuditEntryInput {
         config_hash: "l5-reload-guard".to_string(),
         principal: None,
         vertical: None,
+        model: None,
     }
 }
 

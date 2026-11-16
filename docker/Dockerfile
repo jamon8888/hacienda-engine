@@ -19,7 +19,7 @@
 # 2.36), and a binary built against a newer glibc than the runtime ships fails to
 # even start (`GLIBC_2.38' not found`) rather than failing to build — caught by
 # validate-main's smoke test actually running the built image, not just building it.
-FROM rust:1.94-slim-bookworm AS planner
+FROM rust:1.99-slim-bookworm AS planner
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY . .
@@ -30,22 +30,10 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # 2. BUILDER - Compile deps (cached)
-FROM rust:1.94-slim-bookworm AS builder
+FROM rust:1.99-slim-bookworm AS builder
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
-# Root Cargo.toml's `[patch.crates-io]` path dependencies have to exist before
-# `cargo chef cook`, not just before the `COPY . .` below: unlike the registry deps
-# `recipe.json` otherwise covers, a `path =` patch is resolved from the real source on
-# disk, at every cargo invocation that touches the dependency graph — `cargo chef cook`
-# is exactly that, run here specifically to warm the dependency-build cache before the
-# full source lands. Without this, cook fails immediately with "failed to read
-# vendor/candle-core-0.11.0-wasm-fix/Cargo.toml: No such file or directory". Only these
-# two, not the whole `vendor/` tree: `vendor/xberg-wasm-ner-fix` is a 39MB compiled
-# WASM binary for the browser frontend (apps/hacienda-studio), irrelevant to this
-# Dockerfile's Rust server build and not worth the copy weight here.
-COPY vendor/candle-core-0.11.0-wasm-fix/ vendor/candle-core-0.11.0-wasm-fix/
-COPY vendor/candle-transformers-0.11.0-wasm-fix/ vendor/candle-transformers-0.11.0-wasm-fix/
 RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY . .

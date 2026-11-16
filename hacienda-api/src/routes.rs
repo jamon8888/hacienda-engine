@@ -2789,6 +2789,7 @@ pub(crate) mod tests {
                     config_hash: "cfg".to_string(),
                     principal: Some(principal.clone()),
                     vertical: None,
+                    model: None,
                 }],
             )
             .await
@@ -2876,6 +2877,7 @@ pub(crate) mod tests {
                     config_hash: "cfg".to_string(),
                     principal: Some(principal.clone()),
                     vertical: None,
+                    model: None,
                 }],
             )
             .await

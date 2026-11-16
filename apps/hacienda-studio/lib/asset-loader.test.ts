@@ -1,7 +1,14 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { openDB } from "idb";
-import { fetchAsset, validateFile, loadTessdata, loadNerModel } from "./asset-loader";
+import {
+  fetchAsset,
+  validateFile,
+  loadTessdata,
+  loadNerModel,
+  sha256Hex,
+} from "./asset-loader";
+import { MODEL_DIGESTS } from "./model-digests";
 
 function file(type: string, size = 1024): File {
   return new File([new Uint8Array(size)], "upload", { type });
@@ -75,6 +82,14 @@ describe("fetchAsset", () => {
     expect(JSON.parse(new TextDecoder().decode(bytes))).toEqual({
       hidden_size: 768,
     });
+  });
+});
+
+describe("model asset integrity", () => {
+  it("computes a standard SHA-256 digest", async () => {
+    await expect(sha256Hex(new Uint8Array([1, 2, 3]))).resolves.toBe(
+      "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+    );
   });
 });
 
@@ -357,10 +372,24 @@ describe("loadNerModel storage-quota preflight", () => {
         if (!db.objectStoreNames.contains("models")) db.createObjectStore("models");
       },
     });
-    await db.put("models", new Uint8Array([1]), "gliner2-guardrails-pii-model");
-    await db.put("models", new Uint8Array([2]), "gliner2-guardrails-pii-tokenizer");
-    await db.put("models", new Uint8Array([3]), "gliner2-guardrails-pii-config");
+    await db.put("models", new Uint8Array([1]), "model-jamon8888-gliner2-guardrails-pii-f16");
+    await db.put("models", new Uint8Array([2]), "tokenizer-jamon8888-gliner2-guardrails-pii-f16");
+    await db.put("models", new Uint8Array([3]), "config-jamon8888-gliner2-guardrails-pii-f16");
     db.close();
+
+    const expected = MODEL_DIGESTS["jamon8888/gliner2-guardrails-pii-f16"];
+    const hexToBytes = (hex: string): Uint8Array =>
+      Uint8Array.from(hex.match(/.{2}/g) ?? [], (pair) => Number.parseInt(pair, 16));
+    vi.stubGlobal("crypto", {
+      subtle: {
+        digest: vi.fn(async (_algorithm: string, input: ArrayBuffer) => {
+          const firstByte = new Uint8Array(input)[0];
+          return hexToBytes(
+            firstByte === 1 ? expected.model : firstByte === 2 ? expected.tokenizer : expected.encoder,
+          );
+        }),
+      },
+    });
 
     // Quota deliberately reports far too little space — if the preflight ran before the
     // cache lookup, this alone would fail the call despite nothing needing to be written.

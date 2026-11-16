@@ -783,6 +783,12 @@ async fn migrate_embeddings_work(
 
             if !chunks.is_empty() {
                 let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+                #[cfg(not(feature = "rag-embeddings"))]
+                let _ = (texts, config);
+                #[cfg(not(feature = "rag-embeddings"))]
+                return Err("embedding migration requires the `rag-embeddings` feature".to_owned());
+
+                #[cfg(feature = "rag-embeddings")]
                 let vectors = xberg::embed_texts_async(texts, &config)
                     .await
                     .map_err(|e| format!("embedding failed: {e}"))?;
@@ -791,6 +797,7 @@ async fn migrate_embeddings_work(
                 // return one vector per input text. Catch a mismatch here rather
                 // than silently zipping a short/long vector list against ordinals
                 // and losing (or misattributing) embeddings for a subset of chunks.
+                #[cfg(feature = "rag-embeddings")]
                 if vectors.len() != chunks.len() {
                     return Err(format!(
                         "embedding backend returned {} vectors for {} chunks",
@@ -799,9 +806,11 @@ async fn migrate_embeddings_work(
                     ));
                 }
 
+                #[cfg(feature = "rag-embeddings")]
                 let embeddings: Vec<(u32, Vec<f32>)> =
                     chunks.iter().map(|c| c.ordinal).zip(vectors).collect();
 
+                #[cfg(feature = "rag-embeddings")]
                 store
                     .update_chunk_embeddings(collection, &summary.id, &embeddings)
                     .await

@@ -8,10 +8,10 @@
 //! with `wasm-bindgen-test-runner` configured as the target runner).
 
 use hacienda_core::audit::{AuditEntryInput, AuditStore, InMemoryAuditStore};
-use hacienda_core::pii::{PiiPipeline, PipelineConfig};
-use hacienda_core::tenancy::TenantId;
 #[cfg(feature = "ner-candle-wasm")]
 use hacienda_core::pii::NerDetector;
+use hacienda_core::pii::{PiiPipeline, PipelineConfig};
+use hacienda_core::tenancy::TenantId;
 use uuid::Uuid;
 use wasm_bindgen_test::*;
 
@@ -72,6 +72,7 @@ async fn redaction_round_trip_has_a_real_clock_and_uuid_on_wasm32() {
             config_hash: "wasm32-l3-regression-guard".to_string(),
             principal: None,
             vertical: None,
+            model: None,
         })
         .collect();
     let tenant = TenantId::default_tenant();

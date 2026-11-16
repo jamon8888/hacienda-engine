@@ -37,6 +37,7 @@ import {
   listEditedFindings,
 } from "./lib/persistence";
 import { pruneDrafts } from "./lib/redaction-store";
+import { formatExportContent, outputFileName } from "./lib/output-format";
 import { recordKeyUsage } from "./lib/pseudonym-keys";
 import { folderOf } from "./lib/library";
 import type { LibraryDocument } from "./lib/library";
@@ -59,12 +60,13 @@ function downloadZip(blob: Blob): void {
   URL.revokeObjectURL(url);
 }
 
-function downloadText(fileName: string, content: string): void {
-  const blob = new Blob([content], { type: "text/markdown" });
+function downloadText(fileName: string, content: string, format: AppConfig["outputFormat"]): void {
+  const mime = format === "json" ? "application/json" : format === "plain" ? "text/plain" : "text/markdown";
+  const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = fileName;
+  a.download = outputFileName(fileName, format);
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -823,6 +825,7 @@ export function App() {
           results={results}
           fileErrors={fileErrors}
           onOpenDocument={openDocument}
+          outputFormat={config.outputFormat}
         />
       )}
 
@@ -834,6 +837,7 @@ export function App() {
             onOpenDocument={openDocument}
             onAddFiles={() => setStudioView("upload")}
             onDeleteDocuments={handleDeleteDocuments}
+            outputFormat={config.outputFormat}
           />
         </Suspense>
       )}
@@ -849,7 +853,15 @@ export function App() {
           }
           onRemoveFinding={(i) => handleRemoveFinding(selectedResult, i)}
           onExportBody={(body) =>
-            downloadText(selectedResult.name, wrapRedactedBody(selectedResult, body))
+            downloadText(
+              selectedResult.name,
+              formatExportContent(
+                selectedResult,
+                wrapRedactedBody(selectedResult, body),
+                config.outputFormat,
+              ),
+              config.outputFormat,
+            )
           }
           onDelete={() => {
             handleDeleteDocuments([selectedResult.name]);

@@ -173,7 +173,10 @@ impl JobStore for InMemoryJobStore {
         // tenant after, means a cross-tenant id falls straight into the same `None` a
         // nonexistent id produces — the not-found-not-forbidden property (D-S1b-1) falls
         // out of the lookup itself.
-        Ok(guard.get(id).filter(|j| j.tenant_id == tenant.as_str()).cloned())
+        Ok(guard
+            .get(id)
+            .filter(|j| j.tenant_id == tenant.as_str())
+            .cloned())
     }
 
     async fn transition(
@@ -269,7 +272,8 @@ impl JobStore for InMemoryJobStore {
         let mut jobs: Vec<Job> = guard
             .values()
             .filter(|j| {
-                j.tenant_id == tenant.as_str() && filter.map(|status| j.status == status).unwrap_or(true)
+                j.tenant_id == tenant.as_str()
+                    && filter.map(|status| j.status == status).unwrap_or(true)
             })
             .cloned()
             .collect();
