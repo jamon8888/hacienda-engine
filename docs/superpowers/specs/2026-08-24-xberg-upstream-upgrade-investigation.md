@@ -1,7 +1,7 @@
 # Moving `xberg` to Upstream Latest: Feasibility and wasm Impact
 
 **Date:** 2026-08-24
-**Status:** Investigation complete — recommendation pending decision
+**Status:** Resolved — official upstream `main` adopted on 2026-11-14
 **Relates to:** `Cargo.toml:214-227` (the temporary fork exception),
 `docs/architecture/README.md` §3 (policy against the fork entering the dependency graph)
 **Companion:** `2026-08-24-studio-knowledge-base-export-design.md` (§2.2–§2.4's constraints are
@@ -20,6 +20,13 @@ re-verified against upstream latest here)
 > pin upstream.
 
 Two questions: **can we revert now**, and **what does it do to hacienda-wasm**?
+
+## 1.1 Resolution
+
+The official `xberg-io/xberg` `main` commit
+`a6cb893bf47d739b55ff29cca6790dbdfd58cdd8` now carries a valid
+`test_documents` submodule pointer. Hacienda has moved both Cargo target-specific
+dependencies and the lockfile to that official commit, and the Studio WASM build passes.
 
 ---
 

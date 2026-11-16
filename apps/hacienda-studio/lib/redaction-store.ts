@@ -118,3 +118,9 @@ export async function pruneDrafts(maxAgeMs: number): Promise<void> {
   }
   await tx.done;
 }
+
+/** Remove every saved redacted draft while leaving the document library untouched. */
+export async function clearDrafts(): Promise<void> {
+  const db = await getDB();
+  await db.clear(STORE);
+}

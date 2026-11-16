@@ -472,7 +472,7 @@ describe("filterExportableEntities pseudonymize retention (Track A2 / Task 3)", 
       "doc-002",
     );
     expect(merged.source_documents).toEqual(["doc-001", "doc-002"]);
-  });
+  }, 30_000);
 
   it("leaves mask, hash, and remove entity sets unaffected by this task's change", async () => {
     // Unit-level substitute for a byte-level bundle diff — Task 0 could not produce

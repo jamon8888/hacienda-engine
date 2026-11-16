@@ -38,18 +38,6 @@ extend-exclude = [
   # here specifically (e.g. "UDID" flagged as a typo for "UUID" in an iOS reference doc —
   # UDID is the correct, real term), not a hypothetical.
   ".github/skills/",
-  # vendor/candle-{core,transformers}-0.11.0-wasm-fix/ are the upstream crates.io sources
-  # for two wasm32 bugfix patches (see root Cargo.toml's `[patch.crates-io]`), copied
-  # verbatim aside from the specific patched lines — third-party ML library source, not
-  # this repo's prose, same "machine/vendored output" category as
-  # `crates/hacienda-wasm/pkg/` above. Confirmed failing here specifically: numpy/tensor
-  # API names like "arange", ML jargon like "mmaped"/"layrnorm", not real typos.
-  "vendor/candle-core-0.11.0-wasm-fix/",
-  "vendor/candle-transformers-0.11.0-wasm-fix/",
-  # vendor/xberg-wasm-ner-fix/pkg/web/ is a locally-built @xberg-io/xberg-wasm binary plus
-  # wasm-bindgen's own generated JS/TS glue around it — same "machine output, not
-  # hand-authored" category as crates/hacienda-wasm/pkg/ above.
-  "vendor/xberg-wasm-ner-fix/",
 ]
 
 [default.extend-words]
@@ -85,6 +73,12 @@ mis = "mis"
 # code around the French strings that should stay checked).
 ressources = "ressources"
 sur = "sur"
+remplace = "remplace"
+reste = "reste"
+moteur = "moteur"
+individuels = "individuels"
+complet = "complet"
+abord = "abord"
 appareil = "appareil"
 espace = "espace"
 convertis = "convertis"

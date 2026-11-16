@@ -19,19 +19,17 @@ on:
   push:
     branches: [main]
     paths:
-      - "apps/hacienda-studio/lib/pseudonymize.ts"
-      - "apps/hacienda-studio/lib/pseudonymize.test.ts"
-      - "hacienda-core/src/redaction/pseudonym.rs"
-      - "hacienda-core/tests/pseudonym_vectors.rs"
+      - "apps/hacienda-studio/**"
+      - "crates/hacienda-wasm/pkg/**"
+      - "hacienda-core/**"
       - "apps/hacienda-studio/package.json"
       - ".github/workflows/ci-studio-unit.yaml"
   pull_request:
     branches: [main]
     paths:
-      - "apps/hacienda-studio/lib/pseudonymize.ts"
-      - "apps/hacienda-studio/lib/pseudonymize.test.ts"
-      - "hacienda-core/src/redaction/pseudonym.rs"
-      - "hacienda-core/tests/pseudonym_vectors.rs"
+      - "apps/hacienda-studio/**"
+      - "crates/hacienda-wasm/pkg/**"
+      - "hacienda-core/**"
       - "apps/hacienda-studio/package.json"
       - ".github/workflows/ci-studio-unit.yaml"
 
@@ -40,7 +38,7 @@ permissions:
 
 jobs:
   unit:
-    name: Vitest (lib/)
+    name: Vitest (Studio)
     runs-on: ubuntu-24.04-arm
     defaults:
       run:
@@ -60,10 +58,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install dependencies
         run: npm install
 
-      - name: Run pseudonymization contract test
-        run: npx vitest run lib/pseudonymize.test.ts
+      - name: Run Studio unit tests
+        run: npx vitest run --reporter=dot

@@ -132,8 +132,8 @@ importers:
         specifier: ^4.25.11
         version: 4.25.11(@babel/runtime@8.0.0)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.4)(@codemirror/lint@6.9.7)(@codemirror/search@6.7.1)(@codemirror/state@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@codemirror/view@6.43.8)(codemirror@6.0.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@xberg-io/xberg-wasm':
-        specifier: file:../../vendor/xberg-wasm-ner-fix
-        version: file:../../vendor/xberg-wasm-ner-fix
+        specifier: 1.4.0
+        version: 1.4.0
       border-beam:
         specifier: ^1.3.0
         version: 1.3.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -2504,8 +2504,9 @@ packages:
   '@vue/shared@3.5.41':
     resolution: {integrity: sha512-IOnwSCma8j+9xJT6b8H0dEYidC80NsYmNMlZxRsukYcSoGaDBohog5hDxzeUXdFeGWFA++vWvxqOmrr96VlqMA==}
 
-  '@xberg-io/xberg-wasm@file:../../vendor/xberg-wasm-ner-fix':
-    resolution: {directory: ../../vendor/xberg-wasm-ner-fix, type: directory}
+  '@xberg-io/xberg-wasm@1.4.0':
+    resolution: {integrity: sha512-8UXMR1R+5J6HOSCd+5spzRHZdEQwdbQSTiZjq+z9mvZEGa4zEpNn+cBbCBVMEBL8PElLSu9UtZvg/cpS6leY+Q==}
+    engines: {node: '>= 22'}
 
   acorn-jsx@5.3.2:
     resolution: {integrity: sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==}
@@ -6423,7 +6424,7 @@ snapshots:
 
   '@vue/shared@3.5.41': {}
 
-  '@xberg-io/xberg-wasm@file:../../vendor/xberg-wasm-ner-fix': {}
+  '@xberg-io/xberg-wasm@1.4.0': {}
 
   acorn-jsx@5.3.2(acorn@8.18.0):
     dependencies:

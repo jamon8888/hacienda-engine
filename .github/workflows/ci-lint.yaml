@@ -70,15 +70,12 @@ jobs:
       # markdown linter any more than those are. `.github/skills` (added in
       # 8af0998, never added here) is the same category under a different
       # root — vendored skill reference docs (e.g. `impeccable`), not this
-      # repo's own prose. `vendor/` (this session's candle-{core,transformers}
-      # wasm-fix patches and the locally-built xberg-wasm-ner-fix binary) is
-      # the same "not our prose" category again: third-party crate READMEs
-      # and a wasm-bindgen-generated package README, not hand-authored here.
+      # repo's own prose.
       # Same reasoning for `apps/hacienda-studio/tests/e2e/fixtures`:
       # PII-detection test fixture content, not documentation — MD041 (first
       # line must be a heading) doesn't apply to it.
       - name: Lint markdown
-        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,vendor,apps/hacienda-studio/tests/e2e/fixtures" -d MD013
+        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,apps/hacienda-studio/tests/e2e/fixtures" -d MD013
 
       - name: Check spelling
         run: typos . --config _typos.toml
@@ -89,8 +86,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg.git ../xberg
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/jamon8888/xberg-pii-ecosystem.git ../xberg-pii-ecosystem
+          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/xberg-io/xberg.git ../xberg
 
       - name: Check Rust formatting
         if: steps.deps.outcome == 'success'

@@ -129,4 +129,14 @@ describe("redaction-store", () => {
       Date.now = originalNow;
     }
   });
+
+  it("clearDrafts removes every saved draft", async () => {
+    await saveDraft("one", "first");
+    await saveDraft("two", "second");
+
+    await clearDrafts();
+
+    await expect(loadDraft("one")).resolves.toBeUndefined();
+    await expect(loadDraft("two")).resolves.toBeUndefined();
+  });
 });
