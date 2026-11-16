@@ -782,7 +782,9 @@ async fn migrate_embeddings_work(
             };
 
             if !chunks.is_empty() {
+                #[cfg(feature = "rag-embeddings")]
                 let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+                #[cfg(feature = "rag-embeddings")]
                 let vectors = embed_texts_for_migration(texts, &config)
                     .await
                     .map_err(|e| format!("embedding failed: {e}"))?;
