@@ -26,6 +26,46 @@ const TOKENIZER_URL = `${MODEL_BASE}/tokenizer.json`;
 // NerModel.load reads hidden_size, layer counts and vocab size from this.
 const ENCODER_CONFIG_URL = `${MODEL_BASE}/encoder_config/config.json`;
 
+type ModelAssetName = "model" | "tokenizer" | "encoder";
+
+function expectedModelDigests(): Readonly<Record<ModelAssetName, string>> {
+  const digests = MODEL_DIGESTS[MODEL_ID as keyof typeof MODEL_DIGESTS];
+  if (!digests) {
+    throw new Error(
+      `Unsupported GLiNER model "${MODEL_ID}" — add full SHA-256 digests before using it`,
+    );
+  }
+  return digests;
+}
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // TypeScript's DOM lib models `Uint8Array` as potentially backed by a
+  // SharedArrayBuffer, while SubtleCrypto requires an ArrayBuffer here.
+  // Copying also makes the bytes immutable for the duration of the digest.
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", copy.buffer as ArrayBuffer);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+export async function verifyNerModelAssets(assets: NerModelAssets): Promise<void> {
+  const expected = expectedModelDigests();
+  const actual = await Promise.all([
+    sha256Hex(assets.model),
+    sha256Hex(assets.tokenizer),
+    sha256Hex(assets.encoderConfig),
+  ]);
+  const names: ModelAssetName[] = ["model", "tokenizer", "encoder"];
+  const mismatch = names.find((name, index) => actual[index] !== expected[name]);
+  if (mismatch) {
+    throw new Error(
+      `Integrity check failed for GLiNER ${mismatch} asset of "${MODEL_ID}"`,
+    );
+  }
+}
+
 /**
  * `tessdata_fast` is the same source tesseract.js and most browser OCR integrations use:
  * small (~4MB/language), permissively licensed (Apache-2.0), and served by
@@ -362,7 +402,15 @@ export async function isModelCached(): Promise<boolean> {
   const model = await db.get(MODEL_STORE, modelKey);
   const tokenizer = await db.get(MODEL_STORE, tokenizerKey);
   const config = await db.get(MODEL_STORE, configKey);
-  return !!(model && tokenizer && config);
+  if (!model || !tokenizer || !config) return false;
+  try {
+    await verifyNerModelAssets({ model, tokenizer, encoderConfig: config });
+    return true;
+  } catch (error) {
+    console.warn("[asset-loader] Cached NER model failed integrity verification:", error);
+    await clearStaleModelCache();
+    return false;
+  }
 }
 
 async function clearStaleModelCache(): Promise<void> {
@@ -380,6 +428,17 @@ async function clearStaleModelCache(): Promise<void> {
     ]);
     console.log("[asset-loader] Cleared stale model cache");
   } catch {}
+}
+
+/** Clear model and OCR assets without deleting the IndexedDB database itself. */
+export async function clearAssetCache(): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction([MODEL_STORE, TESSDATA_STORE], "readwrite");
+  await Promise.all([
+    tx.objectStore(MODEL_STORE).clear(),
+    tx.objectStore(TESSDATA_STORE).clear(),
+  ]);
+  await tx.done;
 }
 
 /** The three model buffers `createNerBackend` needs, on the success path. */
@@ -495,8 +554,17 @@ export async function loadNerModel(
   ]);
 
   if (model && tokenizer && config) {
-    // Verify digest placeholder - in production compute hash and compare to MODEL_DIGESTS[MODEL_ID]
-    return { ok: true, assets: { model, tokenizer, encoderConfig: config } };
+    const assets = { model, tokenizer, encoderConfig: config };
+    try {
+      await verifyNerModelAssets(assets);
+      return { ok: true, assets };
+    } catch (error) {
+      console.warn(
+        "[asset-loader] Cached NER model failed integrity verification; redownloading:",
+        error,
+      );
+      await clearStaleModelCache();
+    }
   }
 
   // Evict stale models before download
@@ -530,6 +598,12 @@ export async function loadNerModel(
         fetchAsset(TOKENIZER_URL),
         fetchAsset(ENCODER_CONFIG_URL),
       ]);
+      const assets = {
+        model: modelData,
+        tokenizer: tokenizerData,
+        encoderConfig: configData,
+      };
+      await verifyNerModelAssets(assets);
       const downloadMs = performance.now() - downloadStart;
       console.log(`[PERF] Download: ${downloadMs.toFixed(0)}ms (${(modelData.byteLength / 1024 / 1024).toFixed(1)} MB)`);
 
@@ -544,11 +618,7 @@ export async function loadNerModel(
 
       return {
         ok: true,
-        assets: {
-          model: modelData,
-          tokenizer: tokenizerData,
-          encoderConfig: configData,
-        },
+        assets,
       };
     } catch (e) {
       // A quota failure surfacing only now (the preflight check above passed, or

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build:wasm": "cd ../../crates/hacienda-wasm && wasm-pack build --target web --no-default-features --features ner-candle-wasm",
     "build:wasm:if-needed": "bash scripts/build-wasm-if-needed.sh",
@@ -61,7 +64,7 @@
     "@remotion/whisper-web": "^4.0.500",
     "@tanstack/react-virtual": "^3.14.9",
     "@uiw/react-codemirror": "^4.25.11",
-    "@xberg-io/xberg-wasm": "file:../../vendor/xberg-wasm-ner-fix",
+    "@xberg-io/xberg-wasm": "1.4.0",
     "border-beam": "^1.3.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

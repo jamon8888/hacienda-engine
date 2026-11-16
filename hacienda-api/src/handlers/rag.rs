@@ -791,6 +791,7 @@ async fn migrate_embeddings_work(
                 // return one vector per input text. Catch a mismatch here rather
                 // than silently zipping a short/long vector list against ordinals
                 // and losing (or misattributing) embeddings for a subset of chunks.
+                #[cfg(feature = "rag-embeddings")]
                 if vectors.len() != chunks.len() {
                     return Err(format!(
                         "embedding backend returned {} vectors for {} chunks",
@@ -799,9 +800,11 @@ async fn migrate_embeddings_work(
                     ));
                 }
 
+                #[cfg(feature = "rag-embeddings")]
                 let embeddings: Vec<(u32, Vec<f32>)> =
                     chunks.iter().map(|c| c.ordinal).zip(vectors).collect();
 
+                #[cfg(feature = "rag-embeddings")]
                 store
                     .update_chunk_embeddings(collection, &summary.id, &embeddings)
                     .await

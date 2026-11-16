@@ -83,29 +83,20 @@ re-dérive à l'envers.
 | « Le serveur MCP est absent, à écrire » | La moitié extraction est une **feature `xberg/mcp`** sur une dépendance déjà déclarée | `crates/xberg/src/mcp/`, `Cargo.toml` ligne 515 |
 | « Le RAG suppose de construire un moteur vectoriel » | L'amont publie **huit intégrations de frameworks** — voie bien moins chère (spec E0) | `integrations/README.md` au tag épinglé |
 
-**Provenance des vérifications.** `xberg-io/xberg` n'est pas atteignable par l'outillage GitHub
-de cette session (portée limitée à `jamon8888`), mais l'est **en git simple** via le proxy. Les
-tags `v1.0.2` et `main` ont été récupérés et inspectés directement. Le fork `jamon8888/xberg`
-est figé à **1.0.0-rc.5** : il ne représente pas l'amont et ne doit jamais entrer dans le graphe
-de dépendances — sa seule valeur est d'être la dernière copie MIT publiée de `xberg-rag`.
+**Provenance des vérifications.** `xberg-io/xberg` est récupéré directement en git. Le fork
+historique `jamon8888/xberg` est figé à **1.0.0-rc.5** : il ne représente pas l'amont et ne
+fait plus partie du graphe de dépendances — sa seule valeur est d'être la dernière copie MIT
+publiée de `xberg-rag`.
 
 **Non vérifié.** Le dépôt privé « Xberg Enterprise » n'a pas pu être inspecté ; un sondage des
 noms plausibles sous `xberg-io` n'a rien donné. En revanche **ses specs OpenAPI sont publiques**
 dans `xberg-io/sdks`, ce qui a permis d'en lire toute la surface fonctionnelle. Restent inconnues
 sa licence, son mode de distribution et sa gouvernance.
 
-**Exception temporaire à « ne doit jamais entrer dans le graphe de dépendances » (2026-08-08).**
-Le sous-module git `test_documents` du commit `xberg-io/xberg` épinglé par `tag = "v1.0.2"`
-(`9dcc864d`) pointe vers un commit qui n’existe plus sur `xberg-io/test_documents` — vérifié par
-un `git fetch <sha>` direct, qui renvoie « not our ref », et vrai de **chaque** tag `xberg-io/xberg`
-de v1.0.2 à v1.0.14 : ce n’est pas réparable en changeant de version. `cargo` récupère
-inconditionnellement les sous-modules d’une dépendance git lors de la résolution, donc ceci casse
-`cargo build` pour tout le workspace, sur `main` comme sur toute branche. Le workaround adopté :
-`jamon8888/xberg@fix/test-documents-submodule-pin` — arbre identique au commit `9dcc864d`, avec
-uniquement ce gitlink repointé vers le HEAD valide actuel de `test_documents`. `Cargo.toml` et
-`hacienda-core/Cargo.toml` pointent temporairement là plutôt que sur `xberg-io/xberg` directement ;
-revenir au tag amont dès que `xberg-io` corrige le sous-module. Voir le commentaire au-dessus de
-la dépendance `xberg` dans chacun des deux fichiers pour le détail complet.
+**Résolution de l’exception (2026-11-14).** Les anciens tags `xberg-io/xberg` conservent un
+pointeur `test_documents` orphelin, mais le `main` officiel actuel pointe vers le HEAD valide
+du sous-module. Hacienda épingle donc directement `xberg-io/xberg` au commit officiel
+`a6cb893bf47d739b55ff29cca6790dbdfd58cdd8` ; le fork n’est plus nécessaire.
 
 ---
 

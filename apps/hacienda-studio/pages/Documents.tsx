@@ -12,13 +12,17 @@ import { toFileSystemItems, type LibraryDocument } from "@/lib/library";
 import { getViewerKind } from "@/lib/viewer-kind";
 import { effectiveFileName } from "@/lib/file-filter";
 import { exportDocumentsZip } from "@/lib/export-zip";
+import { formatExportContent, outputFileName } from "@/lib/output-format";
+import type { AppConfig } from "@/lib/types";
 
-function downloadMarkdown(name: string, markdown: string) {
-  const blob = new Blob([markdown], { type: "text/markdown" });
+function downloadDocument(name: string, result: LibraryDocument["result"], outputFormat: AppConfig["outputFormat"]) {
+  const content = formatExportContent(result, result.markdown, outputFormat);
+  const mime = outputFormat === "json" ? "application/json" : outputFormat === "plain" ? "text/plain" : "text/markdown";
+  const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = name.endsWith(".md") ? name : `${name}.md`;
+  a.download = outputFileName(name.endsWith(".md") ? name : `${name}.md`, outputFormat);
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -40,12 +44,14 @@ export function Documents({
   onOpenDocument,
   onAddFiles,
   onDeleteDocuments,
+  outputFormat,
 }: {
   documents: LibraryDocument[];
   files: File[];
   onOpenDocument: (name: string) => void;
   onAddFiles: () => void;
   onDeleteDocuments?: (names: string[]) => void;
+  outputFormat: AppConfig["outputFormat"];
 }) {
   const items = useMemo(() => toFileSystemItems(documents), [documents]);
   const byPath = useMemo(
@@ -79,7 +85,7 @@ export function Documents({
 
   function handleDownloadFile() {
     if (!selectedFileDoc) return;
-    downloadMarkdown(selectedFileDoc.result.name, selectedFileDoc.result.markdown);
+    downloadDocument(selectedFileDoc.result.name, selectedFileDoc.result, outputFormat);
   }
   function handleDownloadFolder() {
     if (selected?.kind !== "folder" || selectedFolderDocs.length === 0) return;
@@ -87,10 +93,11 @@ export function Documents({
     exportDocumentsZip(
       selectedFolderDocs.map((d) => ({ result: d.result })),
       `hacienda-${folderName}-${selectedFolderDocs.length}.zip`,
+      outputFormat,
     );
   }
   function handleDownloadAll() {
-    exportDocumentsZip(documents.map((d) => ({ result: d.result })));
+    exportDocumentsZip(documents.map((d) => ({ result: d.result })), undefined, outputFormat);
   }
   function handleDeleteFile() {
     if (!selectedFileDoc || !onDeleteDocuments) return;

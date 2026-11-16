@@ -607,7 +607,10 @@ mod tests {
         );
         let json = serde_json::to_string(&entry).unwrap();
         let round_tripped: AuditEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped.model, Some("fastino/gliner2-privacy-filter-PII-multi@a1b2c3d4".to_string()));
+        assert_eq!(
+            round_tripped.model,
+            Some("fastino/gliner2-privacy-filter-PII-multi@a1b2c3d4".to_string())
+        );
         assert_eq!(round_tripped.chain_hash, entry.chain_hash);
     }
 }

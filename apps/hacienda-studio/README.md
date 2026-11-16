@@ -68,12 +68,11 @@ compiled to `wasm32-unknown-unknown`, shared by both. Track L
   browser profile — a file-backed chain survives the process. Whether/how the browser's
   chain gets exported into a longer-lived vault for legally-defensible output is still an
   open question.
-- **Still two implementations, not yet one:**
   - **Reversible pseudonymization** (`[CATEGORY:key_id:BASE32]`, AES-SIV,
-    `redaction/pseudonym.rs`) exists only in Rust today. Studio doesn't expose it yet. If
-    it's built in TypeScript against WebCrypto, it must match the Rust token format exactly
-    — a document pseudonymized in one must be revealable by the other. Do not invent a
-    second format.
+    `redaction/pseudonym.rs`) is implemented in Studio's WebCrypto bridge and covered by
+    golden-vector tests. It must continue to match the Rust token format exactly — a
+    document pseudonymized in one must be revealable by the other. Do not invent a second
+    format.
   - **NER: unified backend, not unified detector.** Track B2 wired `worker/pipeline.ts`'s
     live entity extraction to `@xberg-io/xberg-wasm`'s neural `NerModel` (GLiNER2,
     multilingual) via `asset-loader.ts`'s `createNerBackend()`, falling back to

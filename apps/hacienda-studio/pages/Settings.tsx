@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import type { AppConfig, NerCategory } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,6 +10,11 @@ import {
   type KnownPseudonymKey,
 } from "@/lib/pseudonym-keys";
 import { isValidKeyId } from "@/lib/pseudonymize";
+import { clearAssetCache } from "@/lib/asset-loader";
+import { clearDrafts } from "@/lib/redaction-store";
+import { clearWasmCache } from "@/lib/wasm-cache";
+import { clearLibrary } from "@/lib/persistence";
+import { verifyAuditChain } from "@/lib/pii-engine";
 
 type Props = {
   config: AppConfig;
@@ -133,15 +139,46 @@ const fieldLabel = "flex flex-col gap-1.5 text-sm text-muted-foreground";
 const control =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground";
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} Ko`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} Mo`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} Go`;
+}
+
 export function Settings({ config, onChange }: Props) {
-  const storageUsed = 168; // mock
-  const storageTotal = 10_000; // MB
+  const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   // Read once on mount — reopening Settings is enough to pick up a key used elsewhere
   // (e.g. a reveal in `PiiPanel.tsx`) since last render.
   const [knownKeys] = useState(() => listKnownKeys());
   // Mirrors `mintToken`'s own precondition so an id it would reject is caught here, in the
   // field the user can fix, rather than mid-batch inside the worker.
   const keyIdValid = isValidKeyId(config.pseudonymKeyId.trim());
+
+  async function refreshStorage(): Promise<void> {
+    const estimate = await navigator.storage?.estimate?.();
+    if (estimate?.usage !== undefined && estimate.quota !== undefined) {
+      setStorage({ usage: estimate.usage, quota: estimate.quota });
+    }
+  }
+
+  useEffect(() => {
+    void refreshStorage();
+  }, []);
+
+  async function runAction(label: string, action: () => Promise<void>): Promise<void> {
+    setBusyAction(label);
+    try {
+      await action();
+      await refreshStorage();
+      toast.success(label);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `${label} a échoué`);
+    } finally {
+      setBusyAction(null);
+    }
+  }
 
   const toggleCategory = (key: NerCategory) => {
     const has = config.nerCategories.includes(key);
@@ -439,13 +476,59 @@ export function Settings({ config, onChange }: Props) {
 
         <section className="mt-6 rounded-lg border border-border bg-card p-6">
           <h2 className="mb-2 text-sm font-medium">Stockage local</h2>
-          <p className="mb-3 text-xs text-muted-foreground">168 Ko utilisés sur 10,00 Go disponibles</p>
+          <p className="mb-3 text-xs text-muted-foreground">
+            {storage
+              ? `${formatBytes(storage.usage)} utilisés sur ${formatBytes(storage.quota)} disponibles`
+              : "Estimation du stockage local indisponible dans ce navigateur"}
+          </p>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm">Vérifier la chaîne d'audit</Button>
-            <Button variant="outline" size="sm">Effacer les brouillons</Button>
-            <Button variant="outline" size="sm">Effacer les ressources mises en cache</Button>
-            <Button variant="destructive" size="sm">Supprimer tout</Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busyAction !== null}
+              onClick={() => void runAction("Chaîne d’audit vérifiée", verifyAuditChain)}
+            >
+              Vérifier la chaîne d'audit
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busyAction !== null}
+              onClick={() => void runAction("Brouillons effacés", clearDrafts)}
+            >
+              Effacer les brouillons
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busyAction !== null}
+              onClick={() =>
+                void runAction("Ressources mises en cache effacées", async () => {
+                  await Promise.all([clearAssetCache(), clearWasmCache()]);
+                })
+              }
+            >
+              Effacer les ressources mises en cache
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={busyAction !== null}
+              onClick={() =>
+                void runAction("Données locales effacées — la chaîne d’audit est conservée", async () => {
+                  await Promise.all([clearLibrary(), clearDrafts(), clearAssetCache(), clearWasmCache()]);
+                  localStorage.removeItem("xberg-studio-visited");
+                  sessionStorage.clear();
+                })
+              }
+            >
+              Supprimer tout
+            </Button>
           </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            La chaîne d’audit n’est pas effacée par cette action : elle doit d’abord être
+            exportable ou explicitement réinitialisable via le backend WASM.
+          </p>
         </section>
       </main>
   );
