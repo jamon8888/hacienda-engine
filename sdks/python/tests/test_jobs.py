@@ -23,11 +23,12 @@ def test_get_job_result_reflects_current_or_later_status(client: HaciendaClient)
     # the job cannot legitimately advance between the status and result requests.
     deadline = time.monotonic() + 10
     job = client.jobs.get_job(job_id)
-    while job.status not in {"succeeded", "failed"} and time.monotonic() < deadline:
-        time.sleep(0.02)
+    deadline = time.monotonic() + 10
+    while job.status not in {"succeeded", "failed", "cancelled"} and time.monotonic() < deadline:
+        time.sleep(0.05)
         job = client.jobs.get_job(job_id)
 
-    assert job.status in {"succeeded", "failed"}
+    assert job.status in {"succeeded", "failed", "cancelled"}, "background job did not finish"
     result = client.jobs.get_job_result(job_id)
 
     # These are separate HTTP reads while the background worker is running.

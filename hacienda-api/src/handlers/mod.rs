@@ -22,6 +22,7 @@ pub mod rag_stream;
 pub mod uploads;
 pub mod usage;
 pub mod versions;
+pub mod xberg_surface;
 
 use axum::http::request::Parts;
 use hacienda_core::auth::{AuthContext, AuthExtension, Caller};

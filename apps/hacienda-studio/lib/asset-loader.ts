@@ -7,7 +7,15 @@ const DB_VERSION = 1;
 const MODEL_STORE = "models";
 const TESSDATA_STORE = "tessdata";
 
-const MODEL_ID = (import.meta.env.VITE_GLINER_MODEL_ID as string | undefined) ?? "jamon8888/gliner2-guardrails-pii-f16";
+export const MODEL_ID = (import.meta.env.VITE_GLINER_MODEL_ID as string | undefined) ?? "jamon8888/gliner2-guardrails-pii-f16";
+// This is the selected model's expected manifest prefix, not a claim that the
+// browser has independently verified the downloaded bytes.  Keeping the digest
+// in the provenance string preserves the AuditEntry contract while avoiding a
+// misleading "verified" label for the placeholder manifest values.
+const EXPECTED_MODEL_DIGEST = (MODEL_DIGESTS as Record<string, { model: string }>)[MODEL_ID]?.model;
+export const MODEL_PROVENANCE: string = EXPECTED_MODEL_DIGEST
+  ? `${MODEL_ID}@${EXPECTED_MODEL_DIGEST}`
+  : MODEL_ID;
 const MODEL_BASE_URL = import.meta.env.VITE_MODEL_BASE_URL ?? `https://huggingface.co/${MODEL_ID}/resolve/main`;
 const MODEL_BASE = import.meta.env.DEV && MODEL_BASE_URL.startsWith('https://huggingface.co')
   ? MODEL_BASE_URL.replace('https://huggingface.co', '/hf-model')

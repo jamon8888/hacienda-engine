@@ -2,10 +2,10 @@
 
 use crate::cli::{
     AuditExportArgs, AuditExportFormat, AuditListArgs, AuditStoreArgs, AuditVerifyArgs,
-    CompletionsArgs, ComplianceDoraArgs, ComplianceFormatArgs, ComplianceReportArgs,
-    ConcurrencyArgs, ExtractArgs, Format, RevealArgs, ReviewAssignArgs, ReviewDecideArgs,
-    ReviewDecisionArg, ReviewListArgs, ReviewShowArgs, ReviewStatsArgs, ReviewStatusArg,
-    ReviewStoreArgs, ScanArgs, ServeArgs,
+    CacheCommand, CapabilitiesArgs, CompletionsArgs, ComplianceDoraArgs, ComplianceFormatArgs,
+    ComplianceReportArgs, ConcurrencyArgs, ExtractArgs, Format, FormatsArgs, MimeArgs, RevealArgs,
+    ReviewAssignArgs, ReviewDecideArgs, ReviewDecisionArg, ReviewListArgs, ReviewShowArgs,
+    ReviewStatsArgs, ReviewStatusArg, ReviewStoreArgs, ScanArgs, ServeArgs,
 };
 use crate::config::load_config;
 use anyhow::{Context, Result};
@@ -30,6 +30,7 @@ use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::{EnvKeyResolver, RedactionMode};
 use hacienda_rag::InMemoryVectorStore;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -351,6 +352,120 @@ pub async fn run_config_show(
         }
         Format::Text => {
             print_config_text(&config);
+        }
+    }
+    Ok(())
+}
+
+/// Run the capability preflight without constructing a facade or reading documents.
+pub fn run_capabilities(args: CapabilitiesArgs) -> Result<()> {
+    let report = hacienda_core::capabilities::report(
+        env!("CARGO_PKG_VERSION"),
+        cfg!(feature = "rag-embeddings"),
+        hacienda_core::capabilities::cached_onnx_runtime_status(),
+        false,
+    );
+
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Text => {
+            println!("hacienda capabilities");
+            println!("version = {}", report.version);
+            println!("embedding_mode = {}", report.embedding_mode);
+            println!(
+                "onnx_runtime = compiled:{} runtime_ready:{}",
+                report.onnx_runtime.compiled, report.onnx_runtime.runtime_ready
+            );
+            for capability in report.capabilities {
+                println!(
+                    "{} = compiled:{} runtime_ready:{}{}",
+                    capability.name,
+                    capability.compiled,
+                    capability.runtime_ready,
+                    capability
+                        .reason
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn run_formats(args: FormatsArgs) -> Result<()> {
+    let formats = serde_json::to_value(hacienda_core::xberg_surface::supported_formats())?;
+    match args.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&formats)?),
+        Format::Text => {
+            for format in formats.as_array().into_iter().flatten() {
+                println!("{}", serde_json::to_string(format)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn run_mime(args: MimeArgs) -> Result<()> {
+    let file = std::fs::File::open(&args.path)
+        .with_context(|| format!("reading MIME input {}", args.path.display()))?;
+    let mut bytes = Vec::with_capacity(hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES + 1);
+    file.take((hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading MIME input {}", args.path.display()))?;
+    if bytes.len() > hacienda_core::xberg_surface::MAX_MIME_INPUT_BYTES {
+        anyhow::bail!("MIME input exceeds the 8 MiB limit");
+    }
+    let mime = hacienda_core::xberg_surface::detect_mime_type(&bytes, args.path.to_str())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    match args.format {
+        Format::Json => println!("{}", serde_json::json!({"mime_type": mime})),
+        Format::Text => println!("{mime}"),
+    }
+    Ok(())
+}
+
+pub async fn run_cache(command: CacheCommand) -> Result<()> {
+    match command {
+        CacheCommand::Stats { format } => {
+            let stats =
+                tokio::task::spawn_blocking(hacienda_core::xberg_surface::cache_stats).await??;
+            match format {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
+                Format::Text => println!(
+                    "files={} size_bytes={} oldest_days={} newest_days={}",
+                    stats.total_files,
+                    stats.total_size_bytes,
+                    stats.oldest_file_age_days,
+                    stats.newest_file_age_days
+                ),
+            }
+        }
+        CacheCommand::Clear { confirm } => {
+            if !confirm {
+                anyhow::bail!("cache clear requires --confirm");
+            }
+            let result =
+                tokio::task::spawn_blocking(hacienda_core::xberg_surface::clear_cache).await??;
+            println!("removed_files={}", result.removed_files);
+            println!("freed_bytes={}", result.freed_bytes);
+            println!("cleared_engine_count={}", result.cleared_engine_count);
+        }
+        CacheCommand::Warm { preset, confirm } => {
+            if !confirm {
+                anyhow::bail!("cache warm requires --confirm");
+            }
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30 * 60),
+                hacienda_core::xberg_surface::warm_embedding_preset(&preset),
+            )
+            .await
+            .context("cache warm timed out after 30 minutes")??;
+            println!("preset={}", result.preset);
+            println!(
+                "already_loaded_or_downloaded={}",
+                result.already_loaded_or_downloaded
+            );
         }
     }
     Ok(())

@@ -7,8 +7,9 @@
 //! # Why this is not xberg's own MCP server
 //!
 //! `xberg` ships its own MCP server behind its `mcp` cargo feature
-//! (`crates/xberg/src/mcp/`): `extract`, `extract_batch`, `detect_mime_type`, and four
-//! cache-management tools, all returning **unredacted** document content — there is no
+//! (`crates/xberg/src/mcp/`): nine raw tools including `extract`, `extract_batch`,
+//! `detect_mime_type`, `list_formats`, version, and cache-management operations, all
+//! returning **unredacted** document content — there is no
 //! PII detection or audit chain on that path, by design, because xberg is a document
 //! extraction library and hacienda's PII/audit layer is what wraps it.
 //!
@@ -42,6 +43,12 @@
 //! | `audit_verify` | `verify_audit_with_auth` | `GET /v1/audit/verify` |
 //! | `audit_entries` | `audit_history_with_auth` | `GET /v1/audit/entries` |
 //! | `compliance_report` | `compliance_report_with_auth` | `GET /v1/compliance/report` |
+//! | `get_capabilities` | (static) | `GET /capabilities`, `hacienda capabilities` |
+//! | `list_formats` | (Xberg) | `GET /v1/formats`, `hacienda formats` |
+//! | `detect_mime_type` | (Xberg) | `POST /v1/mime/detect`, `hacienda mime` |
+//! | `cache_stats` | (Xberg) | `GET /v1/cache/stats`, `hacienda cache stats` |
+//! | `cache_clear` | (Xberg) | `POST /v1/cache/clear`, `hacienda cache clear` |
+//! | `cache_warm` | (Xberg) | `POST /v1/cache/warm`, `hacienda cache warm` |
 //! | `get_version` | (static) | `GET /version` |
 
 mod params;
@@ -55,8 +62,8 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router,
-    transport::stdio,
-    ServerHandler, ServiceExt,
+    transport::{async_rw::AsyncRwTransport, stdio},
+    RoleServer, ServerHandler, ServiceExt,
 };
 use xberg::ExtractInput;
 
@@ -65,6 +72,11 @@ use xberg::ExtractInput;
 const DEFAULT_PAGE_LIMIT: usize = 100;
 /// Largest page this tool will serve, mirroring that module's `MAX_PAGE_LIMIT`.
 const MAX_PAGE_LIMIT: usize = 1000;
+/// Maximum size of one JSON-RPC request line accepted over MCP stdio.
+///
+/// This leaves room for the 8 MiB MIME payload after base64 encoding and its
+/// JSON-RPC envelope, while bounding the transport's per-message allocation.
+const MAX_MCP_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// The hacienda MCP server. Holds the facade every tool call routes through.
 #[derive(Clone)]
@@ -94,7 +106,10 @@ impl HaciendaMcp {
     /// This is the transport Claude Desktop and most local MCP clients use: they launch
     /// the server as a child process and speak JSON-RPC 2.0 over its stdin/stdout.
     pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let service = self.serve(stdio()).await?;
+        let (reader, writer) = stdio();
+        let transport = AsyncRwTransport::<RoleServer, _, _>::new(reader, writer)
+            .with_max_line_length(MAX_MCP_REQUEST_BYTES);
+        let service = self.serve(transport).await?;
         service.waiting().await?;
         Ok(())
     }
@@ -299,6 +314,147 @@ impl HaciendaMcp {
                 rmcp::ErrorData::invalid_params("compliance reporting is not configured", None)
             })?;
         json_tool_result(&report)
+    }
+
+    /// Report the compiled and runtime capability state shared with REST and CLI.
+    #[tool(
+        description = "Report safe build and runtime capability state. This never returns \
+            document content, secrets, model paths, or authorization grants.",
+        annotations(
+            title = "Get Capabilities",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    fn get_capabilities(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let report = hacienda_core::capabilities::report(
+            env!("CARGO_PKG_VERSION"),
+            false,
+            hacienda_core::capabilities::cached_onnx_runtime_status(),
+            false,
+        );
+        json_tool_result(&report)
+    }
+
+    #[tool(
+        description = "List Xberg document formats enabled in Hacienda.",
+        annotations(title = "List Formats", read_only_hint = true, idempotent_hint = true)
+    )]
+    fn list_formats(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        json_tool_result(&serde_json::json!({
+            "formats": hacienda_core::xberg_surface::supported_formats()
+        }))
+    }
+
+    #[tool(
+        description = "Detect MIME type from inline base64 bytes without reading a path or URL.",
+        annotations(
+            title = "Detect MIME Type",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    fn detect_mime_type(
+        &self,
+        Parameters(params): Parameters<MimeDetectParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.content_base64.len() > hacienda_core::xberg_surface::MAX_MIME_INPUT_BASE64_BYTES {
+            return Err(rmcp::ErrorData::invalid_params(
+                "content_base64 exceeds the 8 MiB limit",
+                None,
+            ));
+        }
+        let bytes = data_encoding::BASE64
+            .decode(params.content_base64.as_bytes())
+            .map_err(|_| rmcp::ErrorData::invalid_params("content_base64 is invalid", None))?;
+        let mime_type =
+            hacienda_core::xberg_surface::detect_mime_type(&bytes, params.filename.as_deref())
+                .map_err(|_| {
+                    rmcp::ErrorData::invalid_params("unsupported document content", None)
+                })?;
+        json_tool_result(&serde_json::json!({ "mime_type": mime_type }))
+    }
+
+    #[tool(
+        description = "Return sanitized Xberg cache statistics without filesystem paths.",
+        annotations(title = "Cache Stats", read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn cache_stats(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let stats = tokio::task::spawn_blocking(hacienda_core::xberg_surface::cache_stats)
+            .await
+            .map_err(|_| rmcp::ErrorData::internal_error("cache stats failed", None))?
+            .map_err(|_| rmcp::ErrorData::internal_error("cache stats failed", None))?;
+        json_tool_result(&stats)
+    }
+
+    #[tool(
+        description = "Clear Xberg-owned cache files and resident engines. Requires confirm=true.",
+        annotations(title = "Clear Cache", read_only_hint = false, destructive_hint = true)
+    )]
+    async fn cache_clear(
+        &self,
+        Parameters(params): Parameters<CacheConfirmParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !params.confirm {
+            return Err(rmcp::ErrorData::invalid_params(
+                "confirm must be true",
+                None,
+            ));
+        }
+        let result = tokio::task::spawn_blocking(hacienda_core::xberg_surface::clear_cache)
+            .await
+            .map_err(|_| rmcp::ErrorData::internal_error("cache clear failed", None))?
+            .map_err(|_| rmcp::ErrorData::internal_error("cache clear failed", None))?;
+        json_tool_result(&result)
+    }
+
+    #[tool(
+        description = "Warm one compiled Xberg embedding preset. Requires confirm=true.",
+        annotations(title = "Warm Cache", read_only_hint = false, open_world_hint = true)
+    )]
+    async fn cache_warm(
+        &self,
+        Parameters(params): Parameters<CacheWarmParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !params.confirm {
+            return Err(rmcp::ErrorData::invalid_params(
+                "confirm must be true",
+                None,
+            ));
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30 * 60),
+            hacienda_core::xberg_surface::warm_embedding_preset(&params.preset),
+        )
+        .await
+        .map_err(|_| rmcp::ErrorData::internal_error("cache warm timed out", None))?
+        .map_err(|error| match error {
+            hacienda_core::xberg_surface::XbergSurfaceError::WarmUnavailable => {
+                rmcp::ErrorData::invalid_params("embedding preset unavailable", None)
+            }
+            hacienda_core::xberg_surface::XbergSurfaceError::Warm(_) => {
+                rmcp::ErrorData::internal_error("embedding preset warm failed", None)
+            }
+            hacienda_core::xberg_surface::XbergSurfaceError::Mime(_)
+            | hacienda_core::xberg_surface::XbergSurfaceError::Cache(_)
+            | hacienda_core::xberg_surface::XbergSurfaceError::UnsafeCacheRoot
+            | hacienda_core::xberg_surface::XbergSurfaceError::CacheBusy => {
+                rmcp::ErrorData::internal_error("embedding preset warm failed", None)
+            }
+            hacienda_core::xberg_surface::XbergSurfaceError::MimeInputTooLarge => {
+                rmcp::ErrorData::invalid_params("input too large", None)
+            }
+        })?;
+        json_tool_result(&result)
     }
 
     /// Get hacienda's version.
@@ -519,12 +675,33 @@ mod tests {
             "audit_verify",
             "compliance_report",
             "documents_process",
+            "cache_clear",
+            "cache_stats",
+            "cache_warm",
+            "detect_mime_type",
+            "get_capabilities",
             "get_version",
+            "list_formats",
             "pii_redact",
             "pii_scan",
         ];
         expected.sort_unstable();
         assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn capabilities_tool_uses_the_shared_report_shape() {
+        let server = server_with_pii(RedactionMode::Mask);
+        let result = server
+            .get_capabilities(Parameters(EmptyParams {}))
+            .expect("capability probe must serialize");
+        let content = result
+            .structured_content
+            .expect("capability probe must include structured content");
+
+        assert_eq!(content["embedding_mode"], "presets_only");
+        assert_eq!(content["capabilities"][0]["name"], "redaction");
+        assert_eq!(content["onnx_runtime"]["compiled"], false);
     }
 
     /// `RedactionDepthExceeded` is a client-input-limit violation (an archive nested

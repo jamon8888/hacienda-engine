@@ -12,6 +12,15 @@ license.workspace = true
 name = "hacienda"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enable the real Xberg embedding runtime consistently across the CLI, API, and core.
+rag-embeddings = [
+    "hacienda-api/rag-embeddings",
+    "hacienda-core/rag-embeddings",
+    "hacienda-rag/embeddings",
+]
+
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }

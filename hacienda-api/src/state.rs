@@ -7,7 +7,7 @@ use hacienda_core::store::postgres::usage::UsageStore;
 use hacienda_core::store::postgres::versions::DocumentVersionStore;
 use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::RagStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::handlers::claude_messages::ClaudeMessagesProvider;
 use crate::quota::InMemoryQuotaStore;
@@ -25,6 +25,12 @@ pub struct ApiLimits {
     pub max_body_bytes: usize,
     /// Maximum number of documents in a single `POST /v1/documents` request.
     pub max_documents: usize,
+}
+
+pub(crate) enum ProbeState {
+    Idle,
+    Running,
+    Ready(hacienda_core::capabilities::CapabilityStatus),
 }
 
 impl Default for ApiLimits {

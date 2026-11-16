@@ -25,6 +25,7 @@
  * the build output is missing. See `initPiiEngine` below.
  */
 import type { AuditHandle } from "hacienda-wasm";
+import { MODEL_PROVENANCE } from "./asset-loader";
 import { initializeWasmWithCache } from "./wasm-cache";
 
 export interface PiiEntity {
@@ -34,6 +35,8 @@ export interface PiiEntity {
   end: number;
   confidence: number;
   source: string;
+  /** Model that detected this entity; absent on legacy findings and regex entities. */
+  model_provenance?: string;
   format_preserving: boolean;
   redact_template: string;
 }
@@ -291,16 +294,17 @@ export async function redactPii(text: string): Promise<PiiPipelineResult> {
 export async function recordPiiAudit(
   result: PiiPipelineResult,
   appliedMode: "mask" | "hash" | "pseudonymize" | "remove",
+  modelProvenance: string | null = MODEL_PROVENANCE,
 ): Promise<void> {
   const handle = await getAuditHandle();
   if (!result.audit_log || result.audit_log.length === 0) {
-    await handle.recordResult(result);
+    await handle.recordResult(result, modelProvenance);
     return;
   }
   await handle.recordResult({
     ...result,
     audit_log: result.audit_log.map((entry) => ({ ...entry, action: appliedMode })),
-  });
+  }, modelProvenance);
 }
 
 /**
@@ -339,10 +343,13 @@ export async function recordPiiReveal(
   revealedText: string,
   category: string,
   source: string,
+  modelProvenance?: string,
 ): Promise<string> {
   await initPiiEngine();
   const handle = await getAuditHandle();
-  return handle.recordReveal(revealedText, category, source);
+  // Older persisted model findings have no provenance. Record that absence as null
+  // instead of attributing the reveal to whichever model a later build selected.
+  return handle.recordReveal(revealedText, category, source, modelProvenance ?? null);
 }
 
 /** One row of `hacienda-core`'s `AuditEntry` (`hacienda-core/src/audit/entry.rs`),

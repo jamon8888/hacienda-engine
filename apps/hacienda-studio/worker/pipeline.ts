@@ -26,7 +26,12 @@ import {
   isBridgeEntityArray,
   type BridgeEntity,
 } from "../lib/ner-bridge";
-import { createNerBackend, loadNerModel, loadTessdata } from "../lib/asset-loader";
+import {
+  MODEL_PROVENANCE,
+  createNerBackend,
+  loadNerModel,
+  loadTessdata,
+} from "../lib/asset-loader";
 import { extractPdfWithLiteParse, toLiteParseOcrEngine } from "../lib/pdf-liteparse";
 import {
   initPiiEngine,
@@ -182,9 +187,12 @@ async function initNerBackend(): Promise<void> {
  */
 export function selectNerBridge(
   runtime: NerRuntime | null,
-): (text: string, categories: string[]) => Promise<BridgeEntity[]> {
-  if (!runtime) return extractEntities;
-  return async (text, categories) => {
+): ((text: string, categories: string[]) => Promise<BridgeEntity[]>) & {
+  getModelProvenance: () => string | null;
+} {
+  let modelProvenance: string | null = runtime ? MODEL_PROVENANCE : null;
+  const bridge = async (text: string, categories: string[]) => {
+    if (!runtime) return extractEntities(text, categories);
     try {
       const raw: unknown = await runtime.detect(text, { categories });
       // `runtime.detect()` crosses a WASM boundary — its result isn't something this
@@ -201,6 +209,7 @@ export function selectNerBridge(
       // document rather than crashing the batch.
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("dtype mismatch")) {
+        modelProvenance = null;
         console.warn(
           "[Worker] Neural NER dtype mismatch (F16/F32), falling back to regex:",
           msg,
@@ -210,6 +219,7 @@ export function selectNerBridge(
       throw err;
     }
   };
+  return Object.assign(bridge, { getModelProvenance: () => modelProvenance });
 }
 
 /**
@@ -879,10 +889,11 @@ async function processFile(
   // Run NER on the markdown (works for both transcription and extraction)
   console.log(`[Worker] Running NER on ${input.name}...`);
   let nerResults: unknown[] = [];
+  const nerBridge = selectNerBridge(nerRuntime);
   try {
     const nerEngine = new XbergEngine(
       { bridgeTimeoutMs: 30000 },
-      { ner: { ner: selectNerBridge(nerRuntime) } },
+      { ner: { ner: nerBridge } },
     );
 
     // `NerModel.detect`/`XbergEngine.ner`'s `opts.categories` is a single array where
@@ -995,7 +1006,12 @@ async function processFile(
 
       const piiMs = performance.now() - piiStart;
       console.log(`[Worker] PII detection completed in ${piiMs.toFixed(0)}ms for ${input.name}`);
-      piiFindings = result.entities;
+      const nerModelProvenance = nerBridge.getModelProvenance();
+      piiFindings = result.entities.map((entity) =>
+        entity.source === "model"
+          ? { ...entity, model_provenance: nerModelProvenance }
+          : entity,
+      );
       piiEntitiesFound = piiFindings.length;
       console.log(`[Worker] Found ${piiEntitiesFound} PII entities in ${input.name}`);
     } catch (piiError) {
@@ -1087,7 +1103,7 @@ async function processFile(
       // because only now is `appliedMode` known. See `recordPiiAudit`'s doc for why the
       // wasm call's own `audit_log` cannot be trusted for anything but mask.
       if (piiResult) {
-        await recordPiiAudit(piiResult, appliedMode);
+        await recordPiiAudit(piiResult, appliedMode, nerBridge.getModelProvenance());
       }
     }
   }
