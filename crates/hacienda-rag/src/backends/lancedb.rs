@@ -305,6 +305,8 @@ impl LanceDbStore {
                         entities: json_value_at(&batch, "entities", row)?,
                         labels: json_value_at(&batch, "labels", row)?,
                         metadata: json_value_at(&batch, "metadata", row)?,
+                        dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
+                        version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
                     },
                     ingested_at: int_at(&batch, "ingested_at", row)?,
                 });
@@ -336,6 +338,8 @@ impl LanceDbStore {
                         sparse_embedding: json_at(&batch, "sparse_embedding", row)?,
                         multi_vector: json_at(&batch, "multi_vector", row)?,
                         chunk_metadata: json_value_at(&batch, "chunk_metadata", row)?,
+                        dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
+                        version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
                     },
                 });
             }
@@ -568,12 +572,26 @@ impl RagStore for LanceDbStore {
                     },
                 )
             });
+        // Le document est la source autoritative du scoping juridique : les
+        // chunks produits par le chunking côté API (dossier_id / version_ref
+        // à None) héritent du scope de leur document parent à l'upsert, sinon
+        // une requête dossier/version retournerait zéro résultat malgré un
+        // document correctement scopé.
         let rows = chunks
             .iter()
-            .map(|record| StoredChunk {
-                id: ChunkId(format!("{}:{}", id.0, record.ordinal)),
-                document_id: id.clone(),
-                record: record.clone(),
+            .map(|record| {
+                let mut scoped = record.clone();
+                if scoped.dossier_id.is_none() {
+                    scoped.dossier_id = document.dossier_id.clone();
+                }
+                if scoped.version_ref.is_none() {
+                    scoped.version_ref = document.version_ref.clone();
+                }
+                StoredChunk {
+                    id: ChunkId(format!("{}:{}", id.0, scoped.ordinal)),
+                    document_id: id.clone(),
+                    record: scoped,
+                }
             })
             .collect::<Vec<_>>();
         self.replace_chunks(&chunk_table, &id, &rows, spec.embedding_dim)
@@ -673,6 +691,19 @@ impl RagStore for LanceDbStore {
                 // or top_k.
                 if let Some(document_id) = &query.document_id {
                     if &chunk.document_id != document_id {
+                        continue;
+                    }
+                }
+                // Hard dossier/version boundary: never surface chunks from a
+                // sibling dossier or version, whatever the mode, filter, or
+                // top_k. Chunks carry these fields denormalized.
+                if let Some(dossier_id) = &query.dossier_id {
+                    if chunk.record.dossier_id.as_deref() != Some(dossier_id.as_str()) {
+                        continue;
+                    }
+                }
+                if let Some(version_ref) = &query.version_ref {
+                    if chunk.record.version_ref.as_deref() != Some(version_ref.as_str()) {
                         continue;
                     }
                 }
@@ -983,6 +1014,8 @@ fn document_schema() -> SchemaRef {
         Field::new("labels", DataType::Utf8, false),
         Field::new("metadata", DataType::Utf8, false),
         Field::new("ingested_at", DataType::Int64, false),
+        Field::new("dossier_id", DataType::Utf8, false),
+        Field::new("version_ref", DataType::Utf8, false),
     ]))
 }
 fn chunk_schema(dim: u32) -> SchemaRef {
@@ -1003,6 +1036,8 @@ fn chunk_schema(dim: u32) -> SchemaRef {
         Field::new("sparse_embedding", DataType::Utf8, false),
         Field::new("multi_vector", DataType::Utf8, false),
         Field::new("chunk_metadata", DataType::Utf8, false),
+        Field::new("dossier_id", DataType::Utf8, false),
+        Field::new("version_ref", DataType::Utf8, false),
     ]))
 }
 
@@ -1056,6 +1091,14 @@ fn document_batch(
             Arc::new(StringArray::from(vec![json_string(&doc.labels)])),
             Arc::new(StringArray::from(vec![json_string(&doc.metadata)])),
             Arc::new(Int64Array::from(vec![ingested_at])),
+            Arc::new(StringArray::from(vec![doc
+                .dossier_id
+                .as_deref()
+                .unwrap_or("")])),
+            Arc::new(StringArray::from(vec![doc
+                .version_ref
+                .as_deref()
+                .unwrap_or("")])),
         ],
     )
     .map_err(backend_err)
@@ -1122,6 +1165,16 @@ fn chunk_batch(rows: &[StoredChunk], dim: u32) -> RagResult<RecordBatch> {
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|r| json_string(&r.record.chunk_metadata))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|r| r.record.dossier_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|r| r.record.version_ref.as_deref().unwrap_or(""))
                     .collect::<Vec<_>>(),
             )),
         ],
@@ -1256,6 +1309,8 @@ fn summarize(doc: &StoredDocument) -> DocumentSummary {
         entities: doc.record.entities.clone(),
         metadata: doc.record.metadata.clone(),
         ingested_at: Some(doc.ingested_at),
+        dossier_id: doc.record.dossier_id.clone(),
+        version_ref: doc.record.version_ref.clone(),
     }
 }
 
@@ -1273,6 +1328,8 @@ fn resolve_field(
             "mime" => record.mime.clone().map(serde_json::Value::String),
             "external_id" => record.external_id.clone().map(serde_json::Value::String),
             "source_uri" => record.source_uri.clone().map(serde_json::Value::String),
+            "dossier_id" => record.dossier_id.clone().map(serde_json::Value::String),
+            "version_ref" => record.version_ref.clone().map(serde_json::Value::String),
             "ingested_at" => Some(serde_json::Value::from(doc.ingested_at)),
             "keywords" => serde_json::to_value(&record.keywords).ok(),
             "labels" => Some(record.labels.clone()),
@@ -1284,6 +1341,8 @@ fn resolve_field(
             "content" => Some(serde_json::Value::String(chunk.content.clone())),
             "ordinal" => Some(serde_json::Value::from(chunk.ordinal)),
             "external_id" => chunk.external_id.clone().map(serde_json::Value::String),
+            "dossier_id" => chunk.dossier_id.clone().map(serde_json::Value::String),
+            "version_ref" => chunk.version_ref.clone().map(serde_json::Value::String),
             path if path.starts_with("chunk_metadata.") => {
                 json_pointer(&chunk.chunk_metadata, &path[15..])
             }
@@ -1356,6 +1415,8 @@ mod tests {
             sparse_embedding: None,
             multi_vector: None,
             chunk_metadata: serde_json::json!({"ordinal": ordinal}),
+            dossier_id: None,
+            version_ref: None,
         }
     }
 
@@ -1899,5 +1960,96 @@ mod tests {
                 .and_then(|document| document.external_id.as_deref()),
             Some("one")
         );
+    }
+
+    /// End-to-end : chunks produits par le chunking côté API (dossier_id /
+    /// version_ref à None) héritent du scope de leur document parent à
+    /// l'upsert, et une requête dossier/version les retrouve.
+    #[tokio::test]
+    async fn should_propagate_document_scope_to_chunks_when_chunk_fields_are_none() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("docs", 2))
+            .await
+            .unwrap();
+
+        let document = DocumentRecord {
+            title: Some("contrat".to_string()),
+            full_text: "texte du contrat".to_string(),
+            dossier_id: Some("dossier-1".to_string()),
+            version_ref: Some("v-2024".to_string()),
+            ..Default::default()
+        };
+        // Les chunks n'ont aucun scope : ils doivent l'hériter du document.
+        let chunks = vec![chunk("clause de confidentialité", 0, vec![1.0, 0.0])];
+        let id = store
+            .upsert_document("docs", &document, &chunks)
+            .await
+            .unwrap();
+
+        // Le document stocké conserve ses scopes.
+        let (stored, stored_chunks) = store
+            .get_document_chunks("docs", &id)
+            .await
+            .unwrap()
+            .expect("document should exist");
+        assert_eq!(stored.dossier_id.as_deref(), Some("dossier-1"));
+        assert_eq!(stored.version_ref.as_deref(), Some("v-2024"));
+        assert_eq!(stored_chunks[0].dossier_id.as_deref(), Some("dossier-1"));
+        assert_eq!(stored_chunks[0].version_ref.as_deref(), Some("v-2024"));
+
+        // Retrieve par dossier : retrouve le chunk malgré des champs chunk
+        // vides à l'upsert.
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    query_vector: Some(vec![1.0, 0.0]),
+                    dossier_id: Some("dossier-1".to_string()),
+                    include_content: true,
+                    ..RetrieveQuery::vector(10)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.chunks.len(), 1);
+        assert_eq!(output.chunks[0].document_id, id);
+        assert_eq!(
+            output.chunks[0].content.as_deref(),
+            Some("clause de confidentialité")
+        );
+
+        // Retrieve par version : idem.
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    query_vector: Some(vec![1.0, 0.0]),
+                    version_ref: Some("v-2024".to_string()),
+                    include_content: true,
+                    ..RetrieveQuery::vector(10)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.chunks.len(), 1);
+        assert_eq!(output.chunks[0].document_id, id);
+
+        // Retrieve par un mauvais dossier : zéro résultat (anti-mélange).
+        let output = store
+            .retrieve(
+                "docs",
+                &RetrieveQuery {
+                    query_vector: Some(vec![1.0, 0.0]),
+                    dossier_id: Some("dossier-9".to_string()),
+                    ..RetrieveQuery::vector(10)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(output.chunks.is_empty());
     }
 }

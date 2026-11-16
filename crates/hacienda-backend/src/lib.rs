@@ -645,6 +645,8 @@ impl Backend {
                 "format_kind": format_kind,
                 "audit_references": document.audit_references(),
             }),
+            dossier_id: Some(dossier_id.clone()),
+            version_ref: Some(version_id.to_string()),
             metadata: rag_metadata,
         };
         #[cfg(feature = "chunking")]
@@ -665,6 +667,8 @@ impl Backend {
             sparse_embedding: None,
             multi_vector: None,
             chunk_metadata: Value::Null,
+            dossier_id: Some(dossier_id.clone()),
+            version_ref: Some(version_id.to_string()),
         }];
         for chunk in &mut chunks {
             chunk.external_id = Some(format!("{document_id}:{version_id}:{}", chunk.ordinal));
@@ -2126,6 +2130,8 @@ fn validate_backend_document(
         sparse_embedding: None,
         multi_vector: None,
         chunk_metadata: Value::Null,
+        dossier_id: Some(document.dossier_id.clone()),
+        version_ref: Some(document.editor.version_ref.clone()),
     }];
     if document.chunks.is_empty()
         || document
@@ -2255,6 +2261,8 @@ fn build_editor_revision_document(
             "format_kind": format_kind,
             "pipeline_digest": revision.pipeline_digest.clone(),
         }),
+        dossier_id: Some(base.dossier_id.clone()),
+        version_ref: Some(version_id.to_string()),
         metadata: rag_metadata,
     };
     #[cfg(feature = "chunking")]
@@ -2275,6 +2283,8 @@ fn build_editor_revision_document(
         sparse_embedding: None,
         multi_vector: None,
         chunk_metadata: Value::Null,
+        dossier_id: Some(base.dossier_id.clone()),
+        version_ref: Some(version_id.to_string()),
     }];
     for chunk in &mut chunks {
         chunk.external_id = Some(format!(

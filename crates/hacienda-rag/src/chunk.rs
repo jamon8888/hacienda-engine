@@ -42,6 +42,11 @@ pub fn chunk_full_text(full_text: &str, config: &ChunkingConfig) -> RagResult<Ve
             sparse_embedding: None,
             multi_vector: None,
             chunk_metadata: serde_json::Value::Null,
+            // Le chunking côté API ne connaît pas encore le dossier/version du
+            // document parent : ces champs restent `None` jusqu'à ce que
+            // l'appelant (upsert) les propage depuis le `DocumentRecord`.
+            dossier_id: None,
+            version_ref: None,
         })
         .collect())
 }

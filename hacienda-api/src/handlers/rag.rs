@@ -1287,6 +1287,8 @@ mod tests {
                     sparse_embedding: None,
                     multi_vector: None,
                     chunk_metadata: serde_json::json!({"contact": "alice@example.com"}),
+                    dossier_id: None,
+                    version_ref: None,
                 }],
             )
             .await
@@ -1339,6 +1341,8 @@ mod tests {
                     sparse_embedding: None,
                     multi_vector: None,
                     chunk_metadata: serde_json::Value::Null,
+                    dossier_id: None,
+                    version_ref: None,
                 }],
             )
             .await
@@ -1453,6 +1457,8 @@ mod tests {
                     sparse_embedding: None,
                     multi_vector: None,
                     chunk_metadata: serde_json::Value::Null,
+                    dossier_id: None,
+                    version_ref: None,
                 }],
             )
             .await
@@ -1475,6 +1481,8 @@ mod tests {
                     sparse_embedding: None,
                     multi_vector: None,
                     chunk_metadata: serde_json::Value::Null,
+                    dossier_id: None,
+                    version_ref: None,
                 }],
             )
             .await
