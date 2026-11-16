@@ -84,6 +84,8 @@ pub struct ApiState {
     /// before `DefaultBodyLimit`/any body decode. `None` means quotas are not enforced —
     /// today's behaviour, and opt-in the same way every other store above is.
     pub(crate) quota_store: Option<Arc<InMemoryQuotaStore>>,
+    /// Per-router ONNX probe state; independent API routers must not share it.
+    pub(crate) probe_state: Arc<Mutex<ProbeState>>,
     /// Anthropic Messages provider used by the authenticated Claude Code gateway.
     /// `None` keeps the route registered but disabled, which is the safe default.
     pub(crate) claude_messages_provider: Option<Arc<dyn ClaudeMessagesProvider>>,
@@ -110,6 +112,7 @@ impl ApiState {
             object_store: None,
             usage_store: None,
             quota_store: None,
+            probe_state: Arc::new(Mutex::new(ProbeState::Idle)),
             claude_messages_provider: None,
             rag_egress_allowlist: None,
         }
