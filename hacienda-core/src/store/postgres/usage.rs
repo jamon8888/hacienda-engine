@@ -46,6 +46,7 @@ pub struct UsageRecord {
 }
 
 /// Read-model over the audit chain for billing/metering.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait UsageStore: Send + Sync {
     /// Aggregate usage per principal for `tenant`, optionally windowed to

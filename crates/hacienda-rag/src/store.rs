@@ -42,6 +42,7 @@ use async_trait::async_trait;
 /// registry (see the crate-level doc comment). Backends that need async,
 /// fallible setup must do it in their own constructor and be fully connected
 /// before being handed to a caller.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RagStore: Send + Sync + 'static {
     /// A stable identifier for this store instance.
