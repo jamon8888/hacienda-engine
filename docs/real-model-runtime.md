@@ -61,6 +61,7 @@ HACIENDA_NER_MODEL_DIR=/chemin/vers/gliner2-pii \
 ```
 
 Ce script :
+
 1. Vérifie la présence des assets du checkpoint (fail clair si manquant).
 2. Exécute le test `#[ignore]`d contre le vrai backend Candle GLiNER2.
 3. Documente l'étape suivante : réchauffer le cache d'embedding Xberg via la
