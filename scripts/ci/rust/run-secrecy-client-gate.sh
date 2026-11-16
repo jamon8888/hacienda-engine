@@ -64,27 +64,6 @@ run_gate secrecy-client-clippy \
 # fields is absent while opaque token references remain present.
 run_gate token-only-negative-tests cargo test -p hacienda-core --lib editor_projection
 
-# The editor/viewer seam is part of this gate. Checking the package's presence
-# rather than `git diff HEAD` is intentional: CI checks a commit, so its tracked
-# frontend changes have no worktree diff at that point.
-if [[ -f apps/hacienda-studio/package.json ]]; then
-    # Studio has no committed ESLint config (the `lint` script is unusable as-is);
-    # typecheck + the contract test are the checks this gate can actually enforce.
-    # Run vitest directly: `test:unit`'s pretest hook rebuilds the WASM package
-    # with wasm-pack, which CI intentionally does not build. This is the same
-    # contract-only test ci-studio-unit.yaml runs.
-    if command -v pnpm >/dev/null 2>&1; then
-        run_gate studio-typecheck pnpm --dir apps/hacienda-studio run check
-        run_gate studio-unit-tests pnpm --dir apps/hacienda-studio exec vitest run lib/pseudonymize.test.ts
-    elif command -v npm >/dev/null 2>&1; then
-        run_gate studio-typecheck npm --prefix apps/hacienda-studio run check
-        run_gate studio-unit-tests npm --prefix apps/hacienda-studio exec -- vitest run lib/pseudonymize.test.ts
-    else
-        echo "frontend files changed but neither pnpm nor npm is installed" >&2
-        failures=$((failures + 1))
-    fi
-fi
-
 # This is intentionally the one workspace-wide attempt. The earlier clippy
 # commands are the focused diagnostics for the touched crates/features.
 run_gate workspace-clippy \

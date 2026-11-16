@@ -32,19 +32,6 @@ jobs:
             protobuf-compiler \
             libprotobuf-dev
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.0.0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: pnpm
-          cache-dependency-path: apps/hacienda-studio/pnpm-lock.yaml
-
-      - name: Install Studio dependencies
-        run: pnpm --dir apps/hacienda-studio install --frozen-lockfile
-
       # Pinned date: see ci-rust.yaml's top-of-file comment for why an unpinned
       # nightly channel broke CI on 2026-08-08.
       - name: Install rust toolchain
