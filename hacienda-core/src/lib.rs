@@ -29,6 +29,7 @@
 pub mod audit;
 pub mod capabilities;
 pub mod editor_projection;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod xberg_surface;
 // Everything below is server/native-only: `auth` pulls in axum, `facade`/`config`/`error`
 // bind the whole crate (review queue, compliance reports, the file-backed audit store)

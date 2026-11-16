@@ -57,7 +57,10 @@ use std::sync::Arc;
 
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};
-use params::{AuditEntriesParams, DocumentsProcessParams, EmptyParams, TextParams};
+use params::{
+    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams, EmptyParams,
+    MimeDetectParams, TextParams,
+};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,

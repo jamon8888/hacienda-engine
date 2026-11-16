@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, claude_messages, documents, info, jobs, keys, openapi, pii,
-        presets, rag, rag_stream, uploads, usage, versions,
+        audit, audit_review, auth, capabilities, claude_messages, documents, info, jobs, keys,
+        openapi, pii, presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
     },
     quota::quota_middleware,
     state::ApiState,
