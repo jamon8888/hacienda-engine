@@ -89,13 +89,13 @@ pub struct RetrieveQuery {
     /// Hard retrieval boundary: when set, only chunks whose parent document's
     /// [`DocumentRecord::dossier_id`] equals this value are eligible, regardless
     /// of mode, filter, or top_k. Complements [`document_id`](Self::document_id)
-    /// and [`version_ref`](Self::version_ref): all three are ANDed together.
+    /// and [`version_ref`](Self::version_ref): all three combine with a logical AND.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dossier_id: Option<String>,
     /// Hard retrieval boundary: when set, only chunks whose parent document's
     /// [`DocumentRecord::version_ref`] equals this value are eligible, regardless
     /// of mode, filter, or top_k. Complements [`document_id`](Self::document_id)
-    /// and [`dossier_id`](Self::dossier_id): all three are ANDed together.
+    /// and [`dossier_id`](Self::dossier_id): all three combine with a logical AND.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
     /// Hard retrieval boundary: when set, only chunks whose parent document id
