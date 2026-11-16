@@ -300,6 +300,7 @@ pub enum AuthzError {
 /// Used by the auth middleware to authenticate requests. Implementations
 /// must hash the incoming token and look up the stored hash — never store
 /// or compare raw keys.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TokenResolver: Send + Sync {
     /// Resolve a bearer token to its capability set.

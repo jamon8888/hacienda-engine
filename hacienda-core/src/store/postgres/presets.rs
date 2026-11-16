@@ -27,6 +27,7 @@ pub enum PresetError {
 /// `presets_name_key`) now enforces at the schema level, not just in application code.
 /// `get`/`get_by_name` on an id/name belonging to a different tenant resolve as `None`,
 /// indistinguishable from one that never existed (D-S1b-1).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PresetStore: Send + Sync {
     async fn create(

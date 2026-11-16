@@ -88,6 +88,7 @@ impl Token {
 /// Trait for resolving a token string into a `Token`.
 ///
 /// Implementations can validate API keys, JWTs, opaque tokens against a store, etc.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TokenResolver: Send + Sync {
     /// Resolve a token string to its [`Token`] representation.

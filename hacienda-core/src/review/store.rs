@@ -53,6 +53,7 @@ use crate::tenancy::TenantId;
 /// = 'pending' RETURNING *`. Splitting the operation into `SELECT` + `UPDATE` — even within a
 /// transaction at `READ COMMITTED` — reintroduces the race and will only appear under Phase 2's
 /// concurrent workload, not in sequential tests.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ReviewStore: Send + Sync {
     /// Insert a pre-built item into the store, scoped to `tenant`.

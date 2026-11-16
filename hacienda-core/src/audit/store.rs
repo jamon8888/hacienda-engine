@@ -53,6 +53,7 @@ use crate::tenancy::TenantId;
 /// (`should_construct_arc_dyn_audit_store`) before any backend was written. If you add a
 /// method with a type parameter or a return type that names `Self`, you will break this
 /// property and every call site that stores the trait object.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AuditStore: Send + Sync {
     /// Mint and record a document's worth of entries in one call, into `tenant`'s chain.
