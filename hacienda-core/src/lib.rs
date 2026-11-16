@@ -27,7 +27,9 @@
 //! ```
 
 pub mod audit;
+pub mod capabilities;
 pub mod editor_projection;
+pub mod xberg_surface;
 // Everything below is server/native-only: `auth` pulls in axum, `facade`/`config`/`error`
 // bind the whole crate (review queue, compliance reports, the file-backed audit store)
 // together, and `compliance`, `glossary`, `jobs`, `review` are unused by browser-side PII
