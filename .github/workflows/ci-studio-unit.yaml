@@ -13,8 +13,7 @@ name: CI - Studio Unit Tests
 # none of that — it only imports `./pseudonymize`, a pure TS/WebCrypto module with no wasm
 # dependency — so paying that cost here would make this job slow for no reason. Other
 # `lib/*.test.ts` files (e.g. `pii-engine.test.ts`, `audit-handle.test.ts`) do import the
-# wasm package and are deliberately NOT run here; they belong in a separate, path-scoped
-# job that accepts the wasm-build cost, not bundled into this one.
+# wasm package and are deliberately NOT run here.
 
 on:
   push:
@@ -47,7 +46,7 @@ jobs:
       run:
         working-directory: apps/hacienda-studio
     steps:
-      # `persist-credentials: false` matches ci-rust.yaml/ci-wasm-freshness.yaml: this job
+      # `persist-credentials: false` matches ci-rust.yaml: this job
       # only reads the tree, so leaving a usable token in .git/config for every later step
       # (including `npm install`'s lifecycle scripts) buys nothing.
       #
