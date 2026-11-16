@@ -757,7 +757,7 @@ impl LocalFullDocumentService {
 
 async fn read_selected_document(path: &Path) -> Result<Vec<u8>, String> {
     let limit = xberg::SecurityLimits::default().max_archive_size;
-    let mut file = tokio::fs::File::open(path)
+    let file = tokio::fs::File::open(path)
         .await
         .map_err(|_| "Selected document could not be read".to_owned())?;
     let metadata = file
