@@ -44,6 +44,7 @@ pub struct ObjectMetadata {
 }
 
 /// Trait for object storage used by the presigned-upload flow.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     /// Compute a presigned PUT URL for `key`, constrained to `content_type`.

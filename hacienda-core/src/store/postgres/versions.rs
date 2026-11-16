@@ -17,6 +17,7 @@ pub enum VersionError {
 }
 
 /// Trait for document version storage.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DocumentVersionStore: Send + Sync {
     /// Create a new version for a document.
