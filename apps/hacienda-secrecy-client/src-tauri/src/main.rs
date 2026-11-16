@@ -1,4 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// `--all-targets` also builds this binary as a test harness, where `main()` and the
+// Tauri command registration it references are compiled out (`#[cfg(not(test))]`).
+// Those items are live in the shipped app; only the test-harness build sees them as dead.
+#![cfg_attr(test, allow(dead_code))]
 
 use futures::executor::block_on;
 use hacienda_backend::{
