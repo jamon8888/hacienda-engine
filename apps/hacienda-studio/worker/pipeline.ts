@@ -18,9 +18,6 @@ import {
   WasmSecurityLimits,
 } from "@xberg-io/xberg-wasm";
 import initWasm from "@xberg-io/xberg-wasm";
-// The WASM package ships only a TypeScript declaration for this enum, not a
-// runtime export; use its numeric value (Markdown = 1) at the call site.
-import type { WasmOutputFormat } from "@xberg-io/xberg-wasm";
 import {
   extractEntities,
   isBridgeEntityArray,
@@ -798,7 +795,7 @@ async function processFile(
       );
 
       const extractConfig = WasmExtractionConfig.default();
-      extractConfig.outputFormat = 1 as WasmOutputFormat;
+      extractConfig.outputFormat = "markdown";
       extractConfig.chunking = WasmChunkingConfig.default();
       extractConfig.chunking.maxCharacters = config.chunkSize;
       extractConfig.ocr = WasmOcrConfig.default();
