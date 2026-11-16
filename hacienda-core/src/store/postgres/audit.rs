@@ -577,6 +577,10 @@ struct AuditEntryRow {
     pipeline_version: String,
     config_hash: String,
     principal: Option<String>,
+    // Part of the SELECT column list and of the audit provenance contract, but
+    // Postgres currently stores neither model id nor checkpoint provenance (see
+    // `model: None` at the insert site), so nothing reads it back yet.
+    #[expect(dead_code)]
     model: Option<String>,
     chain_hash: String,
     created_at: DateTime<Utc>,
