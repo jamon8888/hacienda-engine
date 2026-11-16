@@ -419,6 +419,14 @@ impl RagStore for InMemoryVectorStore {
             .chunks
             .iter()
             .filter(|c| {
+                // Hard document boundary: a retrieval scoped to one document must
+                // never surface a sibling document's chunks, whatever the mode,
+                // filter, or top_k.
+                if let Some(document_id) = &query.document_id {
+                    if &c.document_id != document_id {
+                        return false;
+                    }
+                }
                 query.filter.as_ref().is_none_or(|f| {
                     coll.documents
                         .get(&c.document_id)
@@ -1237,5 +1245,75 @@ mod tests {
             .unwrap()
             .expect("document should exist");
         assert_eq!(chunks[0].embedding, vec![1.0, 0.0]);
+    }
+
+    /// Retrieval scoped to one document must never surface a sibling document's
+    /// chunks — the retrieval-layer isolation seam. Both documents live in the
+    /// same collection, so a collection-scoped query would mix them; a
+    /// `document_id`-scoped query must not.
+    #[tokio::test]
+    async fn should_retrieve_only_scoped_document_when_document_id_is_set() {
+        let store = store_with_collection(2).await;
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            ..Default::default()
+        };
+        let id_a = store
+            .upsert_document(
+                "docs",
+                &doc_a,
+                &[chunk(0, "chunk of doc a", vec![1.0, 0.0])],
+            )
+            .await
+            .unwrap();
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            ..Default::default()
+        };
+        let id_b = store
+            .upsert_document(
+                "docs",
+                &doc_b,
+                &[chunk(0, "chunk of doc b", vec![1.0, 0.0])],
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(id_a, id_b);
+
+        // Unscoped: both documents' chunks are eligible.
+        let unscoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &unscoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 2);
+
+        // Scoped to doc A: only doc A's chunk survives, even though doc B's
+        // chunk is equally similar and sits in the same collection.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            document_id: Some(id_a.clone()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_a);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc a"));
+
+        // Scoped to doc B: the converse holds.
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0]),
+            document_id: Some(id_b.clone()),
+            ..RetrieveQuery::vector(10)
+        };
+        let out = store.retrieve("docs", &scoped).await.unwrap();
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(out.chunks[0].document_id, id_b);
+        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc b"));
     }
 }

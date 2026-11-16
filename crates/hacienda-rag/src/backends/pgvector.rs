@@ -834,6 +834,7 @@ impl PgVectorStore {
         qb.push(") AS rank_value FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id WHERE c.collection = ");
         qb.push_bind(collection.to_string());
         push_optional_filter(&mut qb, query)?;
+        push_document_id_filter(&mut qb, query)?;
         qb.push(" ORDER BY ");
         qb.push(&embedding_cast);
         qb.push(" ");
@@ -955,6 +956,7 @@ impl PgVectorStore {
         qb.push(") AS rank_value FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id WHERE c.collection = ");
         qb.push_bind(collection.to_string());
         push_optional_filter(&mut qb, query)?;
+        push_document_id_filter(&mut qb, query)?;
         qb.push(" ORDER BY c.embedding ");
         qb.push(op);
         qb.push(" ");
@@ -992,6 +994,7 @@ impl PgVectorStore {
         qb.push_bind(text.to_string());
         qb.push(")");
         push_optional_filter(&mut qb, query)?;
+        push_document_id_filter(&mut qb, query)?;
         qb.push(" ORDER BY rank_value DESC LIMIT ");
         qb.push_bind(limit);
 
@@ -1013,6 +1016,26 @@ fn push_optional_filter(
         qb.push(" AND (");
         push_filter_sql(qb, filter)?;
         qb.push(")");
+    }
+    Ok(())
+}
+
+/// Hard retrieval boundary: when `query.document_id` is set, append
+/// `AND c.document_id = $n` so the query can never surface a sibling
+/// document's chunks, whatever mode, filter, or top_k. A malformed id
+/// (not a UUID) matches nothing rather than erroring, mirroring
+/// `get_document_chunks`'s tolerance for foreign ids.
+fn push_document_id_filter(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    query: &RetrieveQuery,
+) -> RagResult<()> {
+    if let Some(document_id) = &query.document_id {
+        if let Ok(doc_uuid) = Uuid::parse_str(&document_id.0) {
+            qb.push(" AND c.document_id = ");
+            qb.push_bind(doc_uuid);
+        } else {
+            qb.push(" AND 1 = 0");
+        }
     }
     Ok(())
 }

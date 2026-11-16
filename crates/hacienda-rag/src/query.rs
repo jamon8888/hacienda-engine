@@ -4,7 +4,7 @@
 
 use crate::error::{RagError, RagResult};
 use crate::filter::Filter;
-use crate::types::{CollectionSpec, MultiVector, RetrievedChunk, SparseVector};
+use crate::types::{CollectionSpec, DocumentId, MultiVector, RetrievedChunk, SparseVector};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of results a single query may request.
@@ -79,6 +79,20 @@ pub struct RetrieveQuery {
     /// Optional filter constraint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<Filter>,
+    /// Hard retrieval boundary: when set, only chunks whose parent document id
+    /// equals this value are eligible, regardless of mode, filter, or top_k.
+    ///
+    /// This is the retrieval-layer isolation seam: a caller that knows the
+    /// document it wants to ground on can scope the query to it so a retrieval
+    /// can never surface chunks from a sibling document in the same collection.
+    ///
+    /// `version_ref` (document version) and `dossier` (folder) are intentionally
+    /// **not** part of this contract yet — `ChunkRecord`/`DocumentRecord` carry
+    /// no such fields today, so there is nothing to scope retrieval against.
+    /// Add them to `DocumentRecord`/`ChunkRecord` first, then widen this field
+    /// (or add sibling fields) once the underlying contract exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<DocumentId>,
     /// Candidate-pool multiplier (pull `top_k * multiplier` before rerank/fusion).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_multiplier: Option<u32>,
@@ -104,6 +118,7 @@ impl RetrieveQuery {
             query_multi_vector: None,
             top_k,
             filter: None,
+            document_id: None,
             candidate_multiplier: None,
             group_by_document: false,
             include_content: true,

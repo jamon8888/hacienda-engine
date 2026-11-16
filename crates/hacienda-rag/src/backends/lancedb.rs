@@ -668,6 +668,14 @@ impl RagStore for LanceDbStore {
                 let Some(doc) = docs_by_id.get(&chunk.document_id.0) else {
                     continue;
                 };
+                // Hard retrieval boundary: a document_id-scoped query never
+                // surfaces a sibling document's chunks, whatever mode, filter,
+                // or top_k.
+                if let Some(document_id) = &query.document_id {
+                    if &chunk.document_id != document_id {
+                        continue;
+                    }
+                }
                 if query
                     .filter
                     .as_ref()

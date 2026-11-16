@@ -1057,7 +1057,7 @@ mod tests {
     use hacienda_core::auth::{authn::DevTokenResolver, AuthContext, AuthExtension, AuthState};
     use hacienda_core::jobs::InMemoryJobStore;
     use hacienda_core::pii::PipelineConfig;
-    use hacienda_core::tenancy::{ActorId, TenantId};
+    use hacienda_core::tenancy::{ActorId, TenantCtx, TenantId};
     use hacienda_core::{CapabilitySet, HaciendaConfig, HaciendaFacade};
     use hacienda_rag::{ChunkRecord, DocumentRecord, InMemoryVectorStore, RagStore};
 
@@ -1417,5 +1417,92 @@ mod tests {
             retrieve_error.code,
             crate::error::ApiErrorCode::InvalidRequest
         );
+    }
+
+    /// The retrieval scope carried by `RetrieveQuery` — the same struct
+    /// `AnswerRequest.retrieve` forwards to the store — reaches `RagStore`
+    /// through the handler: a `document_id`-scoped query only ever returns that
+    /// document's chunks, even though both documents share one collection.
+    #[tokio::test]
+    async fn retrieve_respects_document_id_scope_across_handler() {
+        let state = state_with_rag_and_pii();
+        let store = state.rag_store.as_ref().expect("RAG store");
+        let tenant_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
+        let scoped_name = scope_collection_name(&tenant_ctx, "contracts");
+        let mut spec = CollectionSpec::new("contracts", 3);
+        spec.name = scoped_name.clone();
+        store
+            .ensure_collection(&spec)
+            .await
+            .expect("collection must be created");
+
+        let doc_a = DocumentRecord {
+            title: Some("doc-a".to_string()),
+            full_text: "doc a".to_string(),
+            ..Default::default()
+        };
+        let id_a = store
+            .upsert_document(
+                &scoped_name,
+                &doc_a,
+                &[ChunkRecord {
+                    external_id: None,
+                    ordinal: 0,
+                    content: "secret of doc a".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::Value::Null,
+                }],
+            )
+            .await
+            .expect("doc a must be stored");
+
+        let doc_b = DocumentRecord {
+            title: Some("doc-b".to_string()),
+            full_text: "doc b".to_string(),
+            ..Default::default()
+        };
+        let id_b = store
+            .upsert_document(
+                &scoped_name,
+                &doc_b,
+                &[ChunkRecord {
+                    external_id: None,
+                    ordinal: 0,
+                    content: "secret of doc b".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::Value::Null,
+                }],
+            )
+            .await
+            .expect("doc b must be stored");
+
+        assert_ne!(id_a, id_b);
+
+        let scoped = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0, 0.0]),
+            document_id: Some(id_a.clone()),
+            include_content: true,
+            ..RetrieveQuery::vector(10)
+        };
+        let output = retrieve(
+            State(state.clone()),
+            parts_for("acme"),
+            Path("contracts".to_string()),
+            SafeJson(scoped),
+        )
+        .await
+        .expect("retrieve must succeed")
+        .0;
+        assert_eq!(
+            output.chunks.len(),
+            1,
+            "sibling document's chunks must not leak"
+        );
+        assert_eq!(output.chunks[0].document_id, id_a);
+        assert_eq!(output.chunks[0].content.as_deref(), Some("secret of doc a"));
     }
 }
