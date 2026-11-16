@@ -127,7 +127,12 @@ WebUI = "WebUI"
 traineddata = "traineddata"
 
 [lint.uncomment]
-enabled = true
+# Disabled (issue #18): the rule flags ~110 explanatory `//` comments across hacienda-core
+# (audit/chain.rs, pii/*, redaction/*...) — including the security rationale on the
+# pseudonymisation paths, exactly the comments most worth keeping. `--fix` would delete
+# them; the noise hides real findings. Re-enable only alongside a curated
+# preserve_patterns list that actually protects those comments.
+enabled = false
 remove_todos = false
 remove_fixme = false
 remove_docs = false

@@ -113,3 +113,6 @@ valide = "valide"
 tre = "tre"
 
 [default.extend-identifiers]
+# "EIN" (Employer Identification Number, US tax ID) is a real identifier used verbatim in
+# hacienda-core/src/pii/patterns.rs — the checker wants "IN", which would be wrong.
+EIN = "EIN"
