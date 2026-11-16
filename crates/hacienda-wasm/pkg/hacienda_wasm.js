@@ -76,11 +76,16 @@ export class AuditHandle {
      *
      * Rejects if `result` doesn't deserialize as a `PipelineResult`, or if the
      * store rejects the batch (e.g. the chain was closed).
+     * `model` is recorded only for model-sourced entries; callers should pass the
+     * identifier of the model selected by the surrounding Studio asset loader.
      * @param {any} result
+     * @param {string | null} [model]
      * @returns {Promise<string>}
      */
-    recordResult(result) {
-        const ret = wasm.audithandle_recordResult(this.__wbg_ptr, result);
+    recordResult(result, model) {
+        var ptr0 = isLikeNone(model) ? 0 : passStringToWasm0(model, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.audithandle_recordResult(this.__wbg_ptr, result, ptr0, len0);
         return ret;
     }
     /**
@@ -92,6 +97,7 @@ export class AuditHandle {
      * `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
      *
      * `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+     * `model` is recorded for model-sourced reveals when supplied by the caller.
      *
      * # `principal: None`, not a caller-supplied identity
      *
@@ -115,16 +121,19 @@ export class AuditHandle {
      * @param {string} revealed_text
      * @param {string} category
      * @param {string} source
+     * @param {string | null} [model]
      * @returns {Promise<string>}
      */
-    recordReveal(revealed_text, category, source) {
+    recordReveal(revealed_text, category, source, model) {
         const ptr0 = passStringToWasm0(revealed_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(category, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.audithandle_recordReveal(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr3 = isLikeNone(model) ? 0 : passStringToWasm0(model, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.audithandle_recordReveal(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         return ret;
     }
     /**

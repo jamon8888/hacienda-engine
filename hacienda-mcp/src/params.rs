@@ -55,3 +55,21 @@ pub struct AuditEntriesParams {
 /// `EmptyParams` documents.
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct EmptyParams {}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct MimeDetectParams {
+    pub content_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CacheConfirmParams {
+    pub confirm: bool,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CacheWarmParams {
+    pub preset: String,
+    pub confirm: bool,
+}

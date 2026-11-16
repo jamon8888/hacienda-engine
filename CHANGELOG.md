@@ -299,7 +299,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Surfaced while closing a test-coverage gap noted in the Phase 10 implementation plan
   (no handler-level test exercised the two capabilities' distinction).
 
-### Enhancements
+### Added (continued)
 
 - **Five pure-Rust xberg enrichment capabilities were sitting in the dependency graph,
   unreachable, the same class of gap as the earlier extraction-format win (X1).** Enabled

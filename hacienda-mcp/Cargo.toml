@@ -15,21 +15,19 @@ hacienda = { path = "../hacienda" }
 hacienda-core = { path = "../hacienda-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+data-encoding = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 xberg = { workspace = true }
 
-# Same minimum version xberg itself depends on (`crates/xberg/Cargo.toml`), and expressed
-# the same lax `"2.2.0"` way xberg expresses it there rather than exact-pinned — not to
-# match it for its own sake, but because it means both servers speak the same generation
-# of the protocol against the same Rust SDK, which is the thing worth keeping in sync; an
-# exact pin here could drift from whatever xberg's own unpinned requirement resolves to.
+# Keep this in the same non-exact SDK generation as xberg. The 3.6.0 minimum is
+# required for `with_max_line_length`; an exact pin could drift from xberg's resolution.
 # `server` + `macros` for the `#[tool_router]`/`#[tool]` attribute macros, `transport-io`
 # for the stdio transport `hacienda mcp serve` uses (M1a). HTTP/streamable transport
 # (`transport-streamable-http-server`, `server-side-http`) is deferred to M1b — see the
 # crate's module doc.
-rmcp = { version = "2.2.0", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

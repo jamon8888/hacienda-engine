@@ -262,6 +262,62 @@ pub struct DocumentResult {
     /// The server-assigned 1-based version sequence, present alongside `document_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_sequence: Option<i64>,
+    /// Allowlisted structured xberg fields after Hacienda's redaction pass.
+    pub structured: StructuredExtractionDto,
+}
+
+/// Structured extraction fields retained from the official xberg result.
+///
+/// These are deliberately represented as JSON values rather than serializing the complete
+/// `xberg::ExtractedDocument`: the latter contains binary image data, internal metadata, and
+/// feature-gated fields that are not part of Hacienda's stable wire contract. Every value here
+/// comes from a field that `HaciendaFacade` redacts before the API sees it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StructuredExtractionDto {
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extraction_method: Option<serde_json::Value>,
+    pub counts: serde_json::Value,
+    pub tables: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_languages: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_keywords: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
+    pub form_fields: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uris: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revisions: Option<serde_json::Value>,
+}
+
+impl StructuredExtractionDto {
+    /// Build the stable allowlist from a facade-redacted xberg document.
+    pub fn from_document(document: &xberg::ExtractedDocument) -> Result<Self, serde_json::Error> {
+        fn json<T: Serialize>(value: &T) -> Result<serde_json::Value, serde_json::Error> {
+            serde_json::to_value(value)
+        }
+
+        Ok(Self {
+            mime_type: document.mime_type.to_string(),
+            extraction_method: document.extraction_method.as_ref().map(json).transpose()?,
+            counts: json(&document.counts)?,
+            tables: document.tables.iter().map(json).collect::<Result<_, _>>()?,
+            detected_languages: document.detected_languages.clone(),
+            pages: document.pages.as_ref().map(json).transpose()?,
+            extracted_keywords: document.extracted_keywords.as_ref().map(json).transpose()?,
+            summary: document.summary.as_ref().map(json).transpose()?,
+            annotations: document.annotations.as_ref().map(json).transpose()?,
+            form_fields: json(&document.form_fields)?,
+            uris: document.uris.as_ref().map(json).transpose()?,
+            revisions: document.revisions.as_ref().map(json).transpose()?,
+        })
+    }
 }
 
 /// Response from `POST /v1/documents`.
@@ -913,6 +969,114 @@ pub struct InfoResponse {
     pub name: &'static str,
     pub version: &'static str,
     pub description: &'static str,
+}
+
+/// Build- and runtime-readiness of one safe Hacienda capability.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CapabilityStatusDto {
+    /// Stable capability identifier used by API, CLI, and MCP clients.
+    pub name: &'static str,
+    /// Whether the capability is present in this binary.
+    pub compiled: bool,
+    /// Whether its known runtime prerequisites are currently available.
+    pub runtime_ready: bool,
+    /// Client-safe explanation when the capability is unavailable or needs setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// Response from `GET /capabilities`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CapabilitiesResponse {
+    pub version: &'static str,
+    pub capabilities: Vec<CapabilityStatusDto>,
+    /// `presets_only` means requests can validate preset metadata but cannot run ONNX
+    /// re-embedding jobs; `real` means the embedding feature is compiled in.
+    pub embedding_mode: &'static str,
+    pub onnx_runtime: CapabilityStatusDto,
+}
+
+impl From<hacienda_core::capabilities::CapabilityStatus> for CapabilityStatusDto {
+    fn from(status: hacienda_core::capabilities::CapabilityStatus) -> Self {
+        Self {
+            name: status.name,
+            compiled: status.compiled,
+            runtime_ready: status.runtime_ready,
+            reason: status.reason,
+        }
+    }
+}
+
+impl From<hacienda_core::capabilities::CapabilityReport> for CapabilitiesResponse {
+    fn from(report: hacienda_core::capabilities::CapabilityReport) -> Self {
+        Self {
+            version: report.version,
+            capabilities: report.capabilities.into_iter().map(Into::into).collect(),
+            embedding_mode: report.embedding_mode,
+            onnx_runtime: report.onnx_runtime.into(),
+        }
+    }
+}
+
+/// Supported Xberg formats exposed by Hacienda without filesystem details.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FormatsResponse {
+    #[schema(value_type = Vec<serde_json::Value>)]
+    pub formats: serde_json::Value,
+}
+
+/// Request for content-based MIME detection.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MimeDetectRequest {
+    pub content_base64: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+/// Response from content-based MIME detection.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MimeDetectResponse {
+    pub mime_type: String,
+}
+
+/// Sanitized Xberg cache statistics.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CacheStatsResponse {
+    pub total_files: usize,
+    pub total_size_bytes: u64,
+    pub oldest_file_age_days: f64,
+    pub newest_file_age_days: f64,
+}
+
+/// Explicit confirmation for destructive cache operations.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CacheClearRequest {
+    pub confirm: bool,
+}
+
+/// Request to warm one allowlisted Xberg embedding preset.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CacheWarmRequest {
+    pub preset: String,
+    pub confirm: bool,
+}
+
+/// Result of warming an embedding preset.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CacheWarmResponse {
+    pub preset: String,
+    pub already_loaded_or_downloaded: bool,
+}
+
+/// Result of clearing Hacienda's Xberg-owned cache.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CacheClearResponse {
+    pub removed_files: usize,
+    pub freed_bytes: u64,
+    pub cleared_engine_count: usize,
 }
 
 // ── RAG (`/v1/rag/*`) ───────────────────────────────────────────────────────

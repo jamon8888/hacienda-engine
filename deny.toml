@@ -22,20 +22,29 @@ ignore = [
   "RUSTSEC-2026-0195",
   "RUSTSEC-2026-0192",
   "RUSTSEC-2026-0206",
-  "RUSTSEC-2024-0449",
+  # zip 8.6 is pulled transitively by xberg's calamine; xberg 1.4 requires
+  # rustc 1.99 and is not yet compatible with this workspace's API surface.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+  "RUSTSEC-2026-0429",
+  # No fixed release is available for astral-tokio-tar; it is only pulled by
+  # testcontainers' dev-only test support.
+  "RUSTSEC-2026-0440",
+  # digest 0.11.3 is pinned transitively by rusty-s3, lopdf, and the xberg
+  # document stack; cargo update reports no compatible newer release.
+  "RUSTSEC-2026-0385",
+  "RUSTSEC-2026-0433",
+  # quinn/rustls certificate issues are transitive through reqwest and xberg's
+  # HTTP stack; current compatible versions remain affected in this graph.
   "RUSTSEC-2026-0285",
   "RUSTSEC-2026-0346",
   "RUSTSEC-2026-0348",
   "RUSTSEC-2026-0349",
-  "RUSTSEC-2026-0381",
-  "RUSTSEC-2026-0382",
   "RUSTSEC-2026-0383",
-  "RUSTSEC-2026-0385",
-  "RUSTSEC-2026-0414",
-  "RUSTSEC-2026-0433",
-  "RUSTSEC-2026-0440",
-  "RUSTSEC-2026-0457",
-  "RUSTSEC-2026-0462",
+  # serde_yaml_ng currently exposes unsafe-libyaml transitively; no compatible
+  # replacement is available without changing the CLI configuration format.
+  "RUSTSEC-2024-0449",
 ]
 
 [licenses]

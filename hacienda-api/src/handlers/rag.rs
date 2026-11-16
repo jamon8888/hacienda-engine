@@ -745,16 +745,17 @@ async fn migrate_embeddings_work(
     tenant: &hacienda_core::tenancy::TenantId,
     job_id: &str,
     collection: &str,
-    to_source: &str,
+    _to_source: &str,
 ) -> Result<(), String> {
     let (_, total) = store
         .list_documents(collection, 1, 0)
         .await
         .map_err(|e| format!("failed to read collection document count: {e}"))?;
 
+    #[cfg(feature = "rag-embeddings")]
     let config = xberg::EmbeddingConfig {
         model: xberg::EmbeddingModelType::Preset {
-            name: to_source.to_string(),
+            name: _to_source.to_string(),
         },
         ..Default::default()
     };
@@ -782,14 +783,10 @@ async fn migrate_embeddings_work(
             };
 
             if !chunks.is_empty() {
-                let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-                #[cfg(not(feature = "rag-embeddings"))]
-                let _ = (texts, config);
-                #[cfg(not(feature = "rag-embeddings"))]
-                return Err("embedding migration requires the `rag-embeddings` feature".to_owned());
-
                 #[cfg(feature = "rag-embeddings")]
-                let vectors = xberg::embed_texts_async(texts, &config)
+                let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+                #[cfg(feature = "rag-embeddings")]
+                let vectors = embed_texts_for_migration(texts, &config)
                     .await
                     .map_err(|e| format!("embedding failed: {e}"))?;
 
@@ -838,6 +835,16 @@ async fn migrate_embeddings_work(
     }
 
     Ok(())
+}
+
+#[cfg(feature = "rag-embeddings")]
+async fn embed_texts_for_migration(
+    texts: Vec<String>,
+    config: &xberg::EmbeddingConfig,
+) -> Result<Vec<Vec<f32>>, String> {
+    xberg::embed_texts_async(texts, config)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// `GET /v1/rag/collections/{name}/migrate-embeddings/{job_id}` — poll a

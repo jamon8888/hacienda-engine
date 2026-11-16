@@ -198,7 +198,8 @@ web-time = "1"
 # To develop xberg and hacienda together, override locally without editing this file:
 #   cargo add --path ../xberg/crates/xberg   # or a [patch."https://github.com/xberg-io/xberg"] in .cargo/config.toml
 #
-xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "a6cb893bf47d739b55ff29cca6790dbdfd58cdd8", features = [
+# Use the public upstream release: the former fork revision is no longer fetchable.
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.4.0", features = [
     "redaction",
     "ner",
     "tokio-runtime",

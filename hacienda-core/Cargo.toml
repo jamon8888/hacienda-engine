@@ -21,6 +21,9 @@ ner-candle-wasm = ["xberg/ner-candle-wasm"]
 atomics = ["send_wrapper/futures"]
 # Async job tracking seam for Phase 4's HTTP endpoints. On by default.
 jobs = []
+# Real Xberg embedding inference for the cache-warm surface. Off by default because
+# it pulls ONNX Runtime and model-download support into native consumers.
+rag-embeddings = ["xberg/embeddings"]
 # Postgres store backend (Phase 9). Off by default so wasm32 and non-Postgres
 # consumers don't pull sqlx.
 postgres = ["sqlx"]
@@ -101,9 +104,9 @@ xberg = { workspace = true }
 # `docs/superpowers/plans/2026-07-30-hacienda-program-plan.md`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
-# Keep the wasm target on the same official xberg source and revision as the workspace
-# dependency above. Cargo requires a single canonical source across target sections.
-xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "a6cb893bf47d739b55ff29cca6790dbdfd58cdd8", default-features = false, features = [
+# Keep this target-specific dependency on the same public release as the workspace
+# dependency or cargo refuses to build with different source paths by target.
+xberg = { git = "https://github.com/xberg-io/xberg.git", tag = "v1.4.0", default-features = false, features = [
     "ner",
 ] }
 # `IndexedDbAuditStore` (Track L5, `audit/store_idb.rs`). `send_wrapper`'s "futures"

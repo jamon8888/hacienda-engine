@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, category, action, span_hash,\n                   span_length, confidence, source, pipeline_version, config_hash, principal,\n                   chain_hash, created_at\n            FROM audit_entries\n            WHERE segment_id = (\n                SELECT segment_id FROM audit_segments\n                WHERE sealed_at IS NULL AND tenant_id = $1\n                ORDER BY created_at DESC\n                LIMIT 1\n            )\n            ORDER BY sequence_num\n            ",
+  "query": "\n            SELECT id, category, action, span_hash, span_length, confidence, source,\n                   pipeline_version, config_hash, principal, model, chain_hash, created_at\n            FROM audit_entries\n            WHERE segment_id = $1\n            ORDER BY sequence_num\n            ",
   "describe": {
     "columns": [
       {
@@ -55,18 +55,23 @@
       },
       {
         "ordinal": 10,
-        "name": "chain_hash",
+        "name": "model",
         "type_info": "Text"
       },
       {
         "ordinal": 11,
+        "name": "chain_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -80,9 +85,10 @@
       false,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "0f030c653319a3ddc5082d1e7c5de29c86df6f7904a9682e52f2c9241a1f3c4e"
+  "hash": "567e3ebcbe6c3a7aac10272dd00e48d6963d4726503b8af6e53b58c969e3924c"
 }

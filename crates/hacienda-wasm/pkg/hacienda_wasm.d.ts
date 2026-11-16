@@ -47,8 +47,10 @@ export class AuditHandle {
      *
      * Rejects if `result` doesn't deserialize as a `PipelineResult`, or if the
      * store rejects the batch (e.g. the chain was closed).
+     * `model` is recorded only for model-sourced entries; callers should pass the
+     * identifier of the model selected by the surrounding Studio asset loader.
      */
-    recordResult(result: any): Promise<string>;
+    recordResult(result: any, model?: string | null): Promise<string>;
     /**
      * Record that `revealed_text` was shown to the user in plaintext — the wasm
      * counterpart of `RedactionAction::Reveal` (see that variant's doc: an audit
@@ -58,6 +60,7 @@ export class AuditHandle {
      * `RedactionEngine::redact`'s own `span_hash` convention (`redaction/engine.rs`).
      *
      * `source` is `"regex"` or `"model"`, matching `PiiEntity.source` on the JS side.
+     * `model` is recorded for model-sourced reveals when supplied by the caller.
      *
      * # `principal: None`, not a caller-supplied identity
      *
@@ -79,7 +82,7 @@ export class AuditHandle {
      * left as `None` deliberately rather than filled with something that only looks
      * like an answer.
      */
-    recordReveal(revealed_text: string, category: string, source: string): Promise<string>;
+    recordReveal(revealed_text: string, category: string, source: string, model?: string | null): Promise<string>;
     /**
      * The chain's current head — a client that records this alongside a result can
      * later prove which chain state produced it.
@@ -150,8 +153,8 @@ export interface InitOutput {
     readonly __wbg_audithandle_free: (a: number, b: number) => void;
     readonly audithandle_listEntries: (a: number) => any;
     readonly audithandle_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
-    readonly audithandle_recordResult: (a: number, b: any) => any;
-    readonly audithandle_recordReveal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly audithandle_recordResult: (a: number, b: any, c: number, d: number) => any;
+    readonly audithandle_recordReveal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => any;
     readonly audithandle_tip: (a: number) => any;
     readonly audithandle_verify: (a: number) => any;
     readonly isNerModelLoaded: () => number;
