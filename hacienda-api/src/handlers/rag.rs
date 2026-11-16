@@ -864,6 +864,16 @@ async fn run_migrate_embeddings_job(
     }
 }
 
+#[cfg(feature = "rag-embeddings")]
+async fn embed_texts_for_migration(
+    texts: Vec<String>,
+    config: &xberg::EmbeddingConfig,
+) -> Result<Vec<Vec<f32>>, String> {
+    xberg::embed_texts_async(texts, config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Pages through `collection`'s documents, re-embeds every chunk's content
 /// under `to_source`, and writes the new vectors back via
 /// `RagStore::update_chunk_embeddings`. Reports progress via
