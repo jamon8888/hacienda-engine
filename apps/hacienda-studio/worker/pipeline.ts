@@ -10,6 +10,7 @@ import {
   XbergEngine,
   WasmExtractInput,
   WasmExtractionConfig,
+  WasmOutputFormat,
   WasmChunkingConfig,
   WasmOcrConfig,
   WasmNerConfig,
@@ -785,7 +786,7 @@ async function processFile(
       );
 
       const extractConfig = WasmExtractionConfig.default();
-      extractConfig.outputFormat = "markdown";
+      extractConfig.outputFormat = WasmOutputFormat.Markdown;
       extractConfig.chunking = WasmChunkingConfig.default();
       extractConfig.chunking.maxCharacters = config.chunkSize;
       extractConfig.ocr = WasmOcrConfig.default();

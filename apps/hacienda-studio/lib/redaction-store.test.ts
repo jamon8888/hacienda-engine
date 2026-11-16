@@ -5,6 +5,7 @@ import {
   loadDraft,
   deleteDraft,
   pruneDrafts,
+  clearDrafts,
   saveTokenizedEnvelope,
   loadTokenizedEnvelope,
 } from "./redaction-store";
