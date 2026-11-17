@@ -70,14 +70,14 @@ pub use auth::{AuthContext, AuthzError, Caller, Capability, CapabilitySet};
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::HaciendaConfig;
 #[cfg(not(target_arch = "wasm32"))]
-pub use hacienda_installation::{
-    InstallationConfig, InstallationContext, InstallationResolutionError, resolve_installation,
-    resolve_installation_from_environment, INSTALLATION_CONFIG_ENV,
-};
-#[cfg(not(target_arch = "wasm32"))]
 pub use error::HaciendaError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use facade::{
     HaciendaFacade, HaciendaMetadata, HaciendaResult, SpanText, TextRedactResult, TextScanResult,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use hacienda_installation::{
+    resolve_installation, resolve_installation_from_environment, InstallationConfig,
+    InstallationContext, InstallationResolutionError, INSTALLATION_CONFIG_ENV,
 };
 pub use tenancy::{ActorId, ProjectId, TenantCtx, TenantId};

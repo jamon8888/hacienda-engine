@@ -349,10 +349,7 @@ impl InstallationConfig {
     ///
     /// # Errors
     /// Returns the first configuration invariant that is not satisfied for `context`.
-    pub fn validate_for(
-        &self,
-        context: InstallationContext,
-    ) -> Result<(), ConfigurationError> {
+    pub fn validate_for(&self, context: InstallationContext) -> Result<(), ConfigurationError> {
         match self {
             Self::LocalFull(config) => config.validate(),
             Self::TeamOnPremise(config) => config.validate_for(context),
@@ -479,10 +476,7 @@ impl TeamOnPremiseConfig {
     ///
     /// # Errors
     /// Returns an error when the topology or the tenant binding is invalid for `context`.
-    pub fn validate_for(
-        &self,
-        context: InstallationContext,
-    ) -> Result<(), ConfigurationError> {
+    pub fn validate_for(&self, context: InstallationContext) -> Result<(), ConfigurationError> {
         if context == InstallationContext::Client {
             // Checked first so "a client profile with no tenant" reports the missing
             // scope rather than whatever topology problem happens to sit next to it.
@@ -1127,11 +1121,9 @@ mod tests {
 
     #[test]
     fn resolves_the_environment_for_a_client() {
-        let serialized =
-            serde_json::to_string(&team_config()).expect("a valid profile serializes");
-        let resolved =
-            resolve_installation(None, Some(&serialized), InstallationContext::Client)
-                .expect("the client environment is a first-class source");
+        let serialized = serde_json::to_string(&team_config()).expect("a valid profile serializes");
+        let resolved = resolve_installation(None, Some(&serialized), InstallationContext::Client)
+            .expect("the client environment is a first-class source");
         assert_eq!(resolved, team_config());
     }
 
@@ -1148,8 +1140,7 @@ mod tests {
         // The environment used to be the client's private input; it is now a second
         // source for the same section, so a disagreement is a refusal rather than a
         // silent override of the trust boundary a file declared.
-        let serialized =
-            serde_json::to_string(&team_config()).expect("a valid profile serializes");
+        let serialized = serde_json::to_string(&team_config()).expect("a valid profile serializes");
         assert_eq!(
             resolve_installation(
                 Some(&team_server_config()),
@@ -1163,9 +1154,8 @@ mod tests {
     #[test]
     fn refuses_a_malformed_source_without_echoing_it() {
         let raw = r#"{"LocalFull":{"trust_boundry":"LocalProcess"}}"#;
-        let error =
-            resolve_installation(None, Some(raw), InstallationContext::Client)
-                .expect_err("an unparsable source must not resolve");
+        let error = resolve_installation(None, Some(raw), InstallationContext::Client)
+            .expect_err("an unparsable source must not resolve");
         assert_eq!(error, InstallationResolutionError::Malformed);
         assert!(!format!("{error}").contains("trust_boundry"));
         assert!(!format!("{error:?}").contains("trust_boundry"));
@@ -1173,17 +1163,11 @@ mod tests {
 
     #[test]
     fn refuses_a_client_section_in_a_server_config_file() {
-        let error = resolve_installation(
-            Some(&team_config()),
-            None,
-            InstallationContext::Server,
-        )
-        .expect_err("a pinned tenant has no place in a server configuration");
+        let error = resolve_installation(Some(&team_config()), None, InstallationContext::Server)
+            .expect_err("a pinned tenant has no place in a server configuration");
         assert_eq!(
             error,
-            InstallationResolutionError::Invalid(
-                ConfigurationError::TenantPinnedInServerConfig
-            )
+            InstallationResolutionError::Invalid(ConfigurationError::TenantPinnedInServerConfig)
         );
     }
 
