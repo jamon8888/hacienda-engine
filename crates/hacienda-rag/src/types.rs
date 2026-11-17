@@ -173,18 +173,18 @@ pub struct DocumentRecord {
     /// `None` for documents ingested before this contract existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
-    /// Owning tenant of this row, resolved server-side at ingest (never taken
-    /// from the client payload). `None` for rows ingested before this contract
-    /// existed. A retrieval only ever returns chunks whose `tenant_id` matches
-    /// the caller's effective tenant.
+    /// Owning tenant — every row belongs to exactly one trust domain. `None`
+    /// means the default tenant. The API layer overrides this from the
+    /// authenticated `TenantCtx` on every upsert, so callers cannot impersonate
+    /// another tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
-    /// ACL reference gating access to this row within its tenant. `None` for
-    /// rows ingested before this contract existed. A retrieval only ever
-    /// returns chunks whose `acl_reference` matches the caller's, when one is
-    /// imposed on the query.
+    /// Access control list: which additional tenants (besides `tenant_id`) may
+    /// read this document. Absent means owner-only access. Serialized as
+    /// `{"tenants": ["acme", "globex"]}` or similar; interpretation is
+    /// backend-dependent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acl_reference: Option<String>,
+    pub acl: Option<serde_json::Value>,
 }
 
 /// Chunk record for upsertion.
@@ -215,12 +215,14 @@ pub struct ChunkRecord {
     /// Document version the parent document grounds on, for retrieval scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
-    /// Owning tenant of this row, denormalized from the parent document at upsert.
+    /// Owning tenant — inherited from the parent document at ingest time. `None`
+    /// means the default tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
-    /// ACL reference of this row, denormalized from the parent document at upsert.
+    /// Access control list, inherited from the parent document. Absent means
+    /// owner-only access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acl_reference: Option<String>,
+    pub acl: Option<serde_json::Value>,
 }
 
 /// Sparse (SPLADE-style) embedding: parallel arrays, indices sorted ascending.
@@ -322,12 +324,6 @@ pub struct DocumentSummary {
     /// Document version the document grounds on, for retrieval scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
-    /// Owning tenant of this row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tenant_id: Option<String>,
-    /// ACL reference of this row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acl_reference: Option<String>,
 }
 
 /// How a retrieved chunk was primarily scored.
@@ -394,18 +390,16 @@ pub struct RetrievedChunk {
     pub score: f32,
     /// How the score was produced.
     pub primary_score: PrimaryScore,
-    /// Owning tenant of this row, for post-retrieval access control.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tenant_id: Option<String>,
-    /// ACL reference of this row, for post-retrieval access control.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acl_reference: Option<String>,
     /// Chunk-level metadata.
     #[serde(default)]
     pub chunk_metadata: serde_json::Value,
     /// Parent document summary (present when `include_document` was requested).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document: Option<DocumentSummary>,
+    /// Tenant this chunk belongs to, populated by the backend for
+    /// post-retrieval authorization checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
 }
 
 /// Aggregate statistics for a collection.
@@ -480,14 +474,12 @@ mod tests {
             chunk_metadata: serde_json::Value::Null,
             dossier_id: Some("dossier-1".to_string()),
             version_ref: Some("v-2024".to_string()),
-            tenant_id: Some("tenant-1".to_string()),
-            acl_reference: Some("acl-1".to_string()),
+            tenant_id: Some("acme".to_string()),
+            acl: Some(serde_json::json!({"tenants": ["globex"]})),
         };
         let json = serde_json::to_value(&chunk).unwrap();
         assert_eq!(json["dossier_id"], "dossier-1");
         assert_eq!(json["version_ref"], "v-2024");
-        assert_eq!(json["tenant_id"], "tenant-1");
-        assert_eq!(json["acl_reference"], "acl-1");
         let back: ChunkRecord = serde_json::from_value(json).unwrap();
         assert_eq!(back, chunk);
     }

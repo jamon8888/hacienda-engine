@@ -18,13 +18,18 @@ use xberg::chunking::{chunk_text, ChunkingConfig};
 /// `ordinal`. `embedding` is left empty (`Vec::new()`) — this function does no
 /// embedding of its own; a caller that wants embedded chunks runs them through an
 /// embedder (e.g. `xberg::embed_texts_async`, already used by `migrate_embeddings`)
-/// before upserting.
+/// before upserting. `tenant_id`, when `Some`, is stamped on every produced
+/// chunk so retrieval can scope by tenant without joining the parent document.
 ///
 /// # Errors
 ///
 /// Returns [`RagError::Chunking`], not a bare [`RagError::Core`] — see that
 /// variant's doc comment for why this call site is worth naming explicitly.
-pub fn chunk_full_text(full_text: &str, config: &ChunkingConfig) -> RagResult<Vec<ChunkRecord>> {
+pub fn chunk_full_text(
+    full_text: &str,
+    config: &ChunkingConfig,
+    tenant_id: Option<&str>,
+) -> RagResult<Vec<ChunkRecord>> {
     let result = chunk_text(full_text, config, None).map_err(|source| RagError::Chunking {
         input_chars: full_text.chars().count(),
         source: Box::new(source),
@@ -42,13 +47,14 @@ pub fn chunk_full_text(full_text: &str, config: &ChunkingConfig) -> RagResult<Ve
             sparse_embedding: None,
             multi_vector: None,
             chunk_metadata: serde_json::Value::Null,
-            // Server-side chunking does not yet know the parent document's
-            // dossier / version / tenant / ACL: these fields stay `None` until
-            // the caller (upsert) propagates them from the `DocumentRecord`.
+            // Chunking does not know the parent document's dossier/version yet;
+            // those stay `None` until the caller (upsert) propagates them from
+            // the `DocumentRecord`. Same for `tenant_id`: stamped here when
+            // provided, otherwise left `None` (default tenant).
             dossier_id: None,
             version_ref: None,
-            tenant_id: None,
-            acl_reference: None,
+            tenant_id: tenant_id.map(str::to_string),
+            acl: None,
         })
         .collect())
 }
@@ -66,7 +72,7 @@ mod tests {
         };
         let text = "Sentence one. ".repeat(20);
 
-        let chunks = chunk_full_text(&text, &config).expect("chunking should succeed");
+        let chunks = chunk_full_text(&text, &config, None).expect("chunking should succeed");
 
         assert!(
             chunks.len() > 1,
@@ -86,7 +92,7 @@ mod tests {
     #[test]
     fn should_return_a_single_chunk_for_short_text() {
         let config = ChunkingConfig::default();
-        let chunks = chunk_full_text("hello world", &config).expect("chunking should succeed");
+        let chunks = chunk_full_text("hello world", &config, None).expect("chunking should succeed");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].content, "hello world");
     }

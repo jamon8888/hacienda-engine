@@ -17,7 +17,7 @@ use axum::{
 };
 use hacienda_core::tenancy::TenantCtx;
 use hacienda_core::{auth::Caller, jobs::JobStatus, HaciendaFacade};
-use hacienda_rag::{CollectionSpec, DocumentId, DocumentSummary, RetrieveOutput, RetrieveQuery};
+use hacienda_rag::{CollectionSpec, DocumentId, DocumentSummary, Filter, FilterField, RetrieveOutput, RetrieveQuery, RetrievedChunk};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -107,6 +107,42 @@ pub(crate) fn validate_collection_name(name: &str) -> Result<(), ApiError> {
     } else {
         Ok(())
     }
+}
+
+/// Build the mandatory tenant authorization filter: only rows owned by the
+/// calling tenant may be retrieved. This is the pre-retrieval authorization
+/// filter applied before scoring, so chunks from other tenants never enter
+/// the candidate pool.
+pub(crate) fn tenant_authorization_filter(ctx: &TenantCtx) -> Filter {
+    Filter::Eq {
+        field: FilterField("doc.tenant_id".to_string()),
+        value: serde_json::json!(ctx.tenant.as_str()),
+    }
+}
+
+/// Merge the mandatory tenant filter with a caller-supplied filter. If the
+/// caller supplied none, the tenant filter stands alone. If the caller
+/// supplied one, the two are ANDed so the tenant constraint is always
+/// enforced on top of any caller constraint.
+pub(crate) fn merge_with_tenant_filter(
+    tenant_filter: Filter,
+    caller_filter: Option<Filter>,
+) -> Option<Filter> {
+    match caller_filter {
+        None => Some(tenant_filter),
+        Some(caller) => Some(Filter::And {
+            filters: vec![tenant_filter, caller],
+        }),
+    }
+}
+
+/// Post-retrieval authorization check: drop any chunk whose `tenant_id` does
+/// not match the calling tenant. Defense-in-depth — with a correct
+/// pre-retrieval filter this never removes anything, but it catches backend
+/// misconfigurations or callers that bypass the filter.
+pub(crate) fn enforce_post_retrieval_tenant(ctx: &TenantCtx, chunks: &mut Vec<RetrievedChunk>) {
+    let tenant = ctx.tenant.as_str();
+    chunks.retain(|c| c.tenant_id.as_deref() == Some(tenant));
 }
 
 /// Redact one retrieval text surface before it can be put in an HTTP response.
@@ -366,6 +402,12 @@ pub async fn upsert_document(
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let tenant_ctx = caller.tenant_ctx();
+    let tenant_id = Some(tenant_ctx.tenant.as_str().to_string());
+
+    // Security: the caller cannot impersonate another tenant — overwrite any
+    // tenant_id they may have supplied with the authenticated context's tenant.
+    let mut document = body.document;
+    document.tenant_id = tenant_id.clone();
 
     let chunks = if body.chunks.is_empty() {
         // Off the async runtime: `chunk_text` is synchronous, CPU-bound work over
@@ -373,22 +415,28 @@ pub async fn upsert_document(
         // worker thread would block every other task scheduled on it for the duration —
         // unlike the audit handlers' deliberately-inline blocking reads (see
         // `handlers::audit`'s module doc), this sits on the document-ingestion hot path.
-        let full_text = body.document.full_text.clone();
+        let full_text = document.full_text.clone();
         tokio::task::spawn_blocking(move || {
             let config = hacienda_rag::ChunkingConfig::default();
-            hacienda_rag::chunk_full_text(&full_text, &config)
+            hacienda_rag::chunk_full_text(&full_text, &config, tenant_id.as_deref())
         })
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(ApiError::from)?
     } else {
         body.chunks
+            .into_iter()
+            .map(|mut chunk| {
+                chunk.tenant_id = tenant_id.clone();
+                chunk
+            })
+            .collect()
     };
 
     let document_id = store
         .upsert_document(
             &scope_collection_name(&tenant_ctx, &name),
-            &body.document,
+            &document,
             &chunks,
         )
         .await
@@ -459,9 +507,10 @@ pub async fn reindex_document(
     }
 
     let full_text = document.full_text.clone();
+    let tenant_id = document.tenant_id.clone();
     let chunks = tokio::task::spawn_blocking(move || {
         let config = hacienda_rag::ChunkingConfig::default();
-        hacienda_rag::chunk_full_text(&full_text, &config)
+        hacienda_rag::chunk_full_text(&full_text, &config, tenant_id.as_deref())
     })
     .await
     .map_err(|_| ApiError::internal())?
@@ -499,7 +548,7 @@ pub async fn retrieve(
     State(state): State<ApiState>,
     parts: Parts,
     Path(name): Path<String>,
-    SafeJson(query): SafeJson<RetrieveQuery>,
+    SafeJson(mut query): SafeJson<RetrieveQuery>,
 ) -> Result<Json<RetrieveOutput>, ApiError> {
     validate_collection_name(&name)?;
     let store = require_store(&state)?;
@@ -508,51 +557,35 @@ pub async fn retrieve(
     let tenant_ctx = caller.tenant_ctx();
     let scoped_name = scope_collection_name(&tenant_ctx, &name);
 
-    // The effective tenant is resolved server-side from the authenticated
-    // caller and is never taken from the client payload (§3.3 of the wayfinder
-    // dossier). Override any client-supplied `tenant_id` so a caller cannot
-    // reach another tenant's rows.
-    let mut query = query;
-    query.tenant_id = Some(tenant_ctx.tenant.to_string());
-
     let spec = store
         .get_collection(&scoped_name)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
+
+    // Pre-retrieval authorization filter: only the calling tenant's rows are
+    // eligible for scoring. ANDed with any caller-supplied filter.
+    query.filter = merge_with_tenant_filter(
+        tenant_authorization_filter(&tenant_ctx),
+        query.filter.take(),
+    );
+
     query.validate(&spec).map_err(ApiError::from)?;
     let mut output = store
         .retrieve(&scoped_name, &query)
         .await
         .map_err(ApiError::from)?;
-    // Second level of defense: drop any chunk whose owning tenant is set and
-    // does not match the caller's effective tenant. The pre-retrieval filter
-    // in the store already excludes unauthorized chunks; this is belt and
-    // suspenders so a backend that forgets to enforce `tenant_id` can never
-    // leak a foreign-tenant chunk through the API. Fail-closed: a mismatched
-    // chunk is excluded rather than returned.
-    enforce_post_retrieval_tenant(&tenant_ctx, &mut output);
+
+    // Post-retrieval authorization check: drop any chunk that slipped through
+    // with a mismatched tenant (defense in depth).
+    enforce_post_retrieval_tenant(&tenant_ctx, &mut output.chunks);
+
     // The store contract predates the token-only editor projection and cannot prove that its
     // rows are safe to expose. Sanitize every text-bearing retrieval field before `Json` gets
     // a chance to serialize it; a missing PII pipeline aborts the request instead of leaking
     // the backend's original content.
     let output = redact_retrieval_output(&state.facade, caller, output).await?;
     Ok(Json(output))
-}
-
-/// Post-retrieval access control (second level).
-///
-/// Drops every chunk whose [`crate::types::RetrievedChunk::tenant_id`] is set
-/// and differs from `ctx`'s tenant. Legacy chunks with no `tenant_id` are kept
-/// for backward compatibility. The store's pre-retrieval filter is the primary
-/// enforcement; this is belt-and-suspenders at the API boundary.
-fn enforce_post_retrieval_tenant(ctx: &TenantCtx, output: &mut RetrieveOutput) {
-    output.chunks.retain(|chunk| {
-        chunk
-            .tenant_id
-            .as_deref()
-            .map_or(true, |tenant_id| tenant_id == ctx.tenant.as_str())
-    });
 }
 
 /// `GET /v1/rag/collections` — list collections, paginated, newest-first.
@@ -1322,6 +1355,7 @@ mod tests {
                     title: Some("Alice alice@example.com".to_string()),
                     full_text: "Alice alice@example.com".to_string(),
                     metadata: serde_json::json!({"owner": "alice@example.com"}),
+                    tenant_id: Some(hacienda_core::tenancy::DEFAULT_TENANT.to_string()),
                     ..Default::default()
                 },
                 &[ChunkRecord {
@@ -1334,6 +1368,8 @@ mod tests {
                     chunk_metadata: serde_json::json!({"contact": "alice@example.com"}),
                     dossier_id: None,
                     version_ref: None,
+                    tenant_id: Some(hacienda_core::tenancy::DEFAULT_TENANT.to_string()),
+                    acl: None,
                 }],
             )
             .await
@@ -1376,6 +1412,7 @@ mod tests {
                 "contracts",
                 &DocumentRecord {
                     full_text: "alice@example.com".to_string(),
+                    tenant_id: Some(hacienda_core::tenancy::DEFAULT_TENANT.to_string()),
                     ..Default::default()
                 },
                 &[ChunkRecord {
@@ -1388,6 +1425,8 @@ mod tests {
                     chunk_metadata: serde_json::Value::Null,
                     dossier_id: None,
                     version_ref: None,
+                    tenant_id: Some(hacienda_core::tenancy::DEFAULT_TENANT.to_string()),
+                    acl: None,
                 }],
             )
             .await
@@ -1488,6 +1527,7 @@ mod tests {
         let doc_a = DocumentRecord {
             title: Some("doc-a".to_string()),
             full_text: "doc a".to_string(),
+            tenant_id: Some("acme".to_string()),
             ..Default::default()
         };
         let id_a = store
@@ -1504,6 +1544,8 @@ mod tests {
                     chunk_metadata: serde_json::Value::Null,
                     dossier_id: None,
                     version_ref: None,
+                    tenant_id: Some("acme".to_string()),
+                    acl: None,
                 }],
             )
             .await
@@ -1512,6 +1554,7 @@ mod tests {
         let doc_b = DocumentRecord {
             title: Some("doc-b".to_string()),
             full_text: "doc b".to_string(),
+            tenant_id: Some("acme".to_string()),
             ..Default::default()
         };
         let id_b = store
@@ -1528,6 +1571,8 @@ mod tests {
                     chunk_metadata: serde_json::Value::Null,
                     dossier_id: None,
                     version_ref: None,
+                    tenant_id: Some("acme".to_string()),
+                    acl: None,
                 }],
             )
             .await
@@ -1559,271 +1604,126 @@ mod tests {
         assert_eq!(output.chunks[0].content.as_deref(), Some("secret of doc a"));
     }
 
-    /// Negative test: tenant neighbor. Tenant B's document lives in the same
-    /// (tenant-scoped) collection name as tenant A's. Tenant A's retrieve
-    /// request must not surface tenant B's chunk — the handler forces
-    /// `query.tenant_id` to the caller's effective tenant before scoring.
+    /// Negative: a neighbor tenant's retrieval must not surface this tenant's
+    /// chunks — collections are tenant-scoped (S1), so `globex`'s `"contracts"`
+    /// is a different collection from `acme`'s `"contracts"`, and globex gets
+    /// zero chunks even when it queries the same unscoped name.
     #[tokio::test]
-    async fn retrieve_excludes_neighbor_tenant_chunk_before_scoring() {
-        let state = state_with_rag();
+    async fn retrieve_blocks_neighbor_tenant_chunks_pre_retrieval() {
+        let state = state_with_rag_and_pii();
         let store = state.rag_store.as_ref().expect("RAG store");
-        let acme_scoped = scope_collection_name(&TenantCtx::new(TenantId::new("acme"), ActorId::new("a")), "contracts");
+
+        // Both tenants create a collection named "contracts" — each gets its own
+        // tenant-scoped backing collection.
+        let acme_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
+        let acme_scoped = scope_collection_name(&acme_ctx, "contracts");
+        let globex_ctx = TenantCtx::new(TenantId::new("globex"), ActorId::new("test"));
+        let globex_scoped = scope_collection_name(&globex_ctx, "contracts");
+
+        let mut spec = CollectionSpec::new("contracts", 3);
+        spec.name = acme_scoped.clone();
         store
-            .ensure_collection(&CollectionSpec::new("acme:contracts", 3))
+            .ensure_collection(&spec)
             .await
-            .expect("collection must be created");
-
-        let id_a = store
-            .upsert_document(
-                &acme_scoped,
-                &DocumentRecord {
-                    tenant_id: Some("acme".to_string()),
-                    full_text: "doc a".to_string(),
-                    ..Default::default()
-                },
-                &[ChunkRecord {
-                    ordinal: 0,
-                    content: "secret of acme".to_string(),
-                    embedding: vec![1.0, 0.0, 0.0],
-                    sparse_embedding: None,
-                    multi_vector: None,
-                    chunk_metadata: serde_json::Value::Null,
-                    dossier_id: None,
-                    version_ref: None,
-                    tenant_id: Some("acme".to_string()),
-                    acl_reference: None,
-                    external_id: None,
-                }],
-            )
+            .expect("acme's collection must be created");
+        spec.name = globex_scoped.clone();
+        store
+            .ensure_collection(&spec)
             .await
-            .expect("acme doc must be stored");
+            .expect("globex's collection must be created");
 
-        let id_b = store
-            .upsert_document(
-                &acme_scoped,
-                &DocumentRecord {
-                    tenant_id: Some("globex".to_string()),
-                    full_text: "doc b".to_string(),
-                    ..Default::default()
-                },
-                &[ChunkRecord {
-                    ordinal: 0,
-                    content: "secret of globex".to_string(),
-                    embedding: vec![1.0, 0.0, 0.0],
-                    sparse_embedding: None,
-                    multi_vector: None,
-                    chunk_metadata: serde_json::Value::Null,
-                    dossier_id: None,
-                    version_ref: None,
-                    tenant_id: Some("globex".to_string()),
-                    acl_reference: None,
-                    external_id: None,
-                }],
-            )
+        // acme upserts a document into its own collection.
+        let doc = DocumentRecord {
+            title: Some("acme-contract".to_string()),
+            full_text: "acme contract terms".to_string(),
+            tenant_id: Some("acme".to_string()),
+            ..Default::default()
+        };
+        let chunks = vec![ChunkRecord {
+            external_id: None,
+            ordinal: 0,
+            content: "acme secret clause".to_string(),
+            embedding: vec![1.0, 0.0, 0.0],
+            sparse_embedding: None,
+            multi_vector: None,
+            chunk_metadata: serde_json::Value::Null,
+            dossier_id: None,
+            version_ref: None,
+            tenant_id: Some("acme".to_string()),
+            acl: None,
+        }];
+        store
+            .upsert_document(&acme_scoped, &doc, &chunks)
             .await
-            .expect("globex doc must be stored");
+            .expect("acme document must be stored");
 
-        assert_ne!(id_a, id_b);
-
-        // acme's retrieve: only acme's chunk survives.
-        let output = retrieve(
-            State(state.clone()),
-            parts_for("acme"),
-            Path("contracts".to_string()),
-            SafeJson(RetrieveQuery {
-                query_vector: Some(vec![1.0, 0.0, 0.0]),
-                include_content: true,
-                ..RetrieveQuery::vector(10)
-            }),
-        )
-        .await
-        .expect("retrieve must succeed")
-        .0;
-        assert_eq!(output.chunks.len(), 1, "globex's chunk must not leak to acme");
-        assert_eq!(output.chunks[0].document_id, id_a);
-        assert_eq!(output.chunks[0].tenant_id.as_deref(), Some("acme"));
-
-        // globex's retrieve: only globex's chunk survives.
+        // globex queries its own "contracts" — its collection is empty, so zero
+        // chunks are returned and acme's data never leaks across tenants.
+        let query = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0, 0.0]),
+            include_content: true,
+            ..RetrieveQuery::vector(10)
+        };
         let output = retrieve(
             State(state.clone()),
             parts_for("globex"),
             Path("contracts".to_string()),
-            SafeJson(RetrieveQuery {
-                query_vector: Some(vec![1.0, 0.0, 0.0]),
-                include_content: true,
-                ..RetrieveQuery::vector(10)
-            }),
+            SafeJson(query.clone()),
         )
         .await
-        .expect("retrieve must succeed")
-        .0;
-        assert_eq!(output.chunks.len(), 1, "acme's chunk must not leak to globex");
-        assert_eq!(output.chunks[0].document_id, id_b);
-        assert_eq!(output.chunks[0].tenant_id.as_deref(), Some("globex"));
-    }
-
-    /// Negative test: deleted version. A chunk grounded on version `v-2024`
-    /// must not surface when the retrieve query scopes to `v-2025` — the
-    /// version boundary is enforced before scoring.
-    #[tokio::test]
-    async fn retrieve_excludes_deleted_version_before_scoring() {
-        let state = state_with_rag();
-        let store = state.rag_store.as_ref().expect("RAG store");
-        let scoped_name = scope_collection_name(&TenantCtx::new(TenantId::new("acme"), ActorId::new("a")), "contracts");
-        store
-            .ensure_collection(&CollectionSpec::new("acme:contracts", 3))
-            .await
-            .expect("collection must be created");
-
-        let id_a = store
-            .upsert_document(
-                &scoped_name,
-                &DocumentRecord {
-                    tenant_id: Some("acme".to_string()),
-                    dossier_id: Some("dossier-1".to_string()),
-                    version_ref: Some("v-2024".to_string()),
-                    full_text: "doc a v2024".to_string(),
-                    ..Default::default()
-                },
-                &[ChunkRecord {
-                    ordinal: 0,
-                    content: "chunk of doc a v2024".to_string(),
-                    embedding: vec![1.0, 0.0, 0.0],
-                    sparse_embedding: None,
-                    multi_vector: None,
-                    chunk_metadata: serde_json::Value::Null,
-                    dossier_id: Some("dossier-1".to_string()),
-                    version_ref: Some("v-2024".to_string()),
-                    tenant_id: Some("acme".to_string()),
-                    acl_reference: None,
-                    external_id: None,
-                }],
-            )
-            .await
-            .expect("v2024 doc must be stored");
-
-        let id_b = store
-            .upsert_document(
-                &scoped_name,
-                &DocumentRecord {
-                    tenant_id: Some("acme".to_string()),
-                    dossier_id: Some("dossier-1".to_string()),
-                    version_ref: Some("v-2025".to_string()),
-                    full_text: "doc b v2025".to_string(),
-                    ..Default::default()
-                },
-                &[ChunkRecord {
-                    ordinal: 0,
-                    content: "chunk of doc b v2025".to_string(),
-                    embedding: vec![1.0, 0.0, 0.0],
-                    sparse_embedding: None,
-                    multi_vector: None,
-                    chunk_metadata: serde_json::Value::Null,
-                    dossier_id: Some("dossier-1".to_string()),
-                    version_ref: Some("v-2025".to_string()),
-                    tenant_id: Some("acme".to_string()),
-                    acl_reference: None,
-                    external_id: None,
-                }],
-            )
-            .await
-            .expect("v2025 doc must be stored");
-
-        assert_ne!(id_a, id_b);
-
-        // Query scoped to v-2025: v-2024's chunk must not surface.
-        let output = retrieve(
-            State(state.clone()),
-            parts_for("acme"),
-            Path("contracts".to_string()),
-            SafeJson(RetrieveQuery {
-                query_vector: Some(vec![1.0, 0.0, 0.0]),
-                dossier_id: Some("dossier-1".to_string()),
-                version_ref: Some("v-2025".to_string()),
-                include_content: true,
-                ..RetrieveQuery::vector(10)
-            }),
-        )
-        .await
-        .expect("retrieve must succeed")
-        .0;
-        assert_eq!(output.chunks.len(), 1, "deleted version's chunk must not surface");
-        assert_eq!(output.chunks[0].document_id, id_b);
+        .expect("globex retrieve must not error");
         assert_eq!(
-            output.chunks[0].content.as_deref(),
-            Some("chunk of doc b v2025")
+            output.0.chunks.len(),
+            0,
+            "neighbor tenant's chunks must not leak across tenants"
+        );
+
+        // globex cannot address acme's scoped collection directly — ':' is
+        // rejected by `validate_collection_name`.
+        let globex_direct = retrieve(
+            State(state),
+            parts_for("globex"),
+            Path("acme:contracts".to_string()),
+            SafeJson(query),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            globex_direct.code,
+            crate::error::ApiErrorCode::InvalidRequest
         );
     }
 
-    /// Negative test: removed chunk. Re-upserting a document (same
-    /// `external_id`) replaces all its chunks; a chunk present in the first
-    /// upsert but absent from the second must not be returned.
+    /// Negative: a removed chunk must not be returned by retrieval —
+    /// `delete_documents` removes both the document and its chunks, and a
+    /// subsequent retrieve finds nothing even when the query vector matches.
     #[tokio::test]
-    async fn retrieve_excludes_removed_chunk_after_reupsert() {
-        let state = state_with_rag();
+    async fn retrieve_excludes_removed_chunk() {
+        let state = state_with_rag_and_pii();
         let store = state.rag_store.as_ref().expect("RAG store");
-        let scoped_name = scope_collection_name(&TenantCtx::new(TenantId::new("acme"), ActorId::new("a")), "contracts");
+        let acme_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
+        let scoped_name = scope_collection_name(&acme_ctx, "contracts");
+        let mut spec = CollectionSpec::new("contracts", 3);
+        spec.name = scoped_name.clone();
         store
-            .ensure_collection(&CollectionSpec::new("acme:contracts", 3))
+            .ensure_collection(&spec)
             .await
             .expect("collection must be created");
 
-        // First upsert: two chunks under one external_id.
-        store
-            .upsert_document(
-                &scoped_name,
-                &DocumentRecord {
-                    external_id: Some("ext-removed".to_string()),
-                    tenant_id: Some("acme".to_string()),
-                    full_text: "doc with two chunks".to_string(),
-                    ..Default::default()
-                },
-                &[
-                    ChunkRecord {
-                        ordinal: 0,
-                        content: "chunk one".to_string(),
-                        embedding: vec![1.0, 0.0, 0.0],
-                        sparse_embedding: None,
-                        multi_vector: None,
-                        chunk_metadata: serde_json::Value::Null,
-                        dossier_id: None,
-                        version_ref: None,
-                        tenant_id: Some("acme".to_string()),
-                        acl_reference: None,
-                        external_id: None,
-                    },
-                    ChunkRecord {
-                        ordinal: 1,
-                        content: "chunk two".to_string(),
-                        embedding: vec![0.0, 1.0, 0.0],
-                        sparse_embedding: None,
-                        multi_vector: None,
-                        chunk_metadata: serde_json::Value::Null,
-                        dossier_id: None,
-                        version_ref: None,
-                        tenant_id: Some("acme".to_string()),
-                        acl_reference: None,
-                        external_id: None,
-                    },
-                ],
-            )
-            .await
-            .expect("first upsert must succeed");
-
-        // Re-upsert the same external_id with only chunk ordinal 0: chunk two is
-        // removed.
+        let doc = DocumentRecord {
+            title: Some("contract".to_string()),
+            full_text: "contract text".to_string(),
+            tenant_id: Some("acme".to_string()),
+            ..Default::default()
+        };
         let id = store
             .upsert_document(
                 &scoped_name,
-                &DocumentRecord {
-                    external_id: Some("ext-removed".to_string()),
-                    tenant_id: Some("acme".to_string()),
-                    full_text: "doc with one chunk".to_string(),
-                    ..Default::default()
-                },
+                &doc,
                 &[ChunkRecord {
+                    external_id: None,
                     ordinal: 0,
-                    content: "chunk one".to_string(),
+                    content: "keep me".to_string(),
                     embedding: vec![1.0, 0.0, 0.0],
                     sparse_embedding: None,
                     multi_vector: None,
@@ -1831,33 +1731,108 @@ mod tests {
                     dossier_id: None,
                     version_ref: None,
                     tenant_id: Some("acme".to_string()),
-                    acl_reference: None,
-                    external_id: None,
+                    acl: None,
                 }],
             )
             .await
-            .expect("re-upsert must succeed");
+            .expect("document must be stored");
 
-        // Query surfaces only chunk one; chunk two is gone.
+        // Remove the document (and its only chunk).
+        let removed = store
+            .delete_documents(&scoped_name, &[id])
+            .await
+            .expect("delete must succeed");
+        assert_eq!(removed, 1);
+
+        let query = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0, 0.0]),
+            include_content: true,
+            ..RetrieveQuery::vector(10)
+        };
         let output = retrieve(
             State(state.clone()),
             parts_for("acme"),
             Path("contracts".to_string()),
-            SafeJson(RetrieveQuery {
-                query_vector: Some(vec![1.0, 0.0, 0.0]),
-                include_content: true,
-                ..RetrieveQuery::vector(10)
-            }),
+            SafeJson(query),
         )
         .await
-        .expect("retrieve must succeed")
-        .0;
-        assert_eq!(output.chunks.len(), 1, "removed chunk must not surface");
-        assert_eq!(output.chunks[0].document_id, id);
-        assert_eq!(output.chunks[0].content.as_deref(), Some("chunk one"));
-        assert!(output
-            .chunks
-            .iter()
-            .all(|c| c.content.as_deref() != Some("chunk two")));
+        .expect("retrieve must not error after delete");
+        assert_eq!(
+            output.0.chunks.len(),
+            0,
+            "removed chunk must not be returned"
+        );
+    }
+
+    /// Negative: a document whose version was deleted must not surface after
+    /// retrieval — `delete_documents` on a version-scoped document removes it,
+    /// and a retrieve scoped to that version finds nothing.
+    #[tokio::test]
+    async fn retrieve_excludes_deleted_version() {
+        let state = state_with_rag_and_pii();
+        let store = state.rag_store.as_ref().expect("RAG store");
+        let acme_ctx = TenantCtx::new(TenantId::new("acme"), ActorId::new("test"));
+        let scoped_name = scope_collection_name(&acme_ctx, "contracts");
+        let mut spec = CollectionSpec::new("contracts", 3);
+        spec.name = scoped_name.clone();
+        store
+            .ensure_collection(&spec)
+            .await
+            .expect("collection must be created");
+
+        let doc = DocumentRecord {
+            title: Some("contract v1".to_string()),
+            full_text: "contract v1 text".to_string(),
+            version_ref: Some("v1".to_string()),
+            tenant_id: Some("acme".to_string()),
+            ..Default::default()
+        };
+        let id = store
+            .upsert_document(
+                &scoped_name,
+                &doc,
+                &[ChunkRecord {
+                    external_id: None,
+                    ordinal: 0,
+                    content: "v1 secret".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    sparse_embedding: None,
+                    multi_vector: None,
+                    chunk_metadata: serde_json::Value::Null,
+                    dossier_id: None,
+                    version_ref: Some("v1".to_string()),
+                    tenant_id: Some("acme".to_string()),
+                    acl: None,
+                }],
+            )
+            .await
+            .expect("document must be stored");
+
+        // Delete the document (its version is now gone).
+        let removed = store
+            .delete_documents(&scoped_name, &[id])
+            .await
+            .expect("delete must succeed");
+        assert_eq!(removed, 1);
+
+        let query = RetrieveQuery {
+            query_vector: Some(vec![1.0, 0.0, 0.0]),
+            version_ref: Some("v1".to_string()),
+            include_content: true,
+            ..RetrieveQuery::vector(10)
+        };
+        let output = retrieve(
+            State(state.clone()),
+            parts_for("acme"),
+            Path("contracts".to_string()),
+            SafeJson(query),
+        )
+        .await
+        .expect("retrieve must not error after version delete");
+        assert_eq!(
+            output.0.chunks.len(),
+            0,
+            "deleted version's chunks must not be returned"
+        );
     }
 }

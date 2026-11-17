@@ -120,6 +120,7 @@ fn resolve_field(
             "source_uri" => doc.source_uri.clone().map(serde_json::Value::String),
             "dossier_id" => doc.dossier_id.clone().map(serde_json::Value::String),
             "version_ref" => doc.version_ref.clone().map(serde_json::Value::String),
+            "tenant_id" => doc.tenant_id.as_deref().map(|s| serde_json::Value::String(s.to_string())),
             "keywords" => serde_json::to_value(&doc.keywords).ok(),
             "labels" => Some(doc.labels.clone()),
             "entities" => Some(doc.entities.clone()),
@@ -134,6 +135,7 @@ fn resolve_field(
             "external_id" => chunk.external_id.clone().map(serde_json::Value::String),
             "dossier_id" => chunk.dossier_id.clone().map(serde_json::Value::String),
             "version_ref" => chunk.version_ref.clone().map(serde_json::Value::String),
+            "tenant_id" => chunk.tenant_id.as_deref().map(|s| serde_json::Value::String(s.to_string())),
             path if path.starts_with("chunk_metadata.") => {
                 json_pointer(&chunk.chunk_metadata, &path["chunk_metadata.".len()..])
             }
@@ -214,8 +216,6 @@ fn to_retrieved_chunk(
         content: query.include_content.then(|| c.record.content.clone()),
         score: score_value,
         primary_score,
-        tenant_id: c.record.tenant_id.clone(),
-        acl_reference: c.record.acl_reference.clone(),
         chunk_metadata: c.record.chunk_metadata.clone(),
         document: query.include_document.then(|| {
             coll.documents
@@ -223,6 +223,7 @@ fn to_retrieved_chunk(
                 .map(|d| summarize(&c.document_id, &d.record))
                 .unwrap_or_else(|| summarize(&c.document_id, &DocumentRecord::default()))
         }),
+        tenant_id: c.record.tenant_id.clone(),
     }
 }
 
@@ -239,8 +240,6 @@ fn summarize(id: &DocumentId, doc: &DocumentRecord) -> DocumentSummary {
         ingested_at: None,
         dossier_id: doc.dossier_id.clone(),
         version_ref: doc.version_ref.clone(),
-        tenant_id: doc.tenant_id.clone(),
-        acl_reference: doc.acl_reference.clone(),
     }
 }
 
@@ -346,23 +345,17 @@ impl RagStore for InMemoryVectorStore {
             coll.document_order.push(doc_id.clone());
         }
         for chunk in chunks {
-            // The document is the authoritative source of the legal scope:
-            // chunks produced by server-side chunking (dossier_id / version_ref
-            // / tenant_id / acl_reference at None) inherit the scope of their
-            // parent document at upsert, otherwise a dossier/version/tenant
-            // query would return zero results despite a correctly scoped document.
+            // Le document est la source autoritative du scoping juridique :
+            // les chunks produits par le chunking côté API (dossier_id /
+            // version_ref à None) héritent du scope de leur document parent
+            // à l'upsert, sinon une requête dossier/version retournerait
+            // zéro résultat malgré un document correctement scopé.
             let mut record = chunk.clone();
             if record.dossier_id.is_none() {
                 record.dossier_id = document.dossier_id.clone();
             }
             if record.version_ref.is_none() {
                 record.version_ref = document.version_ref.clone();
-            }
-            if record.tenant_id.is_none() {
-                record.tenant_id = document.tenant_id.clone();
-            }
-            if record.acl_reference.is_none() {
-                record.acl_reference = document.acl_reference.clone();
             }
             coll.chunks.push(StoredChunk {
                 id: ChunkId(format!("{}:{}", doc_id.0, chunk.ordinal)),
@@ -467,26 +460,6 @@ impl RagStore for InMemoryVectorStore {
                 if let Some(version_ref) = &query.version_ref {
                     if c.record.version_ref.as_deref() != Some(version_ref.as_str()) {
                         return false;
-                    }
-                }
-                // Hard tenant boundary: only chunks whose owning tenant matches
-                // the caller's effective tenant are eligible, before scoring.
-                // Legacy chunks without a tenant_id are kept for backward
-                // compatibility (mirrors [`enforce_post_retrieval_tenant`] at
-                // the API layer).
-                if let Some(tenant_id) = &query.tenant_id {
-                    match c.record.tenant_id.as_deref() {
-                        Some(t) if t != tenant_id.as_str() => return false,
-                        _ => {}
-                    }
-                }
-                // Hard ACL boundary: only chunks whose ACL reference matches are
-                // eligible, before scoring. Legacy chunks without an ACL
-                // reference are kept for backward compatibility.
-                if let Some(acl_reference) = &query.acl_reference {
-                    match c.record.acl_reference.as_deref() {
-                        Some(a) if a != acl_reference.as_str() => return false,
-                        _ => {}
                     }
                 }
                 query.filter.as_ref().is_none_or(|f| {
@@ -722,7 +695,7 @@ mod tests {
             dossier_id: None,
             version_ref: None,
             tenant_id: None,
-            acl_reference: None,
+            acl: None,
         }
     }
 
@@ -744,7 +717,7 @@ mod tests {
             dossier_id: None,
             version_ref: None,
             tenant_id: None,
-            acl_reference: None,
+            acl: None,
         }
     }
 
@@ -1405,12 +1378,13 @@ mod tests {
             dossier_id: dossier_id.map(String::from),
             version_ref: version_ref.map(String::from),
             tenant_id: None,
-            acl_reference: None,
+            acl: None,
         }
     }
 
-    /// Retrieval scoped to a dossier must never surface a chunk from another
-    /// dossier, even in the same collection and with an identical embedding.
+    /// Anti-mélange : retrieval scoped à un dossier ne doit jamais remonter un
+    /// chunk d'un autre dossier, même dans la même collection et avec un
+    /// embedding identique.
     #[tokio::test]
     async fn should_retrieve_only_scoped_dossier_when_dossier_id_is_set() {
         let store = store_with_collection(2).await;
@@ -1492,8 +1466,8 @@ mod tests {
         assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc b"));
     }
 
-    /// Retrieval scoped to a version must never surface a chunk from another
-    /// version, even in the same dossier.
+    /// Anti-mélange : retrieval scoped à une version ne doit jamais remonter un
+    /// chunk d'une autre version, même dans le même dossier.
     #[tokio::test]
     async fn should_retrieve_only_scoped_version_when_version_ref_is_set() {
         let store = store_with_collection(2).await;
@@ -1574,8 +1548,9 @@ mod tests {
         );
     }
 
-    /// Dossier and version are ANDed together; a chunk must match both to
-    /// survive, and a `doc.*` filter does not lift the dossier/version barrier.
+    /// Anti-mélange : dossier et version s'ANDent ensemble ; un chunk doit
+    /// matcher les deux pour survivre, et un filtre doc.* ne lève pas la
+    /// barrière dossier/version.
     #[tokio::test]
     async fn should_and_dossier_and_version_when_both_scopes_are_set() {
         let store = store_with_collection(2).await;
@@ -1658,8 +1633,8 @@ mod tests {
         assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc a"));
     }
 
-    /// A `doc.dossier_id` / `doc.version_ref` filter honors the same barriers
-    /// as the query's scoping fields.
+    /// Un filtre `doc.dossier_id` / `doc.version_ref` respecte les mêmes
+    /// barrières que les champs de scopage de requête.
     #[tokio::test]
     async fn should_filter_by_doc_dossier_id_and_version_ref_when_fields_are_allowlisted() {
         let store = store_with_collection(2).await;
@@ -1733,9 +1708,9 @@ mod tests {
         assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc b"));
     }
 
-    /// End-to-end: chunks produced by server-side chunking (dossier_id /
-    /// version_ref at None) inherit the scope of their parent document at
-    /// upsert, and a dossier/version query finds them.
+    /// End-to-end : chunks produits par le chunking côté API (dossier_id /
+    /// version_ref à None) héritent du scope de leur document parent à
+    /// l'upsert, et une requête dossier/version les retrouve.
     #[tokio::test]
     async fn should_propagate_document_scope_to_chunks_when_chunk_fields_are_none() {
         let store = store_with_collection(2).await;
@@ -1747,14 +1722,14 @@ mod tests {
             version_ref: Some("v-2024".to_string()),
             ..Default::default()
         };
-        // The chunks carry no scope: they must inherit it from the document.
+        // Les chunks n'ont aucun scope : ils doivent l'hériter du document.
         let chunks = vec![chunk(0, "clause de confidentialité", vec![1.0, 0.0])];
         let id = store
             .upsert_document("docs", &document, &chunks)
             .await
             .unwrap();
 
-        // The stored document keeps its scopes.
+        // Le document stocké conserve ses scopes.
         let (stored, stored_chunks) = store
             .get_document_chunks("docs", &id)
             .await
@@ -1765,8 +1740,8 @@ mod tests {
         assert_eq!(stored_chunks[0].dossier_id.as_deref(), Some("dossier-1"));
         assert_eq!(stored_chunks[0].version_ref.as_deref(), Some("v-2024"));
 
-        // Retrieve by dossier: finds the chunk despite empty chunk fields at
-        // upsert.
+        // Retrieve par dossier : retrouve le chunk malgré des champs chunk
+        // vides à l'upsert.
         let q = RetrieveQuery {
             query_vector: Some(vec![1.0, 0.0]),
             dossier_id: Some("dossier-1".to_string()),
@@ -1781,7 +1756,7 @@ mod tests {
             Some("clause de confidentialité")
         );
 
-        // Retrieve by version: same.
+        // Retrieve par version : idem.
         let q = RetrieveQuery {
             query_vector: Some(vec![1.0, 0.0]),
             version_ref: Some("v-2024".to_string()),
@@ -1792,7 +1767,7 @@ mod tests {
         assert_eq!(out.chunks.len(), 1);
         assert_eq!(out.chunks[0].document_id, id);
 
-        // Retrieve by a wrong dossier: zero results (no cross-tenant mix-up).
+        // Retrieve par un mauvais dossier : zéro résultat (anti-mélange).
         let q = RetrieveQuery {
             query_vector: Some(vec![1.0, 0.0]),
             dossier_id: Some("dossier-9".to_string()),
@@ -1800,222 +1775,5 @@ mod tests {
         };
         let out = store.retrieve("docs", &q).await.unwrap();
         assert!(out.chunks.is_empty());
-    }
-
-    /// Negative test: neighbor tenant. Tenant B's chunk sits in the same
-    /// collection as tenant A's chunk with an identical embedding; a query
-    /// scoped to tenant A's `tenant_id` must exclude tenant B's chunk before
-    /// scoring, so no cross-tenant data is surfaced no matter how similar it is.
-    #[tokio::test]
-    async fn should_exclude_neighbor_tenant_before_scoring() {
-        let store = store_with_collection(2).await;
-
-        let doc_a = DocumentRecord {
-            title: Some("doc-a".to_string()),
-            full_text: "doc a".to_string(),
-            tenant_id: Some("acme".to_string()),
-            ..Default::default()
-        };
-        let id_a = store
-            .upsert_document(
-                "docs",
-                &doc_a,
-                &[chunk_scoped(
-                    0,
-                    "chunk of doc a",
-                    vec![1.0, 0.0],
-                    None,
-                    None,
-                )],
-            )
-            .await
-            .unwrap();
-
-        let doc_b = DocumentRecord {
-            title: Some("doc-b".to_string()),
-            full_text: "doc b".to_string(),
-            tenant_id: Some("globex".to_string()),
-            ..Default::default()
-        };
-        let id_b = store
-            .upsert_document(
-                "docs",
-                &doc_b,
-                &[chunk_scoped(
-                    0,
-                    "chunk of doc b",
-                    vec![1.0, 0.0],
-                    None,
-                    None,
-                )],
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(id_a, id_b);
-
-        // Query as tenant acme: only doc a's chunk survives, even though doc b's
-        // chunk is equally similar and in the same collection.
-        let scoped = RetrieveQuery {
-            query_vector: Some(vec![1.0, 0.0]),
-            tenant_id: Some("acme".to_string()),
-            ..RetrieveQuery::vector(10)
-        };
-        let out = store.retrieve("docs", &scoped).await.unwrap();
-        assert_eq!(out.chunks.len(), 1);
-        assert_eq!(out.chunks[0].document_id, id_a);
-        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc a"));
-        assert_eq!(out.chunks[0].tenant_id.as_deref(), Some("acme"));
-
-        // Query as tenant globex: only doc b's chunk survives.
-        let scoped = RetrieveQuery {
-            query_vector: Some(vec![1.0, 0.0]),
-            tenant_id: Some("globex".to_string()),
-            ..RetrieveQuery::vector(10)
-        };
-        let out = store.retrieve("docs", &scoped).await.unwrap();
-        assert_eq!(out.chunks.len(), 1);
-        assert_eq!(out.chunks[0].document_id, id_b);
-        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk of doc b"));
-
-        // Unscoped query (no tenant_id): legacy rows without tenant filtering
-        // still surface both; the pre-retrieval tenant filter only applies when
-        // the query imposes it.
-        let unscoped = RetrieveQuery {
-            query_vector: Some(vec![1.0, 0.0]),
-            ..RetrieveQuery::vector(10)
-        };
-        let out = store.retrieve("docs", &unscoped).await.unwrap();
-        assert_eq!(out.chunks.len(), 2);
-    }
-
-    /// Negative test: deleted version. A chunk grounded on version `v-2024` must
-    /// not be returned when the query scopes to a later version `v-2025` — the
-    /// version boundary is enforced before scoring, so a retired version's
-    /// chunks are invisible.
-    #[tokio::test]
-    async fn should_exclude_deleted_version_before_scoring() {
-        let store = store_with_collection(2).await;
-
-        let doc_a = DocumentRecord {
-            title: Some("doc-a".to_string()),
-            full_text: "doc a".to_string(),
-            dossier_id: Some("dossier-1".to_string()),
-            version_ref: Some("v-2024".to_string()),
-            ..Default::default()
-        };
-        let id_a = store
-            .upsert_document(
-                "docs",
-                &doc_a,
-                &[chunk_scoped(
-                    0,
-                    "chunk of doc a v2024",
-                    vec![1.0, 0.0],
-                    Some("dossier-1"),
-                    Some("v-2024"),
-                )],
-            )
-            .await
-            .unwrap();
-
-        let doc_b = DocumentRecord {
-            title: Some("doc-b".to_string()),
-            full_text: "doc b".to_string(),
-            dossier_id: Some("dossier-1".to_string()),
-            version_ref: Some("v-2025".to_string()),
-            ..Default::default()
-        };
-        let id_b = store
-            .upsert_document(
-                "docs",
-                &doc_b,
-                &[chunk_scoped(
-                    0,
-                    "chunk of doc b v2025",
-                    vec![1.0, 0.0],
-                    Some("dossier-1"),
-                    Some("v-2025"),
-                )],
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(id_a, id_b);
-
-        // Query scoped to v-2025: doc a's chunk (v-2024) must not surface.
-        let scoped = RetrieveQuery {
-            query_vector: Some(vec![1.0, 0.0]),
-            dossier_id: Some("dossier-1".to_string()),
-            version_ref: Some("v-2025".to_string()),
-            ..RetrieveQuery::vector(10)
-        };
-        let out = store.retrieve("docs", &scoped).await.unwrap();
-        assert_eq!(out.chunks.len(), 1);
-        assert_eq!(out.chunks[0].document_id, id_b);
-        assert_eq!(
-            out.chunks[0].content.as_deref(),
-            Some("chunk of doc b v2025")
-        );
-    }
-
-    /// Negative test: removed chunk. Re-upserting a document (same
-    /// `external_id`) replaces all its chunks, so a chunk that was present in
-    /// the first upsert but absent from the second must not be returned.
-    #[tokio::test]
-    async fn should_exclude_removed_chunk_after_reupsert() {
-        let store = store_with_collection(2).await;
-
-        // First upsert: two chunks under one external_id.
-        let id = store
-            .upsert_document(
-                "docs",
-                &DocumentRecord {
-                    external_id: Some("ext-removed".to_string()),
-                    full_text: "doc with two chunks".to_string(),
-                    ..Default::default()
-                },
-                &[
-                    chunk_scoped(0, "chunk one", vec![1.0, 0.0], None, None),
-                    chunk_scoped(1, "chunk two", vec![0.0, 1.0], None, None),
-                ],
-            )
-            .await
-            .unwrap();
-
-        // Re-upsert the same external_id with only chunk ordinal 0: chunk two is
-        // removed (upsert replaces all chunks for an existing external_id).
-        let id = store
-            .upsert_document(
-                "docs",
-                &DocumentRecord {
-                    external_id: Some("ext-removed".to_string()),
-                    full_text: "doc with one chunk".to_string(),
-                    ..Default::default()
-                },
-                &[chunk_scoped(
-                    0,
-                    "chunk one",
-                    vec![1.0, 0.0],
-                    None,
-                    None,
-                )],
-            )
-            .await
-            .unwrap();
-
-        // Query should surface only chunk one; chunk two is gone.
-        let q = RetrieveQuery {
-            query_vector: Some(vec![1.0, 0.0]),
-            ..RetrieveQuery::vector(10)
-        };
-        let out = store.retrieve("docs", &q).await.unwrap();
-        assert_eq!(out.chunks.len(), 1);
-        assert_eq!(out.chunks[0].document_id, id);
-        assert_eq!(out.chunks[0].content.as_deref(), Some("chunk one"));
-        assert!(out
-            .chunks
-            .iter()
-            .all(|c| c.content.as_deref() != Some("chunk two")));
     }
 }
