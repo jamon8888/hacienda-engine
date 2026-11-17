@@ -10,11 +10,20 @@
 //! This is the extension point the whole RAG layer is built around: this
 //! crate ships the trait plus a brute-force in-memory backend, and a durable
 //! backend (e.g. tenant-scoped pgvector) is expected to implement it
-//! externally. The trait is deliberately **single-tenant**: one instance is
-//! one trust domain. Multi-tenancy is layered on top by the caller (e.g. one
-//! scoped instance per tenant, or a decorator that sets row-level-security
-//! context before delegating) and is never expressed in these signatures —
-//! exactly hacienda's own multi-tenancy model.
+//! externally.
+//!
+//! Rows carry [`crate::types::DocumentRecord::tenant_id`] and
+//! [`crate::types::DocumentRecord::acl_reference`] (denormalized onto chunks at
+//! upsert), and [`crate::query::RetrieveQuery`] carries `tenant_id` and
+//! `acl_reference` as hard retrieval boundaries. Backends enforce these
+//! boundaries *before* scoring — a chunk the caller is not authorized for is
+//! excluded from the candidate pool, never merely ranked last.
+//!
+//! The trait itself stays free of product/tenant policy in its signatures:
+//! multi-tenancy is expressed through the query IR rather than through
+//! `RagStore` methods. One instance is one trust domain; a deployment that
+//! serves several tenants scopes one instance per tenant (or decorates with
+//! row-level-security context) before delegating.
 
 use crate::capability::Capabilities;
 use crate::error::RagResult;

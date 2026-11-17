@@ -173,6 +173,18 @@ pub struct DocumentRecord {
     /// `None` for documents ingested before this contract existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
+    /// Owning tenant of this row, resolved server-side at ingest (never taken
+    /// from the client payload). `None` for rows ingested before this contract
+    /// existed. A retrieval only ever returns chunks whose `tenant_id` matches
+    /// the caller's effective tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// ACL reference gating access to this row within its tenant. `None` for
+    /// rows ingested before this contract existed. A retrieval only ever
+    /// returns chunks whose `acl_reference` matches the caller's, when one is
+    /// imposed on the query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl_reference: Option<String>,
 }
 
 /// Chunk record for upsertion.
@@ -203,6 +215,12 @@ pub struct ChunkRecord {
     /// Document version the parent document grounds on, for retrieval scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
+    /// Owning tenant of this row, denormalized from the parent document at upsert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// ACL reference of this row, denormalized from the parent document at upsert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl_reference: Option<String>,
 }
 
 /// Sparse (SPLADE-style) embedding: parallel arrays, indices sorted ascending.
@@ -304,6 +322,12 @@ pub struct DocumentSummary {
     /// Document version the document grounds on, for retrieval scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
+    /// Owning tenant of this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// ACL reference of this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl_reference: Option<String>,
 }
 
 /// How a retrieved chunk was primarily scored.
@@ -370,6 +394,12 @@ pub struct RetrievedChunk {
     pub score: f32,
     /// How the score was produced.
     pub primary_score: PrimaryScore,
+    /// Owning tenant of this row, for post-retrieval access control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// ACL reference of this row, for post-retrieval access control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl_reference: Option<String>,
     /// Chunk-level metadata.
     #[serde(default)]
     pub chunk_metadata: serde_json::Value,
@@ -450,10 +480,14 @@ mod tests {
             chunk_metadata: serde_json::Value::Null,
             dossier_id: Some("dossier-1".to_string()),
             version_ref: Some("v-2024".to_string()),
+            tenant_id: Some("tenant-1".to_string()),
+            acl_reference: Some("acl-1".to_string()),
         };
         let json = serde_json::to_value(&chunk).unwrap();
         assert_eq!(json["dossier_id"], "dossier-1");
         assert_eq!(json["version_ref"], "v-2024");
+        assert_eq!(json["tenant_id"], "tenant-1");
+        assert_eq!(json["acl_reference"], "acl-1");
         let back: ChunkRecord = serde_json::from_value(json).unwrap();
         assert_eq!(back, chunk);
     }

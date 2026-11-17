@@ -79,6 +79,8 @@ impl FilterField {
             "ingested_at",
             "dossier_id",
             "version_ref",
+            "tenant_id",
+            "acl_reference",
         ];
         if DOC_FIELDS.contains(&path) || path.starts_with("metadata.") {
             return Ok(());
@@ -96,6 +98,8 @@ impl FilterField {
             "chunk_metadata",
             "dossier_id",
             "version_ref",
+            "tenant_id",
+            "acl_reference",
         ];
         if CHUNK_FIELDS.contains(&path) || path.starts_with("chunk_metadata.") {
             return Ok(());
@@ -378,5 +382,25 @@ mod tests {
         assert!(json.get("and").is_some());
         let back: Filter = serde_json::from_value(json).unwrap();
         assert_eq!(original, back);
+    }
+
+    #[test]
+    fn should_parse_field_when_doc_tenant_id_is_allowlisted() {
+        let parsed = FilterField("doc.tenant_id".to_string()).parse().unwrap();
+        assert_eq!(parsed.namespace, FilterNamespace::Doc);
+        assert_eq!(parsed.path, "tenant_id");
+    }
+
+    #[test]
+    fn should_parse_field_when_chunk_acl_reference_is_allowlisted() {
+        let parsed = FilterField("chunk.acl_reference".to_string()).parse().unwrap();
+        assert_eq!(parsed.namespace, FilterNamespace::Chunk);
+        assert_eq!(parsed.path, "acl_reference");
+    }
+
+    #[test]
+    fn should_reject_field_when_doc_unknown_acl_like_field_is_not_allowlisted() {
+        assert!(FilterField("doc.acl".to_string()).parse().is_err());
+        assert!(FilterField("doc.tenant".to_string()).parse().is_err());
     }
 }
