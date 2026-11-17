@@ -214,6 +214,17 @@ impl From<HaciendaError> for ApiError {
                     ),
                 }
             }
+            HaciendaError::RevealTicket(ticket_err) => {
+                // Issue #147: every reveal-ticket failure collapses to one generic 400 —
+                // no error oracle (a prober cannot distinguish unknown token, revoked,
+                // expired, consumed, or out-of-scope). ACL denial is the single exception:
+                // it is an authorization fact about the caller's own dossier claim, so 403.
+                use hacienda_core::RevealTicketError;
+                match ticket_err {
+                    RevealTicketError::AclDenied => ApiError::forbidden(),
+                    _ => ApiError::invalid_request("Invalid reveal ticket."),
+                }
+            }
             HaciendaError::Pii(pii_err) => {
                 // Map PII errors to appropriate client-visible codes.
                 // Pseudonym errors (malformed token, unreadable, key not found) are
@@ -573,5 +584,45 @@ mod tests {
         )));
         let api_err = ApiError::from(source);
         assert_eq!(api_err.code, ApiErrorCode::InvalidRequest);
+    }
+
+    /// Issue #147: an unknown token resolved under a reveal ticket surfaces as the same
+    /// coarse `PseudonymError::KeyNotFound` as any unreadable token — fail-closed, one 400.
+    #[test]
+    fn unknown_token_under_reveal_ticket_maps_to_400() {
+        use hacienda_core::redaction::PseudonymError;
+        let source = HaciendaError::Pseudonym(PseudonymError::KeyNotFound {
+            id: "k9".into(),
+            variable: "HACIENDA_PSEUDONYM_KEY_K9".into(),
+        });
+        let api_err = ApiError::from(source);
+        assert_eq!(api_err.code, ApiErrorCode::InvalidRequest);
+        assert_eq!(api_err.message, "Invalid pseudonym token.");
+    }
+
+    /// Issue #147: every reveal-ticket failure except ACL denial collapses to the same
+    /// generic 400 — no error oracle between not-found / expired / consumed / revoked /
+    /// out-of-scope.
+    #[test]
+    fn reveal_ticket_failures_map_to_one_generic_400() {
+        use hacienda_core::RevealTicketError;
+        for variant in [
+            RevealTicketError::NotFound,
+            RevealTicketError::NotHolder,
+            RevealTicketError::Revoked,
+            RevealTicketError::Expired,
+            RevealTicketError::Consumed,
+            RevealTicketError::ScopeViolation,
+            RevealTicketError::TrustedCaller,
+            RevealTicketError::NonReversibleMode,
+            RevealTicketError::InsufficientApprovers,
+            RevealTicketError::InvalidRequest,
+        ] {
+            let api_err = ApiError::from(HaciendaError::RevealTicket(variant.clone()));
+            assert_eq!(api_err.code, ApiErrorCode::InvalidRequest, "{variant:?}");
+            assert_eq!(api_err.message, "Invalid reveal ticket.", "{variant:?}");
+        }
+        let acl = ApiError::from(HaciendaError::RevealTicket(RevealTicketError::AclDenied));
+        assert_eq!(acl.code, ApiErrorCode::Forbidden);
     }
 }

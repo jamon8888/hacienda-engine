@@ -55,6 +55,8 @@ pub mod jobs;
 pub mod pii;
 pub mod redaction;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod reveal_ticket;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod review;
 #[cfg(all(any(feature = "postgres", feature = "s3"), not(target_arch = "wasm32")))]
 pub mod store;
@@ -79,5 +81,10 @@ pub use facade::{
 pub use hacienda_installation::{
     resolve_installation, resolve_installation_from_environment, InstallationConfig,
     InstallationContext, InstallationResolutionError, INSTALLATION_CONFIG_ENV,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use reveal_ticket::{
+    DossierAcl, InMemoryDossierAcl, RevealTicket, RevealTicketError, RevealTicketRequest,
+    RevealTicketStatus, RevealTicketStore,
 };
 pub use tenancy::{ActorId, ProjectId, TenantCtx, TenantId};

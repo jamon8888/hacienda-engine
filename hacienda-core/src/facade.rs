@@ -15,7 +15,11 @@ use crate::pii::{
     MergedEntity, PiiCategory, PiiError, PiiPipeline, PipelineMetrics, PipelineResult,
 };
 use crate::redaction::{
-    KeyId, KeyResolver, KeyStatus, Pseudonymiser, RedactionAuditEntry, RedactionError,
+    KeyId, KeyResolver, KeyStatus, Pseudonymiser, RedactionAuditEntry, RedactionError, RedactionMode,
+};
+use crate::reveal_ticket::{
+    new_ticket_id, ticket_window, token_header, DossierAcl, RevealTicket, RevealTicketError,
+    RevealTicketRequest, RevealTicketStatus, RevealTicketStore,
 };
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
@@ -96,6 +100,14 @@ pub struct HaciendaFacade {
     /// `None` when API key auth is not configured. When `Some`, enables
     /// `issue_key_with_auth`, `revoke_key_with_auth`, and token resolution.
     api_key_store: Option<Arc<dyn ApiKeyStore>>,
+    /// Live [`RevealTicket`]s of the unified rehydration contract (issue #147). Always
+    /// present: ticket state needs no configuration, and a restart simply expires every
+    /// outstanding ticket (fail-closed).
+    reveal_tickets: RevealTicketStore,
+    /// Dossier membership ACL behind ticket minting (`pii:reveal` + belonging to the
+    /// dossier). `None` means no ACL is configured, and minting is refused — fail-closed,
+    /// reveal is opt-in, never default-allowed.
+    dossier_acl: Option<Arc<dyn DossierAcl>>,
 }
 
 /// Everything one [`HaciendaFacade::process`] call produced.
@@ -280,6 +292,16 @@ impl HaciendaFacade {
         )
     }
 
+    /// Attach the dossier-membership ACL that gates [`RevealTicket`] minting
+    /// (issue #147: creating a ticket = `pii:reveal` **and** belonging to the dossier).
+    ///
+    /// Without an ACL configured, minting is refused (fail-closed) — see the
+    /// [`Self::dossier_acl`] field doc.
+    pub fn with_dossier_acl(mut self, acl: Arc<dyn DossierAcl>) -> Self {
+        self.dossier_acl = Some(acl);
+        self
+    }
+
     /// Shared construction. Accepts all optional overrides and applies defaults for any
     /// that are `None`.
     fn build(
@@ -352,6 +374,8 @@ impl HaciendaFacade {
             pseudonymisers,
             audit_store,
             api_key_store,
+            reveal_tickets: RevealTicketStore::new(),
+            dossier_acl: None,
             config,
         };
 
@@ -1294,6 +1318,165 @@ impl HaciendaFacade {
         let pseudonymiser = self.pseudonymiser_for(&tenant)?;
         let plaintext = pseudonymiser.reveal(token)?;
         self.record_token_reveal(&plaintext, caller).await?;
+        Ok(plaintext)
+    }
+
+    /// Mint a [`RevealTicket`] — the single authorization object of the unified
+    /// rehydration contract (issue #147, dossier #122 Option 1).
+    ///
+    /// Creation requires `Capability::PiiReveal` **and** membership of `dossier_id` in the
+    /// configured [`DossierAcl`]. An in-process [`Caller::Trusted`] can never mint a ticket
+    /// (the agent/MCP surface stays closed by construction), and a tenant whose redaction
+    /// mode is not [`RedactionMode::Pseudonymize`] — including any future non-reversible
+    /// pseudonym mode (#17) — can never produce one either.
+    ///
+    /// Tickets are always one-shot and expire after at most
+    /// [`MAX_TICKET_TTL_SECS`](crate::reveal_ticket::MAX_TICKET_TTL_SECS) seconds
+    /// (10 minutes, the maximum dossier #122 §4 Q6 proposes; a shorter `ttl_secs` may be
+    /// requested).
+    ///
+    /// # Errors
+    ///
+    /// [`RevealTicketError::TrustedCaller`] for in-process callers,
+    /// [`HaciendaError::Authz`] without `pii:reveal`, [`RevealTicketError::AclDenied`] when
+    /// the subject is not a dossier member (or no ACL is configured),
+    /// [`RevealTicketError::NonReversibleMode`] for a non-reversible redaction mode, and
+    /// [`RevealTicketError::InvalidRequest`] for a malformed request.
+    ///
+    /// TODO(#147): high-sensitivity scopes must require `approvers.len() >= 2` distinct
+    /// approvers != subject (dossier #120 double approval) — the `approvers` field is
+    /// stored but not yet enforced. TODO(#147): expose ticket revocation
+    /// (`RevealTicketStore::revoke` exists but has no facade method yet).
+    pub async fn mint_reveal_ticket_with_auth(
+        &self,
+        caller: Caller<'_>,
+        request: RevealTicketRequest,
+    ) -> Result<RevealTicket, HaciendaError> {
+        // No ticket is ever minted for an in-process caller: the agent surface must not be
+        // able to mint reveal tickets (dossier #122 L1).
+        let Caller::Principal(ctx) = caller else {
+            return Err(RevealTicketError::TrustedCaller.into());
+        };
+        caller.require(Capability::PiiReveal)?;
+        let tenant = caller.tenant_ctx().tenant;
+        let subject = ctx.principal_id.clone();
+
+        // A non-reversible mode (#17 et al.) never gets a ticket.
+        let pii = self.config.pii.as_ref().ok_or(HaciendaError::PiiDisabled)?;
+        if pii.redaction.mode != RedactionMode::Pseudonymize {
+            return Err(RevealTicketError::NonReversibleMode.into());
+        }
+
+        let dossier_id = request.dossier_id.trim().to_owned();
+        if dossier_id.is_empty()
+            || request.document_ids.is_empty()
+            || request.document_ids.iter().any(|d| d.trim().is_empty())
+            || (request.token_ids.is_empty() && request.field_scope.is_empty())
+            || request.justification.trim().is_empty()
+            || request
+                .token_ids
+                .iter()
+                .any(|t| token_header(t).is_none())
+        {
+            return Err(RevealTicketError::InvalidRequest.into());
+        }
+
+        // ACL gate: dossier membership, fail-closed when no ACL is configured.
+        let acl = self
+            .dossier_acl
+            .as_ref()
+            .ok_or(RevealTicketError::AclDenied)?;
+        if !acl.is_member(&tenant, &dossier_id, &subject).await {
+            return Err(RevealTicketError::AclDenied.into());
+        }
+
+        let now = self.reveal_tickets.now();
+        let (requested_at, expires_at) = ticket_window(request.ttl_secs, now);
+        let ticket = RevealTicket {
+            ticket_id: new_ticket_id(),
+            subject,
+            tenant,
+            dossier_id,
+            document_ids: request.document_ids,
+            token_ids: request.token_ids,
+            field_scope: request.field_scope,
+            justification: request.justification,
+            requested_at,
+            expires_at,
+            // Usage unique is non-negotiable on the human path (dossier #122 cible).
+            one_shot: true,
+            approvers: request.approvers,
+            status: RevealTicketStatus::Active,
+        };
+        self.reveal_tickets.insert(ticket.clone());
+        Ok(ticket)
+    }
+
+    /// Resolve one token under a [`RevealTicket`]: only the ticket's `subject`, once (the
+    /// ticket is one-shot), before `expires_at`, and only for tokens/documents inside the
+    /// ticket's scope.
+    ///
+    /// Writes the attributed `Reveal` audit entry (the caller is always a
+    /// [`Caller::Principal`] here, so `principal` is never `None` on this human path) and
+    /// consumes the ticket, so a second resolution fails.
+    ///
+    /// An unknown/unreadable token surfaces as the same coarse
+    /// [`HaciendaError::Pseudonym`] shape as [`Self::reveal_token_with_auth`], which the
+    /// HTTP layer collapses to a single 400 — fail-closed, no error oracle.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealTicketError::TrustedCaller`] for in-process callers, [`HaciendaError::Authz`]
+    /// without `pii:reveal`, [`RevealTicketError::NotFound`]/[`RevealTicketError::NotHolder`]
+    /// for a ticket the caller does not hold, [`RevealTicketError::Expired`] past
+    /// `expires_at`, [`RevealTicketError::Consumed`] on a second resolution,
+    /// [`RevealTicketError::ScopeViolation`] for a token/document outside the ticket scope,
+    /// and [`HaciendaError::Pseudonym`] for a malformed/unknown/unreadable token.
+    pub async fn resolve_reveal_ticket_with_auth(
+        &self,
+        caller: Caller<'_>,
+        ticket_id: &str,
+        token: &str,
+        document_id: Option<&str>,
+    ) -> Result<String, HaciendaError> {
+        let Caller::Principal(ctx) = caller else {
+            return Err(RevealTicketError::TrustedCaller.into());
+        };
+        caller.require(Capability::PiiReveal)?;
+        let tenant = caller.tenant_ctx().tenant;
+
+        let ticket = self
+            .reveal_tickets
+            .get(&tenant, ticket_id)
+            .ok_or(RevealTicketError::NotFound)?;
+        if ticket.subject != ctx.principal_id {
+            return Err(RevealTicketError::NotHolder.into());
+        }
+        match ticket.status {
+            RevealTicketStatus::Resolved => return Err(RevealTicketError::Consumed.into()),
+            RevealTicketStatus::Revoked => return Err(RevealTicketError::Revoked.into()),
+            RevealTicketStatus::Expired => return Err(RevealTicketError::Expired.into()),
+            RevealTicketStatus::Active => {}
+        }
+        let now = self.reveal_tickets.now();
+        if !ticket.is_live_at(now) {
+            return Err(RevealTicketError::Expired.into());
+        }
+        if let Some(doc) = document_id {
+            if !ticket.covers_document(doc) {
+                return Err(RevealTicketError::ScopeViolation.into());
+            }
+        }
+        if !ticket.covers_token(token) {
+            return Err(RevealTicketError::ScopeViolation.into());
+        }
+
+        let pseudonymiser = self.pseudonymiser_for(&tenant)?;
+        let plaintext = pseudonymiser.reveal(token)?;
+        self.record_token_reveal(&plaintext, caller).await?;
+        if ticket.one_shot {
+            self.reveal_tickets.consume(&tenant, ticket_id, now)?;
+        }
         Ok(plaintext)
     }
 
@@ -2745,6 +2928,281 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revealed, "bob@example.com");
+    }
+
+    // ── Issue #147: unified RevealTicket contract ─────────────────────────────
+
+    fn ticket_caller(principal: &str, caps: &[Capability]) -> AuthContext {
+        AuthContext::new(principal, CapabilitySet::new(caps.iter().copied()))
+    }
+
+    fn ticket_facade() -> HaciendaFacade {
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let acl = Arc::new(InMemoryDossierAcl::new());
+        acl.grant(&TenantId::default_tenant(), "case-1", "alice");
+        HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[])
+            .unwrap()
+            .with_dossier_acl(acl)
+    }
+
+    fn ticket_request(token_ids: Vec<String>) -> RevealTicketRequest {
+        RevealTicketRequest {
+            dossier_id: "case-1".into(),
+            document_ids: vec!["doc:v1".into()],
+            token_ids,
+            field_scope: vec![],
+            justification: "legal hold review".into(),
+            approvers: vec![],
+            ttl_secs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mint_ticket_without_pii_reveal_is_refused() {
+        let facade = ticket_facade();
+        let ctx = ticket_caller("bob", &[Capability::DocumentsProcess]);
+        let err = facade
+            .mint_reveal_ticket_with_auth(Caller::Principal(&ctx), ticket_request(vec![]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HaciendaError::Authz(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn trusted_caller_cannot_mint_a_ticket() {
+        let facade = ticket_facade();
+        let err = facade
+            .mint_reveal_ticket_with_auth(
+                Caller::Trusted,
+                ticket_request(vec!["[EMAIL:k1:AAAA]".into()]),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::TrustedCaller)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mint_ticket_requires_dossier_membership() {
+        // A pii:reveal holder who is not a member of the dossier is refused…
+        let facade = ticket_facade();
+        let mallory = ticket_caller("mallory", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let err = facade
+            .mint_reveal_ticket_with_auth(
+                Caller::Principal(&mallory),
+                ticket_request(vec!["[EMAIL:k1:AAAA]".into()]),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::AclDenied)),
+            "{err:?}"
+        );
+        // …and so is everyone when no ACL is configured at all (fail-closed).
+        let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
+        let bare = HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
+        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let err = bare
+            .mint_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                ticket_request(vec!["[EMAIL:k1:AAAA]".into()]),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::AclDenied)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_reversible_mode_never_mints_a_ticket() {
+        // #17: any mode other than Pseudonymize is non-reversible ⇒ never a ticket.
+        let mut pii = PipelineConfig::default();
+        pii.redaction.mode = RedactionMode::Mask;
+        let config = HaciendaConfig::default().with_pii(pii);
+        let acl = Arc::new(InMemoryDossierAcl::new());
+        acl.grant(&TenantId::default_tenant(), "case-1", "alice");
+        let facade = HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[])
+            .unwrap()
+            .with_dossier_acl(acl);
+        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let err = facade
+            .mint_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                ticket_request(vec!["[EMAIL:k1:AAAA]".into()]),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::NonReversibleMode)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_is_one_shot_and_names_the_principal_in_audit() {
+        let facade = ticket_facade();
+        let token = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let ticket = facade
+            .mint_reveal_ticket_with_auth(Caller::Principal(&alice), ticket_request(vec![token.clone()]))
+            .await
+            .unwrap();
+        assert!(ticket.one_shot);
+        assert_eq!(ticket.status, RevealTicketStatus::Active);
+
+        let plaintext = facade
+            .resolve_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                &ticket.ticket_id,
+                &token,
+                Some("doc:v1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plaintext, "bob@example.com");
+
+        // The Reveal audit entry names the human principal — never None on this path.
+        let page = facade
+            .audit_history_with_auth(Caller::Trusted, None, 100)
+            .await
+            .unwrap()
+            .expect("audit store is configured");
+        let reveal = page
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.action == crate::audit::RedactionAction::Reveal)
+            .expect("a Reveal entry was recorded");
+        assert_eq!(reveal.principal.as_deref(), Some("alice"));
+
+        // Second resolution of the one-shot ticket fails.
+        let err = facade
+            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &token, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::Consumed)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_ticket_fails_to_resolve() {
+        let mut facade = ticket_facade();
+        let clock = Arc::new(Mutex::new(chrono::Utc::now()));
+        let clock2 = clock.clone();
+        facade.reveal_tickets =
+            RevealTicketStore::with_clock(Arc::new(move || *clock2.lock().unwrap()));
+
+        let token = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let mut request = ticket_request(vec![token.clone()]);
+        request.ttl_secs = Some(60);
+        let ticket = facade
+            .mint_reveal_ticket_with_auth(Caller::Principal(&alice), request)
+            .await
+            .unwrap();
+
+        // Advance past expires_at.
+        *clock.lock().unwrap() += chrono::Duration::seconds(61);
+
+        let err = facade
+            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &token, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::Expired)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_token_under_a_ticket_fails_closed() {
+        let facade = ticket_facade();
+        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        // Well-formed shape, but key id k9 is not resolvable for the tenant: the same
+        // coarse PseudonymError an unknown token produces, which the HTTP layer maps to
+        // one generic 400.
+        let unknown = "[EMAIL:k9:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]".to_owned();
+        let ticket = facade
+            .mint_reveal_ticket_with_auth(Caller::Principal(&alice), ticket_request(vec![unknown.clone()]))
+            .await
+            .unwrap();
+        let err = facade
+            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &unknown, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                HaciendaError::Pseudonym(crate::redaction::PseudonymError::KeyNotFound { .. })
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_outside_ticket_scope_or_by_non_holder_fails() {
+        let facade = ticket_facade();
+        let token = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
+            .await
+            .unwrap();
+        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let ticket = facade
+            .mint_reveal_ticket_with_auth(Caller::Principal(&alice), ticket_request(vec![token.clone()]))
+            .await
+            .unwrap();
+
+        // A token not in the ticket's scope.
+        let other = facade
+            .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "eve@example.com")
+            .await
+            .unwrap();
+        let err = facade
+            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &other, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::ScopeViolation)),
+            "{err:?}"
+        );
+
+        // A document not in the ticket's document scope.
+        let err = facade
+            .resolve_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                &ticket.ticket_id,
+                &token,
+                Some("other:v9"),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::ScopeViolation)),
+            "{err:?}"
+        );
+
+        // A different principal, even with pii:reveal, is not the ticket holder.
+        let bob = ticket_caller("bob", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let err = facade
+            .resolve_reveal_ticket_with_auth(Caller::Principal(&bob), &ticket.ticket_id, &token, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HaciendaError::RevealTicket(RevealTicketError::NotHolder)),
+            "{err:?}"
+        );
     }
 
     // ── P3b: pseudonym key management API surface ─────────────────────────────

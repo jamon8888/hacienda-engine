@@ -30,6 +30,12 @@ pub enum HaciendaError {
     #[error(transparent)]
     Pseudonym(#[from] crate::redaction::PseudonymError),
 
+    /// A reveal-ticket contract operation failed (issue #147: unified rehydration
+    /// contract). The HTTP layer collapses every variant to one generic 400 — except
+    /// ACL denial, which is a plain 403 — so error shape is never a probing oracle.
+    #[error(transparent)]
+    RevealTicket(#[from] crate::reveal_ticket::RevealTicketError),
+
     /// An API key operation failed.
     #[error(transparent)]
     ApiKey(#[from] crate::auth::keys::ApiKeyError),
