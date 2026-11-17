@@ -75,6 +75,10 @@ cahce = "cahce"
 # hacienda-core/tests/ner_eval.rs doc comment: an example of a typo'd fixture label the
 # schema test is designed to catch, not a typo to fix.
 loaction = "loaction"
+# crates/hacienda-installation/src/lib.rs tests: deliberately misspelled key
+# `trust_boundry` used to assert unknown fields are refused and that the error message
+# does not echo the bad input verbatim. Same class as frist/reveiw/cahce above.
+boundry = "boundry"
 # The "mis-" prefix in "mis-scoring"/"mis-counting" (hacienda-core, crates/hacienda-rag,
 # CHANGELOG.md) reads as a truncated "miss"/"mist" to the checker; it is not one.
 mis = "mis"
