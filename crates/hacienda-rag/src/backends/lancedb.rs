@@ -1105,6 +1105,7 @@ impl RagStore for LanceDbStore {
                     document: query
                         .include_document
                         .then(|| summarize(&docs_by_id[&doc_id])),
+                    tenant_id: None,
                 })
                 .collect();
             Ok(RetrieveOutput {

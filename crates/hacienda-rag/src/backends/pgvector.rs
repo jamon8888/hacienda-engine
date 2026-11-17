@@ -1275,6 +1275,7 @@ impl RowFields {
                 dossier_id: self.doc_dossier_id.clone(),
                 version_ref: self.doc_version_ref.clone(),
             }),
+            tenant_id: None,
         }
     }
 }
