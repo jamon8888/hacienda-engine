@@ -720,6 +720,7 @@ pub async fn run_scan(
 
     let facade = Arc::new(build_facade(HaciendaConfig {
         extraction: config.extraction,
+        installation: config.installation,
         pii: Some(pii_config),
         compliance: config.compliance,
         review: config.review,
@@ -863,6 +864,7 @@ pub async fn run_extract(
 
     let facade = Arc::new(build_facade(HaciendaConfig {
         extraction: config.extraction,
+        installation: config.installation,
         pii: pii_config,
         compliance: config.compliance,
         review: config.review,

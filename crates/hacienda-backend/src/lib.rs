@@ -1196,13 +1196,13 @@ mod tests {
                 endpoint: ServiceEndpoint::new("https://gateway.example.test"),
                 engine: ServiceEndpoint::new("https://engine.example.test"),
                 authentication: SecretReference("session:opaque".into()),
-                tenant_scope: TenantScope(tenant.into()),
+                tenant_scope: Some(TenantScope(tenant.into())),
             }),
             storage: hacienda_client_core::TeamStorageTopology {
                 lancedb: LanceDbTopology::ServerTokenOnly {
                     control_plane: ServiceEndpoint::new("https://lancedb.example.test"),
                     token_reference: SecretReference("lance:opaque".into()),
-                    tenant_scope: TenantScope(tenant.into()),
+                    tenant_scope: Some(TenantScope(tenant.into())),
                 },
             },
             provider_route: ProviderRoute::RedactedViaGateway {

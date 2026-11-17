@@ -9,6 +9,7 @@ use crate::compliance::ComplianceConfig;
 use crate::glossary::GlossaryConfig;
 use crate::pii::PipelineConfig;
 use crate::review::ReviewConfig;
+use hacienda_installation::InstallationConfig;
 use serde::{Deserialize, Serialize};
 use xberg::ExtractionConfig;
 
@@ -29,6 +30,20 @@ use xberg::ExtractionConfig;
 #[serde(default, deny_unknown_fields)]
 pub struct HaciendaConfig {
     pub extraction: ExtractionConfig,
+    /// Which installation this process belongs to: `LocalFull` or `TeamOnPremise`.
+    ///
+    /// This is the first-class `[installation]` section of issue #142. It is the *same*
+    /// type the desktop client reads from `HACIENDA_INSTALLATION_CONFIG`, resolved by
+    /// [`hacienda_installation::resolve_installation`] and validated by
+    /// [`InstallationConfig::validate_for`], so client and server cannot grow two ideas
+    /// of what an installation means (dossier `docs/wayfinder/131-installations.md` §I1,
+    /// gap É1).
+    ///
+    /// `None` means no source declared one. That is correct for the one-shot commands —
+    /// `hacienda extract` runs inside its own process boundary and needs no topology —
+    /// but `hacienda serve` refuses to start without it: a network-facing process has to
+    /// say which installation it is rather than be assumed to be one.
+    pub installation: Option<InstallationConfig>,
     /// Detection and redaction. `None` extracts without touching PII.
     pub pii: Option<PipelineConfig>,
     pub compliance: Option<ComplianceConfig>,

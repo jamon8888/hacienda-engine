@@ -2483,7 +2483,7 @@ mod tests {
                     "https://hacienda.example.test/engine",
                 ),
                 authentication: SecretReference("oidc:client-session".into()),
-                tenant_scope: hacienda_client_core::TenantScope("tenant-a".into()),
+                tenant_scope: Some(hacienda_client_core::TenantScope("tenant-a".into())),
             }),
             storage: hacienda_client_core::TeamStorageTopology {
                 lancedb: hacienda_client_core::LanceDbTopology::ServerTokenOnly {
@@ -2491,7 +2491,7 @@ mod tests {
                         "https://hacienda.example.test/lancedb",
                     ),
                     token_reference: SecretReference("control-plane:lancedb".into()),
-                    tenant_scope: hacienda_client_core::TenantScope("tenant-a".into()),
+                    tenant_scope: Some(hacienda_client_core::TenantScope("tenant-a".into())),
                 },
             },
             provider_route: hacienda_client_core::ProviderRoute::RedactedViaGateway {
