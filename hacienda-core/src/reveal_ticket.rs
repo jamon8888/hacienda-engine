@@ -291,7 +291,12 @@ impl InMemoryDossierAcl {
     }
 
     /// Grant `principal` membership of `dossier_id` in `tenant`.
-    pub fn grant(&self, tenant: &TenantId, dossier_id: impl Into<String>, principal: impl Into<String>) {
+    pub fn grant(
+        &self,
+        tenant: &TenantId,
+        dossier_id: impl Into<String>,
+        principal: impl Into<String>,
+    ) {
         self.members
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -366,7 +371,11 @@ impl RevealTicketStore {
 
     /// Transition `Active -> Revoked`. Idempotent on an already-revoked ticket; fails on a
     /// consumed (resolved) ticket.
-    pub fn revoke(&self, tenant: &TenantId, ticket_id: &str) -> Result<RevealTicket, RevealTicketError> {
+    pub fn revoke(
+        &self,
+        tenant: &TenantId,
+        ticket_id: &str,
+    ) -> Result<RevealTicket, RevealTicketError> {
         let mut tickets = self.tickets.lock().unwrap_or_else(PoisonError::into_inner);
         let ticket = tickets
             .get_mut(&(tenant.clone(), ticket_id.to_owned()))
@@ -383,7 +392,12 @@ impl RevealTicketStore {
 
     /// Transition `Active -> Resolved` for a one-shot ticket. Fails if the ticket is not
     /// live at `now` (revoked / expired / already consumed).
-    pub fn consume(&self, tenant: &TenantId, ticket_id: &str, now: DateTime<Utc>) -> Result<(), RevealTicketError> {
+    pub fn consume(
+        &self,
+        tenant: &TenantId,
+        ticket_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), RevealTicketError> {
         let mut tickets = self.tickets.lock().unwrap_or_else(PoisonError::into_inner);
         let ticket = tickets
             .get_mut(&(tenant.clone(), ticket_id.to_owned()))
@@ -475,12 +489,16 @@ mod tests {
         let now = Utc::now();
         let (_, expires) = ticket_window(Some(60 * 60), now);
         assert_eq!(
-            DateTime::parse_from_rfc3339(&expires).unwrap().with_timezone(&Utc),
+            DateTime::parse_from_rfc3339(&expires)
+                .unwrap()
+                .with_timezone(&Utc),
             now + Duration::seconds(MAX_TICKET_TTL_SECS as i64)
         );
         let (_, expires) = ticket_window(Some(30), now);
         assert_eq!(
-            DateTime::parse_from_rfc3339(&expires).unwrap().with_timezone(&Utc),
+            DateTime::parse_from_rfc3339(&expires)
+                .unwrap()
+                .with_timezone(&Utc),
             now + Duration::seconds(30)
         );
     }

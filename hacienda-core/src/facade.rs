@@ -15,7 +15,8 @@ use crate::pii::{
     MergedEntity, PiiCategory, PiiError, PiiPipeline, PipelineMetrics, PipelineResult,
 };
 use crate::redaction::{
-    KeyId, KeyResolver, KeyStatus, Pseudonymiser, RedactionAuditEntry, RedactionError, RedactionMode,
+    KeyId, KeyResolver, KeyStatus, Pseudonymiser, RedactionAuditEntry, RedactionError,
+    RedactionMode,
 };
 use crate::reveal_ticket::{
     new_ticket_id, ticket_window, token_header, DossierAcl, RevealTicket, RevealTicketError,
@@ -1373,10 +1374,7 @@ impl HaciendaFacade {
             || request.document_ids.iter().any(|d| d.trim().is_empty())
             || (request.token_ids.is_empty() && request.field_scope.is_empty())
             || request.justification.trim().is_empty()
-            || request
-                .token_ids
-                .iter()
-                .any(|t| token_header(t).is_none())
+            || request.token_ids.iter().any(|t| token_header(t).is_none())
         {
             return Err(RevealTicketError::InvalidRequest.into());
         }
@@ -2475,6 +2473,7 @@ mod tests {
         ReviewError, ReviewQueueItem, ReviewRequest, ReviewStatus,
     };
     use crate::tenancy::TenantId;
+    use crate::InMemoryDossierAcl;
     use async_trait::async_trait;
     use std::fs;
     use std::path::PathBuf;
@@ -2979,7 +2978,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::TrustedCaller)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::TrustedCaller)
+            ),
             "{err:?}"
         );
     }
@@ -2988,7 +2990,10 @@ mod tests {
     async fn mint_ticket_requires_dossier_membership() {
         // A pii:reveal holder who is not a member of the dossier is refused…
         let facade = ticket_facade();
-        let mallory = ticket_caller("mallory", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let mallory = ticket_caller(
+            "mallory",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         let err = facade
             .mint_reveal_ticket_with_auth(
                 Caller::Principal(&mallory),
@@ -2997,13 +3002,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::AclDenied)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::AclDenied)
+            ),
             "{err:?}"
         );
         // …and so is everyone when no ACL is configured at all (fail-closed).
         let config = HaciendaConfig::default().with_pii(pseudonymize_config(None));
-        let bare = HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
-        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let bare =
+            HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[]).unwrap();
+        let alice = ticket_caller(
+            "alice",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         let err = bare
             .mint_reveal_ticket_with_auth(
                 Caller::Principal(&alice),
@@ -3012,7 +3024,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::AclDenied)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::AclDenied)
+            ),
             "{err:?}"
         );
     }
@@ -3028,7 +3043,10 @@ mod tests {
         let facade = HaciendaFacade::with_key_resolver(config, Arc::new(key_resolver()), &[])
             .unwrap()
             .with_dossier_acl(acl);
-        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let alice = ticket_caller(
+            "alice",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         let err = facade
             .mint_reveal_ticket_with_auth(
                 Caller::Principal(&alice),
@@ -3037,7 +3055,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::NonReversibleMode)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::NonReversibleMode)
+            ),
             "{err:?}"
         );
     }
@@ -3049,9 +3070,15 @@ mod tests {
             .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
             .await
             .unwrap();
-        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let alice = ticket_caller(
+            "alice",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         let ticket = facade
-            .mint_reveal_ticket_with_auth(Caller::Principal(&alice), ticket_request(vec![token.clone()]))
+            .mint_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                ticket_request(vec![token.clone()]),
+            )
             .await
             .unwrap();
         assert!(ticket.one_shot);
@@ -3084,11 +3111,19 @@ mod tests {
 
         // Second resolution of the one-shot ticket fails.
         let err = facade
-            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &token, None)
+            .resolve_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                &ticket.ticket_id,
+                &token,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::Consumed)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::Consumed)
+            ),
             "{err:?}"
         );
     }
@@ -3105,7 +3140,10 @@ mod tests {
             .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
             .await
             .unwrap();
-        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let alice = ticket_caller(
+            "alice",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         let mut request = ticket_request(vec![token.clone()]);
         request.ttl_secs = Some(60);
         let ticket = facade
@@ -3117,7 +3155,12 @@ mod tests {
         *clock.lock().unwrap() += chrono::Duration::seconds(61);
 
         let err = facade
-            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &token, None)
+            .resolve_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                &ticket.ticket_id,
+                &token,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -3129,17 +3172,28 @@ mod tests {
     #[tokio::test]
     async fn unknown_token_under_a_ticket_fails_closed() {
         let facade = ticket_facade();
-        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let alice = ticket_caller(
+            "alice",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         // Well-formed shape, but key id k9 is not resolvable for the tenant: the same
         // coarse PseudonymError an unknown token produces, which the HTTP layer maps to
         // one generic 400.
         let unknown = "[EMAIL:k9:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]".to_owned();
         let ticket = facade
-            .mint_reveal_ticket_with_auth(Caller::Principal(&alice), ticket_request(vec![unknown.clone()]))
+            .mint_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                ticket_request(vec![unknown.clone()]),
+            )
             .await
             .unwrap();
         let err = facade
-            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &unknown, None)
+            .resolve_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                &ticket.ticket_id,
+                &unknown,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -3158,9 +3212,15 @@ mod tests {
             .mint_pseudonym_token_with_auth(Caller::Trusted, &PiiCategory::Email, "bob@example.com")
             .await
             .unwrap();
-        let alice = ticket_caller("alice", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let alice = ticket_caller(
+            "alice",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         let ticket = facade
-            .mint_reveal_ticket_with_auth(Caller::Principal(&alice), ticket_request(vec![token.clone()]))
+            .mint_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                ticket_request(vec![token.clone()]),
+            )
             .await
             .unwrap();
 
@@ -3170,11 +3230,19 @@ mod tests {
             .await
             .unwrap();
         let err = facade
-            .resolve_reveal_ticket_with_auth(Caller::Principal(&alice), &ticket.ticket_id, &other, None)
+            .resolve_reveal_ticket_with_auth(
+                Caller::Principal(&alice),
+                &ticket.ticket_id,
+                &other,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::ScopeViolation)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::ScopeViolation)
+            ),
             "{err:?}"
         );
 
@@ -3189,18 +3257,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::ScopeViolation)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::ScopeViolation)
+            ),
             "{err:?}"
         );
 
         // A different principal, even with pii:reveal, is not the ticket holder.
-        let bob = ticket_caller("bob", &[Capability::DocumentsProcess, Capability::PiiReveal]);
+        let bob = ticket_caller(
+            "bob",
+            &[Capability::DocumentsProcess, Capability::PiiReveal],
+        );
         let err = facade
-            .resolve_reveal_ticket_with_auth(Caller::Principal(&bob), &ticket.ticket_id, &token, None)
+            .resolve_reveal_ticket_with_auth(
+                Caller::Principal(&bob),
+                &ticket.ticket_id,
+                &token,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HaciendaError::RevealTicket(RevealTicketError::NotHolder)),
+            matches!(
+                err,
+                HaciendaError::RevealTicket(RevealTicketError::NotHolder)
+            ),
             "{err:?}"
         );
     }
@@ -3382,6 +3464,8 @@ mod tests {
         let facade = HaciendaFacade {
             config,
             pii_pipelines: Some(Mutex::new(HashMap::new())),
+            dossier_acl: None,
+            reveal_tickets: RevealTicketStore::new(),
             shared_detector: Some(detector),
             key_resolver: None,
             pinned_active_key: None,
@@ -4487,6 +4571,8 @@ mod tests {
             review_queue: None,
             glossary: None,
             api_key_store: None,
+            dossier_acl: None,
+            reveal_tickets: RevealTicketStore::new(),
         }
     }
 
@@ -5360,6 +5446,8 @@ mod tests {
         audit_store: Option<Arc<dyn AuditStore>>,
     ) -> HaciendaFacade {
         let config = HaciendaConfig::default().with_pii(pipeline.config().clone());
+        // No reveal-ticket surface is exercised here; the store still exists (tickets
+        // never outlive a restart) and no ACL is configured (minting stays fail-closed).
         HaciendaFacade {
             config,
             pii_pipelines: Some(Mutex::new(HashMap::from([(
@@ -5376,6 +5464,8 @@ mod tests {
             review_queue: None,
             glossary: None,
             api_key_store: None,
+            dossier_acl: None,
+            reveal_tickets: RevealTicketStore::new(),
         }
     }
 
