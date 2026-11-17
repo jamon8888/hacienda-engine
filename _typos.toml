@@ -20,6 +20,13 @@ extend-exclude = [
   # produces wrong "corrections" there ("manuels" → "manuals", "contrats" → "contrast",
   # "garanties" → "guarantees").
   "docs/research/",
+  # `docs/wayfinder/` is the French grilling-dossier corpus (one dossier per wayfinder
+  # issue: rehydration contract, trust topology, the two installations, proof of
+  # protection). Same language class as `docs/architecture/` and `docs/research/` above:
+  # an English spell-checker only produces wrong "corrections" here ("topologie" →
+  # "topology", "garanties" → "guarantees", "Partiel" → "Particle"). These are prose
+  # documents, not identifiers — the Rust code is still spell-checked.
+  "docs/wayfinder/",
   "docs/hacienda-guide-ia-fr.md",
   "docs/setup-harnais-ia-fr.md",
   # apps/hacienda-studio/components/extend/layout-blocks.tsx embeds verbatim excerpts from
