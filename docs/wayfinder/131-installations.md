@@ -426,7 +426,8 @@ de valeur brute dans LanceDB, ses index FTS, ses embeddings, les snapshots, trac
 
 ## 11. Sources inspectées (lecture seule, `origin/main` @ `db8d895`)
 
-**Types et contrats**
+### Types et contrats
+
 - `crates/hacienda-client-core/src/lib.rs` — `InstallationConfig`, `LocalFullConfig`,
   `TeamOnPremiseConfig`, `LanceDbTopology`, `GatewayConfig`, `RehydrationCapability/Request`,
   `ConfigurationError` (validation + `Debug` masqué).
@@ -441,14 +442,16 @@ de valeur brute dans LanceDB, ses index FTS, ses embeddings, les snapshots, trac
 - `crates/hacienda-rag/src/backends/lancedb.rs` — `LanceDbStore`, schémas `metadata`/`document`/
   `chunk`, `RRF_K = 60.0`.
 
-**Serveur / API / config**
+### Serveur / API / config
+
 - `hacienda-core/src/config.rs` — `HaciendaConfig` (`deny_unknown_fields`), sections réelles.
 - `hacienda-api/src/handlers/rag.rs` — `scope_collection_name`, `strip_tenant_prefix`,
   `/v1/rag/*` ; `routes.rs` — routes RAG/`answer`.
 - `docs/configuration.md`, `config/production.toml` — surface de config et exemple de prod.
 - `hacienda-core/migrations/*`, `crates/hacienda-rag/migrations/0100/0101/0102` — control plane.
 
-**Client Tauri / packaging / CI**
+### Client Tauri / packaging / CI
+
 - `apps/hacienda-secrecy-client/src-tauri/src/main.rs` — `local_full_profile`,
   `LocalFullDocumentService` (ingest/load/save/search), `HaciendaLocalRedactor`, `LocalViewerState`,
   `NativeOriginalViewer`, `ProviderCommandState`, env (`HACIENDA_INSTALLATION_CONFIG`,
@@ -459,7 +462,8 @@ de valeur brute dans LanceDB, ses index FTS, ses embeddings, les snapshots, trac
   `scripts/ci/actions/setup-onnx-runtime/{linux,macos}.sh`.
 - `.github/workflows/ci-postgres.yaml`, `ci-docker.yaml`, `ci-rust.yaml`.
 
-**Recherche / specs liées**
+### Recherche / specs liées
+
 - `docs/research/2026-11-14-wayfinder-131-xberg-lancedb-rehydration.md`
 - `docs/research/2026-11-14-wayfinder-130-lancedb-full-rag.md`
 - `docs/research/wayfinder-123-rag-security.md`

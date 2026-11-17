@@ -69,13 +69,15 @@ routés, l'état de chaque adaptateur (capturé/décodé/transformé/bloqué), l
 d'exception durant la fenêtre, le hash de la matrice. L'attestation est présentée à
 l'utilisateur (et, si besoin, au conseil) comme preuve de bon fonctionnement.
 
-**Forces**
+#### Forces
+
 - Facile à produire : le proxy connaît déjà l'état de sa propre matrice.
 - Fournit un artefact lisible, horodaté, traçable (liée au journal).
 - S'articule naturellement avec l'audit existant du client secrecy (audit sans contenu,
   hash blake3 des spans, action/catégorie).
 
-**Faiblesses**
+#### Faiblesses
+
 - **Auto-référentielle** : l'attestation est produite par le même système dont on veut
   prouver la protection. Un proxy en panne silencieuse, une régression de décodage,
   ou un contournement inconnu ne sont **pas détectés** par l'attestation elle-même.
@@ -91,7 +93,8 @@ chaque flux (métadonnées du processus, destination, protocole, taille), chaque
 (allow/block/transform), chaque exception, chaque marqueur émis/observé. Le scellement
 rend détectable toute altération a posteriori.
 
-**Forces**
+#### Forces
+
 - **Indépendance face à l'altération** : on peut vérifier après coup que le journal n'a
   pas été modifié (intégrité).
 - Supporte l'audit : le conseil ou un tiers peut exiger la production du journal d'une
@@ -101,7 +104,8 @@ rend détectable toute altération a posteriori.
 - S'aligne avec l'existant : le client secrecy a déjà un `AuditStore` append-only sans
   contenu ; le journal scellé en est l'extension au niveau réseau.
 
-**Faiblesses**
+#### Faiblesses
+
 - Le journal est écrit **par le système accusé** : un contournement total (processus
   qui ne passe jamais par le proxy) n'y laisse **aucune trace** — l'absence n'est pas
   prouvée, seulement la présence des événements observés.
@@ -119,7 +123,8 @@ fournisseur, un analyseur de paquets en parallèle) — cherche la présence de 
 bruts. **Zéro marqueur brut observé** dans la matrice testée = preuve bornée de
 transformation/blocage.
 
-**Forces**
+#### Forces
+
 - **Indépendance réelle** : l'observateur n'est pas le proxy ; il observe l'effet, pas
   l'intention. C'est le seul mécanisme qui détecte un contournement **silencieux**
   (flux qui contourne le proxy, flux capté mais non transformé).
@@ -129,7 +134,8 @@ transformation/blocage.
   correspond exactement à l'exigence de l'issue (« preuve bornée au test, pas une
   garantie universelle »).
 
-**Faiblesses**
+#### Faiblesses
+
 - **Coût** : il faut un observateur indépendant opérationnel (second tap, miroir de
   fournisseur) ; c'est de l'infrastructure de test à construire.
 - **Couverture du test = couverture de la preuve** : un canal non injecté de marqueurs
@@ -253,6 +259,7 @@ unique.**
 viser la matrice exhaustive. Choisir la **première paire OS/application** (macOS +
 Claude Desktop, canal Chat) comme périmètre de preuve minimal. La preuve est
 acceptable pour la décision si, sur cette paire :
+
 - la matrice capture/décodage/transformation/blocage est complète et honnête
   (non couvert explicitement listé) ;
 - la vérification indépendante observe **zéro marqueur brut** sur tous les canaux
@@ -263,6 +270,7 @@ acceptable pour la décision si, sur cette paire :
   bien ce qui doit fuir (réponse au grilling #3).
 
 **Garde-fous transverses** :
+
 - **Mode « marqueurs » distinct** du mode normal, activable uniquement en contexte de
   preuve, avec purge vérifiable des marqueurs des stores après test (grilling #10).
 - **Sentinelle de version** : la preuve est indexée par version client/OS ; toute
@@ -281,6 +289,7 @@ GLiNER2 acceptable. Ces points relèvent du prototype proprement dit, pas de cet
 définition.
 
 ---
+
 *Références : issue #133 (protocole de preuve), carte #118 (séparation stricte
 clair/pseudonymisé/coffre/RAG/fournisseurs ; garantie = contrôle technique vérifiable),
 `apps/hacienda-secrecy-client/` (fail-closed, audit sans contenu, clé en keyring OS,

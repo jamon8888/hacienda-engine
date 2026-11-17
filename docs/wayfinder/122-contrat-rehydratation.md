@@ -14,6 +14,7 @@
 - **Nature du livrable** : note de grilling (aucune modification de code, aucune PR/issue touchée)
 
 > Convention de vocabulaire utilisée dans tout le document :
+>
 > - **pseudonymisation** : valeur → jeton (`Pseudonymiser::token`, `POST /v1/pii/token`).
 > - **réhydratation / révélation** : jeton → valeur (`Pseudonymiser::reveal`, `POST /v1/pii/reveal`).
 > - On distingue la **réhydratation-plaintext** (rend une valeur brute à un humain) de la

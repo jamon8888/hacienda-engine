@@ -50,6 +50,13 @@ ignore = [
   # serde_yaml_ng currently exposes unsafe-libyaml transitively; no compatible
   # replacement is available without changing the CLI configuration format.
   "RUSTSEC-2024-0449",
+  # chrono / chrono-tz / humantime unmaintained notices published 2026-11-17
+  # (chronotope/chrono#1768). Notices only, no known exploit; "no safe upgrade
+  # is available" and the workspace depends on chrono throughout (audit
+  # timestamps, ticket expiry). Migration to jiff is a separate effort.
+  "RUSTSEC-2026-0542",
+  "RUSTSEC-2026-0543",
+  "RUSTSEC-2026-0555",
 ]
 
 [licenses]
