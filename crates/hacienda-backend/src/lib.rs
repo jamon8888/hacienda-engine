@@ -647,6 +647,8 @@ impl Backend {
             }),
             dossier_id: Some(dossier_id.clone()),
             version_ref: Some(version_id.to_string()),
+            tenant_id: self.tenant_scope().map(|s| s.to_string()),
+            acl: None,
             metadata: rag_metadata,
         };
         #[cfg(feature = "chunking")]
@@ -657,6 +659,7 @@ impl Backend {
                 overlap: 100,
                 ..Default::default()
             },
+            self.tenant_scope().as_deref(),
         )?;
         #[cfg(not(feature = "chunking"))]
         let mut chunks = vec![ChunkRecord {
@@ -669,6 +672,8 @@ impl Backend {
             chunk_metadata: Value::Null,
             dossier_id: Some(dossier_id.clone()),
             version_ref: Some(version_id.to_string()),
+            tenant_id: self.tenant_scope().map(|s| s.to_string()),
+            acl: None,
         }];
         for chunk in &mut chunks {
             chunk.external_id = Some(format!("{document_id}:{version_id}:{}", chunk.ordinal));
@@ -2120,6 +2125,7 @@ fn validate_backend_document(
             overlap: 100,
             ..Default::default()
         },
+        None,
     )?;
     #[cfg(not(feature = "chunking"))]
     let expected_chunks = vec![ChunkRecord {
@@ -2132,6 +2138,8 @@ fn validate_backend_document(
         chunk_metadata: Value::Null,
         dossier_id: Some(document.dossier_id.clone()),
         version_ref: Some(document.editor.version_ref.clone()),
+        tenant_id: None,
+        acl: None,
     }];
     if document.chunks.is_empty()
         || document
@@ -2263,6 +2271,8 @@ fn build_editor_revision_document(
         }),
         dossier_id: Some(base.dossier_id.clone()),
         version_ref: Some(version_id.to_string()),
+        tenant_id: backend.tenant_scope().map(|s| s.to_string()),
+        acl: None,
         metadata: rag_metadata,
     };
     #[cfg(feature = "chunking")]
@@ -2273,6 +2283,7 @@ fn build_editor_revision_document(
             overlap: 100,
             ..Default::default()
         },
+        backend.tenant_scope().as_deref(),
     )?;
     #[cfg(not(feature = "chunking"))]
     let mut chunks = vec![ChunkRecord {
@@ -2285,6 +2296,8 @@ fn build_editor_revision_document(
         chunk_metadata: Value::Null,
         dossier_id: Some(base.dossier_id.clone()),
         version_ref: Some(version_id.to_string()),
+        tenant_id: backend.tenant_scope().map(|s| s.to_string()),
+        acl: None,
     }];
     for chunk in &mut chunks {
         chunk.external_id = Some(format!(
