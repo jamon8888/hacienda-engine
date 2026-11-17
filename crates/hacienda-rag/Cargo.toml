@@ -75,7 +75,9 @@ arrow-array = { version = "58.0.0", optional = true }
 arrow-schema = { version = "58.0.0", optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+# "time" backs `tokio::time::timeout` in the egress-audit non-blocking regression test
+# (stream.rs, issue #148).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 # Proof, in the live-Postgres test suite, that this crate's 0100+ migrations
 # and hacienda-core's own 0001-0099 migrations can run against one shared
 # database without a `_sqlx_migrations` version collision (see

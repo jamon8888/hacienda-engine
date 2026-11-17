@@ -336,8 +336,7 @@ impl<'a> GuardedLlm<'a> {
         // write never blocks the streaming hot path — and still fires if the stream
         // below later fails.
         if let Some(auditor) = &self.auditor {
-            let event =
-                build_egress_event(&config, &redacted_prompt, &redacted_context, purpose);
+            let event = build_egress_event(&config, &redacted_prompt, &redacted_context, purpose);
             let auditor = Arc::clone(auditor);
             tokio::spawn(async move {
                 if let Err(err) = auditor.record_egress(event).await {
@@ -1212,7 +1211,11 @@ mod tests {
 
         // Unroutable model: the stream builds, then fails when polled.
         let stream = GuardedLlm::with_auditor(&redactor, auditor)
-            .stream(context, "what is this?".to_string(), guarded_llm_test_config())
+            .stream(
+                context,
+                "what is this?".to_string(),
+                guarded_llm_test_config(),
+            )
             .await
             .expect("stream must build");
         let collected: Vec<_> = stream.collect().await;
@@ -1228,7 +1231,10 @@ mod tests {
             1,
             "the egress audit must be recorded even though the stream failed"
         );
-        assert_eq!(events[0].purpose, "llm-call", "stream() uses the default purpose");
+        assert_eq!(
+            events[0].purpose, "llm-call",
+            "stream() uses the default purpose"
+        );
     }
 
     /// The audit is deferred: a `record_egress` that never completes must not prevent
@@ -1282,7 +1288,10 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        assert!(calls.load(Ordering::SeqCst) > 0, "the auditor must be invoked");
+        assert!(
+            calls.load(Ordering::SeqCst) > 0,
+            "the auditor must be invoked"
+        );
     }
 
     /// No auditor attached (plain `GuardedLlm::new`): nothing is recorded, the stream
@@ -1292,7 +1301,11 @@ mod tests {
         let redactor = SpyRedactor::new();
         let context = RetrievedContext { chunks: vec![] };
         let result = GuardedLlm::new(&redactor)
-            .stream(context, "harmless prompt".to_string(), guarded_llm_test_config())
+            .stream(
+                context,
+                "harmless prompt".to_string(),
+                guarded_llm_test_config(),
+            )
             .await;
         assert!(result.is_ok());
     }
