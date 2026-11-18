@@ -1184,17 +1184,16 @@ mod tests {
             "the hashed prompt must be the redacted one, not the raw one"
         );
 
-        let chunk_part = event
-            .parts
-            .iter()
-            .find(|p| p.role == EgressRole::ContextChunk)
-            .expect("chunk part");
-        assert_eq!(chunk_part.reference, "chunk:d1:c0:0");
-        assert_eq!(
-            chunk_part.hash,
-            blake3::hash("chunk with [REDACTED]".as_bytes())
-                .to_hex()
-                .to_string()
+        // With a system-prompt override the retrieved chunks are not transmitted, so
+        // they must not appear in the egress audit (CodeRabbit #158). The redactor did
+        // still process the chunk (see `produced` above) — but no audit part claims it
+        // was sent to the provider.
+        assert!(
+            !event
+                .parts
+                .iter()
+                .any(|p| p.role == EgressRole::ContextChunk),
+            "undelivered chunks must not be recorded as transmitted"
         );
     }
 
