@@ -112,12 +112,22 @@ impl ServiceEndpoint {
             && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
     }
 
+    /// Accept only a parseable HTTPS URL with a host and no embedded credentials.
+    /// `starts_with("https://")` alone accepted malformed values such as `"https:// "`.
     fn is_https(&self) -> bool {
-        self.0.starts_with("https://") && self.0.len() > "https://".len()
+        let Ok(url) = url::Url::parse(&self.0) else {
+            return false;
+        };
+        url.scheme() == "https"
+            && url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
     }
 
     fn is_present(&self) -> bool {
-        self.0.contains("://") && self.0.split("://").nth(1).is_some_and(|s| !s.is_empty())
+        url::Url::parse(&self.0)
+            .map(|url| url.host().is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -378,11 +388,43 @@ impl InstallationConfig {
     ///
     /// # Errors
     /// Returns an error when the profile or the requested rehydration capability is invalid.
+    /// Validate a rehydration request, choosing the process context from the profile
+    /// itself: `LocalFull` and a tenant-pinned `TeamOnPremise` are client-owned; a
+    /// `TeamOnPremise` profile without a pinned tenant is server-owned (the tenant is
+    /// resolved from the authenticated caller, never from the request).
+    ///
+    /// # Errors
+    /// Returns the first invalid profile invariant or an invalid request capability.
     pub fn validate_rehydration(
         &self,
         request: &RehydrationRequest,
     ) -> Result<(), ConfigurationError> {
-        self.validate()?;
+        let context = match self {
+            Self::LocalFull(_) => InstallationContext::Client,
+            Self::TeamOnPremise(config) if config.tenant_scope.is_some() => {
+                InstallationContext::Client
+            }
+            Self::TeamOnPremise(_) => InstallationContext::Server,
+        };
+        self.validate_rehydration_for(request, context)
+    }
+
+    /// Validate a rehydration request for the process that owns this profile.
+    ///
+    /// The context must be the one of the *caller* (server: tenant resolved from the
+    /// authenticated principal), never derived from `request.tenant_scope`, which comes
+    /// from the untrusted request. Validating a server-owned profile with the default
+    /// client rules rejected every `TeamOnPremise` profile (no pinned tenant) before the
+    /// request was even examined.
+    ///
+    /// # Errors
+    /// Returns the first invalid profile invariant or an invalid request capability.
+    pub fn validate_rehydration_for(
+        &self,
+        request: &RehydrationRequest,
+        context: InstallationContext,
+    ) -> Result<(), ConfigurationError> {
+        self.validate_for(context)?;
         request.validate_for(self)
     }
 }
