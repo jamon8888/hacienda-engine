@@ -1,4 +1,3 @@
-use crate::error::{EmailError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -231,6 +230,21 @@ pub enum Flag {
     Draft,
     Recent,
     Custom(String),
+}
+
+impl Flag {
+    /// Wire spelling understood by the io-email backends (IANA keywords).
+    pub fn to_wire(&self) -> String {
+        match self {
+            Flag::Seen => "\\Seen".to_string(),
+            Flag::Answered => "\\Answered".to_string(),
+            Flag::Flagged => "\\Flagged".to_string(),
+            Flag::Deleted => "\\Deleted".to_string(),
+            Flag::Draft => "\\Draft".to_string(),
+            Flag::Recent => "\\Recent".to_string(),
+            Flag::Custom(s) => s.clone(),
+        }
+    }
 }
 
 /// Redaction rule (re-exported for public API)

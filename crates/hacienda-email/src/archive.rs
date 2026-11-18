@@ -82,6 +82,18 @@ async fn save_message(destination: &EmailDestination, message: &EmailMessage) ->
     }
 }
 
+/// Format a list of addresses as a display string.
+pub fn format_addresses(addresses: &[crate::models::EmailAddress]) -> String {
+    addresses
+        .iter()
+        .map(|a| match &a.name {
+            Some(name) => format!("{} <{}>", name, a.address),
+            None => a.address.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn parse_human_date(value: &str) -> Option<DateTime<Utc>> {
     if let Ok(date) = DateTime::parse_from_rfc3339(value) {
         return Some(date.with_timezone(&Utc));

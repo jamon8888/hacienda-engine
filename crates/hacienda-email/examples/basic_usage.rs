@@ -1,31 +1,31 @@
-//! Basic usage example for hacienda-email
+//! Basic usage example for hacienda-email.
 //!
-//! This example demonstrates how to use the email processor plugin
-//! to archive, extract NER, index for RAG, and redact emails.
+//! Demonstrates the `EmailProcessor` API for archiving, extracting NER,
+//! indexing for RAG and redacting PII. Uses a local Maildir backend so the
+//! example runs without a live mail server (point `path` at a real Maildir to
+//! process actual messages).
 
-use hacienda_email::{EmailConfig, EmailPlugin, EmailRequest, EmailOperation, EmailSource, EmailDestination, PipelineStep};
-use hacienda_core::plugin::Plugin;
+use hacienda_email::{
+    EmailConfig, EmailDestination, EmailOperation, EmailProcessor, EmailRequest, EmailSource,
+    PipelineStep,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load configuration
     let config = EmailConfig {
-        backend: hacienda_email::config::EmailBackend::Imap {
-            server: "imaps://imap.gmail.com".to_string(),
-            username: "user@gmail.com".to_string(),
+        backend: hacienda_email::config::EmailBackend::Maildir {
+            path: "./email-archive".to_string(),
         },
         account: "work".to_string(),
         archive_path: Some("./email-archive".to_string()),
         ..Default::default()
     };
 
-    // Create plugin instance
-    let plugin = EmailPlugin::new(config).await?;
-    println!("Plugin initialized: {}", plugin.metadata().name);
+    let processor = EmailProcessor::new(config).await?;
+    println!("EmailProcessor initialized");
 
-    // Example 1: Archive emails
-    println!("
-=== Archiving emails ===");
+    // Example 1: Archive emails from the INBOX into a local Maildir.
+    println!("\n=== Archiving emails ===");
     let archive_request = EmailRequest {
         operation: EmailOperation::Archive {
             source: EmailSource::Account {
@@ -43,40 +43,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = plugin.process(archive_request).await?;
+    let response = processor.process(archive_request).await?;
     println!("Archived {} emails", response.processed_count);
-    if let Some(path) = response.output_path {
-        println!("Saved to: {}", path);
-    }
     for err in &response.errors {
-        eprintln!("Error: {}", err);
+        eprintln!("Error: {err}");
     }
 
-    // Example 2: Extract NER
-    println!("
-=== Extracting Named Entities ===");
+    // Example 2: Extract named entities.
+    println!("\n=== Extracting Named Entities ===");
     let ner_request = EmailRequest {
         operation: EmailOperation::ExtractNER {
             source: EmailSource::Maildir {
                 path: "./email-archive".to_string(),
             },
             output: "./entities.json".to_string(),
-            model: Some("gliner-multi-v2.1".to_string()),
+            model: None,
         },
         config_overrides: None,
     };
 
-    let response = plugin.process(ner_request).await?;
+    let response = processor.process(ner_request).await?;
     println!("Extracted {} entities", response.processed_count);
     if let Some(entities) = response.entities {
         for entity in entities.iter().take(5) {
-            println!("  {}: {} (confidence: {:.2})", entity.label, entity.text, entity.confidence);
+            println!(
+                "  {}: {} (confidence: {:.2})",
+                entity.label, entity.text, entity.confidence
+            );
         }
     }
 
-    // Example 3: Index for RAG
-    println!("
-=== Indexing for RAG ===");
+    // Example 3: Index for RAG.
+    println!("\n=== Indexing for RAG ===");
     let rag_request = EmailRequest {
         operation: EmailOperation::IndexForRag {
             source: EmailSource::Maildir {
@@ -88,15 +86,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = plugin.process(rag_request).await?;
+    let response = processor.process(rag_request).await?;
     println!("Created {} chunks", response.processed_count);
     if let Some(stats) = response.rag_stats {
         println!("Indexed {} vectors in {}", stats.vectors_indexed, stats.index_name);
     }
 
-    // Example 4: Redact PII
-    println!("
-=== Redacting PII ===");
+    // Example 4: Redact PII.
+    println!("\n=== Redacting PII ===");
     let redact_request = EmailRequest {
         operation: EmailOperation::Redact {
             source: EmailSource::Maildir {
@@ -110,23 +107,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = plugin.process(redact_request).await?;
+    let response = processor.process(redact_request).await?;
     println!("Redacted {} emails", response.processed_count);
     if let Some(stats) = response.redaction_stats {
         println!("Total redactions: {}", stats.total_redactions);
         for (rule, count) in stats.by_type {
-            println!("  {}: {}", rule, count);
+            println!("  {rule}: {count}");
         }
     }
 
-    // Example 5: Full pipeline
-    println!("
-=== Running Full Pipeline ===");
+    // Example 5: Full pipeline.
+    println!("\n=== Running Full Pipeline ===");
     let pipeline_request = EmailRequest {
         operation: EmailOperation::Pipeline {
-            source: EmailSource::Account {
-                name: "work".to_string(),
-                mailbox: Some("INBOX".to_string()),
+            source: EmailSource::Maildir {
+                path: "./email-archive".to_string(),
             },
             destination: EmailDestination::Maildir {
                 path: "./email-processed".to_string(),
@@ -142,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = plugin.process(pipeline_request).await?;
+    let response = processor.process(pipeline_request).await?;
     println!("Pipeline completed: {} emails processed", response.processed_count);
 
     Ok(())

@@ -15,10 +15,15 @@ pub mod rag;
 pub mod redact;
 
 use crate::backend::EmailClient;
-use crate::config::EmailConfig;
-use crate::error::{EmailError, Result};
-use crate::models::{EmailOperation, EmailRequest, EmailResponse};
 use std::sync::Arc;
+
+// Public API re-exports. A `pub use` also brings the name into this module's
+// scope, so no separate private `use` is needed (doing both is E0252).
+pub use crate::config::EmailConfig;
+pub use crate::error::{EmailError, Result};
+pub use crate::models::{
+    EmailDestination, EmailOperation, EmailRequest, EmailResponse, EmailSource, PipelineStep,
+};
 
 /// The hacienda email processor
 pub struct EmailProcessor {
@@ -71,8 +76,3 @@ impl EmailProcessor {
         crate::pipeline::run_pipeline(self.client.as_ref(), op, config).await
     }
 }
-
-/// Re-export for convenience
-pub use crate::config::EmailConfig;
-pub use crate::models::{EmailRequest, EmailResponse, EmailOperation, EmailSource, EmailDestination, PipelineStep};
-pub use crate::error::EmailError;

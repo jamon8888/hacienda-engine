@@ -3,7 +3,6 @@ use crate::config::{EmailConfig, RedactionRule};
 use crate::error::{EmailError, Result};
 use crate::models::{EmailDestination, EmailMessage, EmailOperation, EmailSource, RedactionStats};
 use std::collections::HashMap;
-use std::path::Path;
 
 /// Redact PII from emails
 pub async fn redact(
@@ -176,8 +175,8 @@ async fn save_to_files(
     Ok(())
 }
 
-/// Convert message to RFC822
-fn message_to_rfc822(message: &EmailMessage) -> String {
+/// Convert message to RFC822 (also used by the backend's `add_message`).
+pub(crate) fn message_to_rfc822(message: &EmailMessage) -> String {
     let mut lines = Vec::new();
 
     lines.push(format!("Message-ID: <{}>", message.id));
@@ -234,7 +233,7 @@ fn message_to_rfc822(message: &EmailMessage) -> String {
 fn format_addresses(addresses: &[crate::models::EmailAddress]) -> String {
     addresses.iter()
         .map(|a| match &a.name {
-            Some(name) => format!(""{} <{}>>"", name, a.address),
+            Some(name) => format!("\"{}\" <{}>", name, a.address),
             None => a.address.clone(),
         })
         .collect::<Vec<_>>()

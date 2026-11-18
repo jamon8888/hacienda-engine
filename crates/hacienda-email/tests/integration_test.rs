@@ -1,15 +1,26 @@
-//! Integration tests for hacienda-email
+//! Integration tests for hacienda-email.
+//!
+//! These exercise the public request/response API without requiring a live
+//! mail server: `EmailProcessor::new` with a Maildir backend only roots a
+//! local client (no network), and the operation tests verify the serde shape
+//! that the CLI / HTTP / MCP surfaces will depend on.
 
-use hacienda_email::{EmailConfig, EmailPlugin, EmailRequest, EmailOperation, EmailSource, EmailDestination};
-use hacienda_core::plugin::Plugin;
+use hacienda_email::{EmailConfig, EmailOperation, EmailRequest, EmailSource, EmailDestination};
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn test_plugin_creation() {
-    let config = EmailConfig::default();
-    let plugin = EmailPlugin::new(config).await;
-    // This will fail without proper backend setup, but tests the creation path
-    assert!(plugin.is_err() || plugin.is_ok());
+async fn processor_builds_with_maildir_backend() {
+    let dir = tempdir().unwrap();
+    let config = EmailConfig {
+        backend: hacienda_email::config::EmailBackend::Maildir {
+            path: dir.path().to_str().unwrap().to_string(),
+        },
+        account: "test".to_string(),
+        ..Default::default()
+    };
+    // Construction roots a local Maildir client; no I/O happens yet.
+    let processor = hacienda_email::EmailProcessor::new(config).await;
+    assert!(processor.is_ok(), "Maildir processor should build");
 }
 
 #[tokio::test]
@@ -31,7 +42,6 @@ async fn test_archive_operation_structure() {
         config_overrides: None,
     };
 
-    // Verify serialization
     let json = serde_json::to_string(&request).unwrap();
     assert!(json.contains("Archive"));
     assert!(json.contains("test"));
@@ -127,23 +137,19 @@ async fn test_config_serialization() {
 
 #[tokio::test]
 async fn test_date_parsing() {
-    use hacienda_email::archive::parse_human_date;
-    use chrono::TimeZone;
+    use chrono::Datelike;
 
-    // Test RFC3339
-    let dt = parse_human_date("2024-01-15T10:30:00Z").unwrap();
+    let dt = hacienda_email::archive::parse_human_date("2024-01-15T10:30:00Z").unwrap();
     assert_eq!(dt.year(), 2024);
     assert_eq!(dt.month(), 1);
     assert_eq!(dt.day(), 15);
 
-    // Test simple date
-    let dt = parse_human_date("2024-01-15").unwrap();
+    let dt = hacienda_email::archive::parse_human_date("2024-01-15").unwrap();
     assert_eq!(dt.year(), 2024);
     assert_eq!(dt.month(), 1);
     assert_eq!(dt.day(), 15);
 
-    // Test "N days ago"
-    let dt = parse_human_date("7 days ago").unwrap();
+    let dt = hacienda_email::archive::parse_human_date("7 days ago").unwrap();
     let now = chrono::Utc::now();
     let diff = now - dt;
     assert!(diff.num_days() >= 6 && diff.num_days() <= 8);
@@ -151,10 +157,8 @@ async fn test_date_parsing() {
 
 #[tokio::test]
 async fn test_html_to_text() {
-    use hacienda_email::ner::html_to_text;
-
     let html = "<p>Hello <b>world</b></p><br/>New line";
-    let text = html_to_text(html);
+    let text = hacienda_email::ner::html_to_text(html);
     assert!(text.contains("Hello"));
     assert!(text.contains("world"));
     assert!(text.contains("New line"));
@@ -162,7 +166,6 @@ async fn test_html_to_text() {
 
 #[tokio::test]
 async fn test_format_addresses() {
-    use hacienda_email::archive::format_addresses;
     use hacienda_email::models::EmailAddress;
 
     let addresses = vec![
@@ -170,34 +173,8 @@ async fn test_format_addresses() {
         EmailAddress { name: None, address: "jane@example.com".to_string() },
     ];
 
-    let formatted = format_addresses(&addresses);
+    let formatted = hacienda_email::archive::format_addresses(&addresses);
     assert!(formatted.contains("John Doe"));
     assert!(formatted.contains("john@example.com"));
     assert!(formatted.contains("jane@example.com"));
-}
-
-#[cfg(feature = "mock")]
-#[tokio::test]
-async fn test_mock_imap_archive() {
-    use mock_imap::MockImapServer;
-    use hacienda_email::config::EmailBackend;
-
-    let mut mock = MockImapServer::new();
-    mock.expect_login().returning(|_, _| Ok(()));
-    mock.expect_select().returning(|_| Ok(()));
-    mock.expect_fetch().returning(|_, _| Ok(vec![]));
-    let addr = mock.start().await;
-
-    let config = EmailConfig {
-        backend: EmailBackend::Imap {
-            server: format!("imap://{}", addr),
-            username: "test".to_string(),
-        },
-        account: "test".to_string(),
-        ..Default::default()
-    };
-
-    // This would test the full archive flow with a mock IMAP server
-    // let plugin = EmailPlugin::new(config).await.unwrap();
-    // ...
 }

@@ -49,4 +49,10 @@ pub enum EmailError {
     InvalidOperation(String),
 }
 
+impl From<io_email::client::EmailClientStdError> for EmailError {
+    fn from(e: io_email::client::EmailClientStdError) -> Self {
+        EmailError::Backend(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, EmailError>;

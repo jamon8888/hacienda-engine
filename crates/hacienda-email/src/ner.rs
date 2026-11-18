@@ -90,8 +90,8 @@ async fn fetch_envelopes(
 fn extract_text(message: &crate::models::EmailMessage) -> String {
     let mut parts = Vec::new();
 
-    if let Some(subject) = &message.subject {
-        parts.push(format!("Subject: {}", subject));
+    if !message.subject.is_empty() {
+        parts.push(format!("Subject: {}", message.subject));
     }
 
     if let Some(text) = &message.text_body {
@@ -105,7 +105,7 @@ fn extract_text(message: &crate::models::EmailMessage) -> String {
 }
 
 /// Simple HTML to text conversion
-fn html_to_text(html: &str) -> String {
+pub fn html_to_text(html: &str) -> String {
     // Very basic - in production use a proper HTML parser
     html.replace("<br>", "\n")
         .replace("<br/>", "\n")
