@@ -32,12 +32,15 @@
 //!
 //! # Tool inventory
 //!
-//! Thirteen tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
-//! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands:
+//! Fourteen tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
+//! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands (the Xberg and
+//! email tools are the exceptions: they drive their own backends directly — the email
+//! tool drives `hacienda_email::EmailProcessor`):
 //!
 //! | Tool | Facade method | Mirrors |
 //! | --- | --- | --- |
 //! | `documents_process` | `process_batch_with_auth` | `POST /v1/documents`, `hacienda extract` |
+//! | `email_redact` | (`EmailProcessor::process`) | `POST /v1/email/process`, `hacienda email redact` |
 //! | `pii_scan` | `scan_text_with_auth` | `POST /v1/pii/scan` |
 //! | `pii_redact` | `redact_text_with_auth` | `POST /v1/pii/redact` |
 //! | `audit_verify` | `verify_audit_with_auth` | `GET /v1/audit/verify` |
@@ -749,6 +752,7 @@ mod tests {
             "cache_warm",
             "detect_mime_type",
             "get_capabilities",
+            "email_redact",
             "get_version",
             "list_formats",
             "pii_redact",
