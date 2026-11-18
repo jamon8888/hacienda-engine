@@ -147,5 +147,6 @@ CLAUDE.md
 .env*
 apps/hacienda-secrecy-client/src-tauri/resources/onnxruntime/
 
-# Private build dirs for local CI reruns
+# Per-worktree private Cargo target dirs (CodeRabbit fixes)
+target-i7/
 target-cr157/
