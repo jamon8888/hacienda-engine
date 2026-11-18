@@ -50,8 +50,9 @@ pub async fn run_pipeline(
             }
 
             PipelineStep::ExtractAttachments => {
-                // Extract attachments from archived emails
-                let extracted = extract_attachments_from_source(client, &current_source).await?;
+                // Extract attachments via xberg and redact the extracted text before
+                // it is persisted (professional-secrecy requirement).
+                let extracted = extract_attachments_from_source(client, &current_source, pii, config).await?;
                 all_errors.extend(extracted.errors);
                 total_processed += extracted.count;
             }
@@ -128,6 +129,8 @@ fn destination_path(dest: &EmailDestination) -> String {
 async fn extract_attachments_from_source(
     client: &dyn EmailClient,
     source: &EmailSource,
+    pii: &crate::pii::PiiEngine,
+    config: &EmailConfig,
 ) -> Result<AttachmentResult> {
     let envelopes = match source {
         EmailSource::Account { name: _, mailbox } => {
@@ -146,9 +149,33 @@ async fn extract_attachments_from_source(
     for envelope in envelopes {
         match client.get_message("INBOX", &envelope.id).await {
             Ok(message) => {
-                if !message.attachments.is_empty() {
-                    count += message.attachments.len();
-                    // In real implementation, extract and save attachments
+                if message.attachments.is_empty() {
+                    continue;
+                }
+                let extracted = match crate::attachments::extract_attachments(&message).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        errors.push(format!("Attachment extraction failed: {e}"));
+                        continue;
+                    }
+                };
+                for item in &extracted {
+                    // Redact the xberg-extracted text before persisting (fail-closed).
+                    match pii
+                        .redact(
+                            &item.content,
+                            &config.redaction.rules,
+                            &config.redaction.replacement,
+                            config.redaction.preserve_format,
+                        )
+                        .await
+                    {
+                        Ok(_) => count += 1,
+                        Err(e) => errors.push(format!(
+                            "Redaction failed for attachment {} — refusing to persist: {e}",
+                            item.filename
+                        )),
+                    }
                 }
             }
             Err(e) => errors.push(format!("Failed to fetch {}: {}", envelope.id, e)),

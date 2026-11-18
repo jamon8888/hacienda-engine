@@ -1,6 +1,5 @@
 use crate::error::{EmailError, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Email plugin configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,10 +210,9 @@ pub fn load_config_with_secrets(path: &str) -> Result<EmailConfig> {
 
     // Override secrets from environment variables
     match &mut config.backend {
-        EmailBackend::Imap { username, server: _ } => {
-            if let Ok(pass) = std::env::var(format!("HACIENDA_EMAIL_{}_PASSWORD", config.account.to_uppercase())) {
-                // Store password securely - in practice use pimalaya-config secrets
-            }
+        EmailBackend::Imap { username: _, server: _ } => {
+            // Secrets are resolved at client-build time from the environment;
+            // no plaintext is stored in the config struct.
         }
         EmailBackend::Jmap { token, .. } => {
             if let Ok(t) = std::env::var(format!("HACIENDA_EMAIL_{}_TOKEN", config.account.to_uppercase())) {

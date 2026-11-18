@@ -140,6 +140,7 @@ mod convert {
                     .unwrap_or_else(|| "application/octet-stream".to_string()),
                 size: a.contents().len(),
                 content_id: a.content_id().map(|v| v.to_string()),
+                content: a.contents().to_vec(),
             })
             .collect();
 
@@ -174,12 +175,6 @@ pub struct BlockingClient {
 impl BlockingClient {
     fn new(client: io_email::client::EmailClientStd) -> Self {
         Self { inner: Arc::new(Mutex::new(client)) }
-    }
-
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, io_email::client::EmailClientStd>> {
-        self.inner
-            .lock()
-            .map_err(|_| EmailError::Backend("email client lock poisoned".to_string()))
     }
 }
 

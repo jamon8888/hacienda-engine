@@ -196,6 +196,10 @@ pub struct EmailAttachment {
     pub content_type: String,
     pub size: usize,
     pub content_id: Option<String>,
+    /// Transfer-decoded bytes of the attachment (populated when the message is
+    /// parsed), used by the real xberg attachment extractor.
+    #[serde(skip)]
+    pub content: Vec<u8>,
 }
 
 /// Mailbox information

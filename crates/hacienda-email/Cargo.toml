@@ -33,6 +33,7 @@ native-tls = ["io-email/native-tls"]
 # available; the feature only toggles whether the Mutex-backed facade is built.
 ner = ["hacienda-core/ner-candle"]
 rag = ["hacienda-rag/chunking", "dep:xberg"]
+attachments = ["dep:xberg"]
 redact = []
 # Offline fast tests with a mock IMAP server.
 mock = []

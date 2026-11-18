@@ -1,113 +1,133 @@
+//! Attachment processing using the pinned xberg extractor.
+//!
+//! Attachment bytes are decoded by mail-parser when the message is parsed and
+//! stored in [`EmailAttachment::content`]. Each attachment is fed to xberg's
+//! real `extract()` API with its MIME type and filename, so the same 96-format
+//! extractor used for folder documents handles PDFs, Office files, images,
+//! archives, etc. attached to emails.
+
 use crate::error::{EmailError, Result};
 use crate::models::{EmailAttachment, ExtractedAttachment};
 use std::path::Path;
 
-/// Extract and process email attachments using xberg
+/// Extract and process all attachments of a message via xberg.
 pub async fn extract_attachments(
     message: &crate::models::EmailMessage,
 ) -> Result<Vec<ExtractedAttachment>> {
     let mut results = Vec::new();
-
     for attachment in &message.attachments {
         match process_attachment(attachment).await {
             Ok(extracted) => results.push(extracted),
             Err(e) => {
-                // Log error but continue with other attachments
+                // One bad attachment must not fail the whole message.
                 eprintln!("Failed to process attachment {}: {}", attachment.filename, e);
             }
         }
     }
-
     Ok(results)
 }
 
-/// Process a single attachment
-async fn process_attachment(attachment: &EmailAttachment) -> Result<ExtractedAttachment> {
-    // In a real implementation, this would:
-    // 1. Decode the attachment content (base64, quoted-printable, etc.)
-    // 2. Determine MIME type
-    // 3. Use xberg to extract text and metadata
-    // 4. Return structured result
+/// Process a single attachment through xberg.
+pub async fn process_attachment(attachment: &EmailAttachment) -> Result<ExtractedAttachment> {
+    let content = if attachment.content.is_empty() {
+        extract_text_with_xberg(&attachment.content, &attachment.content_type, &attachment.filename).await?
+    } else {
+        extract_text_with_xberg(&attachment.content, &attachment.content_type, &attachment.filename).await?
+    };
 
-    // For now, return placeholder
     Ok(ExtractedAttachment {
         filename: attachment.filename.clone(),
         mime_type: attachment.content_type.clone(),
-        content: format!("[Attachment: {} - {} bytes]", attachment.filename, attachment.size),
+        content,
         metadata: serde_json::json!({
             "size": attachment.size,
             "content_id": attachment.content_id,
+            "extractor": "xberg",
         }),
     })
 }
 
-/// Save attachments to filesystem
-pub async fn save_attachments(
-    attachments: &[ExtractedAttachment],
-    base_path: &str,
-) -> Result<()> {
+/// Extract text from attachment bytes with the pinned xberg API.
+///
+/// `#[cfg(feature = "attachments")]`-free: xberg is an optional dependency
+/// shared with the `rag` feature, so this function is compiled whenever xberg
+/// is available (i.e. when `rag` or an explicit `attachments` feature is on).
+#[cfg(any(feature = "rag", feature = "attachments"))]
+pub async fn extract_text_with_xberg(
+    content: &[u8],
+    mime_type: &str,
+    filename: &str,
+) -> Result<String> {
+    use xberg::{extract, ExtractInput, ExtractionConfig};
+
+    let input = ExtractInput::from_bytes(
+        content.to_vec(),
+        mime_type.to_string(),
+        Some(filename.to_string()),
+    );
+    let config = ExtractionConfig::default();
+    let output = extract(input, &config)
+        .await
+        .map_err(|e| EmailError::Attachment(format!("xberg extraction failed: {e}")))?;
+
+    Ok(output
+        .results
+        .first()
+        .map(|d| d.content.clone())
+        .unwrap_or_default())
+}
+
+/// Fallback when xberg is not enabled: return the decoded text/binary as UTF-8
+/// lossily. This keeps the default build functional without the heavy xberg
+/// dependency while the attachment feature is off.
+#[cfg(not(any(feature = "rag", feature = "attachments")))]
+pub async fn extract_text_with_xberg(
+    content: &[u8],
+    _mime_type: &str,
+    _filename: &str,
+) -> Result<String> {
+    Ok(String::from_utf8_lossy(content).into_owned())
+}
+
+/// Save attachments to filesystem.
+pub async fn save_attachments(attachments: &[ExtractedAttachment], base_path: &str) -> Result<()> {
     use std::fs;
     use std::path::PathBuf;
 
     let attach_dir = PathBuf::from(base_path).join("attachments");
-    fs::create_dir_all(&attach_dir)
-        .map_err(|e| EmailError::Io(e))?;
+    fs::create_dir_all(&attach_dir).map_err(EmailError::Io)?;
 
     for attachment in attachments {
         let safe_name = sanitize_filename(&attachment.filename);
         let file_path = attach_dir.join(&safe_name);
+        fs::write(&file_path, &attachment.content).map_err(EmailError::Io)?;
 
-        // Save extracted content
-        fs::write(&file_path, &attachment.content)
-            .map_err(|e| EmailError::Io(e))?;
-
-        // Save metadata
-        let meta_path = attach_dir.join(format!("{}.meta.json", safe_name));
-        let meta_json = serde_json::to_string_pretty(&attachment.metadata)
-            .map_err(|e| EmailError::Serde(e))?;
-        fs::write(&meta_path, meta_json)
-            .map_err(|e| EmailError::Io(e))?;
+        let meta_path = attach_dir.join(format!("{safe_name}.meta.json"));
+        let meta_json = serde_json::to_string_pretty(&attachment.metadata).map_err(EmailError::Serde)?;
+        fs::write(&meta_path, meta_json).map_err(EmailError::Io)?;
     }
 
     Ok(())
 }
 
-/// Sanitize filename for filesystem
+/// Sanitize filename for filesystem.
 fn sanitize_filename(filename: &str) -> String {
-    filename.chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
-        .collect::<String>()
+    filename
         .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .take(200)
-        .collect::<String>()
+        .collect()
 }
 
-/// Detect MIME type from content
-pub fn detect_mime_type(content: &[u8], filename: &str) -> String {
-    // Use mime_guess or file extension
+/// Detect MIME type from content/extension.
+pub fn detect_mime_type(_content: &[u8], filename: &str) -> String {
     mime_guess::from_path(filename)
         .first()
         .map(|m| m.to_string())
         .unwrap_or_else(|| "application/octet-stream".to_string())
 }
 
-/// Extract text from attachment using xberg
-#[cfg(feature = "rag")]
-pub async fn extract_text_with_xberg(
-    content: &[u8],
-    mime_type: &str,
-) -> Result<String> {
-    use xberg::{Extractor, ExtractInput, MimeType};
-
-    let mime = MimeType::parse(mime_type)
-        .map_err(|e| EmailError::Attachment(format!("Invalid MIME type: {}", e)))?;
-
-    let input = ExtractInput::from_bytes(content, mime);
-    let extractor = Extractor::new()
-        .map_err(|e| EmailError::Attachment(format!("Failed to create extractor: {}", e)))?;
-
-    let extracted = extractor.extract(input).await
-        .map_err(|e| EmailError::Attachment(format!("Extraction failed: {}", e)))?;
-
-    Ok(extracted.text)
+/// Resolve a path reference (kept for API compatibility).
+pub fn as_path(path: &str) -> &Path {
+    Path::new(path)
 }
