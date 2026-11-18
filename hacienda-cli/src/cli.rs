@@ -96,6 +96,74 @@ pub enum Command {
     },
     /// Print a shell completion script to stdout.
     Completions(CompletionsArgs),
+    /// Process emails (archive, NER, RAG index, redact) using the same PII engine
+    /// and extraction stack as document processing.
+    Email(EmailArgs),
+}
+
+/// Email processing arguments.
+#[derive(Debug, Parser)]
+pub struct EmailArgs {
+    #[command(subcommand)]
+    pub command: EmailCommand,
+    /// Path to an email config file (TOML). Defaults to env-based configuration.
+    #[arg(long, value_name = "PATH")]
+    pub email_config: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EmailCommand {
+    /// Archive emails from an account/maildir into a destination.
+    Archive {
+        /// Maildir path or account name to read from.
+        #[arg(long)]
+        source: String,
+        /// Output directory (Maildir or files).
+        #[arg(long)]
+        output: String,
+        /// Process only messages since this date (e.g. "30 days ago").
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Extract named entities from emails (uses the PII engine).
+    Ner {
+        #[arg(long)]
+        source: String,
+        /// Output JSON path for the entities.
+        #[arg(long)]
+        output: String,
+    },
+    /// Redact PII in emails (body and headers) — the secret-professional default.
+    Redact {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        output: String,
+        /// Privacy mode: `redact` (irreversible) or `pseudonymize` (reversible, audited).
+        #[arg(long, value_enum, default_value = "redact")]
+        mode: EmailPrivacyMode,
+    },
+    /// Index redacted email content for RAG (redaction is mandatory before indexing).
+    Index {
+        #[arg(long)]
+        source: String,
+        /// Vector index / collection name.
+        #[arg(long)]
+        index: Option<String>,
+    },
+    /// Run the full email pipeline (archive → attachments → NER → RAG → redact).
+    Pipeline {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        output: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum EmailPrivacyMode {
+    Redact,
+    Pseudonymize,
 }
 
 #[derive(Debug, Parser)]

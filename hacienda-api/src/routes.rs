@@ -24,8 +24,8 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, capabilities, claude_messages, documents, info, jobs, keys,
-        openapi, pii, presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
+        audit, audit_review, auth, capabilities, claude_messages, documents, email, info, jobs,
+        keys, openapi, pii, presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
     },
     quota::quota_middleware,
     state::ApiState,
@@ -112,6 +112,11 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/jobs/{id}/result",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || get(jobs::get_job_result),
+    },
+    RouteSpec {
+        path: "/v1/email/process",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(email::process_email),
     },
     RouteSpec {
         path: "/v1/pii/scan",

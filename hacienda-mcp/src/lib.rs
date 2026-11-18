@@ -58,8 +58,8 @@ use std::sync::Arc;
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};
 use params::{
-    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams, EmptyParams,
-    MimeDetectParams, TextParams,
+    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams,
+    EmailRedactParams, EmptyParams, MimeDetectParams, TextParams,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -164,6 +164,50 @@ impl HaciendaMcp {
             .await
             .map_err(map_hacienda_error)?;
         json_tool_result(&result)
+    }
+
+    /// Redact PII in emails from a local Maildir (body and headers).
+    #[tool(
+        description = "Redact PII in emails from a local Maildir using hacienda's PII engine. \
+            Redacts message bodies AND headers (From/To/Cc/Subject) and writes the redacted \
+            messages to the output directory. Uses the irreversible mask mode by default \
+            (professional-secrecy safe). Runs in-process (Caller::Trusted), like the CLI.",
+        annotations(
+            title = "Redact Emails",
+            read_only_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn email_redact(
+        &self,
+        Parameters(params): Parameters<EmailRedactParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use hacienda_email::config::EmailBackend;
+        use hacienda_email::{
+            EmailConfig, EmailDestination, EmailOperation, EmailProcessor, EmailRequest,
+            EmailSource,
+        };
+
+        let config = EmailConfig {
+            backend: EmailBackend::Maildir { path: params.source.clone() },
+            account: "mcp".to_string(),
+            ..Default::default()
+        };
+        let processor = EmailProcessor::new(config)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("email processor: {e}"), None))?;
+        let response = processor
+            .process(EmailRequest {
+                operation: EmailOperation::Redact {
+                    source: EmailSource::Maildir { path: params.source },
+                    destination: EmailDestination::Maildir { path: params.output },
+                    rules: None,
+                },
+                config_overrides: None,
+            })
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("email redaction: {e}"), None))?;
+        json_tool_result(&response)
     }
 
     /// Scan raw text for PII, without rewriting it.

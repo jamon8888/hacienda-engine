@@ -1753,6 +1753,125 @@ pub async fn run_serve(
         .context("serving the API")
 }
 
+/// Build an EmailConfig from an optional TOML file, falling back to an
+/// environment-driven IMAP/Maildir config.
+fn build_email_config(path: Option<&std::path::Path>) -> Result<hacienda_email::EmailConfig> {
+    if let Some(path) = path {
+        return hacienda_email::config::load_config_with_secrets(
+            path.to_str().context("email config path is not UTF-8")?,
+        )
+        .context("loading email config");
+    }
+    // Default: Maildir rooted at a configurable path, or IMAP when creds exist.
+    let maildir = std::env::var("HACIENDA_EMAIL_MAILDIR").unwrap_or_else(|_| {
+        dirs::home_dir()
+            .map(|h| h.join(".local/share/himalaya/mail").to_string_lossy().into_owned())
+            .unwrap_or_else(|| "./email-archive".to_string())
+    });
+    Ok(hacienda_email::EmailConfig {
+        backend: hacienda_email::config::EmailBackend::Maildir { path: maildir },
+        account: std::env::var("HACIENDA_EMAIL_ACCOUNT").unwrap_or_else(|_| "default".to_string()),
+        ..Default::default()
+    })
+}
+
+/// Run an email processing command.
+pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
+    use crate::cli::{EmailCommand, EmailPrivacyMode};
+    use hacienda_email::{
+        EmailDestination, EmailOperation, EmailProcessor, EmailRequest, EmailSource, PipelineStep,
+    };
+
+    let config = build_email_config(args.email_config.as_deref())?;
+    let mode = match &args.command {
+        EmailCommand::Redact { mode, .. } => *mode,
+        _ => EmailPrivacyMode::Redact,
+    };
+    let mut config = config;
+    config.redaction.mode = match mode {
+        EmailPrivacyMode::Redact => hacienda_email::PrivacyMode::Redact,
+        EmailPrivacyMode::Pseudonymize => hacienda_email::PrivacyMode::Pseudonymize,
+    };
+
+    let processor = EmailProcessor::new(config).await.context("initialising email processor")?;
+
+    let (operation, label) = match args.command {
+        EmailCommand::Archive { source, output, since } => (
+            EmailOperation::Archive {
+                source: EmailSource::Maildir { path: source },
+                destination: EmailDestination::Maildir { path: output },
+                since,
+                before: None,
+                mailbox: Some("INBOX".to_string()),
+                include_attachments: true,
+            },
+            "Archived",
+        ),
+        EmailCommand::Ner { source, output } => (
+            EmailOperation::ExtractNER {
+                source: EmailSource::Maildir { path: source },
+                output,
+                model: None,
+            },
+            "NER entities extracted",
+        ),
+        EmailCommand::Redact { source, output, .. } => (
+            EmailOperation::Redact {
+                source: EmailSource::Maildir { path: source },
+                destination: EmailDestination::Maildir { path: output },
+                rules: None,
+            },
+            "Redacted",
+        ),
+        EmailCommand::Index { source, index } => (
+            EmailOperation::IndexForRag {
+                source: EmailSource::Maildir { path: source },
+                index_name: index,
+                chunk_size: None,
+            },
+            "Chunks prepared (redaction enforced before indexing)",
+        ),
+        EmailCommand::Pipeline { source, output } => (
+            EmailOperation::Pipeline {
+                source: EmailSource::Maildir { path: source },
+                destination: EmailDestination::Maildir { path: output },
+                steps: vec![
+                    PipelineStep::Archive,
+                    PipelineStep::ExtractAttachments,
+                    PipelineStep::Ner,
+                    PipelineStep::RagIndex,
+                    PipelineStep::Redact,
+                ],
+            },
+            "Pipeline completed",
+        ),
+    };
+
+    let response = processor
+        .process(EmailRequest { operation, config_overrides: None })
+        .await
+        .context("processing emails")?;
+
+    println!("{label}: {} items", response.processed_count);
+    if let Some(path) = &response.output_path {
+        println!("Output: {path}");
+    }
+    if let Some(stats) = &response.redaction_stats {
+        println!("Redactions: {} total", stats.total_redactions);
+        for (category, count) in &stats.by_type {
+            println!("  {category}: {count}");
+        }
+    }
+    if let Some(stats) = &response.rag_stats {
+        println!("RAG chunks: {} (vectors indexed: {})", stats.chunks_created, stats.vectors_indexed);
+    }
+    for err in &response.errors {
+        eprintln!("Warning: {err}");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

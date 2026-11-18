@@ -87,6 +87,7 @@ fn main() -> std::process::ExitCode {
                 }
             },
             Command::Completions(_) => unreachable!("handled above, before the runtime starts"),
+            Command::Email(args) => commands::run_email(args).await,
         }
     });
 

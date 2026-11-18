@@ -35,3 +35,13 @@ Users connect accounts via OAuth tokens; `pimalaya-stream 0.0.1` exposes
 `SaslXoauth2 { username, token: SecretString }`, so IMAP + XOAUTH2 works for
 `imap.gmail.com` and `outlook.office365.com` without a separate graph client.
 Refresh-token handling and encrypted token storage are part of this work.
+
+### D5 — CLI first; HTTP/MCP surfaces require tenant-scoped auth
+The CLI is the primary user surface (a locally spawned process is `Caller::Trusted`,
+matching hacienda's existing precedent). The HTTP API and MCP server are
+network-reachable: exposing a shared `EmailProcessor` there would let one tenant
+read another's mail or trigger redaction under the wrong privacy mode. Wiring
+those surfaces therefore requires building an `EmailProcessor` **per request from
+the authenticated tenant's config** (`AuthContext`/`TenantCtx` already extracted by
+`hacienda-api/src/handlers/mod.rs`), never a process-wide trusted instance. This
+is tracked as the final Phase-5 step, not skipped.

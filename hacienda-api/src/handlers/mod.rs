@@ -12,6 +12,7 @@ pub mod auth;
 pub mod capabilities;
 pub mod claude_messages;
 pub mod documents;
+pub mod email;
 pub mod info;
 pub mod jobs;
 pub mod keys;

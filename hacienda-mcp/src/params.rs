@@ -423,6 +423,15 @@ mod tests {
     }
 }
 
+/// Parameters for `email_redact`.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct EmailRedactParams {
+    /// Local Maildir path to read emails from.
+    pub source: String,
+    /// Directory where redacted emails are written.
+    pub output: String,
+}
+
 /// Parameters for `pii_scan` and `pii_redact`.
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct TextParams {
