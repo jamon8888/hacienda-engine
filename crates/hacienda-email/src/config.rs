@@ -57,6 +57,39 @@ pub enum EmailBackend {
 
     #[serde(rename = "msgraph")]
     Msgraph { tenant_id: String, client_id: String },
+
+    /// OAuth 2.0 over IMAP using the XOAUTH2 SASL mechanism. Works for both
+    /// Gmail (`imap.gmail.com`) and Outlook (`outlook.office365.com`) with an
+    /// access token obtained from the provider's consent flow.
+    #[serde(rename = "oauth")]
+    OAuth {
+        /// IMAP host, e.g. `imaps://imap.gmail.com` or
+        /// `imaps://outlook.office365.com`.
+        server: String,
+        /// The account's email address (the SASL authcid).
+        username: String,
+        /// `gmail` or `outlook` — used only to pick the default host and to
+        /// name the token environment variable.
+        provider: OAuthProvider,
+    },
+}
+
+/// Supported OAuth providers for the XOAUTH2 IMAP backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OAuthProvider {
+    Gmail,
+    Outlook,
+}
+
+impl OAuthProvider {
+    /// Default implicit-TLS IMAP endpoint for the provider.
+    pub fn imap_url(&self) -> &'static str {
+        match self {
+            OAuthProvider::Gmail => "imaps://imap.gmail.com:993",
+            OAuthProvider::Outlook => "imaps://outlook.office365.com:993",
+        }
+    }
 }
 
 /// NER model configuration

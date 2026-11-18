@@ -363,6 +363,30 @@ pub fn build_imap_client(server: &str, username: &str, password: secrecy::Secret
     Ok(BlockingClient::new(inner))
 }
 
+/// Build an OAuth/XOAUTH2 IMAP client for Gmail or Outlook.
+#[cfg(feature = "imap")]
+pub fn build_oauth_client(
+    server: &str,
+    username: &str,
+    token: secrecy::SecretString,
+) -> Result<BlockingClient> {
+    use pimalaya_stream::sasl::{Sasl, SaslXoauth2};
+    use pimalaya_stream::tls::Tls;
+
+    let url = url::Url::parse(server)
+        .map_err(|e| EmailError::Config(format!("invalid IMAP URL: {e}")))?;
+    let tls = Tls::default();
+    let sasl: Sasl = SaslXoauth2 {
+        username: username.to_string(),
+        token,
+    }
+    .into();
+    let inner = io_email::client::EmailClientStd::new()
+        .connect_imap(&url, &tls, false, Some(sasl), None)
+        .map_err(|e| EmailError::Auth(format!("OAuth IMAP authentication failed: {e}")))?;
+    Ok(BlockingClient::new(inner))
+}
+
 /// Build a Maildir-backed client rooted at `path`.
 #[cfg(feature = "maildir")]
 pub fn build_maildir_client(path: &str) -> Result<BlockingClient> {
@@ -389,6 +413,32 @@ pub async fn build_client(config: &crate::config::EmailConfig) -> Result<Arc<dyn
         #[cfg(feature = "maildir")]
         crate::config::EmailBackend::Maildir { path } => {
             let client = build_maildir_client(path)?;
+            Ok(Arc::new(client))
+        }
+        #[cfg(feature = "imap")]
+        crate::config::EmailBackend::OAuth {
+            server,
+            username,
+            provider,
+        } => {
+            // The access token is never stored in config; it comes from the
+            // environment (populated by the OAuth consent/token-refresh flow).
+            let token = std::env::var(format!(
+                "HACIENDA_EMAIL_{}_ACCESS_TOKEN",
+                config.account.to_uppercase()
+            ))
+            .map_err(|_| {
+                EmailError::Auth(format!(
+                    "OAuth access token not found in HACIENDA_EMAIL_{}_ACCESS_TOKEN (provider {provider:?})",
+                    config.account.to_uppercase()
+                ))
+            })?;
+            let url = if server.is_empty() {
+                provider.imap_url().to_string()
+            } else {
+                server.clone()
+            };
+            let client = build_oauth_client(&url, username, secrecy::SecretString::new(token.into()))?;
             Ok(Arc::new(client))
         }
         other => Err(EmailError::Config(format!(

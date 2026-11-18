@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 // Public API re-exports. A `pub use` also brings the name into this module's
 // scope, so no separate private `use` is needed (doing both is E0252).
-pub use crate::config::{EmailConfig, PrivacyMode};
+pub use crate::config::{EmailConfig, OAuthProvider, PrivacyMode};
 pub use crate::error::{EmailError, Result};
 pub use crate::models::{
     EmailDestination, EmailOperation, EmailRequest, EmailResponse, EmailSource, PipelineStep,

@@ -165,6 +165,34 @@ async fn test_html_to_text() {
 }
 
 #[tokio::test]
+async fn test_oauth_provider_defaults() {
+    use hacienda_email::OAuthProvider;
+    assert!(OAuthProvider::Gmail.imap_url().contains("imap.gmail.com"));
+    assert!(OAuthProvider::Outlook.imap_url().contains("outlook.office365.com"));
+
+    // An OAuth backend must round-trip through serde for config files.
+    let cfg = EmailConfig {
+        backend: hacienda_email::config::EmailBackend::OAuth {
+            server: String::new(),
+            username: "user@example.com".to_string(),
+            provider: OAuthProvider::Gmail,
+        },
+        ..Default::default()
+    };
+    let toml = toml::to_string(&cfg).unwrap();
+    assert!(toml.contains("oauth"));
+    assert!(toml.contains("gmail"));
+}
+
+#[tokio::test]
+async fn test_privacy_mode_defaults_to_redact() {
+    assert_eq!(
+        EmailConfig::default().redaction.mode,
+        hacienda_email::PrivacyMode::Redact
+    );
+}
+
+#[tokio::test]
 async fn test_format_addresses() {
     use hacienda_email::models::EmailAddress;
 
