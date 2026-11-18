@@ -144,3 +144,6 @@ CLAUDE.md
 .vercel
 .env*
 apps/hacienda-secrecy-client/src-tauri/resources/onnxruntime/
+
+# Private build dirs for local CI reruns
+target-cr157/

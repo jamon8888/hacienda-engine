@@ -58,8 +58,8 @@ use std::sync::Arc;
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};
 use params::{
-    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentInput, DocumentsProcessParams,
-    EmptyParams, MimeDetectParams, TextParams,
+    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams, EmptyParams,
+    MimeDetectParams, TextParams,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -143,12 +143,21 @@ impl HaciendaMcp {
         // and would run every document's PII detection sequentially instead of under
         // `PipelineConfig::concurrency`'s bound — this tool's own doc table claims parity
         // with the REST path, so its behaviour needs to match, not just its shape.
+        //
+        // A conversion failure names the offending input's index: a batch with one lying
+        // `mime_type` must tell the caller which document was refused, not just that
+        // some document was. The index is attached by this loop, so the error message
+        // never needs to carry — and never carries — any document content.
         let inputs: Vec<ExtractInput> = params
             .inputs
             .into_iter()
-            .map(DocumentInput::into_extract_input)
-            .collect::<Result<_, _>>()
-            .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+            .enumerate()
+            .map(|(index, input)| {
+                input.into_extract_input().map_err(|error| {
+                    rmcp::ErrorData::invalid_params(format!("inputs[{index}]: {error}"), None)
+                })
+            })
+            .collect::<Result<_, _>>()?;
         let result = self
             .facade
             .process_batch_with_auth(Caller::Trusted, inputs)
@@ -576,7 +585,7 @@ mod tests {
     use super::*;
     use hacienda::{HaciendaConfig, HaciendaFacade};
     use hacienda_core::{pii::PipelineConfig, redaction::RedactionMode};
-    use params::StructuredDocumentInput;
+    use params::{DocumentInput, StructuredDocumentInput};
 
     /// A value that must never appear in any tool result unredacted. Distinct from
     /// anything else in the codebase, so a match is a disclosure and never a coincidence
@@ -825,6 +834,38 @@ mod tests {
         assert!(
             rendered.contains("[EMAIL]"),
             "expected a mask token in: {rendered}"
+        );
+    }
+
+    /// CodeRabbit follow-up (#157): a refused input must name its index, so a caller
+    /// can tell *which* document in a batch was rejected — the conversion errors attach
+    /// the field, the cause, and a suggestion, and this loop attaches the position.
+    #[tokio::test]
+    async fn documents_process_names_the_refused_input_index() {
+        let server = server_with_pii(RedactionMode::Mask);
+        let error = server
+            .documents_process(Parameters(DocumentsProcessParams {
+                inputs: vec![
+                    DocumentInput::Uri("/nonexistent/first.txt".to_string()),
+                    DocumentInput::Structured(StructuredDocumentInput::Bytes {
+                        bytes: b"%PDF-1.7\n".to_vec(),
+                        mime_type: "text/plain".to_string(),
+                        filename: None,
+                    }),
+                ],
+            }))
+            .await
+            .expect_err("the lying MIME hint must refuse the batch");
+
+        let message = error.message;
+        assert!(message.contains("inputs[1]"), "{message}");
+        assert!(
+            message.contains("suggestion:"),
+            "conversion errors must carry repair guidance: {message}"
+        );
+        assert!(
+            !message.contains("%PDF"),
+            "the error must not echo document content: {message}"
         );
     }
 }
