@@ -12,7 +12,7 @@
 //! decoded with `mail-parser` into the plugin's simplified [`EmailMessage`].
 
 use crate::error::{EmailError, Result};
-use crate::models::{EmailAddress, EmailAttachment, EmailMessage, Mailbox, Envelope, Flag};
+use crate::models::{EmailAddress, EmailAttachment, EmailMessage, Envelope, Flag, Mailbox};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -36,7 +36,13 @@ pub trait EmailClient: Send + Sync {
     /// Delete messages.
     async fn delete_messages(&self, mailbox: &str, uids: &[String]) -> Result<()>;
     /// Store flags on messages.
-    async fn store_flags(&self, mailbox: &str, uids: &[String], flags: &[Flag], add: bool) -> Result<()>;
+    async fn store_flags(
+        &self,
+        mailbox: &str,
+        uids: &[String],
+        flags: &[Flag],
+        add: bool,
+    ) -> Result<()>;
     /// Send a message (network backends only).
     async fn send_message(&self, message: &EmailMessage) -> Result<()>;
 }
@@ -53,7 +59,10 @@ mod convert {
     use io_email::mailbox::types::Mailbox as IoMailbox;
 
     pub(crate) fn address(a: &IoAddress) -> EmailAddress {
-        EmailAddress { name: a.name.clone(), address: a.email.clone() }
+        EmailAddress {
+            name: a.name.clone(),
+            address: a.email.clone(),
+        }
     }
 
     pub(crate) fn addresses(a: &[IoAddress]) -> Vec<EmailAddress> {
@@ -110,7 +119,11 @@ mod convert {
 
         let addr = |a: &mail_parser::Addr<'_>| EmailAddress {
             name: a.name.as_ref().map(|n| n.to_string()),
-            address: a.address.as_ref().map(|v| v.to_string()).unwrap_or_default(),
+            address: a
+                .address
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
         };
         let addr_list = |h: Option<&mail_parser::Address<'_>>| -> Vec<EmailAddress> {
             match h {
@@ -154,7 +167,10 @@ mod convert {
             bcc: Vec::new(),
             date: parsed
                 .date()
-                .map(|d| chrono::DateTime::from_timestamp(d.to_timestamp(), 0).unwrap_or_else(chrono::Utc::now))
+                .map(|d| {
+                    chrono::DateTime::from_timestamp(d.to_timestamp(), 0)
+                        .unwrap_or_else(chrono::Utc::now)
+                })
                 .unwrap_or_else(chrono::Utc::now),
             text_body,
             html_body,
@@ -174,7 +190,9 @@ pub struct BlockingClient {
 
 impl BlockingClient {
     fn new(client: io_email::client::EmailClientStd) -> Self {
-        Self { inner: Arc::new(Mutex::new(client)) }
+        Self {
+            inner: Arc::new(Mutex::new(client)),
+        }
     }
 }
 
@@ -187,8 +205,14 @@ impl EmailClient for BlockingClient {
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>> {
         let c = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
-            Ok(guard.list_mailboxes(true)?.iter().map(convert::mailbox).collect())
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            Ok(guard
+                .list_mailboxes(true)?
+                .iter()
+                .map(convert::mailbox)
+                .collect())
         })
         .await
         .map_err(join)?
@@ -198,14 +222,19 @@ impl EmailClient for BlockingClient {
         let c = Arc::clone(&self.inner);
         let mailbox = mailbox.to_string();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             let page_size = limit.unwrap_or(1000) as u32;
             let envs = guard.list_envelopes(&mailbox, Some(0), Some(page_size), true)?;
-            Ok(envs.iter().map(|e| {
-                let mut env = convert::envelope(e);
-                env.mailbox = mailbox.clone();
-                env
-            }).collect())
+            Ok(envs
+                .iter()
+                .map(|e| {
+                    let mut env = convert::envelope(e);
+                    env.mailbox = mailbox.clone();
+                    env
+                })
+                .collect())
         })
         .await
         .map_err(join)?
@@ -216,13 +245,16 @@ impl EmailClient for BlockingClient {
         let mailbox = mailbox.to_string();
         let query = query.to_string();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             // io-email 0.1's search takes a structured SearchEmailsQuery; the
             // string form is backend-specific, so fall back to listing and
             // filtering on subject for a portable subset.
             let envs = guard.list_envelopes(&mailbox, Some(0), Some(1000), false)?;
             let needle = query.to_lowercase();
-            Ok(envs.iter()
+            Ok(envs
+                .iter()
                 .filter(|e| e.subject.to_lowercase().contains(&needle))
                 .map(|e| {
                     let mut env = convert::envelope(e);
@@ -240,7 +272,9 @@ impl EmailClient for BlockingClient {
         let mailbox = mailbox.to_string();
         let uid = uid.to_string();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             let raw = guard.get_message(&mailbox, &uid)?;
             convert::message(&raw, &mailbox, &uid)
         })
@@ -253,7 +287,9 @@ impl EmailClient for BlockingClient {
         let mailbox = mailbox.to_string();
         let raw = crate::redact::message_to_rfc822(message).into_bytes();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             guard.add_message(&mailbox, &[], raw)?;
             Ok(())
         })
@@ -266,7 +302,9 @@ impl EmailClient for BlockingClient {
         let (src, dst) = (src.to_string(), dst.to_string());
         let uids = uids.to_vec();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             let refs: Vec<&str> = uids.iter().map(|s| s.as_str()).collect();
             guard.copy_messages(&src, &dst, &refs)?;
             Ok(())
@@ -280,7 +318,9 @@ impl EmailClient for BlockingClient {
         let (src, dst) = (src.to_string(), dst.to_string());
         let uids = uids.to_vec();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             let refs: Vec<&str> = uids.iter().map(|s| s.as_str()).collect();
             guard.move_messages(&src, &dst, &refs)?;
             Ok(())
@@ -294,7 +334,9 @@ impl EmailClient for BlockingClient {
         let mailbox = mailbox.to_string();
         let uids = uids.to_vec();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             for uid in &uids {
                 guard.delete_message(&mailbox, uid)?;
             }
@@ -304,13 +346,21 @@ impl EmailClient for BlockingClient {
         .map_err(join)?
     }
 
-    async fn store_flags(&self, mailbox: &str, uids: &[String], flags: &[Flag], add: bool) -> Result<()> {
+    async fn store_flags(
+        &self,
+        mailbox: &str,
+        uids: &[String],
+        flags: &[Flag],
+        add: bool,
+    ) -> Result<()> {
         let c = Arc::clone(&self.inner);
         let mailbox = mailbox.to_string();
         let uids = uids.to_vec();
         let names: Vec<String> = flags.iter().map(|f| f.to_wire()).collect();
         tokio::task::spawn_blocking(move || {
-            let mut guard = c.lock().map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
+            let mut guard = c
+                .lock()
+                .map_err(|_| EmailError::Backend("lock poisoned".to_string()))?;
             let refs: Vec<&str> = uids.iter().map(|s| s.as_str()).collect();
             let io_flags: Vec<io_email::flag::types::Flag> = names
                 .iter()
@@ -344,7 +394,11 @@ pub type IoEmailMaildirClient = BlockingClient;
 
 /// Build an IMAP-backed client connected via implicit TLS.
 #[cfg(feature = "imap")]
-pub fn build_imap_client(server: &str, username: &str, password: secrecy::SecretString) -> Result<BlockingClient> {
+pub fn build_imap_client(
+    server: &str,
+    username: &str,
+    password: secrecy::SecretString,
+) -> Result<BlockingClient> {
     use pimalaya_stream::sasl::{Sasl, SaslPlain};
     use pimalaya_stream::tls::Tls;
 
@@ -407,7 +461,11 @@ pub async fn build_client(config: &crate::config::EmailConfig) -> Result<Arc<dyn
                 config.account.to_uppercase()
             ))
             .map_err(|_| EmailError::Auth("IMAP password not found in environment".to_string()))?;
-            let client = build_imap_client(server, username, secrecy::SecretString::new(password.into()))?;
+            let client = build_imap_client(
+                server,
+                username,
+                secrecy::SecretString::new(password.into()),
+            )?;
             Ok(Arc::new(client))
         }
         #[cfg(feature = "maildir")]
@@ -438,7 +496,8 @@ pub async fn build_client(config: &crate::config::EmailConfig) -> Result<Arc<dyn
             } else {
                 server.clone()
             };
-            let client = build_oauth_client(&url, username, secrecy::SecretString::new(token.into()))?;
+            let client =
+                build_oauth_client(&url, username, secrecy::SecretString::new(token.into()))?;
             Ok(Arc::new(client))
         }
         other => Err(EmailError::Config(format!(

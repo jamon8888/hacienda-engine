@@ -39,7 +39,11 @@ impl EmailProcessor {
     pub async fn new(config: EmailConfig) -> Result<Self> {
         let client = crate::backend::build_client(&config).await?;
         let pii = crate::pii::PiiEngine::new(config.redaction.mode)?;
-        Ok(Self { client, config, pii })
+        Ok(Self {
+            client,
+            config,
+            pii,
+        })
     }
 
     /// Process an email request
@@ -59,8 +63,12 @@ impl EmailProcessor {
 
         match input.operation {
             EmailOperation::Archive { .. } => self.archive(input.operation, config).await,
-            EmailOperation::ExtractNER { .. } => self.extract_ner(pii, input.operation, config).await,
-            EmailOperation::IndexForRag { .. } => self.index_for_rag(pii, input.operation, config).await,
+            EmailOperation::ExtractNER { .. } => {
+                self.extract_ner(pii, input.operation, config).await
+            }
+            EmailOperation::IndexForRag { .. } => {
+                self.index_for_rag(pii, input.operation, config).await
+            }
             EmailOperation::Redact { .. } => self.redact(pii, input.operation, config).await,
             EmailOperation::Pipeline { .. } => self.pipeline(pii, input.operation, config).await,
         }
@@ -72,22 +80,42 @@ impl EmailProcessor {
     }
 
     /// Extract named entities
-    async fn extract_ner(&self, pii: &crate::pii::PiiEngine, op: EmailOperation, config: &EmailConfig) -> Result<EmailResponse> {
+    async fn extract_ner(
+        &self,
+        pii: &crate::pii::PiiEngine,
+        op: EmailOperation,
+        config: &EmailConfig,
+    ) -> Result<EmailResponse> {
         crate::ner::extract_ner(self.client.as_ref(), pii, op, config).await
     }
 
     /// Index for RAG
-    async fn index_for_rag(&self, pii: &crate::pii::PiiEngine, op: EmailOperation, config: &EmailConfig) -> Result<EmailResponse> {
+    async fn index_for_rag(
+        &self,
+        pii: &crate::pii::PiiEngine,
+        op: EmailOperation,
+        config: &EmailConfig,
+    ) -> Result<EmailResponse> {
         crate::rag::index_for_rag(self.client.as_ref(), pii, op, config).await
     }
 
     /// Redact PII
-    async fn redact(&self, pii: &crate::pii::PiiEngine, op: EmailOperation, config: &EmailConfig) -> Result<EmailResponse> {
+    async fn redact(
+        &self,
+        pii: &crate::pii::PiiEngine,
+        op: EmailOperation,
+        config: &EmailConfig,
+    ) -> Result<EmailResponse> {
         crate::redact::redact(self.client.as_ref(), pii, op, config).await
     }
 
     /// Full pipeline
-    async fn pipeline(&self, pii: &crate::pii::PiiEngine, op: EmailOperation, config: &EmailConfig) -> Result<EmailResponse> {
+    async fn pipeline(
+        &self,
+        pii: &crate::pii::PiiEngine,
+        op: EmailOperation,
+        config: &EmailConfig,
+    ) -> Result<EmailResponse> {
         crate::pipeline::run_pipeline(self.client.as_ref(), pii, op, config).await
     }
 }

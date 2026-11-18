@@ -15,8 +15,11 @@ pub async fn run_pipeline(
         source,
         destination,
         steps,
-    } = op else {
-        return Err(EmailError::InvalidOperation("Expected Pipeline operation".to_string()));
+    } = op
+    else {
+        return Err(EmailError::InvalidOperation(
+            "Expected Pipeline operation".to_string(),
+        ));
     };
 
     let mut current_source = source;
@@ -45,14 +48,17 @@ pub async fn run_pipeline(
                 if let EmailDestination::Maildir { path } = &destination {
                     current_source = EmailSource::Maildir { path: path.clone() };
                 } else if let EmailDestination::Files { path } = &destination {
-                    current_source = EmailSource::Files { paths: vec![path.clone()] };
+                    current_source = EmailSource::Files {
+                        paths: vec![path.clone()],
+                    };
                 }
             }
 
             PipelineStep::ExtractAttachments => {
                 // Extract attachments via xberg and redact the extracted text before
                 // it is persisted (professional-secrecy requirement).
-                let extracted = extract_attachments_from_source(client, &current_source, pii, config).await?;
+                let extracted =
+                    extract_attachments_from_source(client, &current_source, pii, config).await?;
                 all_errors.extend(extracted.errors);
                 total_processed += extracted.count;
             }
@@ -103,7 +109,11 @@ pub async fn run_pipeline(
         success: all_errors.is_empty(),
         processed_count: total_processed,
         output_path: Some(destination_path(&destination)),
-        entities: if all_entities.is_empty() { None } else { Some(all_entities) },
+        entities: if all_entities.is_empty() {
+            None
+        } else {
+            Some(all_entities)
+        },
         rag_stats: Some(crate::models::RagIndexStats {
             chunks_created: total_chunks,
             vectors_indexed: total_chunks,
@@ -137,10 +147,13 @@ async fn extract_attachments_from_source(
             let mb = mailbox.as_deref().unwrap_or("INBOX");
             client.list_envelopes(mb, Some(1000)).await?
         }
-        EmailSource::Maildir { path: _ } => {
-            client.list_envelopes("INBOX", Some(1000)).await?
+        EmailSource::Maildir { path: _ } => client.list_envelopes("INBOX", Some(1000)).await?,
+        _ => {
+            return Ok(AttachmentResult {
+                count: 0,
+                errors: Vec::new(),
+            })
         }
-        _ => return Ok(AttachmentResult { count: 0, errors: Vec::new() }),
     };
 
     let mut count = 0;

@@ -5,7 +5,7 @@
 //! local client (no network), and the operation tests verify the serde shape
 //! that the CLI / HTTP / MCP surfaces will depend on.
 
-use hacienda_email::{EmailConfig, EmailOperation, EmailRequest, EmailSource, EmailDestination};
+use hacienda_email::{EmailConfig, EmailDestination, EmailOperation, EmailRequest, EmailSource};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -43,7 +43,10 @@ async fn test_archive_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("\"operation\":\"archive\""), "JSON was: {json}");
+    assert!(
+        json.contains("\"operation\":\"archive\""),
+        "JSON was: {json}"
+    );
     assert!(json.contains("test"));
 }
 
@@ -61,7 +64,10 @@ async fn test_ner_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("\"operation\":\"extract_n_e_r\""), "JSON was: {json}");
+    assert!(
+        json.contains("\"operation\":\"extract_n_e_r\""),
+        "JSON was: {json}"
+    );
     assert!(json.contains("gliner-multi-v2.1"));
 }
 
@@ -84,7 +90,10 @@ async fn test_redact_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("\"operation\":\"redact\""), "JSON was: {json}");
+    assert!(
+        json.contains("\"operation\":\"redact\""),
+        "JSON was: {json}"
+    );
     assert!(json.contains("email"));
     assert!(json.contains("phone"));
 }
@@ -110,7 +119,10 @@ async fn test_pipeline_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("\"operation\":\"pipeline\""), "JSON was: {json}");
+    assert!(
+        json.contains("\"operation\":\"pipeline\""),
+        "JSON was: {json}"
+    );
     assert!(json.contains("\"archive\""));
     assert!(json.contains("\"ner\""));
     assert!(json.contains("\"rag_index\""));
@@ -168,7 +180,9 @@ async fn test_html_to_text() {
 async fn test_oauth_provider_defaults() {
     use hacienda_email::OAuthProvider;
     assert!(OAuthProvider::Gmail.imap_url().contains("imap.gmail.com"));
-    assert!(OAuthProvider::Outlook.imap_url().contains("outlook.office365.com"));
+    assert!(OAuthProvider::Outlook
+        .imap_url()
+        .contains("outlook.office365.com"));
 
     // An OAuth backend must round-trip through serde for config files.
     let cfg = EmailConfig {
@@ -197,8 +211,14 @@ async fn test_format_addresses() {
     use hacienda_email::models::EmailAddress;
 
     let addresses = vec![
-        EmailAddress { name: Some("John Doe".to_string()), address: "john@example.com".to_string() },
-        EmailAddress { name: None, address: "jane@example.com".to_string() },
+        EmailAddress {
+            name: Some("John Doe".to_string()),
+            address: "john@example.com".to_string(),
+        },
+        EmailAddress {
+            name: None,
+            address: "jane@example.com".to_string(),
+        },
     ];
 
     let formatted = hacienda_email::archive::format_addresses(&addresses);

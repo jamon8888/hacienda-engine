@@ -12,8 +12,15 @@ pub async fn extract_ner(
     op: EmailOperation,
     config: &EmailConfig,
 ) -> Result<crate::models::EmailResponse> {
-    let EmailOperation::ExtractNER { source, output, model } = op else {
-        return Err(EmailError::InvalidOperation("Expected ExtractNER operation".to_string()));
+    let EmailOperation::ExtractNER {
+        source,
+        output,
+        model,
+    } = op
+    else {
+        return Err(EmailError::InvalidOperation(
+            "Expected ExtractNER operation".to_string(),
+        ));
     };
 
     let envelopes = fetch_envelopes(client, &source).await?;
@@ -52,11 +59,14 @@ pub async fn extract_ner(
 
     // Save entities to JSON
     if let Some(parent) = Path::new(&output).parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| EmailError::Io(e))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| EmailError::Io(e))?;
     }
-    let json = serde_json::to_string_pretty(&all_entities)
-        .map_err(|e| EmailError::Serde(e))?;
-    tokio::fs::write(&output, json).await.map_err(|e| EmailError::Io(e))?;
+    let json = serde_json::to_string_pretty(&all_entities).map_err(|e| EmailError::Serde(e))?;
+    tokio::fs::write(&output, json)
+        .await
+        .map_err(|e| EmailError::Io(e))?;
 
     Ok(crate::models::EmailResponse {
         success: errors.is_empty(),
@@ -78,15 +88,13 @@ async fn fetch_envelopes(
             let mb = mailbox.as_deref().unwrap_or("INBOX");
             client.list_envelopes(mb, Some(1000)).await
         }
-        EmailSource::Maildir { path: _ } => {
-            client.list_envelopes("INBOX", Some(1000)).await
-        }
-        EmailSource::Files { paths: _ } => {
-            Err(EmailError::InvalidOperation("File source not yet implemented".to_string()))
-        }
-        EmailSource::Stdin => {
-            Err(EmailError::InvalidOperation("Stdin source not yet implemented".to_string()))
-        }
+        EmailSource::Maildir { path: _ } => client.list_envelopes("INBOX", Some(1000)).await,
+        EmailSource::Files { paths: _ } => Err(EmailError::InvalidOperation(
+            "File source not yet implemented".to_string(),
+        )),
+        EmailSource::Stdin => Err(EmailError::InvalidOperation(
+            "Stdin source not yet implemented".to_string(),
+        )),
     }
 }
 

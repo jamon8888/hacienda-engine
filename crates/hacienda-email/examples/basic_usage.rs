@@ -89,7 +89,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response = processor.process(rag_request).await?;
     println!("Created {} chunks", response.processed_count);
     if let Some(stats) = response.rag_stats {
-        println!("Indexed {} vectors in {}", stats.vectors_indexed, stats.index_name);
+        println!(
+            "Indexed {} vectors in {}",
+            stats.vectors_indexed, stats.index_name
+        );
     }
 
     // Example 4: Redact PII.
@@ -138,7 +141,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let response = processor.process(pipeline_request).await?;
-    println!("Pipeline completed: {} emails processed", response.processed_count);
+    println!(
+        "Pipeline completed: {} emails processed",
+        response.processed_count
+    );
 
     Ok(())
 }

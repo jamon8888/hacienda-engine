@@ -1765,7 +1765,11 @@ fn build_email_config(path: Option<&std::path::Path>) -> Result<hacienda_email::
     // Default: Maildir rooted at a configurable path, or IMAP when creds exist.
     let maildir = std::env::var("HACIENDA_EMAIL_MAILDIR").unwrap_or_else(|_| {
         dirs::home_dir()
-            .map(|h| h.join(".local/share/himalaya/mail").to_string_lossy().into_owned())
+            .map(|h| {
+                h.join(".local/share/himalaya/mail")
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .unwrap_or_else(|| "./email-archive".to_string())
     });
     Ok(hacienda_email::EmailConfig {
@@ -1793,10 +1797,16 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
         EmailPrivacyMode::Pseudonymize => hacienda_email::PrivacyMode::Pseudonymize,
     };
 
-    let processor = EmailProcessor::new(config).await.context("initialising email processor")?;
+    let processor = EmailProcessor::new(config)
+        .await
+        .context("initialising email processor")?;
 
     let (operation, label) = match args.command {
-        EmailCommand::Archive { source, output, since } => (
+        EmailCommand::Archive {
+            source,
+            output,
+            since,
+        } => (
             EmailOperation::Archive {
                 source: EmailSource::Maildir { path: source },
                 destination: EmailDestination::Maildir { path: output },
@@ -1848,7 +1858,10 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
     };
 
     let response = processor
-        .process(EmailRequest { operation, config_overrides: None })
+        .process(EmailRequest {
+            operation,
+            config_overrides: None,
+        })
         .await
         .context("processing emails")?;
 
@@ -1863,7 +1876,10 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
         }
     }
     if let Some(stats) = &response.rag_stats {
-        println!("RAG chunks: {} (vectors indexed: {})", stats.chunks_created, stats.vectors_indexed);
+        println!(
+            "RAG chunks: {} (vectors indexed: {})",
+            stats.chunks_created, stats.vectors_indexed
+        );
     }
     for err in &response.errors {
         eprintln!("Warning: {err}");

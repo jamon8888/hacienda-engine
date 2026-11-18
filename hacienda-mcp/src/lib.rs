@@ -189,7 +189,9 @@ impl HaciendaMcp {
         };
 
         let config = EmailConfig {
-            backend: EmailBackend::Maildir { path: params.source.clone() },
+            backend: EmailBackend::Maildir {
+                path: params.source.clone(),
+            },
             account: "mcp".to_string(),
             ..Default::default()
         };
@@ -199,8 +201,12 @@ impl HaciendaMcp {
         let response = processor
             .process(EmailRequest {
                 operation: EmailOperation::Redact {
-                    source: EmailSource::Maildir { path: params.source },
-                    destination: EmailDestination::Maildir { path: params.output },
+                    source: EmailSource::Maildir {
+                        path: params.source,
+                    },
+                    destination: EmailDestination::Maildir {
+                        path: params.output,
+                    },
                     rules: None,
                 },
                 config_overrides: None,

@@ -16,8 +16,11 @@ pub async fn redact(
         source,
         destination,
         rules,
-    } = op else {
-        return Err(EmailError::InvalidOperation("Expected Redact operation".to_string()));
+    } = op
+    else {
+        return Err(EmailError::InvalidOperation(
+            "Expected Redact operation".to_string(),
+        ));
     };
 
     let envelopes = fetch_envelopes(client, &source).await?;
@@ -34,12 +37,16 @@ pub async fn redact(
             Ok(mut message) => {
                 // Redact the text body (real PII engine).
                 if let Some(text) = &message.text_body {
-                    match redact_body(text, &redaction_rules, replacement, preserve_format, pii).await {
+                    match redact_body(text, &redaction_rules, replacement, preserve_format, pii)
+                        .await
+                    {
                         Ok((redacted, stats)) => {
                             message.text_body = Some(redacted);
                             merge_stats(&mut all_stats, stats);
                         }
-                        Err(e) => errors.push(format!("Text redaction failed for {}: {}", envelope.id, e)),
+                        Err(e) => {
+                            errors.push(format!("Text redaction failed for {}: {}", envelope.id, e))
+                        }
                     }
                 }
 
@@ -47,17 +54,35 @@ pub async fn redact(
                 // it, and writing it back keeps markup intact while ensuring
                 // PII in human-visible content is removed.
                 if let Some(html) = &message.html_body {
-                    match redact_html_body(html, &redaction_rules, replacement, preserve_format, pii).await {
+                    match redact_html_body(
+                        html,
+                        &redaction_rules,
+                        replacement,
+                        preserve_format,
+                        pii,
+                    )
+                    .await
+                    {
                         Ok((redacted, stats)) => {
                             message.html_body = Some(redacted);
                             merge_stats(&mut all_stats, stats);
                         }
-                        Err(e) => errors.push(format!("HTML redaction failed for {}: {}", envelope.id, e)),
+                        Err(e) => {
+                            errors.push(format!("HTML redaction failed for {}: {}", envelope.id, e))
+                        }
                     }
                 }
 
                 // Redact header fields, which frequently carry PII (From/To/Cc/Subject).
-                redact_headers(&mut message, &redaction_rules, replacement, preserve_format, pii, &mut all_stats).await;
+                redact_headers(
+                    &mut message,
+                    &redaction_rules,
+                    replacement,
+                    preserve_format,
+                    pii,
+                    &mut all_stats,
+                )
+                .await;
 
                 // Save redacted message.
                 if let Err(e) = save_redacted(&destination, &message).await {
@@ -74,7 +99,9 @@ pub async fn redact(
         success: errors.is_empty(),
         processed_count: processed,
         output_path: match &destination {
-            EmailDestination::Maildir { path } | EmailDestination::Files { path } => Some(path.clone()),
+            EmailDestination::Maildir { path } | EmailDestination::Files { path } => {
+                Some(path.clone())
+            }
             _ => None,
         },
         redaction_stats: Some(RedactionStats {
@@ -103,12 +130,12 @@ async fn fetch_envelopes(
             client.list_envelopes(mb, Some(1000)).await
         }
         EmailSource::Maildir { path: _ } => client.list_envelopes("INBOX", Some(1000)).await,
-        EmailSource::Files { paths: _ } => {
-            Err(EmailError::InvalidOperation("File source not yet implemented".to_string()))
-        }
-        EmailSource::Stdin => {
-            Err(EmailError::InvalidOperation("Stdin source not yet implemented".to_string()))
-        }
+        EmailSource::Files { paths: _ } => Err(EmailError::InvalidOperation(
+            "File source not yet implemented".to_string(),
+        )),
+        EmailSource::Stdin => Err(EmailError::InvalidOperation(
+            "Stdin source not yet implemented".to_string(),
+        )),
     }
 }
 
@@ -122,14 +149,25 @@ async fn redact_headers(
     stats: &mut HashMap<String, usize>,
 ) {
     // Addresses: redact the address value but keep the display name structure.
-    for address in message.from.iter_mut().chain(message.to.iter_mut()).chain(message.cc.iter_mut()) {
-        if let Ok((redacted, s)) = pii.redact(&address.address, rules, replacement, preserve_format).await {
+    for address in message
+        .from
+        .iter_mut()
+        .chain(message.to.iter_mut())
+        .chain(message.cc.iter_mut())
+    {
+        if let Ok((redacted, s)) = pii
+            .redact(&address.address, rules, replacement, preserve_format)
+            .await
+        {
             address.address = redacted;
             merge_stats(stats, s);
         }
     }
     if !message.subject.is_empty() {
-        if let Ok((redacted, s)) = pii.redact(&message.subject, rules, replacement, preserve_format).await {
+        if let Ok((redacted, s)) = pii
+            .redact(&message.subject, rules, replacement, preserve_format)
+            .await
+        {
             message.subject = redacted;
             merge_stats(stats, s);
         }
@@ -156,12 +194,17 @@ async fn redact_html_body(
     pii: &PiiEngine,
 ) -> Result<(String, HashMap<String, usize>)> {
     let visible = crate::ner::html_to_text(html);
-    let (redacted, stats) = pii.redact(&visible, rules, replacement, preserve_format).await?;
+    let (redacted, stats) = pii
+        .redact(&visible, rules, replacement, preserve_format)
+        .await?;
     // The visible text is stored as a plain-text alternative; keeping the
     // original HTML markup avoids corrupting tags while removing the PII from
     // the human-readable representation. Merge with any existing text body.
     let safe = redacted.replace('<', "&lt;").replace('>', "&gt;");
-    Ok((format!("{html}\n\n<!-- redacted text -->\n<p>{safe}</p>"), stats))
+    Ok((
+        format!("{html}\n\n<!-- redacted text -->\n<p>{safe}</p>"),
+        stats,
+    ))
 }
 
 /// Save redacted message
@@ -203,7 +246,13 @@ async fn save_to_files(base_path: &str, message: &EmailMessage) -> Result<()> {
     let safe_subject: String = message
         .subject
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(100)
         .collect();
     let filename = format!("{}_{}_redacted.eml", message.id, safe_subject);
@@ -215,7 +264,10 @@ pub(crate) fn message_to_rfc822(message: &EmailMessage) -> String {
     let mut lines = Vec::new();
 
     lines.push(format!("Message-ID: <{}>", message.id));
-    lines.push(format!("Date: {}", message.date.format("%a, %d %b %Y %H:%M:%S %z")));
+    lines.push(format!(
+        "Date: {}",
+        message.date.format("%a, %d %b %Y %H:%M:%S %z")
+    ));
     lines.push(format!("Subject: {}", message.subject));
 
     if !message.from.is_empty() {

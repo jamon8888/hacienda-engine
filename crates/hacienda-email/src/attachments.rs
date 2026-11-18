@@ -20,7 +20,10 @@ pub async fn extract_attachments(
             Ok(extracted) => results.push(extracted),
             Err(e) => {
                 // One bad attachment must not fail the whole message.
-                eprintln!("Failed to process attachment {}: {}", attachment.filename, e);
+                eprintln!(
+                    "Failed to process attachment {}: {}",
+                    attachment.filename, e
+                );
             }
         }
     }
@@ -30,9 +33,19 @@ pub async fn extract_attachments(
 /// Process a single attachment through xberg.
 pub async fn process_attachment(attachment: &EmailAttachment) -> Result<ExtractedAttachment> {
     let content = if attachment.content.is_empty() {
-        extract_text_with_xberg(&attachment.content, &attachment.content_type, &attachment.filename).await?
+        extract_text_with_xberg(
+            &attachment.content,
+            &attachment.content_type,
+            &attachment.filename,
+        )
+        .await?
     } else {
-        extract_text_with_xberg(&attachment.content, &attachment.content_type, &attachment.filename).await?
+        extract_text_with_xberg(
+            &attachment.content,
+            &attachment.content_type,
+            &attachment.filename,
+        )
+        .await?
     };
 
     Ok(ExtractedAttachment {
@@ -103,7 +116,8 @@ pub async fn save_attachments(attachments: &[ExtractedAttachment], base_path: &s
         fs::write(&file_path, &attachment.content).map_err(EmailError::Io)?;
 
         let meta_path = attach_dir.join(format!("{safe_name}.meta.json"));
-        let meta_json = serde_json::to_string_pretty(&attachment.metadata).map_err(EmailError::Serde)?;
+        let meta_json =
+            serde_json::to_string_pretty(&attachment.metadata).map_err(EmailError::Serde)?;
         fs::write(&meta_path, meta_json).map_err(EmailError::Io)?;
     }
 
@@ -114,7 +128,13 @@ pub async fn save_attachments(attachments: &[ExtractedAttachment], base_path: &s
 fn sanitize_filename(filename: &str) -> String {
     filename
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(200)
         .collect()
 }

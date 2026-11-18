@@ -56,7 +56,10 @@ pub enum EmailOperation {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmailSource {
     #[serde(rename = "account")]
-    Account { name: String, mailbox: Option<String> },
+    Account {
+        name: String,
+        mailbox: Option<String>,
+    },
 
     #[serde(rename = "maildir")]
     Maildir { path: String },

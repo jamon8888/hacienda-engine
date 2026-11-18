@@ -22,8 +22,11 @@ pub async fn index_for_rag(
         source,
         index_name,
         chunk_size,
-    } = op else {
-        return Err(EmailError::InvalidOperation("Expected IndexForRag operation".to_string()));
+    } = op
+    else {
+        return Err(EmailError::InvalidOperation(
+            "Expected IndexForRag operation".to_string(),
+        ));
     };
 
     let envelopes = fetch_envelopes(client, &source).await?;
@@ -90,12 +93,12 @@ async fn fetch_envelopes(
             client.list_envelopes(mb, Some(5000)).await
         }
         EmailSource::Maildir { path: _ } => client.list_envelopes("INBOX", Some(5000)).await,
-        EmailSource::Files { paths: _ } => {
-            Err(EmailError::InvalidOperation("File source not yet implemented".to_string()))
-        }
-        EmailSource::Stdin => {
-            Err(EmailError::InvalidOperation("Stdin source not yet implemented".to_string()))
-        }
+        EmailSource::Files { paths: _ } => Err(EmailError::InvalidOperation(
+            "File source not yet implemented".to_string(),
+        )),
+        EmailSource::Stdin => Err(EmailError::InvalidOperation(
+            "Stdin source not yet implemented".to_string(),
+        )),
     }
 }
 
@@ -109,7 +112,10 @@ fn extract_text_for_rag(
     parts.push(format!("Subject: {}", envelope.subject));
     parts.push(format!("From: {}", format_addresses(&envelope.from)));
     parts.push(format!("To: {}", format_addresses(&envelope.to)));
-    parts.push(format!("Date: {}", envelope.date.format("%Y-%m-%d %H:%M:%S UTC")));
+    parts.push(format!(
+        "Date: {}",
+        envelope.date.format("%Y-%m-%d %H:%M:%S UTC")
+    ));
 
     if let Some(text) = &message.text_body {
         parts.push(format!("Content:\n{text}"));

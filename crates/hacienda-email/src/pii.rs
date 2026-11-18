@@ -34,7 +34,9 @@ impl PiiEngine {
                 // uses); a tenant without keys configured gets a startup error rather
                 // than a silent downgrade to masking.
                 use hacienda_core::redaction::pseudonym::EnvKeyResolver;
-                use hacienda_core::redaction::{RedactionConfig as CoreRedactionConfig, RedactionMode};
+                use hacienda_core::redaction::{
+                    RedactionConfig as CoreRedactionConfig, RedactionMode,
+                };
                 let mut pipeline = PipelineConfig::default();
                 pipeline.redaction = CoreRedactionConfig {
                     mode: RedactionMode::Pseudonymize,
@@ -45,7 +47,9 @@ impl PiiEngine {
             }
         }
         .map_err(|e| EmailError::Redaction(format!("failed to build PII engine: {e}")))?;
-        Ok(Self { facade: Arc::new(facade) })
+        Ok(Self {
+            facade: Arc::new(facade),
+        })
     }
 
     /// Redact all configured PII categories in `text`, returning the rewritten
@@ -90,7 +94,8 @@ impl PiiEngine {
                 .await
                 .map_err(|e| EmailError::Redaction(format!("redaction failed: {e}")))?
         } else {
-            self.redact_with_template(text, replacement, preserve_format).await?
+            self.redact_with_template(text, replacement, preserve_format)
+                .await?
         };
 
         Ok((result.redacted_text, stats))
@@ -115,8 +120,9 @@ impl PiiEngine {
             key_id: None,
         };
         let config = HaciendaConfig::default().with_pii(pipeline);
-        let facade = HaciendaFacade::new(config)
-            .map_err(|e| EmailError::Redaction(format!("failed to build custom PII engine: {e}")))?;
+        let facade = HaciendaFacade::new(config).map_err(|e| {
+            EmailError::Redaction(format!("failed to build custom PII engine: {e}"))
+        })?;
         facade
             .redact_text(text)
             .await
@@ -146,12 +152,7 @@ impl PiiEngine {
                 } else {
                     String::new()
                 };
-                (
-                    e.category.to_string(),
-                    mention,
-                    e.confidence,
-                    (start, end),
-                )
+                (e.category.to_string(), mention, e.confidence, (start, end))
             })
             .collect())
     }
@@ -178,7 +179,10 @@ fn category_matches(rule: &str, category: &str) -> bool {
         return true;
     }
     matches!(
-        (rule.to_ascii_lowercase().as_str(), category.to_ascii_lowercase().as_str()),
+        (
+            rule.to_ascii_lowercase().as_str(),
+            category.to_ascii_lowercase().as_str()
+        ),
         ("phone", "phonenumber")
             | ("ip", "ipaddress")
             | ("ssn", "usssn")

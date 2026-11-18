@@ -53,10 +53,16 @@ pub enum EmailBackend {
     Jmap { server: String, token: String },
 
     #[serde(rename = "gmail")]
-    Gmail { client_id: String, client_secret: String },
+    Gmail {
+        client_id: String,
+        client_secret: String,
+    },
 
     #[serde(rename = "msgraph")]
-    Msgraph { tenant_id: String, client_id: String },
+    Msgraph {
+        tenant_id: String,
+        client_id: String,
+    },
 
     /// OAuth 2.0 over IMAP using the XOAUTH2 SASL mechanism. Works for both
     /// Gmail (`imap.gmail.com`) and Outlook (`outlook.office365.com`) with an
@@ -243,22 +249,34 @@ pub fn load_config_with_secrets(path: &str) -> Result<EmailConfig> {
 
     // Override secrets from environment variables
     match &mut config.backend {
-        EmailBackend::Imap { username: _, server: _ } => {
+        EmailBackend::Imap {
+            username: _,
+            server: _,
+        } => {
             // Secrets are resolved at client-build time from the environment;
             // no plaintext is stored in the config struct.
         }
         EmailBackend::Jmap { token, .. } => {
-            if let Ok(t) = std::env::var(format!("HACIENDA_EMAIL_{}_TOKEN", config.account.to_uppercase())) {
+            if let Ok(t) = std::env::var(format!(
+                "HACIENDA_EMAIL_{}_TOKEN",
+                config.account.to_uppercase()
+            )) {
                 *token = t;
             }
         }
         EmailBackend::Gmail { client_secret, .. } => {
-            if let Ok(s) = std::env::var(format!("HACIENDA_EMAIL_{}_CLIENT_SECRET", config.account.to_uppercase())) {
+            if let Ok(s) = std::env::var(format!(
+                "HACIENDA_EMAIL_{}_CLIENT_SECRET",
+                config.account.to_uppercase()
+            )) {
                 *client_secret = s;
             }
         }
         EmailBackend::Msgraph { client_id, .. } => {
-            if let Ok(id) = std::env::var(format!("HACIENDA_EMAIL_{}_CLIENT_ID", config.account.to_uppercase())) {
+            if let Ok(id) = std::env::var(format!(
+                "HACIENDA_EMAIL_{}_CLIENT_ID",
+                config.account.to_uppercase()
+            )) {
                 *client_id = id;
             }
         }

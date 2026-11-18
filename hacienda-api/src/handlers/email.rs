@@ -35,7 +35,9 @@ pub struct EmailProcessRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmailBackendDto {
-    Maildir { path: String },
+    Maildir {
+        path: String,
+    },
     OAuth {
         /// Optional server URL; empty uses the provider's default IMAP endpoint.
         #[serde(default)]
@@ -69,18 +71,38 @@ pub enum PrivacyModeValue {
 
 impl Default for PrivacyModeDto {
     fn default() -> Self {
-        Self { mode: PrivacyModeValue::Redact }
+        Self {
+            mode: PrivacyModeValue::Redact,
+        }
     }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum EmailOperationDto {
-    Archive { source: String, output: String, #[serde(default)] since: Option<String> },
-    ExtractNER { source: String, output: String },
-    Redact { source: String, output: String },
-    IndexForRag { source: String, #[serde(default)] index: Option<String> },
-    Pipeline { source: String, output: String },
+    Archive {
+        source: String,
+        output: String,
+        #[serde(default)]
+        since: Option<String>,
+    },
+    ExtractNER {
+        source: String,
+        output: String,
+    },
+    Redact {
+        source: String,
+        output: String,
+    },
+    IndexForRag {
+        source: String,
+        #[serde(default)]
+        index: Option<String>,
+    },
+    Pipeline {
+        source: String,
+        output: String,
+    },
 }
 
 /// Response body for an email operation.
@@ -103,7 +125,11 @@ fn to_api_error(e: hacienda_email::EmailError) -> ApiError {
 fn build_config(body: &EmailProcessRequest) -> Result<EmailConfig, ApiError> {
     let backend = match &body.backend {
         EmailBackendDto::Maildir { path } => EmailBackend::Maildir { path: path.clone() },
-        EmailBackendDto::OAuth { server, username, provider } => {
+        EmailBackendDto::OAuth {
+            server,
+            username,
+            provider,
+        } => {
             let provider = match provider {
                 OAuthProviderDto::Gmail => OAuthProvider::Gmail,
                 OAuthProviderDto::Outlook => OAuthProvider::Outlook,
@@ -165,7 +191,11 @@ pub async fn process_email(
     let processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
 
     let operation = match &body.operation {
-        EmailOperationDto::Archive { source, output, since } => EmailOperation::Archive {
+        EmailOperationDto::Archive {
+            source,
+            output,
+            since,
+        } => EmailOperation::Archive {
             source: source_of(source.clone()),
             destination: dest_of(output.clone()),
             since: since.clone(),
@@ -202,7 +232,10 @@ pub async fn process_email(
     };
 
     let response = processor
-        .process(EmailRequest { operation, config_overrides: None })
+        .process(EmailRequest {
+            operation,
+            config_overrides: None,
+        })
         .await
         .map_err(to_api_error)?;
 
