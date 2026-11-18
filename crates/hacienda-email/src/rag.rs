@@ -2,6 +2,7 @@ use crate::backend::EmailClient;
 use crate::config::EmailConfig;
 use crate::error::{EmailError, Result};
 use crate::models::{EmailOperation, EmailSource, RagIndexStats};
+use crate::pii::PiiEngine;
 
 /// Prepare email content for RAG indexing.
 ///
@@ -13,6 +14,7 @@ use crate::models::{EmailOperation, EmailSource, RagIndexStats};
 /// them.
 pub async fn index_for_rag(
     client: &dyn EmailClient,
+    pii: &PiiEngine,
     op: EmailOperation,
     config: &EmailConfig,
 ) -> Result<crate::models::EmailResponse> {
@@ -35,7 +37,27 @@ pub async fn index_for_rag(
         match client.get_message("INBOX", &envelope.id).await {
             Ok(message) => {
                 let text = extract_text_for_rag(&message, &envelope);
-                match chunk(&text, chunk_sz, config.rag.chunk_overlap) {
+                // D2 (ingestion guard): redact BEFORE chunking/embedding. Fail closed —
+                // if the PII engine errors, do not index this email's plaintext.
+                let safe_text = match pii
+                    .redact(
+                        &text,
+                        &config.redaction.rules,
+                        &config.redaction.replacement,
+                        config.redaction.preserve_format,
+                    )
+                    .await
+                {
+                    Ok((redacted, _)) => redacted,
+                    Err(e) => {
+                        errors.push(format!(
+                            "Redaction failed for {} — refusing to index (fail-closed): {e}",
+                            envelope.id
+                        ));
+                        continue;
+                    }
+                };
+                match chunk(&safe_text, chunk_sz, config.rag.chunk_overlap) {
                     Ok(chunks) => total_chunks += chunks.len(),
                     Err(e) => errors.push(format!("Chunking failed for {}: {}", envelope.id, e)),
                 }

@@ -6,7 +6,7 @@
 //! same detection pipeline, audit chain and pseudonymisation as the rest of
 //! hacienda. It is shared (behind `&self`) by all operations in `EmailProcessor`.
 
-use crate::config::RedactionRule;
+use crate::config::{PrivacyMode, RedactionRule};
 use crate::error::{EmailError, Result};
 use hacienda_core::facade::TextRedactResult;
 use hacienda_core::pii::PipelineConfig;
@@ -21,11 +21,30 @@ pub struct PiiEngine {
 }
 
 impl PiiEngine {
-    /// Build the engine with PII detection enabled (default pipeline config).
-    pub fn new() -> Result<Self> {
-        let config = HaciendaConfig::default().with_pii(PipelineConfig::default());
-        let facade = HaciendaFacade::new(config)
-            .map_err(|e| EmailError::Redaction(format!("failed to build PII engine: {e}")))?;
+    /// Build the engine for a tenant's chosen privacy mode (design D1).
+    pub fn new(mode: PrivacyMode) -> Result<Self> {
+        let facade = match mode {
+            PrivacyMode::Redact => {
+                let config = HaciendaConfig::default().with_pii(PipelineConfig::default());
+                HaciendaFacade::new(config)
+            }
+            PrivacyMode::Pseudonymize => {
+                // Reversible tokens need a key resolver. EnvKeyResolver reads the
+                // key material from the environment (the same convention hacienda-core
+                // uses); a tenant without keys configured gets a startup error rather
+                // than a silent downgrade to masking.
+                use hacienda_core::redaction::pseudonym::EnvKeyResolver;
+                use hacienda_core::redaction::{RedactionConfig as CoreRedactionConfig, RedactionMode};
+                let mut pipeline = PipelineConfig::default();
+                pipeline.redaction = CoreRedactionConfig {
+                    mode: RedactionMode::Pseudonymize,
+                    ..CoreRedactionConfig::default()
+                };
+                let config = HaciendaConfig::default().with_pii(pipeline);
+                HaciendaFacade::with_key_resolver(config, Arc::new(EnvKeyResolver::new()), &[])
+            }
+        }
+        .map_err(|e| EmailError::Redaction(format!("failed to build PII engine: {e}")))?;
         Ok(Self { facade: Arc::new(facade) })
     }
 

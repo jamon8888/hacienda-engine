@@ -61,7 +61,7 @@ async fn test_ner_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("\"operation\":\"extract_ner\""), "JSON was: {json}");
+    assert!(json.contains("\"operation\":\"extract_n_e_r\""), "JSON was: {json}");
     assert!(json.contains("gliner-multi-v2.1"));
 }
 

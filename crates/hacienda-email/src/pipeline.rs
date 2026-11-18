@@ -74,7 +74,7 @@ pub async fn run_pipeline(
                     index_name: None,
                     chunk_size: None,
                 };
-                let response = crate::rag::index_for_rag(client, op, config).await?;
+                let response = crate::rag::index_for_rag(client, pii, op, config).await?;
                 if let Some(stats) = response.rag_stats {
                     total_chunks = stats.chunks_created;
                 }
