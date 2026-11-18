@@ -125,9 +125,7 @@ impl ServiceEndpoint {
     }
 
     fn is_present(&self) -> bool {
-        url::Url::parse(&self.0)
-            .map(|url| url.host().is_some())
-            .unwrap_or(false)
+        url::Url::parse(&self.0).is_ok_and(|url| url.host().is_some())
     }
 }
 
