@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod models;
 pub mod ner;
+pub mod pii;
 pub mod pipeline;
 pub mod rag;
 pub mod redact;
@@ -29,13 +30,16 @@ pub use crate::models::{
 pub struct EmailProcessor {
     client: Arc<dyn EmailClient>,
     config: EmailConfig,
+    /// The real hacienda PII engine, shared by redaction and NER operations.
+    pii: crate::pii::PiiEngine,
 }
 
 impl EmailProcessor {
     /// Create a new email processor
     pub async fn new(config: EmailConfig) -> Result<Self> {
         let client = crate::backend::build_client(&config).await?;
-        Ok(Self { client, config })
+        let pii = crate::pii::PiiEngine::new()?;
+        Ok(Self { client, config, pii })
     }
 
     /// Process an email request
@@ -58,7 +62,7 @@ impl EmailProcessor {
 
     /// Extract named entities
     async fn extract_ner(&self, op: EmailOperation, config: &EmailConfig) -> Result<EmailResponse> {
-        crate::ner::extract_ner(self.client.as_ref(), op, config).await
+        crate::ner::extract_ner(self.client.as_ref(), &self.pii, op, config).await
     }
 
     /// Index for RAG
@@ -68,11 +72,11 @@ impl EmailProcessor {
 
     /// Redact PII
     async fn redact(&self, op: EmailOperation, config: &EmailConfig) -> Result<EmailResponse> {
-        crate::redact::redact(self.client.as_ref(), op, config).await
+        crate::redact::redact(self.client.as_ref(), &self.pii, op, config).await
     }
 
     /// Full pipeline
     async fn pipeline(&self, op: EmailOperation, config: &EmailConfig) -> Result<EmailResponse> {
-        crate::pipeline::run_pipeline(self.client.as_ref(), op, config).await
+        crate::pipeline::run_pipeline(self.client.as_ref(), &self.pii, op, config).await
     }
 }

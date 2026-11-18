@@ -2,10 +2,12 @@ use crate::backend::EmailClient;
 use crate::config::EmailConfig;
 use crate::error::{EmailError, Result};
 use crate::models::{EmailDestination, EmailOperation, EmailSource, PipelineStep};
+use crate::pii::PiiEngine;
 
 /// Run full email processing pipeline
 pub async fn run_pipeline(
     client: &dyn EmailClient,
+    pii: &PiiEngine,
     op: EmailOperation,
     config: &EmailConfig,
 ) -> Result<crate::models::EmailResponse> {
@@ -60,7 +62,7 @@ pub async fn run_pipeline(
                     output: format!("{}/entities.json", destination_path(&destination)),
                     model: None,
                 };
-                let response = crate::ner::extract_ner(client, op, config).await?;
+                let response = crate::ner::extract_ner(client, pii, op, config).await?;
                 all_entities.extend(response.entities.unwrap_or_default());
                 all_errors.extend(response.errors);
                 total_processed = response.processed_count;
@@ -86,7 +88,7 @@ pub async fn run_pipeline(
                     destination: destination.clone(),
                     rules: None,
                 };
-                let response = crate::redact::redact(client, op, config).await?;
+                let response = crate::redact::redact(client, pii, op, config).await?;
                 if let Some(stats) = response.redaction_stats {
                     total_redactions = stats.total_redactions;
                 }

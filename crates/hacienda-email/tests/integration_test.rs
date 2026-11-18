@@ -43,7 +43,7 @@ async fn test_archive_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("Archive"));
+    assert!(json.contains("\"operation\":\"archive\""), "JSON was: {json}");
     assert!(json.contains("test"));
 }
 
@@ -61,7 +61,7 @@ async fn test_ner_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("ExtractNER"));
+    assert!(json.contains("\"operation\":\"extract_ner\""), "JSON was: {json}");
     assert!(json.contains("gliner-multi-v2.1"));
 }
 
@@ -84,9 +84,9 @@ async fn test_redact_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("Redact"));
-    assert!(json.contains("Email"));
-    assert!(json.contains("Phone"));
+    assert!(json.contains("\"operation\":\"redact\""), "JSON was: {json}");
+    assert!(json.contains("email"));
+    assert!(json.contains("phone"));
 }
 
 #[tokio::test]
@@ -110,10 +110,10 @@ async fn test_pipeline_operation_structure() {
     };
 
     let json = serde_json::to_string(&request).unwrap();
-    assert!(json.contains("Pipeline"));
-    assert!(json.contains("Archive"));
-    assert!(json.contains("Ner"));
-    assert!(json.contains("RagIndex"));
+    assert!(json.contains("\"operation\":\"pipeline\""), "JSON was: {json}");
+    assert!(json.contains("\"archive\""));
+    assert!(json.contains("\"ner\""));
+    assert!(json.contains("\"rag_index\""));
 }
 
 #[tokio::test]

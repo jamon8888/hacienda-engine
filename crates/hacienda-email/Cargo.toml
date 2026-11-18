@@ -32,7 +32,7 @@ native-tls = ["io-email/native-tls"]
 # Pipeline features. PII redaction lives in hacienda-core and is always
 # available; the feature only toggles whether the Mutex-backed facade is built.
 ner = ["hacienda-core/ner-candle"]
-rag = ["hacienda-rag/chunking"]
+rag = ["hacienda-rag/chunking", "dep:xberg"]
 redact = []
 # Offline fast tests with a mock IMAP server.
 mock = []
@@ -49,6 +49,10 @@ io-email = { version = "0.1", default-features = false, optional = true }
 # `connect_imap` takes `pimalaya_stream::sasl::Sasl` / `tls::Tls` from the 0.0.1
 # line (what io-email 0.1 depends on). Needed to build the credentials.
 pimalaya-stream = { version = "0.0.1", default-features = false }
+# xberg is used for real attachment/text extraction and (under the `rag`
+# feature) for the chunking config type. Optional so the default IMAP/Maildir
+# build stays lean.
+xberg = { workspace = true, optional = true }
 
 # Core
 serde = { workspace = true }

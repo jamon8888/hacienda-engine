@@ -2,11 +2,13 @@ use crate::backend::EmailClient;
 use crate::config::EmailConfig;
 use crate::error::{EmailError, Result};
 use crate::models::{EmailOperation, EmailSource, ExtractedEntity};
+use crate::pii::PiiEngine;
 use std::path::Path;
 
 /// Extract named entities from emails
 pub async fn extract_ner(
     client: &dyn EmailClient,
+    pii: &PiiEngine,
     op: EmailOperation,
     config: &EmailConfig,
 ) -> Result<crate::models::EmailResponse> {
@@ -15,7 +17,9 @@ pub async fn extract_ner(
     };
 
     let envelopes = fetch_envelopes(client, &source).await?;
-    let model_name = model.unwrap_or_else(|| config.ner.model.clone());
+    // The model name is accepted for API compatibility; hacienda-core's shared
+    // detection pipeline owns the configured NER backend.
+    let _model_name = model.unwrap_or_else(|| config.ner.model.clone());
 
     let mut all_entities = Vec::new();
     let mut errors = Vec::new();
@@ -26,7 +30,7 @@ pub async fn extract_ner(
             match client.get_message("INBOX", &envelope.id).await {
                 Ok(message) => {
                     let text = extract_text(&message);
-                    match extract_entities(&text, &model_name, &config.ner).await {
+                    match extract_entities(&text, pii).await {
                         Ok(entities) => {
                             for entity in entities {
                                 all_entities.push(ExtractedEntity {
@@ -115,11 +119,7 @@ pub fn html_to_text(html: &str) -> String {
         .replace("<div>", "\n")
         .replace("</div>", "")
         .replace("&nbsp;", " ")
-        .replace("&", "&")
-        .replace("<", "<")
-        .replace(">", ">")
-        .replace("\"", "\"")
-        .replace("\'", "\'")
+        .replace("&amp;", "&")
         // Strip remaining tags
         .split('<')
         .map(|s| s.split('>').last().unwrap_or(s))
@@ -136,80 +136,16 @@ struct NerEntity {
     span: (usize, usize),
 }
 
-/// Extract entities using hacienda-core NER pipeline
-async fn extract_entities(
-    text: &str,
-    model: &str,
-    ner_config: &crate::config::NerConfig,
-) -> Result<Vec<NerEntity>> {
-    // Use hacienda-core's NER pipeline
-    // This is a placeholder - actual implementation would use the GLiNER integration
-    #[cfg(feature = "ner")]
-    {
-        use hacienda_core::ner::{NerPipeline, NerEntity as CoreNerEntity};
-
-        let pipeline = NerPipeline::new(model.to_string(), ner_config.confidence_threshold)
-            .map_err(|e| EmailError::Ner(format!("Failed to create NER pipeline: {}", e)))?;
-
-        let entities = pipeline.extract(text, &ner_config.entity_types)
-            .await
-            .map_err(|e| EmailError::Ner(format!("NER extraction failed: {}", e)))?;
-
-        Ok(entities.into_iter().map(|e| NerEntity {
-            text: e.text,
-            label: e.label,
-            confidence: e.confidence,
-            span: e.span,
-        }).collect())
-    }
-
-    #[cfg(not(feature = "ner"))]
-    {
-        // Fallback: return empty or use regex-based extraction
-        Ok(extract_entities_regex(text))
-    }
-}
-
-/// Regex-based entity extraction (fallback)
-fn extract_entities_regex(text: &str) -> Vec<NerEntity> {
-    use regex::Regex;
-    let mut entities = Vec::new();
-
-    // Email regex
-    if let Ok(re) = Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b") {
-        for mat in re.find_iter(text) {
-            entities.push(NerEntity {
-                text: mat.as_str().to_string(),
-                label: "EMAIL".to_string(),
-                confidence: 0.9,
-                span: (mat.start(), mat.end()),
-            });
-        }
-    }
-
-    // Phone regex (simplified)
-    if let Ok(re) = Regex::new(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b") {
-        for mat in re.find_iter(text) {
-            entities.push(NerEntity {
-                text: mat.as_str().to_string(),
-                label: "PHONE".to_string(),
-                confidence: 0.8,
-                span: (mat.start(), mat.end()),
-            });
-        }
-    }
-
-    // SSN regex
-    if let Ok(re) = Regex::new(r"\b\d{3}-\d{2}-\d{4}\b") {
-        for mat in re.find_iter(text) {
-            entities.push(NerEntity {
-                text: mat.as_str().to_string(),
-                label: "SSN".to_string(),
-                confidence: 0.95,
-                span: (mat.start(), mat.end()),
-            });
-        }
-    }
-
-    entities
+/// Extract entities via hacienda-core's real detection pipeline.
+async fn extract_entities(text: &str, pii: &PiiEngine) -> Result<Vec<NerEntity>> {
+    let found = pii.scan_entities(text).await?;
+    Ok(found
+        .into_iter()
+        .map(|(label, mention, confidence, span)| NerEntity {
+            text: mention,
+            label,
+            confidence,
+            span,
+        })
+        .collect())
 }

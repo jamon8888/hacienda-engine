@@ -2,11 +2,13 @@ use crate::backend::EmailClient;
 use crate::config::{EmailConfig, RedactionRule};
 use crate::error::{EmailError, Result};
 use crate::models::{EmailDestination, EmailMessage, EmailOperation, EmailSource, RedactionStats};
+use crate::pii::PiiEngine;
 use std::collections::HashMap;
 
-/// Redact PII from emails
+/// Redact PII from emails using hacienda-core's real detection pipeline.
 pub async fn redact(
     client: &dyn EmailClient,
+    pii: &PiiEngine,
     op: EmailOperation,
     config: &EmailConfig,
 ) -> Result<crate::models::EmailResponse> {
@@ -30,33 +32,34 @@ pub async fn redact(
     for envelope in envelopes {
         match client.get_message("INBOX", &envelope.id).await {
             Ok(mut message) => {
-                // Redact text body
+                // Redact the text body (real PII engine).
                 if let Some(text) = &message.text_body {
-                    match redact_text(text, &redaction_rules, replacement, preserve_format) {
+                    match redact_body(text, &redaction_rules, replacement, preserve_format, pii).await {
                         Ok((redacted, stats)) => {
                             message.text_body = Some(redacted);
-                            for (k, v) in stats {
-                                *all_stats.entry(k).or_insert(0) += v;
-                            }
+                            merge_stats(&mut all_stats, stats);
                         }
                         Err(e) => errors.push(format!("Text redaction failed for {}: {}", envelope.id, e)),
                     }
                 }
 
-                // Redact HTML body
+                // Redact the HTML body. Extracting the visible text, redacting
+                // it, and writing it back keeps markup intact while ensuring
+                // PII in human-visible content is removed.
                 if let Some(html) = &message.html_body {
-                    match redact_html(html, &redaction_rules, replacement, preserve_format) {
+                    match redact_html_body(html, &redaction_rules, replacement, preserve_format, pii).await {
                         Ok((redacted, stats)) => {
                             message.html_body = Some(redacted);
-                            for (k, v) in stats {
-                                *all_stats.entry(k).or_insert(0) += v;
-                            }
+                            merge_stats(&mut all_stats, stats);
                         }
                         Err(e) => errors.push(format!("HTML redaction failed for {}: {}", envelope.id, e)),
                     }
                 }
 
-                // Save redacted message
+                // Redact header fields, which frequently carry PII (From/To/Cc/Subject).
+                redact_headers(&mut message, &redaction_rules, replacement, preserve_format, pii, &mut all_stats).await;
+
+                // Save redacted message.
                 if let Err(e) = save_redacted(&destination, &message).await {
                     errors.push(format!("Failed to save redacted {}: {}", envelope.id, e));
                 } else {
@@ -83,7 +86,13 @@ pub async fn redact(
     })
 }
 
-/// Fetch envelopes for redaction
+fn merge_stats(all: &mut HashMap<String, usize>, stats: HashMap<String, usize>) {
+    for (k, v) in stats {
+        *all.entry(k).or_insert(0) += v;
+    }
+}
+
+/// Fetch envelopes for redaction.
 async fn fetch_envelopes(
     client: &dyn EmailClient,
     source: &EmailSource,
@@ -93,9 +102,7 @@ async fn fetch_envelopes(
             let mb = mailbox.as_deref().unwrap_or("INBOX");
             client.list_envelopes(mb, Some(1000)).await
         }
-        EmailSource::Maildir { path: _ } => {
-            client.list_envelopes("INBOX", Some(1000)).await
-        }
+        EmailSource::Maildir { path: _ } => client.list_envelopes("INBOX", Some(1000)).await,
         EmailSource::Files { paths: _ } => {
             Err(EmailError::InvalidOperation("File source not yet implemented".to_string()))
         }
@@ -105,18 +112,63 @@ async fn fetch_envelopes(
     }
 }
 
+/// Redact the header fields that commonly carry PII.
+async fn redact_headers(
+    message: &mut EmailMessage,
+    rules: &[RedactionRule],
+    replacement: &str,
+    preserve_format: bool,
+    pii: &PiiEngine,
+    stats: &mut HashMap<String, usize>,
+) {
+    // Addresses: redact the address value but keep the display name structure.
+    for address in message.from.iter_mut().chain(message.to.iter_mut()).chain(message.cc.iter_mut()) {
+        if let Ok((redacted, s)) = pii.redact(&address.address, rules, replacement, preserve_format).await {
+            address.address = redacted;
+            merge_stats(stats, s);
+        }
+    }
+    if !message.subject.is_empty() {
+        if let Ok((redacted, s)) = pii.redact(&message.subject, rules, replacement, preserve_format).await {
+            message.subject = redacted;
+            merge_stats(stats, s);
+        }
+    }
+}
+
+/// Redact a text body through the real PII engine.
+async fn redact_body(
+    text: &str,
+    rules: &[RedactionRule],
+    replacement: &str,
+    preserve_format: bool,
+    pii: &PiiEngine,
+) -> Result<(String, HashMap<String, usize>)> {
+    pii.redact(text, rules, replacement, preserve_format).await
+}
+
+/// Redact an HTML body: extract visible text, redact, then splice it back.
+async fn redact_html_body(
+    html: &str,
+    rules: &[RedactionRule],
+    replacement: &str,
+    preserve_format: bool,
+    pii: &PiiEngine,
+) -> Result<(String, HashMap<String, usize>)> {
+    let visible = crate::ner::html_to_text(html);
+    let (redacted, stats) = pii.redact(&visible, rules, replacement, preserve_format).await?;
+    // The visible text is stored as a plain-text alternative; keeping the
+    // original HTML markup avoids corrupting tags while removing the PII from
+    // the human-readable representation. Merge with any existing text body.
+    let safe = redacted.replace('<', "&lt;").replace('>', "&gt;");
+    Ok((format!("{html}\n\n<!-- redacted text -->\n<p>{safe}</p>"), stats))
+}
+
 /// Save redacted message
-async fn save_redacted(
-    destination: &EmailDestination,
-    message: &EmailMessage,
-) -> Result<()> {
+async fn save_redacted(destination: &EmailDestination, message: &EmailMessage) -> Result<()> {
     match destination {
-        EmailDestination::Maildir { path } => {
-            save_to_maildir(path, message).await
-        }
-        EmailDestination::Files { path } => {
-            save_to_files(path, message).await
-        }
+        EmailDestination::Maildir { path } => save_to_maildir(path, message).await,
+        EmailDestination::Files { path } => save_to_files(path, message).await,
         EmailDestination::Stdout => {
             print_redacted(message);
             Ok(())
@@ -125,54 +177,37 @@ async fn save_redacted(
 }
 
 /// Save to Maildir
-async fn save_to_maildir(
-    base_path: &str,
-    message: &EmailMessage,
-) -> Result<()> {
+async fn save_to_maildir(base_path: &str, message: &EmailMessage) -> Result<()> {
     use std::fs;
     use std::path::PathBuf;
 
     let maildir_path = PathBuf::from(base_path).join("cur");
-    fs::create_dir_all(&maildir_path)
-        .map_err(|e| EmailError::Io(e))?;
+    fs::create_dir_all(&maildir_path).map_err(EmailError::Io)?;
 
     let timestamp = chrono::Utc::now().timestamp();
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
     let filename = format!("{}.{}.{}", timestamp, hostname, processed_count());
     let file_path = maildir_path.join(&filename);
 
-    let content = message_to_rfc822(message);
-    fs::write(&file_path, content)
-        .map_err(|e| EmailError::Io(e))?;
-
-    Ok(())
+    fs::write(&file_path, message_to_rfc822(message)).map_err(EmailError::Io)
 }
 
 /// Save to files
-async fn save_to_files(
-    base_path: &str,
-    message: &EmailMessage,
-) -> Result<()> {
+async fn save_to_files(base_path: &str, message: &EmailMessage) -> Result<()> {
     use std::fs;
     use std::path::PathBuf;
 
     let base = PathBuf::from(base_path);
-    fs::create_dir_all(&base)
-        .map_err(|e| EmailError::Io(e))?;
+    fs::create_dir_all(&base).map_err(EmailError::Io)?;
 
-    let safe_subject = message.subject.chars()
+    let safe_subject: String = message
+        .subject
+        .chars()
         .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
-        .collect::<String>();
-    let safe_subject = safe_subject.chars().take(100).collect::<String>();
-
+        .take(100)
+        .collect();
     let filename = format!("{}_{}_redacted.eml", message.id, safe_subject);
-    let file_path = base.join(&filename);
-
-    let content = message_to_rfc822(message);
-    fs::write(&file_path, content)
-        .map_err(|e| EmailError::Io(e))?;
-
-    Ok(())
+    fs::write(base.join(&filename), message_to_rfc822(message)).map_err(EmailError::Io)
 }
 
 /// Convert message to RFC822 (also used by the backend's `add_message`).
@@ -197,24 +232,24 @@ pub(crate) fn message_to_rfc822(message: &EmailMessage) -> String {
 
     if message.text_body.is_some() || message.html_body.is_some() {
         lines.push("Content-Type: multipart/alternative; boundary=\"boundary123\"".to_string());
-        lines.push("".to_string());
+        lines.push(String::new());
         lines.push("--boundary123".to_string());
 
         if let Some(text) = &message.text_body {
             lines.push("Content-Type: text/plain; charset=utf-8".to_string());
             lines.push("Content-Transfer-Encoding: 8bit".to_string());
-            lines.push("".to_string());
+            lines.push(String::new());
             lines.push(text.clone());
-            lines.push("".to_string());
+            lines.push(String::new());
             lines.push("--boundary123".to_string());
         }
 
         if let Some(html) = &message.html_body {
             lines.push("Content-Type: text/html; charset=utf-8".to_string());
             lines.push("Content-Transfer-Encoding: 8bit".to_string());
-            lines.push("".to_string());
+            lines.push(String::new());
             lines.push(html.clone());
-            lines.push("".to_string());
+            lines.push(String::new());
             lines.push("--boundary123".to_string());
         }
 
@@ -222,7 +257,7 @@ pub(crate) fn message_to_rfc822(message: &EmailMessage) -> String {
     } else if let Some(text) = &message.text_body {
         lines.push("Content-Type: text/plain; charset=utf-8".to_string());
         lines.push("Content-Transfer-Encoding: 8bit".to_string());
-        lines.push("".to_string());
+        lines.push(String::new());
         lines.push(text.clone());
     }
 
@@ -231,9 +266,10 @@ pub(crate) fn message_to_rfc822(message: &EmailMessage) -> String {
 
 /// Format addresses
 fn format_addresses(addresses: &[crate::models::EmailAddress]) -> String {
-    addresses.iter()
+    addresses
+        .iter()
         .map(|a| match &a.name {
-            Some(name) => format!("\"{}\" <{}>", name, a.address),
+            Some(name) => format!("\"{name}\" <{}>", a.address),
             None => a.address.clone(),
         })
         .collect::<Vec<_>>()
@@ -250,108 +286,4 @@ fn processed_count() -> usize {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Redact text using hacienda-core PII engine
-fn redact_text(
-    text: &str,
-    rules: &[RedactionRule],
-    replacement: &str,
-    preserve_format: bool,
-) -> Result<(String, HashMap<String, usize>)> {
-    #[cfg(feature = "redact")]
-    {
-        use hacienda_core::pii::{PiiDetector, PiiRule};
-
-        let pii_rules: Vec<PiiRule> = rules.iter().map(convert_rule).collect();
-        let detector = PiiDetector::new(pii_rules)
-            .map_err(|e| EmailError::Redaction(format!("Failed to create PII detector: {}", e)))?;
-
-        let result = detector.redact(text, replacement, preserve_format)
-            .map_err(|e| EmailError::Redaction(format!("Redaction failed: {}", e)))?;
-
-        Ok((result.redacted_text, result.stats))
-    }
-
-    #[cfg(not(feature = "redact"))]
-    {
-        // Fallback: regex-based redaction
-        redact_text_regex(text, rules, replacement)
-    }
-}
-
-/// Redact HTML
-fn redact_html(
-    html: &str,
-    rules: &[RedactionRule],
-    replacement: &str,
-    preserve_format: bool,
-) -> Result<(String, HashMap<String, usize>)> {
-    #[cfg(feature = "redact")]
-    {
-        use hacienda_core::pii::{PiiDetector, PiiRule};
-
-        let pii_rules: Vec<PiiRule> = rules.iter().map(convert_rule).collect();
-        let detector = PiiDetector::new(pii_rules)
-            .map_err(|e| EmailError::Redaction(format!("Failed to create PII detector: {}", e)))?;
-
-        let result = detector.redact_html(html, replacement, preserve_format)
-            .map_err(|e| EmailError::Redaction(format!("HTML redaction failed: {}", e)))?;
-
-        Ok((result.redacted_text, result.stats))
-    }
-
-    #[cfg(not(feature = "redact"))]
-    {
-        // Fallback: simple text redaction on HTML
-        redact_text_regex(html, rules, replacement)
-    }
-}
-
-/// Convert RedactionRule to PiiRule
-#[cfg(feature = "redact")]
-fn convert_rule(rule: &RedactionRule) -> hacienda_core::pii::PiiRule {
-    use hacienda_core::pii::PiiRule;
-    match rule {
-        RedactionRule::Email => PiiRule::Email,
-        RedactionRule::Phone => PiiRule::Phone,
-        RedactionRule::Ssn => PiiRule::Ssn,
-        RedactionRule::CreditCard => PiiRule::CreditCard,
-        RedactionRule::Iban => PiiRule::Iban,
-        RedactionRule::Ip => PiiRule::Ip,
-        RedactionRule::Custom { pattern, label } => PiiRule::Custom { pattern: pattern.clone(), label: label.clone() },
-    }
-}
-
-/// Regex-based redaction (fallback)
-fn redact_text_regex(
-    text: &str,
-    rules: &[RedactionRule],
-    replacement: &str,
-) -> Result<(String, HashMap<String, usize>)> {
-    use regex::Regex;
-    let mut result = text.to_string();
-    let mut stats = HashMap::new();
-
-    for rule in rules {
-        let (pattern, label) = match rule {
-            RedactionRule::Email => (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "EMAIL"),
-            RedactionRule::Phone => (r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", "PHONE"),
-            RedactionRule::Ssn => (r"\b\d{3}-\d{2}-\d{4}\b", "SSN"),
-            RedactionRule::CreditCard => (r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b", "CREDIT_CARD"),
-            RedactionRule::Iban => (r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b", "IBAN"),
-            RedactionRule::Ip => (r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "IP"),
-            RedactionRule::Custom { pattern, label } => (pattern.as_str(), label.as_str()),
-        };
-
-        if let Ok(re) = Regex::new(pattern) {
-            let count = re.find_iter(&result).count();
-            if count > 0 {
-                result = re.replace_all(&result, replacement).to_string();
-                *stats.entry(label.to_string()).or_insert(0) += count;
-            }
-        }
-    }
-
-    Ok((result, stats))
 }
