@@ -1,5 +1,7 @@
 # Cargo
 target/
+# Per-agent scratch target dir (CARGO_TARGET_DIR=target-i1, see issue workflow)
+target-i1/
 Cargo.lock
 
 # Build artifacts

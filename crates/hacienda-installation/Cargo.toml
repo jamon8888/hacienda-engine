@@ -1,0 +1,25 @@
+[package]
+name = "hacienda-installation"
+version.workspace = true
+edition = "2024"
+rust-version = "1.85"
+license.workspace = true
+description = "First-class [installation] section: one resolution and validation path shared by client and server"
+
+# Same lint profile as `hacienda-client-core`, the crate that re-exports this one:
+# the trust-boundary contract is the surface where a warning deserves to be loud.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# URL parsing only — deliberately not `reqwest` (which `hacienda-client-core` uses):
+# this leaf crate is also a dependency of `hacienda-core`, and the server config path
+# must not inherit an HTTP client.
+url = { workspace = true }

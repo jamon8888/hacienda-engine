@@ -3766,6 +3766,7 @@ dependencies = [
 name = "hacienda-client-core"
 version = "0.1.0"
 dependencies = [
+ "hacienda-installation",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
@@ -3783,6 +3784,7 @@ dependencies = [
  "blake3",
  "chrono",
  "data-encoding",
+ "hacienda-installation",
  "indexed_db_futures",
  "rand 0.8.8",
  "regex",
@@ -3805,6 +3807,16 @@ dependencies = [
  "web-time",
  "xberg",
  "zeroize",
+]
+
+[[package]]
+name = "hacienda-installation"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "url",
 ]
 
 [[package]]

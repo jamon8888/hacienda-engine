@@ -75,4 +75,9 @@ pub use error::HaciendaError;
 pub use facade::{
     HaciendaFacade, HaciendaMetadata, HaciendaResult, SpanText, TextRedactResult, TextScanResult,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use hacienda_installation::{
+    resolve_installation, resolve_installation_from_environment, InstallationConfig,
+    InstallationContext, InstallationResolutionError, INSTALLATION_CONFIG_ENV,
+};
 pub use tenancy::{ActorId, ProjectId, TenantCtx, TenantId};

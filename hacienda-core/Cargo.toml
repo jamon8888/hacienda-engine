@@ -38,6 +38,11 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 data-encoding = { workspace = true }
+# The shared `[installation]` section (issue #142): `HaciendaConfig.installation` is
+# this crate's type, and the desktop client re-exports that very same one. It is a leaf
+# crate rather than a dependency on the client because the client pulls in an HTTP
+# transport this server config path must not inherit — see that crate's module doc.
+hacienda-installation = { path = "../crates/hacienda-installation" }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
