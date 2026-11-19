@@ -32,21 +32,14 @@ pub async fn extract_attachments(
 
 /// Process a single attachment through xberg.
 pub async fn process_attachment(attachment: &EmailAttachment) -> Result<ExtractedAttachment> {
-    let content = if attachment.content.is_empty() {
-        extract_text_with_xberg(
-            &attachment.content,
-            &attachment.content_type,
-            &attachment.filename,
-        )
-        .await?
-    } else {
-        extract_text_with_xberg(
-            &attachment.content,
-            &attachment.content_type,
-            &attachment.filename,
-        )
-        .await?
-    };
+    // The same xberg call serves both branches: it is idempotent on empty bytes
+    // and there is no meaningful distinction between the two former arms.
+    let content = extract_text_with_xberg(
+        &attachment.content,
+        &attachment.content_type,
+        &attachment.filename,
+    )
+    .await?;
 
     Ok(ExtractedAttachment {
         filename: attachment.filename.clone(),

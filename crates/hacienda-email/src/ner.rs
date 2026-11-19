@@ -61,12 +61,12 @@ pub async fn extract_ner(
     if let Some(parent) = Path::new(&output).parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| EmailError::Io(e))?;
+            .map_err(EmailError::Io)?;
     }
-    let json = serde_json::to_string_pretty(&all_entities).map_err(|e| EmailError::Serde(e))?;
+    let json = serde_json::to_string_pretty(&all_entities).map_err(EmailError::Serde)?;
     tokio::fs::write(&output, json)
         .await
-        .map_err(|e| EmailError::Io(e))?;
+        .map_err(EmailError::Io)?;
 
     Ok(crate::models::EmailResponse {
         success: errors.is_empty(),
@@ -130,7 +130,7 @@ pub fn html_to_text(html: &str) -> String {
         .replace("&amp;", "&")
         // Strip remaining tags
         .split('<')
-        .map(|s| s.split('>').last().unwrap_or(s))
+        .map(|s| s.split('>').next_back().unwrap_or(s))
         .collect::<Vec<_>>()
         .join("")
 }

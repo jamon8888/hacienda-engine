@@ -403,7 +403,7 @@ impl EmailClient for BlockingClient {
             let refs: Vec<&str> = uids.iter().map(|s| s.as_str()).collect();
             let io_flags: Vec<io_email::flag::types::Flag> = names
                 .iter()
-                .map(|n| io_email::flag::types::Flag::from_raw(n))
+                .map(io_email::flag::types::Flag::from_raw)
                 .collect();
             let op = if add {
                 io_email::flag::types::FlagOp::Add

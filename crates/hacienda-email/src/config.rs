@@ -217,21 +217,16 @@ impl Default for RagConfig {
 }
 
 /// Privacy mode selected per tenant / caller (design decision D1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyMode {
     /// Irreversibly mask PII before persisting or indexing. Fail-closed and
     /// the default: plaintext never leaves the client.
+    #[default]
     Redact,
     /// Replace PII with reversible, per-tenant keyed tokens. Reveal is a
     /// separate, audited operation. Requires a pseudonymisation key resolver.
     Pseudonymize,
-}
-
-impl Default for PrivacyMode {
-    fn default() -> Self {
-        Self::Redact
-    }
 }
 
 /// Redaction configuration

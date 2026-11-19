@@ -37,10 +37,12 @@ impl PiiEngine {
                 use hacienda_core::redaction::{
                     RedactionConfig as CoreRedactionConfig, RedactionMode,
                 };
-                let mut pipeline = PipelineConfig::default();
-                pipeline.redaction = CoreRedactionConfig {
-                    mode: RedactionMode::Pseudonymize,
-                    ..CoreRedactionConfig::default()
+                let pipeline = PipelineConfig {
+                    redaction: CoreRedactionConfig {
+                        mode: RedactionMode::Pseudonymize,
+                        ..CoreRedactionConfig::default()
+                    },
+                    ..PipelineConfig::default()
                 };
                 let config = HaciendaConfig::default().with_pii(pipeline);
                 HaciendaFacade::with_key_resolver(config, Arc::new(EnvKeyResolver::new()), &[])
@@ -112,12 +114,14 @@ impl PiiEngine {
     ) -> Result<TextRedactResult> {
         use hacienda_core::redaction::{RedactionConfig as CoreRedactionConfig, RedactionMode};
 
-        let mut pipeline = PipelineConfig::default();
-        pipeline.redaction = CoreRedactionConfig {
-            mode: RedactionMode::Custom,
-            custom_template: Some(template.to_string()),
-            preserve_format,
-            key_id: None,
+        let pipeline = PipelineConfig {
+            redaction: CoreRedactionConfig {
+                mode: RedactionMode::Custom,
+                custom_template: Some(template.to_string()),
+                preserve_format,
+                key_id: None,
+            },
+            ..PipelineConfig::default()
         };
         let config = HaciendaConfig::default().with_pii(pipeline);
         let facade = HaciendaFacade::new(config).map_err(|e| {

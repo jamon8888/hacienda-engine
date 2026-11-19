@@ -263,18 +263,14 @@ pub async fn index_for_rag(
         // ignore messages we already ingested in a previous run
         let mut selected: Vec<Envelope> = Vec::with_capacity(envelopes.len());
         for envelope in &envelopes {
-            let already_seen = match envelope_uid(&envelope) {
-                Some(uid) => uid <= last_uid,
-                None => false,
-            };
-            if already_seen {
-                continue;
-            }
-            if seen.contains(envelope.id.as_str()) {
+            let uid = envelope_uid(envelope);
+            // Skip messages already ingested in a previous run (watermark) and
+            // duplicates already handled inside this run.
+            if uid.is_some_and(|uid| uid <= last_uid) || seen.contains(envelope.id.as_str()) {
                 continue;
             }
             seen.insert(envelope.id.clone());
-            if let Some(uid) = envelope_uid(&envelope) {
+            if let Some(uid) = uid {
                 last_uid = last_uid.max(uid);
             }
             selected.push(envelope.clone());

@@ -105,7 +105,7 @@ pub struct EmailRequest {
 }
 
 /// Plugin response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EmailResponse {
     pub success: bool,
     pub processed_count: usize,
@@ -118,20 +118,6 @@ pub struct EmailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redaction_stats: Option<RedactionStats>,
     pub errors: Vec<String>,
-}
-
-impl Default for EmailResponse {
-    fn default() -> Self {
-        Self {
-            success: false,
-            processed_count: 0,
-            output_path: None,
-            entities: None,
-            rag_stats: None,
-            redaction_stats: None,
-            errors: Vec::new(),
-        }
-    }
 }
 
 /// Extracted entity from NER
