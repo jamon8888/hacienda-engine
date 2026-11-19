@@ -1,0 +1,188 @@
+name: Build Desktop Releases
+
+# Cross-platform release builds of the Tauri secrecy client.
+# Targets: macOS Apple Silicon (arm64), macOS Universal (Intel + Silicon),
+#          Windows x86_64 and Windows ARM64.
+# ONNX Runtime is staged from a checksum-pinned NuGet package by
+# `prepare_onnxruntime.py` (the upstream GitHub repo has been unavailable
+# since 2026-11-17), so these builds do not depend on GitHub release assets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_artifacts:
+        description: "Upload build artifacts"
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "desktop-v*"
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/hacienda-secrecy-client/**"
+      - ".github/workflows/build-desktop.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 was retired by GitHub Actions on 2026-11-02; macos-15 is arm64.
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            args: ""
+          - name: macos-universal
+            runner: macos-15
+            target: aarch64-apple-darwin
+            args: ""
+            universal: true
+          - name: windows-x86_64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            args: ""
+          - name: windows-arm64
+            runner: windows-2022
+            target: aarch64-pc-windows-msvc
+            args: "--target aarch64-pc-windows-msvc"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # macOS Universal needs both slices installed before Tauri bundles them.
+      - name: Install Intel slice (Universal only)
+        if: matrix.name == 'macos-universal'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y --no-progress
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/hacienda-secrecy-client/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/hacienda-secrecy-client
+        run: npm ci
+
+      - name: Cache NuGet ONNX Runtime package
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/hacienda-secrecy-client/onnxruntime
+          key: ort-nuget-${{ runner.os }}-1.23.2
+
+      - name: Stage ONNX Runtime (checksum-pinned NuGet)
+        working-directory: apps/hacienda-secrecy-client
+        run: npm run prepare:onnxruntime
+        env:
+          # Cross-compiled Windows ARM64 needs the ARM64 native runtime even though
+          # the host runner is x86_64.
+          HACIENDA_ORT_TARGET: ${{ matrix.name == 'windows-arm64' && 'aarch64-pc-windows-msvc' || '' }}
+
+      - name: Build frontend
+        working-directory: apps/hacienda-secrecy-client
+        run: npm run build
+
+      # Windows ARM64 cross-compilation needs the MSVC arm64 toolchain, already
+      # present on windows-2022; Tauri handles the rest via --target.
+      - name: Build Tauri bundle (single arch)
+        if: matrix.universal != true
+        working-directory: apps/hacienda-secrecy-client
+        run: npx tauri build ${{ matrix.args }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # macOS Universal: `universal-apple-darwin` is not a valid Rust target;
+      # build each slice and merge the final binaries with `lipo`.
+      - name: Build Tauri bundle (arm64 slice)
+        if: matrix.universal == true
+        working-directory: apps/hacienda-secrecy-client
+        run: npx tauri build --target aarch64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Build Tauri bundle (x86_64 slice)
+        if: matrix.universal == true
+        working-directory: apps/hacienda-secrecy-client
+        run: npx tauri build --target x86_64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Merge slices into a universal binary
+        if: matrix.universal == true
+        working-directory: apps/hacienda-secrecy-client/src-tauri
+        run: |
+          ARM=target/aarch64-apple-darwin/release/hacienda-secrecy-client
+          INTEL=target/x86_64-apple-darwin/release/hacienda-secrecy-client
+          UNIVERSAL=target/universal/release/hacienda-secrecy-client
+          mkdir -p target/universal/release
+          lipo -create "$ARM" "$INTEL" -output "$UNIVERSAL"
+          lipo -info "$UNIVERSAL"
+
+      - name: Collect artifacts (macOS)
+        if: runner.os == 'macOS' && inputs.upload_artifacts != false
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: |
+            apps/hacienda-secrecy-client/src-tauri/target/*/release/bundle/**/*.app
+            apps/hacienda-secrecy-client/src-tauri/target/*/release/bundle/**/*.dmg
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Collect artifacts (Windows)
+        if: runner.os == 'Windows' && inputs.upload_artifacts != false
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: |
+            apps/hacienda-secrecy-client/src-tauri/target/*/release/bundle/**/*.msi
+            apps/hacienda-secrecy-client/src-tauri/target/*/release/bundle/**/*.exe
+          if-no-files-found: warn
+          retention-days: 14
+
+  attach-release:
+    name: Attach desktop binaries to release
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: dist/
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: dist/**/*
