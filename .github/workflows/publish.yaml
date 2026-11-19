@@ -56,12 +56,12 @@ jobs:
         include:
           # Python wheels (maturin)
           - { lang: python, runner: ubuntu-24.04-arm }
-          - { lang: python, runner: macos-14 }
+          - { lang: python, runner: macos-15 }
           - { lang: python, runner: windows-2022 }
 
           # Node (NAPI-RS)
           - { lang: node, runner: ubuntu-24.04-arm }
-          - { lang: node, runner: macos-14 }
+          - { lang: node, runner: macos-15 }
           - { lang: node, runner: windows-2022 }
 
           # Ruby
@@ -81,7 +81,7 @@ jobs:
 
           # C#
           - { lang: csharp, runner: ubuntu-24.04-arm }
-          - { lang: csharp, runner: macos-14 }
+          - { lang: csharp, runner: macos-15 }
           - { lang: csharp, runner: windows-2022 }
 
           # Elixir
@@ -94,14 +94,14 @@ jobs:
           - { lang: kotlin_android, runner: ubuntu-24.04-arm }
 
           # Swift
-          - { lang: swift, runner: macos-14 }
+          - { lang: swift, runner: macos-15 }
 
           # Zig
           - { lang: zig, runner: ubuntu-24.04-arm }
 
           # CLI binaries
           - { lang: cli, runner: ubuntu-24.04-arm }
-          - { lang: cli, runner: macos-14 }
+          - { lang: cli, runner: macos-15 }
           - { lang: cli, runner: windows-2022 }
 
     runs-on: ${{ matrix.runner }}
