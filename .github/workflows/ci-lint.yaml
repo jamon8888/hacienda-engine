@@ -64,7 +64,7 @@ jobs:
         # MD013 (line length): long lines are intentional in prose and code blocks.
         # MD076 (blank line between list items): the CHANGELOG uses tight lists with
         # multi-line items by convention; rumdl started enforcing MD076 in 2026-11.
-        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,docs/research,apps/hacienda-studio" -d MD013 -d MD076
+        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,docs/research,apps/hacienda-studio" -d MD013,MD076
 
       - name: Check spelling
         run: typos . --config _typos.toml

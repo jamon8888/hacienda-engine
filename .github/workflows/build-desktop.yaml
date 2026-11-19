@@ -45,8 +45,9 @@ jobs:
             args: ""
           - name: macos-universal
             runner: macos-15
-            target: universal-apple-darwin
-            args: "--target universal-apple-darwin"
+            target: aarch64-apple-darwin
+            args: ""
+            universal: true
           - name: windows-x86_64
             runner: windows-2022
             target: x86_64-pc-windows-msvc
@@ -68,6 +69,14 @@ jobs:
       - name: Install Intel slice (Universal only)
         if: matrix.name == 'macos-universal'
         run: rustup target add x86_64-apple-darwin
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y --no-progress
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -96,12 +105,42 @@ jobs:
 
       # Windows ARM64 cross-compilation needs the MSVC arm64 toolchain, already
       # present on windows-2022; Tauri handles the rest via --target.
-      - name: Build Tauri bundle
+      - name: Build Tauri bundle (single arch)
+        if: matrix.universal != true
         working-directory: apps/hacienda-secrecy-client
         run: npx tauri build ${{ matrix.args }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # macOS Universal: `universal-apple-darwin` is not a valid Rust target;
+      # build each slice and merge the final binaries with `lipo`.
+      - name: Build Tauri bundle (arm64 slice)
+        if: matrix.universal == true
+        working-directory: apps/hacienda-secrecy-client
+        run: npx tauri build --target aarch64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Build Tauri bundle (x86_64 slice)
+        if: matrix.universal == true
+        working-directory: apps/hacienda-secrecy-client
+        run: npx tauri build --target x86_64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Merge slices into a universal binary
+        if: matrix.universal == true
+        working-directory: apps/hacienda-secrecy-client/src-tauri
+        run: |
+          ARM=target/aarch64-apple-darwin/release/hacienda-secrecy-client
+          INTEL=target/x86_64-apple-darwin/release/hacienda-secrecy-client
+          UNIVERSAL=target/universal/release/hacienda-secrecy-client
+          mkdir -p target/universal/release
+          lipo -create "$ARM" "$INTEL" -output "$UNIVERSAL"
+          lipo -info "$UNIVERSAL"
 
       - name: Collect artifacts (macOS)
         if: runner.os == 'macOS' && inputs.upload_artifacts != false
