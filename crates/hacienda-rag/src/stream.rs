@@ -377,17 +377,23 @@ fn build_egress_event(
         hash: blake3_hex(prompt.as_bytes()),
         length: byte_len(prompt),
     });
-    for chunk in &context.chunks {
-        if let Some(content) = &chunk.content {
-            parts.push(EgressPart {
-                role: EgressRole::ContextChunk,
-                reference: format!(
-                    "chunk:{}:{}:{}",
-                    chunk.document_id.0, chunk.id.0, chunk.ordinal
-                ),
-                hash: blake3_hex(content.as_bytes()),
-                length: byte_len(content),
-            });
+    // With a `system_prompt` override, `system_content_of` sends the override alone —
+    // retrieved context is NOT injected. Record chunk parts only when the default
+    // system message actually transmits them, so the audit never claims undelivered
+    // chunks were sent (CodeRabbit #158).
+    if config.system_prompt.is_none() {
+        for chunk in &context.chunks {
+            if let Some(content) = &chunk.content {
+                parts.push(EgressPart {
+                    role: EgressRole::ContextChunk,
+                    reference: format!(
+                        "chunk:{}:{}:{}",
+                        chunk.document_id.0, chunk.id.0, chunk.ordinal
+                    ),
+                    hash: blake3_hex(content.as_bytes()),
+                    length: byte_len(content),
+                });
+            }
         }
     }
 
@@ -1313,6 +1319,37 @@ mod tests {
     /// first, user prompt second. Combined with the redacted-only event hashes above,
     /// this closes the chain: GuardedLlm redacts → answer_stream forwards verbatim →
     /// the transport sends what build_chat_request built.
+    /// Egress audit must describe only what is transmitted: with a system override,
+    /// retrieved chunks are not sent, so no ContextChunk part may be recorded.
+    #[test]
+    fn egress_event_excludes_chunks_when_system_prompt_override_replaces_context() {
+        use crate::types::PrimaryScore;
+        let chunk = RetrievedChunk {
+            id: ChunkId("c1".to_string()),
+            document_id: DocumentId("d1".to_string()),
+            ordinal: 0,
+            external_id: None,
+            content: Some("retrieved context".to_string()),
+            score: 1.0,
+            primary_score: PrimaryScore::Vector { score: 1.0 },
+            chunk_metadata: serde_json::Value::Null,
+            document: None,
+        };
+        let context = RetrievedContext { chunks: vec![chunk] };
+        let mut config = guarded_llm_test_config();
+        config.system_prompt = Some("SYS".to_string());
+        let event = build_egress_event(&config, "USER", &context, "rag-answer");
+        assert!(
+            !event.parts.iter().any(|p| p.role == EgressRole::ContextChunk),
+            "undelivered chunks must not be audited as transmitted"
+        );
+        config.system_prompt = None;
+        let event = build_egress_event(&config, "USER", &context, "rag-answer");
+        assert_eq!(
+            event.parts.iter().filter(|p| p.role == EgressRole::ContextChunk).count(), 1
+        );
+    }
+
     #[test]
     fn build_chat_request_places_system_then_user_verbatim() {
         let mut config = guarded_llm_test_config();

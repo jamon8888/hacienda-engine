@@ -366,16 +366,16 @@ mod tests {
             entries[0].model.as_deref(),
             Some("acme/test-model @ https://llm.test.invalid")
         );
-        assert_eq!(entries[1].id, "system_prompt");
+        assert!(entries[1].id.ends_with(":system_prompt"));
         assert_eq!(entries[1].category, "llm_egress.system_prompt");
-        assert_eq!(entries[2].id, "prompt");
+        assert!(entries[2].id.ends_with(":prompt"));
         assert_eq!(entries[2].category, "llm_egress.prompt");
         // The entry id is the part's reference (`id = reference`, the same mapping
         // `LlmEgressRecord::to_entry_inputs` documents and the core-level
         // `to_entry_inputs_maps_summary_plus_one_entry_per_part` asserts) — never
         // reference-plus-content: raw span text has no place in the chain, and
         // `WITNESS` below is the canary that would catch it if it did.
-        assert_eq!(entries[3].id, "chunk:doc-1:c0:0");
+        assert!(entries[3].id.ends_with(":chunk:doc-1:c0:0"));
         assert_eq!(entries[3].category, "llm_egress.context_chunk");
 
         // Hash + reference only: every span hash is a 64-hex blake3 digest, and the

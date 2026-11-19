@@ -97,9 +97,13 @@ impl LlmEgressRecord {
             None => self.provider_model.clone(),
         };
 
+        // One UUID per dispatch: `audit_entries.id` is a primary key in Postgres, so a
+        // bare part reference (`prompt`, `chunk:...`) would collide on the second
+        // dispatch (and across tenants). Prefixing keeps the reference readable.
+        let dispatch_id = uuid::Uuid::new_v4();
         let mut inputs = Vec::with_capacity(self.parts.len() + 1);
         inputs.push(AuditEntryInput {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: dispatch_id.to_string(),
             category: LLM_EGRESS_CATEGORY.to_string(),
             action: RedactionAction::Custom(self.purpose.clone()),
             span_hash: self.request_hash.clone(),
@@ -114,7 +118,7 @@ impl LlmEgressRecord {
         });
         for part in &self.parts {
             inputs.push(AuditEntryInput {
-                id: part.reference.clone(),
+                id: format!("{dispatch_id}:{}", part.reference),
                 category: part.role.category(),
                 action: RedactionAction::Custom(self.purpose.clone()),
                 span_hash: part.hash.clone(),
@@ -196,17 +200,32 @@ mod tests {
         // The store owns config_hash — the input leaves it empty.
         assert!(summary.config_hash.is_empty());
 
-        assert_eq!(inputs[1].id, "system_prompt");
+        assert!(inputs[1].id.ends_with(":system_prompt"));
         assert_eq!(inputs[1].category, "llm_egress.system_prompt");
         assert_eq!(inputs[1].span_hash, "bb".repeat(32));
-        assert_eq!(inputs[2].id, "prompt");
+        assert!(inputs[2].id.ends_with(":prompt"));
         assert_eq!(inputs[2].category, "llm_egress.prompt");
-        assert_eq!(inputs[3].id, "chunk:doc-1:c0:0");
+        assert!(inputs[3].id.ends_with(":chunk:doc-1:c0:0"));
         assert_eq!(inputs[3].category, "llm_egress.context_chunk");
         for input in &inputs {
             assert_eq!(input.source, EntitySource::LlmEgress);
             assert_eq!(input.pipeline_version, "0.1.0");
         }
+    }
+
+    /// Two dispatches of the same record must never reuse an audit entry ID:
+    /// `audit_entries.id` is a primary key in Postgres, so a bare part reference
+    /// (`prompt`, `chunk:...`) would make the second dispatch fail its whole batch.
+    #[test]
+    fn repeated_dispatch_ids_are_unique() {
+        let record = sample_record();
+        let first = record.to_entry_inputs(Some("avocat-7".to_string()), "0.1.0", None);
+        let second = record.to_entry_inputs(Some("avocat-7".to_string()), "0.1.0", None);
+        let ids_first: std::collections::HashSet<_> = first.iter().map(|i| i.id.as_str()).collect();
+        let ids_second: std::collections::HashSet<_> = second.iter().map(|i| i.id.as_str()).collect();
+        assert!(ids_first.is_disjoint(&ids_second), "two dispatches reused audit entry IDs");
+        assert_eq!(ids_first.len(), first.len());
+        assert_eq!(ids_second.len(), second.len());
     }
 
     /// The record must persist through the existing store seam unchanged: one append
@@ -223,7 +242,7 @@ mod tests {
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].category, "llm_egress");
         assert_eq!(entries[0].source, EntitySource::LlmEgress);
-        assert_eq!(entries[3].id, "chunk:doc-1:c0:0");
+        assert!(entries[3].id.ends_with(":chunk:doc-1:c0:0"));
         assert_eq!(entries[3].category, "llm_egress.context_chunk");
         // config_hash is owned by the store/chain, not by the caller.
         assert_eq!(entries[0].config_hash, "test-config");
