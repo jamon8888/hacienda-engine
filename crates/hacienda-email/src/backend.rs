@@ -449,9 +449,43 @@ pub fn build_maildir_client(path: &str) -> Result<BlockingClient> {
     Ok(BlockingClient::new(inner))
 }
 
-/// Build a client from configuration. Only IMAP and Maildir are implemented;
-/// the other backends are advertised in the config enum but rejected here with
-/// an explicit error rather than silently doing nothing.
+/// Resolve an OAuth access token by running an external broker command.
+///
+/// Mirrors Himalaya's `imap.sasl.xoauth2.token.command`: the plugin does not
+/// implement the OAuth grant itself, it asks a helper (ortie, pizauth, oama,
+/// `pass`, …) for a fresh token. Running it at connection time rather than at
+/// process start is what makes token refresh work in a long-lived session.
+async fn resolve_token_command(command: &[String]) -> Result<String> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| EmailError::Config("OAuth token_command is empty".to_string()))?;
+    let output = tokio::process::Command::new(program)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| EmailError::Auth(format!("OAuth token command failed to start: {e}")))?;
+    if !output.status.success() {
+        return Err(EmailError::Auth(format!(
+            "OAuth token command exited with {}",
+            output.status
+        )));
+    }
+    let token = String::from_utf8(output.stdout)
+        .map_err(|e| EmailError::Auth(format!("OAuth token command returned non-UTF-8: {e}")))?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err(EmailError::Auth(
+            "OAuth token command returned an empty token".to_string(),
+        ));
+    }
+    Ok(token)
+}
+
+/// Build a client from configuration. IMAP (password and XOAUTH2), Maildir and
+/// OAuth/XOAUTH2 are implemented; the other backends are advertised in the
+/// config enum but rejected here with an explicit error rather than silently
+/// doing nothing.
 pub async fn build_client(config: &crate::config::EmailConfig) -> Result<Arc<dyn EmailClient>> {
     match &config.backend {
         #[cfg(feature = "imap")]
@@ -478,19 +512,27 @@ pub async fn build_client(config: &crate::config::EmailConfig) -> Result<Arc<dyn
             server,
             username,
             provider,
+            token_command,
         } => {
-            // The access token is never stored in config; it comes from the
-            // environment (populated by the OAuth consent/token-refresh flow).
-            let token = std::env::var(format!(
-                "HACIENDA_EMAIL_{}_ACCESS_TOKEN",
-                config.account.to_uppercase()
-            ))
-            .map_err(|_| {
-                EmailError::Auth(format!(
-                    "OAuth access token not found in HACIENDA_EMAIL_{}_ACCESS_TOKEN (provider {provider:?})",
+            // The access token is never stored in config. Two resolution modes,
+            // in priority order:
+            //   1. an external broker command (Himalaya/Pimalaya pattern), run
+            //      at connection time so a long-lived MCP session always gets a
+            //      fresh token (e.g. `ortie token show -a outlook`);
+            //   2. the environment variable for a statically provisioned token.
+            let token = match token_command.as_ref().filter(|cmd| !cmd.is_empty()) {
+                Some(cmd) => resolve_token_command(cmd).await?,
+                None => std::env::var(format!(
+                    "HACIENDA_EMAIL_{}_ACCESS_TOKEN",
                     config.account.to_uppercase()
                 ))
-            })?;
+                .map_err(|_| {
+                    EmailError::Auth(format!(
+                        "OAuth access token not found in HACIENDA_EMAIL_{}_ACCESS_TOKEN and no token_command is configured (provider {provider:?})",
+                        config.account.to_uppercase()
+                    ))
+                })?,
+            };
             let url = if server.is_empty() {
                 provider.imap_url().to_string()
             } else {

@@ -77,6 +77,14 @@ pub enum EmailBackend {
         /// `gmail` or `outlook` — used only to pick the default host and to
         /// name the token environment variable.
         provider: OAuthProvider,
+        /// Optional external token broker command (e.g. `["ortie", "token",
+        /// "show", "-a", "outlook"]`). Follows the Himalaya/Pimalaya pattern:
+        /// the plugin never performs the OAuth grant itself; a helper returns a
+        /// fresh access token on stdout at connection time, which is how token
+        /// refresh works during a long-lived MCP session. When absent, the token
+        /// is read from `HACIENDA_EMAIL_<ACCOUNT>_ACCESS_TOKEN`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_command: Option<Vec<String>>,
     },
 }
 

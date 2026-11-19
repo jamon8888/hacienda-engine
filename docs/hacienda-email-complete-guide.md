@@ -19,7 +19,8 @@ texte clair de la machine**, dans la même logique de secret professionnel que l
 de hacienda. Il réutilise les composants existants plutôt que d'en réinventer :
 
 - `hacienda-core` pour le moteur PII, l'audit et la pseudonymisation ;
-- `hacienda-rag` pour le découpage en chunks (`chunk_full_text`) et l'indexation ;
+- `hacienda-rag` pour le découpage en chunks (`chunk_full_text`) **et** l'upsert
+  dans le même `RagStore` que les documents (voir § 5.6) ;
 - `xberg` pour l'extraction réelle des pièces jointes et du texte ;
 - `io-email` 0.1 (Pimalaya) comme façade de protocole ;
 - `mail-parser` pour décoder les octets RFC 5322 en modèle simplifié.
@@ -54,7 +55,7 @@ Les décisions de conception sont consignées dans `crates/hacienda-email/DESIGN
   Le choix est fait **à l'ingestion**, pas à la requête, pour qu'un texte clair ne
   puisse jamais être indexé sous le mauvais mode.
 - **D2** — redaction obligatoire avant chunking/embedding. Si le moteur PII échoue,
-  l'indexation est refusée.
+  la préparation RAG du message est refusée.
 - **D3** — uniquement de vraies API (`HaciendaFacade`, `chunk_full_text`,
   `ExtractInput::from_bytes()` / `extract()` de xberg).
 - **D4** — OAuth/XOAUTH2 via `SaslXoauth2` de `pimalaya-stream 0.0.1`, sans client Graph.
@@ -117,7 +118,7 @@ l'environnement (§ 4.7). **Important :** `load_config` désérialise directemen
 |---|---|---|
 | `imap` | `server`, `username` | ✅ implémenté (`build_imap_client`, SASL PLAIN) |
 | `maildir` | `path` | ✅ implémenté (`build_maildir_client`) |
-| `oauth` | `server`, `username`, `provider` | ✅ implémenté (`build_oauth_client`, SASL XOAUTH2) |
+| `oauth` | `server`, `username`, `provider`, `token_command?` | ✅ implémenté (`build_oauth_client`, SASL XOAUTH2) |
 | `jmap` | `server`, `token` | ❌ déclaré, rejeté : `backend Jmap { .. } is not enabled or not implemented` |
 | `gmail` | `client_id`, `client_secret` | ❌ idem |
 | `msgraph` | `tenant_id`, `client_id` | ❌ idem |
@@ -156,7 +157,7 @@ Un `server` explicite dans la configuration `oauth` l'emporte sur cette valeur p
 - `preserve_format` : `true`.
 - `mode` : `redact` (défaut) ou `pseudonymize`.
 
-`PrivacyMode::Redact` masque définitivement les PII avant persistance/indexation.
+`PrivacyMode::Redact` masque définitivement les PII avant persistance ou préparation RAG.
 `PrivacyMode::Pseudonymize` les remplace par des jetons réversibles par clé de locataire ;
 la révélation est une opération distincte et auditée via `HaciendaFacade`.
 
@@ -210,6 +211,9 @@ type = "oauth"
 server = "imaps://imap.gmail.com:993"   # vide => valeur par défaut du provider
 username = "user@gmail.com"
 provider = "gmail"
+# Optionnel mais recommandé : broker de token externe, appelé à chaque connexion.
+# Suivi du modèle Himalaya/Pimalaya (`imap.sasl.xoauth2.token.command`).
+token_command = ["ortie", "token", "show", "-a", "gmail"]
 
 [ner]
 model = "gliner-multi-v2.1"
@@ -248,6 +252,8 @@ type = "oauth"
 server = "imaps://outlook.office365.com:993"
 username = "prenom.nom@entreprise.fr"
 provider = "outlook"
+# Le broker fournit un token frais à chaque connexion (session MCP longue).
+token_command = ["ortie", "token", "show", "-a", "outlook"]
 
 [redaction]
 rules = ["email", "phone", "iban", "custom"]
@@ -327,7 +333,8 @@ tenant_id = "00000000-0000-0000-0000-000000000000"
 | Variable | Utilisée pour |
 |---|---|
 | `HACIENDA_EMAIL_<COMPTE>_PASSWORD` | Mot de passe IMAP (SASL PLAIN). Obligatoire pour `type = "imap"`. |
-| `HACIENDA_EMAIL_<COMPTE>_ACCESS_TOKEN` | Token OAuth/XOAUTH2. Obligatoire pour `type = "oauth"`. |
+| `HACIENDA_EMAIL_<COMPTE>_ACCESS_TOKEN` | Token OAuth/XOAUTH2 statique. Utilisé seulement si `token_command` est absent. |
+| `token_command` (config) | Commande d'un broker externe (`ortie`, `pizauth`, `oama`, `pass`) appelée à chaque connexion pour obtenir un token frais. Prioritaire sur la variable d'environnement. |
 | `HACIENDA_EMAIL_<COMPTE>_TOKEN` | Surcharge du token JMAP (`load_config_with_secrets`). |
 | `HACIENDA_EMAIL_<COMPTE>_CLIENT_SECRET` | Surcharge du secret client Gmail. |
 | `HACIENDA_EMAIL_<COMPTE>_CLIENT_ID` | Surcharge du client ID Microsoft Graph. |
@@ -364,7 +371,7 @@ produit `EmailError::Config`.
 
 Les sources (`EmailSource`) et destinations (`EmailDestination`) couvrent Maildir,
 fichiers et stdin ; l'entrée `Stdin` et `Files` sont explicitement refusées pour
-l'indexation RAG (`InvalidOperation`).
+la préparation RAG (`InvalidOperation`).
 
 ### 5.2 Étapes du pipeline
 
@@ -373,7 +380,8 @@ l'indexation RAG (`InvalidOperation`).
 1. `Archive` — lecture et archivage via l'adaptateur `EmailClient` ;
 2. `ExtractAttachments` — extraction réelle avec xberg (`attachments.rs`) ;
 3. `Ner` — détection d'entités via le moteur PII de `hacienda-core` ;
-4. `RagIndex` — découpage avec `hacienda-rag::chunk_full_text` puis indexation ;
+4. `RagIndex` — découpage avec `hacienda-rag::chunk_full_text`, puis persistance
+   des chunks redigés dans le `RagStore` injecté (voir § 5.6) ;
 5. `Redact` — redaction du corps **et des en-têtes** (`redact.rs`).
 
 ### 5.3 Le garde-fou fail-closed (D2)
@@ -410,6 +418,45 @@ Le trait `EmailClient` expose : `list_mailboxes`, `list_envelopes`, `search_enve
 `MailboxNotFound`, `MessageNotFound`, `Io`, `Serde`, `UrlParse`, `Ner`, `Rag`,
 `Redaction`, `Attachment`, `Plugin`, `InvalidOperation`.
 
+### 5.6 Stockage et recherche : la même logique que les documents
+
+L'ingestion email utilise **le même `hacienda_rag::RagStore` que les documents**.
+`POST /v1/email/process` injecte `ApiState::rag_store` dans un `EmailProcessor`
+frais via `with_rag_store()`, et lui passe le `dossier_id` de la requête via
+`with_dossier_id()`.
+
+Chemin exact (miroir de `hacienda-api/src/handlers/rag.rs`) :
+
+1. `rag.rs::index_for_rag` récupère les enveloppes, puis pour chaque message :
+   redaction **obligatoire et fail-closed** (D2) avant tout stockage ;
+2. `chunk_full_text` découpe le texte redigé ;
+3. `upsert_email` appelle `get_collection` puis `ensure_collection` si besoin
+   (`CollectionSpec::new(index_name, 0)` — collection BYOV, comme le chemin
+   documents), puis `upsert_document(collection, &document, &chunks)` ;
+4. l'identité est `email:<account>:<mailbox>:<uid>` (`external_id`) : réingérer
+   le même message est **idempotent** ;
+5. `DocumentRecord` porte `dossier_id`, `mime = message/rfc822`, `source_uri`,
+   `metadata` (account/mailbox/privacy) et `full_text` **redigé** ; les
+   `ChunkRecord` héritent du même `dossier_id` ;
+6. `vectors_indexed` dans `EmailResponse.rag_stats` compte réellement les chunks
+   persistés (0 si aucun store n'a été injecté). Le pipeline ne rapporte plus un
+   chiffre trompeur.
+
+**Conséquence :** les emails ingérés sont interrogeables avec les endpoints
+documents existants, `/v1/rag/retrieve` et `/v1/rag/collections/...`, dans la
+même collection `index_name`, avec filtrage par `dossier_id`. Le `dossier_id`
+est fourni par le corps de `POST /v1/email/process` (`dossier_id`, optionnel).
+
+Note d'embedding : comme le chemin documents de l'API, les chunks sont écrits
+en mode BYOV (vecteur dense vide). Si la collection cible exige une dimension
+non nulle, l'embedder configuré côté API doit être appliqué avant l'upsert —
+la crate email ne possède pas son propre modèle d'embedding.
+
+`Archive` / `Redact` écrivent toujours des fichiers `.eml` locaux
+(`archive.rs::save_message` : seul `text_body`, pas l'RFC 5322 brute, pas une
+vraie structure Maildir `cur/new/tmp`) : ce sont deux chemins distincts,
+l'archivage fichier et l'indexation cherchable.
+
 ---
 
 ## 6. Surfaces d'appel réelles
@@ -441,17 +488,26 @@ Corps (`EmailProcessRequest`) :
 ```json
 {
   "account": "work",
-  "backend": { "type": "oauth", "server": "", "username": "user@gmail.com", "provider": "gmail" },
+  "backend": {
+    "type": "oauth", "server": "", "username": "user@gmail.com", "provider": "gmail",
+    "token_command": ["ortie", "token", "show", "-a", "gmail"]
+  },
   "privacy_mode": { "mode": "redact" },
+  "dossier_id": "dossier-42",
   "operation": { "operation": "pipeline", "source": "…", "output": "…" }
 }
 ```
 
 Formes de `backend` acceptées par le DTO : `maildir { path }` et
-`oauth { server?, username, provider }`. Les identifiants ne sont **jamais** dans le
-corps : le serveur les résout depuis `HACIENDA_EMAIL_<ACCOUNT>_*`. Un processeur neuf est
-construit pour chaque requête (D5), ce qui empêche qu'un locataire lise la boîte d'un
-autre ou déclenche une redaction sous le mauvais mode.
+`oauth { server?, username, provider, token_command? }`. Les identifiants ne sont
+**jamais** dans le corps : le serveur les résout depuis `HACIENDA_EMAIL_<ACCOUNT>_*`
+ou exécute le `token_command` configuré. Un processeur neuf est construit pour chaque
+requête (D5), ce qui empêche qu'un locataire lise la boîte d'un autre ou déclenche une
+redaction sous le mauvais mode.
+
+Le `dossier_id` optionnel est propagé au `DocumentRecord`/`ChunkRecord` lors de
+l'ingestion RAG (§ 5.6) : les emails deviennent cherchables via `/v1/rag/retrieve` dans
+la même collection que les documents.
 
 Opérations disponibles dans le DTO : `archive`, `extract_ner`, `redact`, `index_for_rag`,
 `pipeline`.
@@ -610,10 +666,11 @@ apparaître dans `git status`.
    écrire si l'on veut les dossiers et les labels non-IMAP.
 2. **JMAP, M2Dir, SMTP** — même situation : types de config et features déclarés, non
    branchés. `send_message` est donc inopérant sur les backends actuellement supportés.
-3. **Cycle de vie des tokens OAuth** — `DESIGN.md` mentionne le rafraîchissement des
-   tokens et leur stockage chiffré comme faisant partie du travail ; le code actuel lit
-   `HACIENDA_EMAIL_<COMPTE>_ACCESS_TOKEN` mais n'implémente ni refresh ni stockage chiffré
-   (à confirmer / évolution future).
+3. **Cycle de vie des tokens OAuth** — le refresh est délégué à un broker externe via
+   `token_command` (§ 4.2/4.6), exactement comme Himalaya le fait avec `ortie` : un token
+   frais est demandé à chaque connexion, ce qui suffit pour une session MCP longue. Le
+   plugin ne stocke aucun token chiffré et ne realise pas le grant OAuth lui-même — le
+   stockage chiffré du refresh token reste à la charge du broker.
 4. **Résolveur de clé de pseudonymisation** — le mode `pseudonymize` est porté par
    `PrivacyMode`, mais la configuration du résolveur de clé par locataire n'est pas dans
    `EmailConfig` (à confirmer / évolution future).
@@ -625,6 +682,9 @@ apparaître dans `git status`.
    granulaires du README ne sont pas enregistrés.
 7. **`mock`** — feature déclarée pour un serveur IMAP de test qui n'est pas matérialisé
    dans les 12 tests actuels.
+8. **Embedding des chunks email** — l'upsert se fait en mode BYOV (§ 5.6), comme
+   le chemin documents de l'API. Une collection à dimension non nulle nécessite
+   un embedder appliqué avant l'upsert.
 
 ---
 

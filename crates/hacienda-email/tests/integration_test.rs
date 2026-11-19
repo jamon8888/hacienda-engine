@@ -190,6 +190,7 @@ async fn test_oauth_provider_defaults() {
             server: String::new(),
             username: "user@example.com".to_string(),
             provider: OAuthProvider::Gmail,
+            token_command: None,
         },
         ..Default::default()
     };

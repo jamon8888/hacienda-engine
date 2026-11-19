@@ -10,6 +10,7 @@ pub async fn run_pipeline(
     pii: &PiiEngine,
     op: EmailOperation,
     config: &EmailConfig,
+    rag: Option<crate::rag::RagIngestion<'_>>,
 ) -> Result<crate::models::EmailResponse> {
     let EmailOperation::Pipeline {
         source,
@@ -26,6 +27,7 @@ pub async fn run_pipeline(
     let mut total_processed = 0;
     let mut all_entities = Vec::new();
     let mut total_chunks = 0;
+    let mut total_indexed = 0;
     let mut total_redactions = 0;
     let mut all_errors = Vec::new();
 
@@ -81,9 +83,10 @@ pub async fn run_pipeline(
                     index_name: None,
                     chunk_size: None,
                 };
-                let response = crate::rag::index_for_rag(client, pii, op, config).await?;
+                let response = crate::rag::index_for_rag(client, pii, op, config, rag).await?;
                 if let Some(stats) = response.rag_stats {
                     total_chunks = stats.chunks_created;
+                    total_indexed = stats.vectors_indexed;
                 }
                 all_errors.extend(response.errors);
                 total_processed = response.processed_count;
@@ -116,7 +119,7 @@ pub async fn run_pipeline(
         },
         rag_stats: Some(crate::models::RagIndexStats {
             chunks_created: total_chunks,
-            vectors_indexed: total_chunks,
+            vectors_indexed: total_indexed,
             index_name: config.rag.index_name.clone(),
         }),
         redaction_stats: Some(crate::models::RedactionStats {

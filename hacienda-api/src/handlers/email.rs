@@ -30,6 +30,11 @@ pub struct EmailProcessRequest {
     pub privacy_mode: PrivacyModeDto,
     /// The operation to perform.
     pub operation: EmailOperationDto,
+    /// Legal dossier (folder) the ingested emails belong to. Mirrors the
+    /// `dossier_id` scoping used by document ingestion, so the same
+    /// `/v1/rag/*` retrieval endpoints can scope results by dossier.
+    #[serde(default)]
+    pub dossier_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +49,10 @@ pub enum EmailBackendDto {
         server: String,
         username: String,
         provider: OAuthProviderDto,
+        /// External token broker command, e.g. `["ortie","token","show","-a","outlook"]`.
+        /// The token is resolved at connection time, never from the request body.
+        #[serde(default)]
+        token_command: Option<Vec<String>>,
     },
 }
 
@@ -129,6 +138,7 @@ fn build_config(body: &EmailProcessRequest) -> Result<EmailConfig, ApiError> {
             server,
             username,
             provider,
+            token_command,
         } => {
             let provider = match provider {
                 OAuthProviderDto::Gmail => OAuthProvider::Gmail,
@@ -138,6 +148,7 @@ fn build_config(body: &EmailProcessRequest) -> Result<EmailConfig, ApiError> {
                 server: server.clone(),
                 username: username.clone(),
                 provider,
+                token_command: token_command.clone(),
             }
         }
     };
@@ -182,13 +193,21 @@ fn dest_of(path: String) -> EmailDestination {
     )
 )]
 pub async fn process_email(
-    State(_state): State<ApiState>,
+    State(state): State<ApiState>,
     SafeJson(body): SafeJson<EmailProcessRequest>,
 ) -> Result<Json<EmailProcessResponse>, ApiError> {
     let start = Instant::now();
     let config = build_config(&body)?;
     // Per-request processor: never shared across tenants (design D5).
-    let processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
+    let mut processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
+    // Same RAG store as document ingestion: emails become searchable through
+    // the existing /v1/rag/* retrieve endpoints, scoped by dossier_id.
+    if let Some(store) = state.rag_store.clone() {
+        processor = processor.with_rag_store(store);
+    }
+    if let Some(dossier) = body.dossier_id.as_deref() {
+        processor = processor.with_dossier_id(dossier);
+    }
 
     let operation = match &body.operation {
         EmailOperationDto::Archive {
