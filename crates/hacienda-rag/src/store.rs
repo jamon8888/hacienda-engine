@@ -51,6 +51,16 @@ pub trait RagStore: Send + Sync + 'static {
     /// What this backend supports (full-text, hybrid, filtering, index methods).
     fn capabilities(&self) -> Capabilities;
 
+    /// Compact storage and rebuild search indices after a large batch of writes.
+    ///
+    /// LanceDB accumulates many small fragments and moves updated rows out of
+    /// the vector/FTS indices; queries degrade until `optimize()` is called.
+    /// Backends that do not need maintenance keep the default no-op. Callers
+    /// doing bulk ingestion should invoke this once per batch, not per document.
+    async fn optimize(&self) -> RagResult<()> {
+        Ok(())
+    }
+
     /// Create the collection if it does not exist.
     ///
     /// # Errors

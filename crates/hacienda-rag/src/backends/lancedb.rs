@@ -32,6 +32,7 @@ use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::index::{Index, IndexType};
 use lancedb::query::ExecutableQuery;
 use lancedb::query::QueryBase;
+use lancedb::table::OptimizeAction;
 use lancedb::{Connection, Table};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -462,6 +463,24 @@ impl RagStore for LanceDbStore {
         }
     }
 
+    async fn optimize(&self) -> RagResult<()> {
+        let _write = self.write_lock.lock().await;
+        for spec in self.read_metadata().await? {
+            let (docs, chunks) = self.collection_tables(&spec.name).await?;
+            // LanceDB accumulates small fragments on every write; compact both
+            // tables and rebuild the FTS index once for the whole batch.
+            docs.optimize(OptimizeAction::All)
+                .await
+                .map_err(backend_err)?;
+            chunks
+                .optimize(OptimizeAction::All)
+                .await
+                .map_err(backend_err)?;
+            self.ensure_fts_index(&chunks, true).await?;
+        }
+        Ok(())
+    }
+
     async fn ensure_collection(&self, spec: &CollectionSpec) -> RagResult<()> {
         let _write = self.write_lock.lock().await;
         if let Some(existing) = self.spec(&spec.name).await? {
@@ -548,30 +567,23 @@ impl RagStore for LanceDbStore {
             }
         }
         let (docs, chunk_table) = self.collection_tables(collection).await?;
-        let existing = self.read_documents(&docs).await?;
-        let id = document
-            .external_id
-            .as_ref()
-            .and_then(|external| {
-                existing
-                    .iter()
-                    .find(|d| d.record.external_id.as_ref() == Some(external))
-                    .map(|d| d.id.clone())
-            })
-            .unwrap_or_else(|| {
-                document.external_id.as_ref().map_or_else(
-                    || DocumentId(format!("doc-{}", Uuid::new_v4())),
-                    |external| {
-                        let mut key = collection.as_bytes().to_vec();
-                        key.push(0);
-                        key.extend_from_slice(external.as_bytes());
-                        DocumentId(format!(
-                            "doc-ext-{}",
-                            Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
-                        ))
-                    },
-                )
-            });
+        // Compute the identity deterministically instead of scanning the whole
+        // documents table on every upsert. The old `read_documents()` linear
+        // search made bulk ingestion O(n²) (one full table scan per message).
+        // `merge_insert` keeps re-upserts idempotent, and `replace_chunks`
+        // removes the chunks of the previous version of the same id.
+        let id = document.external_id.as_ref().map_or_else(
+            || DocumentId(format!("doc-{}", Uuid::new_v4())),
+            |external| {
+                let mut key = collection.as_bytes().to_vec();
+                key.push(0);
+                key.extend_from_slice(external.as_bytes());
+                DocumentId(format!(
+                    "doc-ext-{}",
+                    Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
+                ))
+            },
+        );
         // Le document est la source autoritative du scoping juridique : les
         // chunks produits par le chunking côté API (dossier_id / version_ref
         // à None) héritent du scope de leur document parent à l'upsert, sinon
@@ -598,7 +610,11 @@ impl RagStore for LanceDbStore {
             .await?;
         self.merge_document(&docs, &id, document, now_secs())
             .await?;
-        self.ensure_fts_index(&chunk_table, true).await?;
+        // Do NOT rebuild the FTS index on every upsert: LanceDB documents that
+        // repeated `create_index(...).replace(true)` is expensive and that a
+        // rebuild belongs after a whole batch. New rows stay searchable via
+        // flat scan until `optimize()` folds them into the index.
+        self.ensure_fts_index(&chunk_table, false).await?;
         Ok(id)
     }
 
@@ -1475,6 +1491,69 @@ mod tests {
         assert_eq!(store.delete_documents("docs", &[first]).await.unwrap(), 1);
         assert_eq!(store.collection_stats("docs").await.unwrap().documents, 0);
         assert_eq!(store.collection_stats("docs").await.unwrap().chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn bulk_upsert_is_idempotent_and_optimize_is_safe() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("emails", 2))
+            .await
+            .unwrap();
+
+        // 50 distinct external ids -> 50 distinct deterministic document ids.
+        let mut ids = Vec::new();
+        for i in 0..50 {
+            let doc = DocumentRecord {
+                external_id: Some(format!("email:work:INBOX:uid-{i}")),
+                full_text: format!("body {i}"),
+                ..Default::default()
+            };
+            ids.push(
+                store
+                    .upsert_document(
+                        "emails",
+                        &doc,
+                        &[chunk(&format!("c{i}"), 0, vec![1.0, 0.0])],
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let distinct: HashSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), 50);
+
+        // Re-ingesting the same UIDs must reuse the same ids (no duplicates).
+        for (i, id) in ids.iter().enumerate() {
+            let doc = DocumentRecord {
+                external_id: Some(format!("email:work:INBOX:uid-{i}")),
+                full_text: format!("body {i} v2"),
+                ..Default::default()
+            };
+            assert_eq!(
+                store
+                    .upsert_document(
+                        "emails",
+                        &doc,
+                        &[chunk(&format!("c{i}"), 0, vec![1.0, 0.0])],
+                    )
+                    .await
+                    .unwrap(),
+                *id
+            );
+        }
+        let stats = store.collection_stats("emails").await.unwrap();
+        assert_eq!(stats.documents, 50);
+        assert_eq!(stats.chunks, 50);
+
+        // Compaction + FTS rebuild after the batch must not change the data.
+        store.optimize().await.unwrap();
+        let stats = store.collection_stats("emails").await.unwrap();
+        assert_eq!(stats.documents, 50);
+        assert_eq!(stats.chunks, 50);
     }
 
     #[tokio::test]

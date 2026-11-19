@@ -452,6 +452,15 @@ en mode BYOV (vecteur dense vide). Si la collection cible exige une dimension
 non nulle, l'embedder configuré côté API doit être appliqué avant l'upsert —
 la crate email ne possède pas son propre modèle d'embedding.
 
+**Performance du store (lot « grosse boîte »).** `LanceDbStore::upsert_document` ne
+fait plus de scan complet de la table des documents à chaque appel : l'ID est calculé
+de façon déterministe (`doc-ext-<uuid5(collection||external_id)>`), ce qui supprime le
+coût O(n²) de l'ingestion en masse. L'index FTS n'est plus reconstruit à chaque
+message (`ensure_fts_index(..., false)`) ; la reconstruction et la compaction sont
+regroupées dans le nouveau `RagStore::optimize()` (no-op par défaut, implémenté par
+`LanceDbStore` via `table.optimize(OptimizeAction::All)`). À appeler **une fois par lot**,
+pas par document.
+
 `Archive` / `Redact` écrivent toujours des fichiers `.eml` locaux
 (`archive.rs::save_message` : seul `text_body`, pas l'RFC 5322 brute, pas une
 vraie structure Maildir `cur/new/tmp`) : ce sont deux chemins distincts,
