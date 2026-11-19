@@ -708,6 +708,23 @@ mod tests {
         assert_eq!(names, expected);
     }
 
+    /// Issue #147: the agent-facing manifest must never expose a reveal/rehydration tool —
+    /// no `RevealTicket` can be minted or resolved through `Caller::Trusted` here. This is
+    /// the manifest-level guard; the facade refuses `Caller::Trusted` ticket minting too
+    /// (`HaciendaFacade::mint_reveal_ticket_with_auth`).
+    #[tokio::test]
+    async fn manifest_contains_no_reveal_or_rehydration_tool() {
+        let server = server_with_pii(RedactionMode::Mask);
+        let tools = server.tool_router.list_all();
+        for tool in &tools {
+            let name = tool.name.as_ref();
+            assert!(
+                !name.contains("reveal") && !name.contains("rehydrat"),
+                "agent-facing manifest must not expose '{name}'"
+            );
+        }
+    }
+
     #[test]
     fn capabilities_tool_uses_the_shared_report_shape() {
         let server = server_with_pii(RedactionMode::Mask);
