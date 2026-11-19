@@ -76,6 +76,16 @@ pub const MAX_TICKET_TTL_SECS: u64 = 600;
 /// Minimum ticket TTL, in seconds. 1 s keeps tests fast without allowing a zero-lived
 /// ticket (which would expire between mint and resolve under any clock jitter).
 pub const MIN_TICKET_TTL_SECS: u64 = 1;
+/// How long a *terminal* ticket (resolved / revoked / expired) is retained past its
+/// `expires_at` before being purged from [`RevealTicketStore`], in seconds — a short
+/// forensic window ("which ticket was resolved, and when"), never a durability
+/// promise: a purge simply makes an old ticket `NotFound`, which is the same
+/// client-facing answer it already produced while expiring.
+pub const TICKET_RETENTION_SECS: i64 = 600;
+/// Ceiling on how many tickets a single [`RevealTicketStore`] keeps in memory. Only
+/// already-dead tickets are ever dropped to get back under this bound; an `Active`
+/// ticket is never evicted, so a valid resolution always still succeeds.
+pub const MAX_RETAINED_TICKETS: usize = 4096;
 
 /// Category labels (the `CATEGORY` header of a `[CATEGORY:key_id:body]` token) that make a
 /// reveal scope **high-sensitivity**, requiring at least two approvers (dossier #120's
@@ -112,6 +122,19 @@ pub const HIGH_SENSITIVITY_CATEGORIES: &[&str] = &[
 /// Whether a token category label (e.g. `"SSN"`) is high-sensitivity.
 pub fn is_high_sensitivity_category(label: &str) -> bool {
     HIGH_SENSITIVITY_CATEGORIES.contains(&label.to_ascii_uppercase().as_str())
+}
+
+/// Whether a request's scope touches at least one high-sensitivity category — the trigger
+/// for the double-approval rule (dossier #120): either a listed token's category header,
+/// or a `field_scope` category label.
+pub fn is_high_sensitivity_scope(token_ids: &[String], field_scope: &[String]) -> bool {
+    token_ids
+        .iter()
+        .filter_map(|t| token_header(t))
+        .any(|(category, _)| is_high_sensitivity_category(category))
+        || field_scope
+            .iter()
+            .any(|label| is_high_sensitivity_category(label))
 }
 
 /// Parse the `[CATEGORY:key_id:body]` header of a pseudonym token.
@@ -264,8 +287,27 @@ pub enum RevealTicketError {
     NonReversibleMode,
     #[error("high-sensitivity scope requires at least two distinct approvers")]
     InsufficientApprovers,
-    #[error("invalid reveal ticket request")]
-    InvalidRequest,
+    #[error("invalid reveal ticket request: {reason}")]
+    InvalidRequest { reason: String },
+    /// No document→dossier index is configured, so document ownership cannot be proven.
+    /// Fail-closed: without the index a ticket cannot be minted (reveal is opt-in).
+    #[error("no document-to-dossier index is configured: document ownership cannot be proven")]
+    DocumentOwnershipUnknown,
+    /// A requested document does not belong to the ticket's dossier.
+    #[error("a requested document does not belong to the ticket dossier")]
+    DocumentNotInDossier,
+}
+
+impl RevealTicketError {
+    /// A malformed request, naming **which field** failed and how to correct it, without
+    /// exposing any secret (never the token body, key id, or dossier payload). Operators,
+    /// logs and tests see the reason; the transport layer still collapses every one of
+    /// these to a single generic 400, so a client gains no oracle from it.
+    pub(crate) fn invalid_request(reason: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            reason: reason.into(),
+        }
+    }
 }
 
 /// Dossier membership (the business ACL behind ticket minting: `pii:reveal` + belonging
@@ -317,6 +359,59 @@ impl DossierAcl for InMemoryDossierAcl {
     }
 }
 
+/// Authoritative mapping `document_id -> dossier_id` within a tenant.
+///
+/// This is what closes the ownership gap the [`DossierAcl`] cannot: membership proves the
+/// *subject* belongs to the dossier, never that a caller-supplied `document_id` does. A
+/// member of `case-1` could otherwise name a document of `case-2` and have it minted into
+/// the ticket's scope.
+///
+/// Implementations must **fail closed**: an unknown document or any internal error is
+/// reported as `false` (not in this dossier), never as `true` and never as a panic.
+#[async_trait]
+pub trait DocumentDossierIndex: Send + Sync {
+    /// Whether `document_id` belongs to `dossier_id` in `tenant`.
+    async fn belongs_to(&self, tenant: &TenantId, document_id: &str, dossier_id: &str) -> bool;
+}
+
+/// In-memory [`DocumentDossierIndex`] — the default for single-process deployments and
+/// tests. An index that knows nothing answers `false` for every lookup, which is the
+/// fail-closed direction (no ownership proof ⇒ no ticket).
+#[derive(Default)]
+pub struct InMemoryDocumentDossierIndex {
+    owner: Mutex<HashMap<(TenantId, String), String>>,
+}
+
+impl InMemoryDocumentDossierIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `document_id` belongs to `dossier_id` in `tenant`.
+    pub fn index(
+        &self,
+        tenant: &TenantId,
+        document_id: impl Into<String>,
+        dossier_id: impl Into<String>,
+    ) {
+        self.owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((tenant.clone(), document_id.into()), dossier_id.into());
+    }
+}
+
+#[async_trait]
+impl DocumentDossierIndex for InMemoryDocumentDossierIndex {
+    async fn belongs_to(&self, tenant: &TenantId, document_id: &str, dossier_id: &str) -> bool {
+        self.owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(tenant.clone(), document_id.to_owned()))
+            .is_some_and(|owner| owner == dossier_id)
+    }
+}
+
 /// In-memory store of live [`RevealTicket`]s, keyed by `(tenant, ticket_id)` — tickets
 /// never cross tenants.
 ///
@@ -354,7 +449,44 @@ impl RevealTicketStore {
         (self.now)()
     }
 
+    /// Drop tickets that can never be resolved again, so a long-running facade does not
+    /// retain every ticket (and its scope payload) forever. Bounds the map's size, not its
+    /// security posture.
+    ///
+    /// Never removes an `Active` ticket, so a valid resolution always still succeeds.
+    pub(crate) fn purge_obsolete(&self) {
+        let now = self.now();
+        let mut tickets = self.tickets.lock().unwrap_or_else(PoisonError::into_inner);
+        let retention = Duration::seconds(TICKET_RETENTION_SECS);
+        tickets.retain(|_, ticket| match ticket.status {
+            RevealTicketStatus::Active => true,
+            // Terminal tickets are kept a short while past expiry, then dropped.
+            _ => match DateTime::parse_from_rfc3339(&ticket.expires_at) {
+                Ok(expires) => now < expires.with_timezone(&Utc) + retention,
+                // An unparsable timestamp is fail-closed and never resolvable again.
+                Err(_) => false,
+            },
+        });
+        // Capacity bound: shed the oldest already-dead tickets first, never a live one.
+        if tickets.len() > MAX_RETAINED_TICKETS {
+            let mut dead: Vec<(DateTime<Utc>, (TenantId, String))> = tickets
+                .iter()
+                .filter(|(_, t)| t.status != RevealTicketStatus::Active)
+                .filter_map(|(key, t)| {
+                    DateTime::parse_from_rfc3339(&t.expires_at)
+                        .ok()
+                        .map(|expires| (expires.with_timezone(&Utc), key.clone()))
+                })
+                .collect();
+            dead.sort();
+            for (_, key) in dead.into_iter().take(tickets.len() - MAX_RETAINED_TICKETS) {
+                tickets.remove(&key);
+            }
+        }
+    }
+
     pub fn insert(&self, ticket: RevealTicket) {
+        self.purge_obsolete();
         self.tickets
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -540,5 +672,89 @@ mod tests {
         acl.grant(&tenant, "case-1", "alice");
         assert!(acl.is_member(&tenant, "case-1", "alice").await);
         assert!(!acl.is_member(&tenant, "case-2", "alice").await);
+    }
+
+    #[tokio::test]
+    async fn in_memory_document_index_is_fail_closed_by_default() {
+        let index = InMemoryDocumentDossierIndex::new();
+        let tenant = TenantId::new("default");
+        // Unknown everywhere until indexed — never a yes from ignorance.
+        assert!(!index.belongs_to(&tenant, "doc:v1", "case-1").await);
+        index.index(&tenant, "doc:v1", "case-1");
+        assert!(index.belongs_to(&tenant, "doc:v1", "case-1").await);
+        // Indexed in case-1: another dossier (case-2) is refused, and so is another
+        // tenant that happens to use the same document id.
+        assert!(!index.belongs_to(&tenant, "doc:v1", "case-2").await);
+        let other = TenantId::new("acme");
+        assert!(!index.belongs_to(&other, "doc:v1", "case-1").await);
+    }
+
+    fn ticket_with_status(tenant: &str, id: &str, status: RevealTicketStatus) -> RevealTicket {
+        let now = Utc::now();
+        let mut t = ticket(tenant, id);
+        let (_, expires_at) = ticket_window(Some(60), now);
+        t.expires_at = expires_at;
+        t.status = status;
+        t
+    }
+
+    #[test]
+    fn purge_drops_terminal_tickets_but_never_a_live_one() {
+        let store = RevealTicketStore::new();
+        store.insert(ticket_with_status(
+            "default",
+            "live",
+            RevealTicketStatus::Active,
+        ));
+        store.insert(ticket_with_status(
+            "default",
+            "resolved",
+            RevealTicketStatus::Resolved,
+        ));
+        store.insert(ticket_with_status(
+            "default",
+            "revoked",
+            RevealTicketStatus::Revoked,
+        ));
+        // Within the retention window: terminal tickets are kept, none lost early.
+        store.purge_obsolete();
+        assert!(store.get(&TenantId::new("default"), "live").is_some());
+        assert!(store.get(&TenantId::new("default"), "resolved").is_some());
+
+        // Past the retention window: terminal tickets are gone, the live one stays.
+        // A store-level clock lets us move time instead of sleeping.
+        let now = Utc::now();
+        let shifted = Arc::new(Mutex::new(now));
+        let clock = shifted.clone();
+        let store = RevealTicketStore::with_clock(Arc::new(move || *clock.lock().unwrap()));
+        store.insert(ticket_with_status(
+            "default",
+            "live",
+            RevealTicketStatus::Active,
+        ));
+        let mut stale = ticket_with_status("default", "resolved", RevealTicketStatus::Resolved);
+        let (_, long_ago) = ticket_window(
+            Some(60),
+            now - Duration::seconds(TICKET_RETENTION_SECS + 120),
+        );
+        stale.expires_at = long_ago;
+        store.insert(stale);
+        store.purge_obsolete();
+        assert!(store.get(&TenantId::new("default"), "live").is_some());
+        assert!(
+            store.get(&TenantId::new("default"), "resolved").is_none(),
+            "a terminal ticket long past expiry must be purged"
+        );
+    }
+
+    #[test]
+    fn high_sensitivity_scope_recognises_tokens_and_field_scope() {
+        assert!(is_high_sensitivity_scope(&["[EMAIL:k1:AAAA]".to_owned()], &[]) == false);
+        assert!(is_high_sensitivity_scope(
+            &["[SSN:k1:AAAA]".to_owned()],
+            &[]
+        ));
+        assert!(is_high_sensitivity_scope(&[], &["DIAGNOSIS".to_owned()]));
+        assert!(!is_high_sensitivity_scope(&[], &["EMAIL".to_owned()]));
     }
 }

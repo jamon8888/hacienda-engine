@@ -220,9 +220,25 @@ impl From<HaciendaError> for ApiError {
                 // expired, consumed, or out-of-scope). ACL denial is the single exception:
                 // it is an authorization fact about the caller's own dossier claim, so 403.
                 use hacienda_core::RevealTicketError;
+                // Enumerated on purpose (no catch-all): a new ticket variant must make an
+                // explicit classification decision instead of silently becoming a client
+                // fault. The non-ACL arms all answer the same thing, deliberately.
                 match ticket_err {
                     RevealTicketError::AclDenied => ApiError::forbidden(),
-                    _ => ApiError::invalid_request("Invalid reveal ticket."),
+                    RevealTicketError::TrustedCaller
+                    | RevealTicketError::NotFound
+                    | RevealTicketError::NotHolder
+                    | RevealTicketError::Revoked
+                    | RevealTicketError::Expired
+                    | RevealTicketError::Consumed
+                    | RevealTicketError::ScopeViolation
+                    | RevealTicketError::NonReversibleMode
+                    | RevealTicketError::InsufficientApprovers
+                    | RevealTicketError::InvalidRequest { .. }
+                    | RevealTicketError::DocumentOwnershipUnknown
+                    | RevealTicketError::DocumentNotInDossier => {
+                        ApiError::invalid_request("Invalid reveal ticket.")
+                    }
                 }
             }
             HaciendaError::Pii(pii_err) => {
@@ -616,7 +632,11 @@ mod tests {
             RevealTicketError::TrustedCaller,
             RevealTicketError::NonReversibleMode,
             RevealTicketError::InsufficientApprovers,
-            RevealTicketError::InvalidRequest,
+            RevealTicketError::InvalidRequest {
+                reason: "document_ids is empty".into(),
+            },
+            RevealTicketError::DocumentOwnershipUnknown,
+            RevealTicketError::DocumentNotInDossier,
         ] {
             let api_err = ApiError::from(HaciendaError::RevealTicket(variant.clone()));
             assert_eq!(api_err.code, ApiErrorCode::InvalidRequest, "{variant:?}");
