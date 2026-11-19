@@ -32,7 +32,7 @@
 //!
 //! # Tool inventory
 //!
-//! Seven tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
+//! Thirteen tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
 //! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands:
 //!
 //! | Tool | Facade method | Mirrors |
@@ -119,7 +119,8 @@ impl HaciendaMcp {
 
     /// Extract and redact one or more documents.
     #[tool(
-        description = "Extract text from documents (local paths or file:// URIs) and redact \
+        description = "Extract text from documents (string local paths or file:// URIs, or \
+            structured `{kind: bytes|uri, ...}` inputs with MIME/filename hints) and redact \
             any detected PII before returning it. Mirrors `POST /v1/documents` and `hacienda \
             extract`. Every redacted span is recorded in the audit chain.",
         annotations(
@@ -142,7 +143,21 @@ impl HaciendaMcp {
         // and would run every document's PII detection sequentially instead of under
         // `PipelineConfig::concurrency`'s bound — this tool's own doc table claims parity
         // with the REST path, so its behaviour needs to match, not just its shape.
-        let inputs: Vec<ExtractInput> = params.inputs.iter().map(ExtractInput::from_uri).collect();
+        //
+        // A conversion failure names the offending input's index: a batch with one lying
+        // `mime_type` must tell the caller which document was refused, not just that
+        // some document was. The index is attached by this loop, so the error message
+        // never needs to carry — and never carries — any document content.
+        let inputs: Vec<ExtractInput> = params
+            .inputs
+            .into_iter()
+            .enumerate()
+            .map(|(index, input)| {
+                input.into_extract_input().map_err(|error| {
+                    rmcp::ErrorData::invalid_params(format!("inputs[{index}]: {error}"), None)
+                })
+            })
+            .collect::<Result<_, _>>()?;
         let result = self
             .facade
             .process_batch_with_auth(Caller::Trusted, inputs)
@@ -570,6 +585,7 @@ mod tests {
     use super::*;
     use hacienda::{HaciendaConfig, HaciendaFacade};
     use hacienda_core::{pii::PipelineConfig, redaction::RedactionMode};
+    use params::{DocumentInput, StructuredDocumentInput};
 
     /// A value that must never appear in any tool result unredacted. Distinct from
     /// anything else in the codebase, so a match is a disclosure and never a coincidence
@@ -722,6 +738,134 @@ mod tests {
             mapped.code,
             rmcp::ErrorData::invalid_params("", None).code,
             "RedactionDepthExceeded must map to invalid_params, got {mapped:?}"
+        );
+    }
+
+    #[test]
+    fn structured_bytes_input_preserves_filename_and_mime_type() {
+        let input: DocumentInput = serde_json::from_value(serde_json::json!({
+            "kind": "bytes",
+            "bytes": [72, 105],
+            "mime_type": "text/plain",
+            "filename": "note.txt"
+        }))
+        .expect("structured bytes input");
+
+        let input = input.into_extract_input().expect("valid bytes input");
+        assert_eq!(input.bytes, Some(vec![72, 105]));
+        assert_eq!(input.mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(input.filename.as_deref(), Some("note.txt"));
+        assert!(input.uri.is_none());
+    }
+
+    #[test]
+    fn structured_input_rejects_per_call_extraction_config() {
+        let error = serde_json::from_value::<DocumentInput>(serde_json::json!({
+            "kind": "uri",
+            "uri": "file:///tmp/document.txt",
+            "config": {"extract_tables": false}
+        }))
+        .expect_err("per-call config must not be accepted");
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    /// Bytes input (`kind: "bytes"`, xberg's structured form) runs through the same
+    /// `process_batch_with_auth` seam as the CLI — the corpus value must not surface in
+    /// either the text content block or `structured_content`, both of which reach the
+    /// MCP client.
+    #[tokio::test]
+    async fn documents_process_redacts_structured_bytes_input() {
+        let server = server_with_pii(RedactionMode::Mask);
+        let result = server
+            .documents_process(Parameters(DocumentsProcessParams {
+                inputs: vec![DocumentInput::Structured(StructuredDocumentInput::Bytes {
+                    bytes: format!("reach me at {CORPUS_EMAIL}").into_bytes(),
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("note.txt".to_string()),
+                })],
+            }))
+            .await
+            .expect("tool call succeeds");
+
+        assert!(!result.is_error.unwrap_or(false));
+        let rendered = result_text(&result);
+        assert!(
+            !rendered.contains(CORPUS_EMAIL),
+            "documents_process leaked the corpus value: {rendered}"
+        );
+        let structured =
+            serde_json::to_string(&result.structured_content).expect("structured content");
+        assert!(
+            !structured.contains(CORPUS_EMAIL),
+            "documents_process's structured_content leaked the corpus value: {structured}"
+        );
+        assert!(
+            rendered.contains("[EMAIL]"),
+            "expected a mask token in: {rendered}"
+        );
+    }
+
+    /// The legacy string form is still a URI shorthand: a local file written by the test
+    /// is extracted and redacted through the same facade seam.
+    #[tokio::test]
+    async fn documents_process_redacts_uri_shorthand_input() {
+        use std::io::Write as _;
+
+        let server = server_with_pii(RedactionMode::Mask);
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        write!(file, "reach me at {CORPUS_EMAIL}").expect("writes fixture");
+
+        let result = server
+            .documents_process(Parameters(DocumentsProcessParams {
+                inputs: vec![DocumentInput::Uri(
+                    file.path().to_string_lossy().into_owned(),
+                )],
+            }))
+            .await
+            .expect("tool call succeeds");
+
+        assert!(!result.is_error.unwrap_or(false));
+        let rendered = result_text(&result);
+        assert!(
+            !rendered.contains(CORPUS_EMAIL),
+            "documents_process leaked the corpus value: {rendered}"
+        );
+        assert!(
+            rendered.contains("[EMAIL]"),
+            "expected a mask token in: {rendered}"
+        );
+    }
+
+    /// CodeRabbit follow-up (#157): a refused input must name its index, so a caller
+    /// can tell *which* document in a batch was rejected — the conversion errors attach
+    /// the field, the cause, and a suggestion, and this loop attaches the position.
+    #[tokio::test]
+    async fn documents_process_names_the_refused_input_index() {
+        let server = server_with_pii(RedactionMode::Mask);
+        let error = server
+            .documents_process(Parameters(DocumentsProcessParams {
+                inputs: vec![
+                    DocumentInput::Uri("/nonexistent/first.txt".to_string()),
+                    DocumentInput::Structured(StructuredDocumentInput::Bytes {
+                        bytes: b"%PDF-1.7\n".to_vec(),
+                        mime_type: "text/plain".to_string(),
+                        filename: None,
+                    }),
+                ],
+            }))
+            .await
+            .expect_err("the lying MIME hint must refuse the batch");
+
+        let message = error.message;
+        assert!(message.contains("inputs[1]"), "{message}");
+        assert!(
+            message.contains("suggestion:"),
+            "conversion errors must carry repair guidance: {message}"
+        );
+        assert!(
+            !message.contains("%PDF"),
+            "the error must not echo document content: {message}"
         );
     }
 }
