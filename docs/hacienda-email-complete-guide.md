@@ -296,6 +296,14 @@ rules = ["email", "phone", "ssn", "credit_card", "iban"]
 replacement = "[REDACTED]"
 preserve_format = true
 mode = "redact"
+
+# Réglage de l'ingestion pour une boîte volumineuse (tous les champs sont optionnels)
+[ingestion]
+page_size = 200        # enveloppes par page IMAP
+max_pages = 0          # 0 = illimité
+concurrency = 4        # bornes des tâches redaction/chunking après fetch
+incremental = true     # sauter les messages déjà ingérés (watermark)
+optimize_after_run = true
 ```
 
 Sans `--email-config`, la CLI construit elle-même ce profil : `HACIENDA_EMAIL_MAILDIR`
@@ -467,6 +475,24 @@ pour les documents et un seul pour les chunks, et exécute un `merge_insert` par
 table au lieu d'un par message. Les backends sans support spécifique gardent le
 comportement par défaut (boucle sur `upsert_document`). L'idempotence et le
 `dossier_id` sont préservés — utiliser cette API pour l'ingestion email par pages.
+
+### Grosse boîte : pagination, watermark, batch
+
+`EmailConfig.ingestion` (section `[ingestion]` du TOML, optionnelle) pilote
+l'ingestion RAG d'une boîte volumineuse :
+
+| Champ | Défaut | Rôle |
+|---|---|---|
+| `page_size` | 200 | Enveloppes par page IMAP (`list_envelopes_page`, page 1-indexée). |
+| `max_pages` | 0 | Arrêt après N pages (0 = illimité). |
+| `concurrency` | 4 | Bornes des tâches de redaction/chunking après le fetch (le client étant derrière un `Mutex`, les fetchs restent sérialisés). |
+| `incremental` | true | Saute les messages déjà ingérés via un watermark (`watermark:<compte>:INBOX`, collection `email-watermarks` du même store). |
+| `optimize_after_run` | true | Appelle `RagStore::optimize()` une fois en fin de run. |
+
+Le bouclage s'arrête quand une page renvoie moins de `page_size` enveloppes, ou
+après `max_pages`. Les messages dont l'UID est ≤ watermark sont ignorés ; le
+watermark retient le **plus grand UID vu**, pas un compteur. Chaque page produit
+un seul `upsert_documents` — coût O(n) au lieu de O(n²).
 
 `Archive` / `Redact` écrivent toujours des fichiers `.eml` locaux
 (`archive.rs::save_message` : seul `text_body`, pas l'RFC 5322 brute, pas une
@@ -701,6 +727,11 @@ apparaître dans `git status`.
 8. **Embedding des chunks email** — l'upsert se fait en mode BYOV (§ 5.6), comme
    le chemin documents de l'API. Une collection à dimension non nulle nécessite
    un embedder appliqué avant l'upsert.
+9. **Ingestion asynchrone** — l'indexation RAG d'une grosse boîte tourne
+   actuellement dans l'appel HTTP (`POST /v1/email/process`). Pagination,
+   watermark et batch upsert sont en place (§ 5.6), mais il n'existe pas encore
+   de job en arrière-plan avec reprise : chaque appel refait le run complet de
+   ses pages. C'est la prochaine étape.
 
 ---
 

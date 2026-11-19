@@ -21,6 +21,9 @@ pub struct EmailConfig {
 
     /// Redaction rules
     pub redaction: RedactionConfig,
+    /// Tuning for large-mailbox RAG ingestion (pagination, batching, limits).
+    #[serde(default)]
+    pub ingestion: IngestionConfig,
 }
 
 impl Default for EmailConfig {
@@ -35,6 +38,51 @@ impl Default for EmailConfig {
             ner: NerConfig::default(),
             rag: RagConfig::default(),
             redaction: RedactionConfig::default(),
+            ingestion: IngestionConfig::default(),
+        }
+    }
+}
+
+/// Tuning knobs for ingesting large mailboxes without exhausting memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestionConfig {
+    /// Envelopes fetched per IMAP page. Default 200.
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
+    /// Stop after this many pages (0 = unlimited). Default 0.
+    #[serde(default)]
+    pub max_pages: u32,
+    /// Messages prepared concurrently after fetch. IMAP fetches stay serialized
+    /// behind the client's Mutex; this only bounds redaction/chunking tasks.
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+    /// Skip messages already ingested in a previous run by remembering the
+    /// highest UID per (account, mailbox) in the RAG store. Default true.
+    #[serde(default = "default_true")]
+    pub incremental: bool,
+    /// Call `RagStore::optimize()` once at the end of a run (compaction + FTS).
+    #[serde(default = "default_true")]
+    pub optimize_after_run: bool,
+}
+
+fn default_page_size() -> u32 {
+    200
+}
+fn default_concurrency() -> usize {
+    4
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for IngestionConfig {
+    fn default() -> Self {
+        Self {
+            page_size: default_page_size(),
+            max_pages: 0,
+            concurrency: default_concurrency(),
+            incremental: default_true(),
+            optimize_after_run: default_true(),
         }
     }
 }
