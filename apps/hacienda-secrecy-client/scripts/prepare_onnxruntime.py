@@ -126,7 +126,24 @@ def stage_from_nupkg(archive: Path, stage: Path, prefix: str, libraries: list[st
 
 
 def main() -> int:
-    identity = (platform.system(), platform.machine())
+    # Cross-compilation: the host machine may differ from the target (e.g. building
+    # aarch64-pc-windows-msvc on an x86_64 Windows runner). CARGO_BUILD_TARGET (set by
+    # the release workflow) selects the runtime binaries for the *target* platform.
+    override = os.environ.get("HACIENDA_ORT_TARGET", "").strip()
+    if override:
+        mapping = {
+            "aarch64-apple-darwin": ("Darwin", "arm64"),
+            "x86_64-apple-darwin": ("Darwin", "x86_64"),
+            "aarch64-pc-windows-msvc": ("Windows", "ARM64"),
+            "x86_64-pc-windows-msvc": ("Windows", "AMD64"),
+            "aarch64-unknown-linux-gnu": ("Linux", "aarch64"),
+            "x86_64-unknown-linux-gnu": ("Linux", "x86_64"),
+        }
+        identity = mapping.get(override)
+        if identity is None:
+            raise RuntimeError(f"Unsupported HACIENDA_ORT_TARGET override: {override}")
+    else:
+        identity = (platform.system(), platform.machine())
     try:
         prefix, target_dir, libraries = TARGETS[identity]
     except KeyError as error:

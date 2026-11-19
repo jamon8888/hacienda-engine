@@ -98,6 +98,10 @@ jobs:
       - name: Stage ONNX Runtime (checksum-pinned NuGet)
         working-directory: apps/hacienda-secrecy-client
         run: npm run prepare:onnxruntime
+        env:
+          # Cross-compiled Windows ARM64 needs the ARM64 native runtime even though
+          # the host runner is x86_64.
+          HACIENDA_ORT_TARGET: ${{ matrix.name == 'windows-arm64' && 'aarch64-pc-windows-msvc' || '' }}
 
       - name: Build frontend
         working-directory: apps/hacienda-secrecy-client
