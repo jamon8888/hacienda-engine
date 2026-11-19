@@ -38,6 +38,7 @@
 //! mapping with a synthetic source without a live network connection.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use serde::Serialize;
@@ -138,6 +139,78 @@ pub trait Redactor: Send + Sync {
     async fn redact(&self, text: &str) -> RagResult<String>;
 }
 
+/// Which part of an outgoing LLM request an [`EgressPart`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressRole {
+    /// The `system_prompt` override (redacted before dispatch — the É7 leak of
+    /// wayfinder #131, closed by redacting it in [`GuardedLlm::stream_with_purpose`]).
+    SystemPrompt,
+    /// The user prompt (redacted before dispatch).
+    Prompt,
+    /// One retrieved chunk's content (redacted before dispatch).
+    ContextChunk,
+}
+
+/// One transmitted span of an LLM request, recorded as **hash + reference only** —
+/// never raw content (issue #148, P6 §5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EgressPart {
+    pub role: EgressRole,
+    /// Stable reference identifying the part: `system_prompt`, `prompt`, or
+    /// `chunk:<document_id>:<chunk_id>:<ordinal>`.
+    pub reference: String,
+    /// blake3 hex digest of the exact (redacted) bytes transmitted.
+    pub hash: String,
+    /// Byte length of the transmitted span.
+    pub length: u32,
+}
+
+/// Structured record of one LLM dispatch: what was sent (hashes + references), to
+/// which provider, for which purpose. Carries no raw content, so it is safe to
+/// persist in the audit chain and to log.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LlmEgressEvent {
+    /// What the call was for, e.g. `"rag-answer"`.
+    pub purpose: String,
+    /// Provider model that received the payload.
+    pub provider_model: String,
+    /// Provider base URL, when configured.
+    pub provider_base_url: Option<String>,
+    /// blake3 hex digest of the full outgoing request payload (system + user messages).
+    pub request_hash: String,
+    /// Byte length of that payload.
+    pub request_length: u32,
+    /// Per-part hashes + references.
+    pub parts: Vec<EgressPart>,
+}
+
+/// Deferred auditor for the P6 "content sent to an LLM" record (issue #148).
+///
+/// This crate has no audit store of its own (and no dependency on `hacienda-core`,
+/// same boundary as [`Redactor`]), so the audit sink is injected the same way the
+/// redactor is: `hacienda-api` implements this over
+/// `HaciendaFacade::record_llm_egress_with_auth`. [`GuardedLlm`] invokes it from a
+/// spawned task — never inline — so the audit write cannot slow the stream down,
+/// and the event fires even when the stream itself later fails.
+#[async_trait::async_trait]
+pub trait LlmEgressAuditor: Send + Sync {
+    /// Record one LLM dispatch. Called off the streaming hot path; an error is
+    /// logged by the caller, never propagated into the answer stream.
+    async fn record_egress(&self, event: LlmEgressEvent) -> RagResult<()>;
+}
+
+/// blake3 hex digest of `bytes` — the digest scheme the audit chain already uses
+/// for `span_hash` (`hacienda-core`'s `audit` module), so an egress entry can be
+/// joined to a redaction entry by digest where the two cover the same text.
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn byte_len(text: &str) -> u32 {
+    u32::try_from(text.len()).unwrap_or(u32::MAX)
+}
+
 /// P6's LLM-call enforcement point: redacts `prompt` and every chunk in `context` through
 /// an injected [`Redactor`] *before* handing either to [`answer_stream`].
 ///
@@ -147,12 +220,48 @@ pub trait Redactor: Send + Sync {
 /// instead of skipping it.
 pub struct GuardedLlm<'a> {
     redactor: &'a (dyn Redactor + Sync),
+    auditor: Option<Arc<dyn LlmEgressAuditor>>,
 }
 
 impl<'a> GuardedLlm<'a> {
     /// Wrap `redactor` as the mandatory redaction step for every call this guard makes.
+    ///
+    /// No egress auditor is attached: calls are redacted but not audited. Prefer
+    /// [`GuardedLlm::with_auditor`] for any production call site.
     pub fn new(redactor: &'a (dyn Redactor + Sync)) -> Self {
-        Self { redactor }
+        Self {
+            redactor,
+            auditor: None,
+        }
+    }
+
+    /// Wrap `redactor` as the mandatory redaction step **and** attach `auditor` as the
+    /// deferred P6 egress audit (issue #148): every call this guard makes records one
+    /// [`LlmEgressEvent`] (hashes + references of the redacted payload, provider, purpose)
+    /// through `auditor`, from a spawned task so the audit never blocks the stream.
+    pub fn with_auditor(
+        redactor: &'a (dyn Redactor + Sync),
+        auditor: Arc<dyn LlmEgressAuditor>,
+    ) -> Self {
+        Self {
+            redactor,
+            auditor: Some(auditor),
+        }
+    }
+
+    /// Redact `prompt` and every chunk's content in `context`, then stream an answer
+    /// exactly as [`answer_stream`] would from the redacted versions.
+    ///
+    /// Equivalent to [`GuardedLlm::stream_with_purpose`] with a generic `"llm-call"`
+    /// audit purpose.
+    pub async fn stream(
+        &self,
+        context: RetrievedContext,
+        prompt: String,
+        config: LlmAnswerConfig,
+    ) -> RagResult<impl Stream<Item = RagResult<AnswerEvent>> + Send + 'static> {
+        self.stream_with_purpose(context, prompt, config, "llm-call")
+            .await
     }
 
     /// Redact `prompt` and every chunk's content in `context`, then stream an answer
@@ -182,11 +291,22 @@ impl<'a> GuardedLlm<'a> {
     /// Egress is fail-closed too: when `config.egress_allowlist` is `Some` (strict mode),
     /// `config.llm.base_url` must be present and listed, or the call fails before any
     /// connection is attempted.
-    pub async fn stream(
+    ///
+    /// # Deferred audit (P6, issue #148)
+    ///
+    /// When an auditor was attached via [`GuardedLlm::with_auditor`], one
+    /// [`LlmEgressEvent`] is built from the **redacted** values — the exact strings handed
+    /// to [`answer_stream`] — and recorded through the auditor from a spawned task. The
+    /// spawn happens before the stream is returned, so the audit fires even if the stream
+    /// later fails, and the audit write never blocks stream construction or token
+    /// delivery. `purpose` names the calling capability (e.g. `"rag-answer"`) in the
+    /// audit record.
+    pub async fn stream_with_purpose(
         &self,
         context: RetrievedContext,
         prompt: String,
         mut config: LlmAnswerConfig,
+        purpose: impl Into<String>,
     ) -> RagResult<impl Stream<Item = RagResult<AnswerEvent>> + Send + 'static> {
         // Redact the system prompt override, if any, before it reaches the transport.
         // A redaction failure is fail-closed: the unredacted system prompt never reaches
@@ -210,7 +330,83 @@ impl<'a> GuardedLlm<'a> {
         let redacted_context = RetrievedContext {
             chunks: redacted_chunks,
         };
+
+        // Deferred P6 egress audit (issue #148): hash the exact redacted payload that
+        // is about to be dispatched, and record it from a spawned task so the audit
+        // write never blocks the streaming hot path — and still fires if the stream
+        // below later fails.
+        if let Some(auditor) = &self.auditor {
+            let event = build_egress_event(&config, &redacted_prompt, &redacted_context, purpose);
+            let auditor = Arc::clone(auditor);
+            tokio::spawn(async move {
+                if let Err(err) = auditor.record_egress(event).await {
+                    tracing::warn!(error = %err, "llm egress audit write failed");
+                }
+            });
+        }
+
         Ok(answer_stream(redacted_context, redacted_prompt, config))
+    }
+}
+
+/// Build the [`LlmEgressEvent`] for one dispatch from the **redacted** values that are
+/// about to be handed to [`answer_stream`] — the same strings [`build_token_stream`]
+/// will place into the outgoing request, hashed here via [`context_text_of`] /
+/// [`system_content_of`] so the digests cannot drift from what is actually sent.
+fn build_egress_event(
+    config: &LlmAnswerConfig,
+    prompt: &str,
+    context: &RetrievedContext,
+    purpose: impl Into<String>,
+) -> LlmEgressEvent {
+    let context_text = context_text_of(&context.chunks);
+    let system_content = system_content_of(config, &context_text);
+
+    let mut parts = Vec::with_capacity(context.chunks.len() + 2);
+    if let Some(system) = &config.system_prompt {
+        parts.push(EgressPart {
+            role: EgressRole::SystemPrompt,
+            reference: "system_prompt".to_string(),
+            hash: blake3_hex(system.as_bytes()),
+            length: byte_len(system),
+        });
+    }
+    parts.push(EgressPart {
+        role: EgressRole::Prompt,
+        reference: "prompt".to_string(),
+        hash: blake3_hex(prompt.as_bytes()),
+        length: byte_len(prompt),
+    });
+    // With a `system_prompt` override, `system_content_of` sends the override alone —
+    // retrieved context is NOT injected. Record chunk parts only when the default
+    // system message actually transmits them, so the audit never claims undelivered
+    // chunks were sent (CodeRabbit #158).
+    if config.system_prompt.is_none() {
+        for chunk in &context.chunks {
+            if let Some(content) = &chunk.content {
+                parts.push(EgressPart {
+                    role: EgressRole::ContextChunk,
+                    reference: format!(
+                        "chunk:{}:{}:{}",
+                        chunk.document_id.0, chunk.id.0, chunk.ordinal
+                    ),
+                    hash: blake3_hex(content.as_bytes()),
+                    length: byte_len(content),
+                });
+            }
+        }
+    }
+
+    let payload = serde_json::json!({ "system": system_content, "user": prompt });
+    let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+
+    LlmEgressEvent {
+        purpose: purpose.into(),
+        provider_model: config.llm.model.clone(),
+        provider_base_url: config.llm.base_url.clone(),
+        request_hash: blake3_hex(&payload_bytes),
+        request_length: u32::try_from(payload_bytes.len()).unwrap_or(u32::MAX),
+        parts,
     }
 }
 
@@ -273,12 +469,7 @@ pub fn answer_stream(
         .collect();
 
     let setup = async move {
-        let context_text: String = context
-            .chunks
-            .iter()
-            .filter_map(|c| c.content.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let context_text = context_text_of(&context.chunks);
 
         let raw = build_token_stream(prompt, context_text, config).await?;
         let tokens = map_tokens(raw);
@@ -327,6 +518,60 @@ pub fn map_tokens(
     })
 }
 
+/// The context text injected into the LLM request: every chunk's `content`, joined —
+/// extracted from [`answer_stream`] so the egress audit (issue #148) hashes exactly the
+/// string that is transmitted, with no chance of the two drifting apart.
+fn context_text_of(chunks: &[RetrievedChunk]) -> String {
+    chunks
+        .iter()
+        .filter_map(|c| c.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The system message actually sent for `config`, given the composed `context_text` —
+/// extracted from [`build_token_stream`] for the same reason: the egress audit must
+/// hash the same string the transport receives.
+fn system_content_of(config: &LlmAnswerConfig, context_text: &str) -> String {
+    match &config.system_prompt {
+        Some(system) => system.clone(),
+        None if context_text.is_empty() => "You are a helpful assistant.".to_string(),
+        None => format!("Use the following context to answer the question:\n\n{context_text}"),
+    }
+}
+
+/// Build the outgoing chat request from `prompt` and `context_text` — extracted from
+/// [`build_token_stream`] so the exact messages handed to the provider are
+/// unit-testable without a live connection (the redaction guarantee is only as strong
+/// as "the request carries exactly the strings it was given").
+fn build_chat_request(
+    prompt: String,
+    context_text: String,
+    config: LlmAnswerConfig,
+) -> liter_llm::ChatCompletionRequest {
+    let system_content = system_content_of(&config, &context_text);
+
+    liter_llm::ChatCompletionRequest {
+        model: config.llm.model,
+        messages: vec![
+            liter_llm::Message::System(liter_llm::SystemMessage {
+                content: liter_llm::UserContent::Text(system_content),
+                name: None,
+            }),
+            liter_llm::Message::User(liter_llm::UserMessage {
+                content: liter_llm::UserContent::Text(prompt),
+                name: None,
+            }),
+        ],
+        temperature: config.llm.temperature,
+        max_tokens: config.llm.max_tokens,
+        stream_options: Some(liter_llm::StreamOptions {
+            include_usage: Some(true),
+        }),
+        ..Default::default()
+    }
+}
+
 /// Open the LLM connection and return a raw streaming chunk iterator.
 ///
 /// Constructs the request from `prompt` and `context_text`, creates a
@@ -352,31 +597,7 @@ async fn build_token_stream(
     )
     .map_err(|e| RagError::Backend(Box::new(e)))?;
 
-    let system_content = match config.system_prompt {
-        Some(system) => system,
-        None if context_text.is_empty() => "You are a helpful assistant.".to_string(),
-        None => format!("Use the following context to answer the question:\n\n{context_text}"),
-    };
-
-    let req = liter_llm::ChatCompletionRequest {
-        model: config.llm.model,
-        messages: vec![
-            liter_llm::Message::System(liter_llm::SystemMessage {
-                content: liter_llm::UserContent::Text(system_content),
-                name: None,
-            }),
-            liter_llm::Message::User(liter_llm::UserMessage {
-                content: liter_llm::UserContent::Text(prompt),
-                name: None,
-            }),
-        ],
-        temperature: config.llm.temperature,
-        max_tokens: config.llm.max_tokens,
-        stream_options: Some(liter_llm::StreamOptions {
-            include_usage: Some(true),
-        }),
-        ..Default::default()
-    };
+    let req = build_chat_request(prompt, context_text, config);
 
     client
         .chat_stream(req)
@@ -817,5 +1038,347 @@ mod tests {
             .await;
 
         assert!(result.is_ok(), "an authorized base_url must be accepted");
+    }
+
+    // ── Deferred P6 egress audit (issue #148) ───────────────────────────────────
+
+    /// A redactor that actually redacts a witness value (replacing it with a token)
+    /// and records both what it saw and what it produced.
+    struct RedactingSpy {
+        produced: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RedactingSpy {
+        fn new() -> Self {
+            Self {
+                produced: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn redacted(text: &str) -> String {
+            text.replace("CONTROL_CORPUS_SECRET", "[REDACTED]")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Redactor for RedactingSpy {
+        async fn redact(&self, text: &str) -> RagResult<String> {
+            let out = Self::redacted(text);
+            self.produced.lock().unwrap().push(out.clone());
+            Ok(out)
+        }
+    }
+
+    /// Auditor spy: records every event it is asked to record.
+    struct SpyAuditor {
+        events: Arc<Mutex<Vec<LlmEgressEvent>>>,
+    }
+
+    impl SpyAuditor {
+        fn new() -> (Arc<Self>, Arc<Mutex<Vec<LlmEgressEvent>>>) {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    events: Arc::clone(&events),
+                }),
+                events,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmEgressAuditor for SpyAuditor {
+        async fn record_egress(&self, event: LlmEgressEvent) -> RagResult<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    /// Give the spawned audit task a bounded number of runtime turns to run.
+    async fn drain_spawned_audit(events: &Arc<Mutex<Vec<LlmEgressEvent>>>) {
+        for _ in 0..200 {
+            if !events.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The egress event must hash the **redacted** payload only: a witness value present
+    /// in the raw prompt / system prompt / chunk must not appear anywhere in the event
+    /// (which carries hashes + references, never content), and each part's hash must be
+    /// the digest of the redacted string — provably different from the digest of the raw
+    /// string that contains the witness.
+    #[tokio::test]
+    async fn guarded_llm_egress_event_hashes_only_redacted_content() {
+        let redactor = RedactingSpy::new();
+        let produced = Arc::clone(&redactor.produced);
+        let (auditor, events) = SpyAuditor::new();
+
+        let mut config = guarded_llm_test_config();
+        config.system_prompt = Some("system with CONTROL_CORPUS_SECRET inside".to_string());
+        let context = RetrievedContext {
+            chunks: vec![guarded_llm_test_chunk("chunk with CONTROL_CORPUS_SECRET")],
+        };
+
+        let result = GuardedLlm::with_auditor(&redactor, auditor)
+            .stream_with_purpose(
+                context,
+                "prompt with CONTROL_CORPUS_SECRET".to_string(),
+                config,
+                "rag-answer",
+            )
+            .await;
+        assert!(result.is_ok(), "redaction succeeded, stream must build");
+
+        drain_spawned_audit(&events).await;
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one egress event per dispatch");
+        let event = &events[0];
+        assert_eq!(event.purpose, "rag-answer");
+        assert_eq!(event.provider_model, "not-a-real-provider/does-not-exist");
+
+        // Hash + reference only: the serialized event must not contain the witness.
+        let serialized = serde_json::to_string(event).unwrap();
+        assert!(
+            !serialized.contains("CONTROL_CORPUS_SECRET"),
+            "egress event must carry hashes, not raw content: {serialized}"
+        );
+
+        // The redacted outputs of the redactor must not contain the witness either —
+        // this is the string GuardedLlm forwards to answer_stream.
+        let produced = produced.lock().unwrap();
+        assert_eq!(produced.len(), 3, "system prompt + prompt + one chunk");
+        for text in produced.iter() {
+            assert!(
+                !text.contains("CONTROL_CORPUS_SECRET"),
+                "redacted text must not contain the witness: {text}"
+            );
+        }
+
+        // Each part's hash is the digest of the redacted string, not the raw one.
+        let sys_part = event
+            .parts
+            .iter()
+            .find(|p| p.role == EgressRole::SystemPrompt)
+            .expect("system prompt part");
+        assert_eq!(sys_part.reference, "system_prompt");
+        assert_eq!(
+            sys_part.hash,
+            blake3::hash("system with [REDACTED] inside".as_bytes())
+                .to_hex()
+                .to_string()
+        );
+
+        let prompt_part = event
+            .parts
+            .iter()
+            .find(|p| p.role == EgressRole::Prompt)
+            .expect("prompt part");
+        assert_eq!(prompt_part.reference, "prompt");
+        assert_eq!(
+            prompt_part.hash,
+            blake3::hash("prompt with [REDACTED]".as_bytes())
+                .to_hex()
+                .to_string()
+        );
+        assert_ne!(
+            prompt_part.hash,
+            blake3::hash("prompt with CONTROL_CORPUS_SECRET".as_bytes())
+                .to_hex()
+                .to_string(),
+            "the hashed prompt must be the redacted one, not the raw one"
+        );
+
+        // With a system-prompt override the retrieved chunks are not transmitted, so
+        // they must not appear in the egress audit (CodeRabbit #158). The redactor did
+        // still process the chunk (see `produced` above) — but no audit part claims it
+        // was sent to the provider.
+        assert!(
+            !event
+                .parts
+                .iter()
+                .any(|p| p.role == EgressRole::ContextChunk),
+            "undelivered chunks must not be recorded as transmitted"
+        );
+    }
+
+    /// The egress audit fires even when the stream itself fails: the dispatch is
+    /// audited at the guard (before the stream is returned), so an unroutable model
+    /// surfacing as an `Err` item mid-stream must not lose the audit record.
+    #[tokio::test]
+    async fn guarded_llm_emits_egress_audit_even_when_the_stream_fails() {
+        let redactor = SpyRedactor::new();
+        let (auditor, events) = SpyAuditor::new();
+        let context = RetrievedContext {
+            chunks: vec![guarded_llm_test_chunk("hello world")],
+        };
+
+        // Unroutable model: the stream builds, then fails when polled.
+        let stream = GuardedLlm::with_auditor(&redactor, auditor)
+            .stream(
+                context,
+                "what is this?".to_string(),
+                guarded_llm_test_config(),
+            )
+            .await
+            .expect("stream must build");
+        let collected: Vec<_> = stream.collect().await;
+        assert!(
+            collected.iter().any(|e| e.is_err()),
+            "the unroutable model must surface as an Err item"
+        );
+
+        drain_spawned_audit(&events).await;
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "the egress audit must be recorded even though the stream failed"
+        );
+        assert_eq!(
+            events[0].purpose, "llm-call",
+            "stream() uses the default purpose"
+        );
+    }
+
+    /// The audit is deferred: a `record_egress` that never completes must not prevent
+    /// `stream` from building the answer stream (the audit runs in a spawned task, off
+    /// the streaming hot path).
+    #[tokio::test]
+    async fn guarded_llm_audit_never_blocks_stream_construction() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PendingAuditor {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmEgressAuditor for PendingAuditor {
+            async fn record_egress(&self, _event: LlmEgressEvent) -> RagResult<()> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                futures::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+
+        let redactor = SpyRedactor::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let auditor: Arc<dyn LlmEgressAuditor> = Arc::new(PendingAuditor {
+            calls: Arc::clone(&calls),
+        });
+        let context = RetrievedContext { chunks: vec![] };
+
+        // If the audit were awaited inline, this would hang forever on the pending
+        // auditor; the timeout turns a regression into a clean failure.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            GuardedLlm::with_auditor(&redactor, auditor).stream(
+                context,
+                "harmless prompt".to_string(),
+                guarded_llm_test_config(),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "stream construction must not wait on the auditor"
+        );
+        assert!(result.unwrap().is_ok(), "stream must build");
+
+        // The auditor was still invoked — from the spawned task, not inline.
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            calls.load(Ordering::SeqCst) > 0,
+            "the auditor must be invoked"
+        );
+    }
+
+    /// No auditor attached (plain `GuardedLlm::new`): nothing is recorded, the stream
+    /// still builds — the audit is opt-in per call site.
+    #[tokio::test]
+    async fn guarded_llm_without_auditor_streams_normally() {
+        let redactor = SpyRedactor::new();
+        let context = RetrievedContext { chunks: vec![] };
+        let result = GuardedLlm::new(&redactor)
+            .stream(
+                context,
+                "harmless prompt".to_string(),
+                guarded_llm_test_config(),
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    /// The outgoing request carries exactly the strings it was given — system message
+    /// first, user prompt second. Combined with the redacted-only event hashes above,
+    /// this closes the chain: GuardedLlm redacts → answer_stream forwards verbatim →
+    /// the transport sends what build_chat_request built.
+    /// Egress audit must describe only what is transmitted: with a system override,
+    /// retrieved chunks are not sent, so no ContextChunk part may be recorded.
+    #[test]
+    fn egress_event_excludes_chunks_when_system_prompt_override_replaces_context() {
+        use crate::types::PrimaryScore;
+        let chunk = RetrievedChunk {
+            id: ChunkId("c1".to_string()),
+            document_id: DocumentId("d1".to_string()),
+            ordinal: 0,
+            external_id: None,
+            content: Some("retrieved context".to_string()),
+            score: 1.0,
+            primary_score: PrimaryScore::Vector { score: 1.0 },
+            chunk_metadata: serde_json::Value::Null,
+            document: None,
+        };
+        let context = RetrievedContext { chunks: vec![chunk] };
+        let mut config = guarded_llm_test_config();
+        config.system_prompt = Some("SYS".to_string());
+        let event = build_egress_event(&config, "USER", &context, "rag-answer");
+        assert!(
+            !event.parts.iter().any(|p| p.role == EgressRole::ContextChunk),
+            "undelivered chunks must not be audited as transmitted"
+        );
+        config.system_prompt = None;
+        let event = build_egress_event(&config, "USER", &context, "rag-answer");
+        assert_eq!(
+            event.parts.iter().filter(|p| p.role == EgressRole::ContextChunk).count(), 1
+        );
+    }
+
+    #[test]
+    fn build_chat_request_places_system_then_user_verbatim() {
+        let mut config = guarded_llm_test_config();
+        config.system_prompt = Some("SYS".to_string());
+        let req = build_chat_request("USER".to_string(), "CTX".to_string(), config);
+        assert_eq!(req.messages.len(), 2);
+        match &req.messages[0] {
+            liter_llm::Message::System(m) => {
+                assert!(matches!(&m.content, liter_llm::UserContent::Text(t) if t == "SYS"))
+            }
+            other => panic!("first message must be system, got {other:?}"),
+        }
+        match &req.messages[1] {
+            liter_llm::Message::User(m) => {
+                assert!(matches!(&m.content, liter_llm::UserContent::Text(t) if t == "USER"))
+            }
+            other => panic!("second message must be user, got {other:?}"),
+        }
+
+        // Without an override, the default framing injects the context into the system
+        // message — the same string system_content_of hashes for the egress event.
+        let config = guarded_llm_test_config();
+        let req = build_chat_request("USER".to_string(), "CTX".to_string(), config.clone());
+        let system = match &req.messages[0] {
+            liter_llm::Message::System(m) => m.content.clone(),
+            other => panic!("first message must be system, got {other:?}"),
+        };
+        let expected = system_content_of(&config, "CTX");
+        assert!(matches!(&system, liter_llm::UserContent::Text(t) if t == &expected));
+        assert!(expected.contains("CTX"));
     }
 }

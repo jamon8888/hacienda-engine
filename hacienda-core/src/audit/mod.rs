@@ -12,6 +12,7 @@
 // in the first place.
 pub mod chain;
 pub mod cursor;
+pub mod egress;
 pub mod entry;
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,6 +28,7 @@ pub mod store_idb;
 
 pub use chain::{verify_entries, AuditChain, GENESIS_HASH};
 pub use cursor::{AuditCursor, AuditPage};
+pub use egress::{LlmEgressPart, LlmEgressRecord, LlmEgressRole, LLM_EGRESS_CATEGORY};
 pub use entry::{
     compute_chain_hash, AuditEntry, AuditEntryInput, ChainHashFields, EntitySource, RedactionAction,
 };

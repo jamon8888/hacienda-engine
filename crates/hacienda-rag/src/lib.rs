@@ -68,8 +68,8 @@ pub use query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 pub use store::RagStore;
 #[cfg(feature = "streaming")]
 pub use stream::{
-    answer_stream, AnswerEvent, Citation, GuardedLlm, LlmAnswerConfig, Redactor, RetrievedContext,
-    TokenUsage,
+    answer_stream, AnswerEvent, Citation, EgressPart, EgressRole, GuardedLlm, LlmAnswerConfig,
+    LlmEgressAuditor, LlmEgressEvent, Redactor, RetrievedContext, TokenUsage,
 };
 pub use types::{
     ChunkId, ChunkRecord, CollectionSpec, CollectionStats, DistanceMetric, DocumentId,

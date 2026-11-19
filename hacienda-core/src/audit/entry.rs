@@ -80,6 +80,11 @@ pub enum EntitySource {
     Model,
     /// An explicit user action supplied the value rather than a detector finding it.
     Manual,
+    /// The entry records content dispatched to an external LLM provider — the P6 §5
+    /// "content sent to an LLM" egress record (issue #148). Not a detector finding:
+    /// the LLM egress point itself is the source, named honestly rather than filed
+    /// under `Manual` (the gap the P6 spec's §7 "deferred" note called out).
+    LlmEgress,
 }
 
 impl std::fmt::Display for EntitySource {
@@ -88,6 +93,7 @@ impl std::fmt::Display for EntitySource {
             EntitySource::Regex => write!(f, "regex"),
             EntitySource::Model => write!(f, "model"),
             EntitySource::Manual => write!(f, "manual"),
+            EntitySource::LlmEgress => write!(f, "llm_egress"),
         }
     }
 }
@@ -100,6 +106,7 @@ impl std::str::FromStr for EntitySource {
             "regex" => Ok(EntitySource::Regex),
             "model" => Ok(EntitySource::Model),
             "manual" => Ok(EntitySource::Manual),
+            "llm_egress" => Ok(EntitySource::LlmEgress),
             other => Err(format!("unknown entity source '{other}'")),
         }
     }
@@ -597,6 +604,22 @@ mod tests {
             0,
         );
         assert_ne!(with_model.chain_hash, with_different_model.chain_hash);
+    }
+
+    /// The P6 egress source (issue #148) must round-trip through both persistence
+    /// encodings: serde JSON (file store) and the `Display`/`FromStr` string form the
+    /// Postgres store's `source` TEXT column uses.
+    #[test]
+    fn llm_egress_source_round_trips_through_display_from_str_and_json() {
+        let source = EntitySource::LlmEgress;
+        assert_eq!(source.to_string(), "llm_egress");
+        assert_eq!("llm_egress".parse::<EntitySource>(), Ok(source));
+        let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(json, "\"llm_egress\"");
+        let back: EntitySource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, source);
+        // Older, unknown strings still fail to parse rather than collapsing.
+        assert!("something_else".parse::<EntitySource>().is_err());
     }
 
     #[test]

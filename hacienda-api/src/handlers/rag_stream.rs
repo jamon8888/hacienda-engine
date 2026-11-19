@@ -3,13 +3,21 @@
 //! Streams a grounded answer over Server-Sent Events: retrieves chunks from the
 //! configured `RagStore`, then hands the caller's prompt and the retrieved chunks to
 //! `hacienda_rag::GuardedLlm` (`2026-08-13-P6-llm-call-enforcement-point.md`), which
-//! redacts both through `FacadeRedactor` below before ever reaching
+//! redacts both — and the `system_prompt` override too (the É7 leak of wayfinder #131,
+//! issue #148) — through `FacadeRedactor` below before ever reaching
 //! `hacienda_rag::answer_stream` — the function that actually calls the LLM, and which is
 //! deliberately not redaction-aware itself (see its `# Security` doc note in
 //! `crates/hacienda-rag/src/stream.rs`). Before P6, this handler enforced that gate by
 //! calling `redact_text_with_auth` by hand and trusting itself to remember; now the gate is
 //! structural — `GuardedLlm::stream` cannot be called without a `Redactor`, and this is the
 //! only call site in the workspace that constructs one.
+//!
+//! The same call site attaches the deferred P6 §5 egress audit (issue #148) via
+//! `FacadeEgressAuditor`: every dispatch records an `llm_egress` audit entry set (one
+//! summary + one entry per transmitted part, hash + reference only, never content) into
+//! the caller tenant's chain through `HaciendaFacade::record_llm_egress_with_auth`, from
+//! a spawned task so the audit write can neither slow the stream nor be lost when the
+//! stream fails mid-flight.
 //!
 //! # Why SSE errors don't reuse `ApiError`
 //!
@@ -25,6 +33,7 @@
 //! module doc).
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
@@ -32,9 +41,14 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::{Stream, StreamExt};
-use hacienda_core::{auth::Caller, HaciendaError, HaciendaFacade};
+use hacienda_core::auth::{AuthContext, Caller};
+use hacienda_core::{
+    audit::{LlmEgressPart, LlmEgressRecord, LlmEgressRole},
+    HaciendaError, HaciendaFacade,
+};
 use hacienda_rag::{
-    AnswerEvent, GuardedLlm, LlmAnswerConfig, RagError, RagResult, Redactor, RetrievedContext,
+    AnswerEvent, EgressRole, GuardedLlm, LlmAnswerConfig, LlmEgressAuditor, LlmEgressEvent,
+    RagError, RagResult, Redactor, RetrievedContext,
 };
 
 use crate::{
@@ -74,6 +88,72 @@ impl Redactor for FacadeRedactor<'_> {
             .await
             .map_err(|error| RagError::Backend(Box::new(error)))?;
         Ok(result.redacted_text)
+    }
+}
+
+/// Adapts [`HaciendaFacade::record_llm_egress_with_auth`] to
+/// [`hacienda_rag::LlmEgressAuditor`] — the seam the deferred P6 "content sent to an LLM"
+/// audit (issue #148) records through. Same boundary rationale as [`FacadeRedactor`]:
+/// `hacienda-rag` cannot depend on `hacienda-core`, so the adapter lives here, in the one
+/// crate that already depends on both.
+///
+/// The caller identity is owned (`AuthContext` is [`Clone`]) because the auditor is
+/// [`Arc`]-held by `GuardedLlm` and invoked from a spawned task, i.e. it must be
+/// `'static` — while the handler's `Caller<'_>` borrows the request's auth context.
+/// Cloning the context preserves the principal and its tenant: the audit entries name
+/// the same principal the redaction gate authenticated, and the capability check
+/// (`documents:process`) is enforced again inside the facade call, not skipped.
+///
+/// The conversion is hash + reference only: [`LlmEgressEvent`] already carries no raw
+/// content, and the facade persists exactly that — so no redacted span is ever written
+/// to the audit chain in plain text.
+struct FacadeEgressAuditor {
+    facade: Arc<HaciendaFacade>,
+    /// The authenticated principal's context, owned; `None` for an in-process
+    /// (`Caller::Trusted`) call site.
+    auth_ctx: Option<AuthContext>,
+}
+
+impl FacadeEgressAuditor {
+    /// Rebuild the [`Caller`] the facade's `with_auth` seam expects from the owned
+    /// identity this adapter holds.
+    fn caller(&self) -> Caller<'_> {
+        match &self.auth_ctx {
+            Some(ctx) => Caller::Principal(ctx),
+            None => Caller::Trusted,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmEgressAuditor for FacadeEgressAuditor {
+    async fn record_egress(&self, event: LlmEgressEvent) -> RagResult<()> {
+        let record = LlmEgressRecord {
+            purpose: event.purpose,
+            provider_model: event.provider_model,
+            provider_base_url: event.provider_base_url,
+            request_hash: event.request_hash,
+            request_length: event.request_length,
+            parts: event
+                .parts
+                .into_iter()
+                .map(|part| LlmEgressPart {
+                    role: match part.role {
+                        EgressRole::SystemPrompt => LlmEgressRole::SystemPrompt,
+                        EgressRole::Prompt => LlmEgressRole::Prompt,
+                        EgressRole::ContextChunk => LlmEgressRole::ContextChunk,
+                    },
+                    reference: part.reference,
+                    hash: part.hash,
+                    length: part.length,
+                })
+                .collect(),
+        };
+        self.facade
+            .record_llm_egress_with_auth(self.caller(), record)
+            .await
+            .map(|_entries| ())
+            .map_err(|error| RagError::Backend(Box::new(error)))
     }
 }
 
@@ -158,7 +238,18 @@ pub async fn answer(
         facade: &state.facade,
         caller,
     };
-    let stream = GuardedLlm::new(&redactor)
+    // Deferred P6 egress audit (issue #148): every dispatch through `GuardedLlm` records
+    // an `llm_egress` audit event (hash + reference of the redacted payload, provider,
+    // purpose) from a spawned task — off the streaming hot path, and still emitted when
+    // the stream itself later fails.
+    let egress_auditor = Arc::new(FacadeEgressAuditor {
+        facade: Arc::clone(&state.facade),
+        auth_ctx: match caller {
+            Caller::Trusted => None,
+            Caller::Principal(ctx) => Some(ctx.clone()),
+        },
+    });
+    let stream = GuardedLlm::with_auditor(&redactor, egress_auditor)
         .stream(context, body.prompt, config)
         .await
         .map_err(map_guarded_llm_error)?;
@@ -203,4 +294,105 @@ fn to_sse_event(item: RagResult<AnswerEvent>) -> Result<Event, Infallible> {
         }
     };
     Ok(event)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hacienda_core::{pii::PipelineConfig, HaciendaConfig};
+    use hacienda_rag::EgressPart;
+
+    /// A witness value that must never reach the audit chain in plain text —
+    /// deliberately unlike anything else in the codebase (same discipline as
+    /// `handlers/audit.rs`'s control corpus).
+    const WITNESS: &str = "MAGNOLIA-CARTHAGE-4471";
+
+    fn sample_event() -> LlmEgressEvent {
+        LlmEgressEvent {
+            purpose: "rag-answer".to_string(),
+            provider_model: "acme/test-model".to_string(),
+            provider_base_url: Some("https://llm.test.invalid".to_string()),
+            request_hash: "ee".repeat(32),
+            request_length: 512,
+            parts: vec![
+                EgressPart {
+                    role: EgressRole::SystemPrompt,
+                    reference: "system_prompt".to_string(),
+                    hash: "aa".repeat(32),
+                    length: 96,
+                },
+                EgressPart {
+                    role: EgressRole::Prompt,
+                    reference: "prompt".to_string(),
+                    hash: "bb".repeat(32),
+                    length: 64,
+                },
+                EgressPart {
+                    role: EgressRole::ContextChunk,
+                    reference: "chunk:doc-1:c0:0".to_string(),
+                    hash: "cc".repeat(32),
+                    length: 352,
+                },
+            ],
+        }
+    }
+
+    /// The adapter maps the rag event onto the facade seam and the entries land in the
+    /// caller tenant's audit chain: one summary + one per transmitted part, with every
+    /// role's category preserved across the `hacienda-rag`/`hacienda-core` enum
+    /// boundary, `source = llm_egress`, hashes + references only.
+    #[tokio::test]
+    async fn facade_egress_auditor_records_hash_only_entries_in_the_chain() {
+        let config = HaciendaConfig::default().with_pii(PipelineConfig::default());
+        let facade = Arc::new(HaciendaFacade::new(config).expect("facade"));
+        let auditor = FacadeEgressAuditor {
+            facade: Arc::clone(&facade),
+            auth_ctx: None, // in-process (Trusted) call site
+        };
+
+        auditor.record_egress(sample_event()).await.expect("record");
+
+        let entries = facade
+            .audit_entries_with_auth(Caller::Trusted)
+            .await
+            .expect("read entries");
+        assert_eq!(entries.len(), 4, "summary + one entry per transmitted part");
+        assert_eq!(entries[0].category, "llm_egress");
+        assert_eq!(
+            entries[0].source,
+            hacienda_core::audit::EntitySource::LlmEgress
+        );
+        assert_eq!(
+            entries[0].model.as_deref(),
+            Some("acme/test-model @ https://llm.test.invalid")
+        );
+        assert!(entries[1].id.ends_with(":system_prompt"));
+        assert_eq!(entries[1].category, "llm_egress.system_prompt");
+        assert!(entries[2].id.ends_with(":prompt"));
+        assert_eq!(entries[2].category, "llm_egress.prompt");
+        // The entry id is the part's reference (`id = reference`, the same mapping
+        // `LlmEgressRecord::to_entry_inputs` documents and the core-level
+        // `to_entry_inputs_maps_summary_plus_one_entry_per_part` asserts) — never
+        // reference-plus-content: raw span text has no place in the chain, and
+        // `WITNESS` below is the canary that would catch it if it did.
+        assert!(entries[3].id.ends_with(":chunk:doc-1:c0:0"));
+        assert_eq!(entries[3].category, "llm_egress.context_chunk");
+
+        // Hash + reference only: every span hash is a 64-hex blake3 digest, and the
+        // serialized chain carries no raw span text — `WITNESS` stands in for the
+        // content a real dispatch would digest, never store.
+        for entry in &entries {
+            assert_eq!(entry.span_hash.len(), 64, "blake3 hex digest: {entry:?}");
+        }
+        let json = serde_json::to_string(&entries).unwrap();
+        assert!(
+            !json.contains(WITNESS),
+            "audit entries must never carry raw content: {json}"
+        );
+
+        facade
+            .verify_audit()
+            .await
+            .expect("the chain still verifies");
+    }
 }

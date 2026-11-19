@@ -2,7 +2,7 @@
 
 use crate::audit::{
     export as export_chain, AuditChain, AuditCursor, AuditEntry, AuditEntryInput, AuditPage,
-    AuditStore, ExportFormat, InMemoryAuditStore, RedactionAction, SegmentSeal,
+    AuditStore, ExportFormat, InMemoryAuditStore, LlmEgressRecord, RedactionAction, SegmentSeal,
 };
 use crate::auth::{ApiKeyStore, Caller, Capability, CapabilitySet};
 use crate::compliance::{ComplianceGenerator, ComplianceReport};
@@ -816,6 +816,53 @@ impl HaciendaFacade {
             Some(store) => Ok(store.verify(&tenant).await?),
             None => Ok(()),
         }
+    }
+
+    /// Record that redacted content was dispatched to an external LLM provider — the
+    /// deferred P6 §5 "content sent to an LLM" audit (issue #148).
+    ///
+    /// Mints one summary entry (blake3 of the full outgoing request payload) plus one
+    /// entry per transmitted part (hash + reference) from `record`, and appends them in
+    /// a **single** [`AuditStore::append`] batch into the caller tenant's chain — the
+    /// same D3 one-append-per-event invariant `record_audit_entries` keeps. Raw content
+    /// is never recorded; the record carries hashes and references only. Both existing
+    /// backends (`FileAuditStore`, `PostgresAuditStore`) persist these entries through
+    /// the unchanged `AuditEntryInput` schema (`source = llm_egress`).
+    ///
+    /// Intended to be called off the request's hot path (the caller spawns it), so a
+    /// slow or failing audit store never blocks the operation being audited; an audit
+    /// failure is still returned as an error, not swallowed.
+    ///
+    /// Requires `Capability::DocumentsProcess` — the same capability the redaction gate
+    /// (`redact_text_with_auth`) requires, since an egress record without a redaction
+    /// gate in front of it would be the É7 leak all over again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HaciendaError::Authz`] without `DocumentsProcess`, or
+    /// [`HaciendaError::Audit`] if the store rejects the batch.
+    pub async fn record_llm_egress_with_auth(
+        &self,
+        caller: Caller<'_>,
+        record: LlmEgressRecord,
+    ) -> Result<Vec<AuditEntry>, HaciendaError> {
+        caller.require(Capability::DocumentsProcess)?;
+
+        let Some(store) = &self.audit_store else {
+            return Ok(Vec::new());
+        };
+
+        let tenant = caller.tenant_ctx().tenant;
+        let principal = caller.principal_id().map(str::to_owned);
+        // Best-effort, same reasoning as `record_audit_entries`: the tenant's pipeline
+        // is normally already built and cached by the caller that produced the record.
+        let vertical = self
+            .pii_pipeline_for(&tenant)
+            .ok()
+            .and_then(|p| p.vertical_provenance_id());
+        let inputs = record.to_entry_inputs(principal, PIPELINE_VERSION, vertical);
+
+        Ok(store.append(&tenant, inputs).await?)
     }
 
     /// Shut down every store the facade holds: seal the audit segment and release the

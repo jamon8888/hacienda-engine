@@ -26,7 +26,10 @@ embeddings = ["xberg/embeddings"]
 # retrieval don't pull in `liter-llm`/`futures`. Does NOT enable xberg's own
 # `liter-llm` feature — see the `liter-llm` dependency's doc comment in the workspace
 # root `Cargo.toml` for why that would be the wrong lever here.
-streaming = ["dep:liter-llm", "dep:futures"]
+# `blake3` digests the redacted payload handed to the LLM transport for the deferred
+# P6 egress audit (issue #148); `tokio` (rt only) spawns that audit off the streaming
+# hot path.
+streaming = ["dep:liter-llm", "dep:futures", "dep:blake3", "dep:tokio"]
 # Embedded LanceDB backend.  The adapter is deliberately opt-in because the
 # Lance/Arrow dependency tree is substantial and is not needed by callers that
 # use the in-memory or Postgres stores.
@@ -58,6 +61,10 @@ chrono = { workspace = true, optional = true }
 # Streaming answer synthesis (Phase 12 Track 3). Gated behind the `streaming` feature.
 liter-llm = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+# blake3 digests the redacted payload handed to the LLM transport, for the deferred
+# P6 "content sent to an LLM" audit (issue #148) — the audit stores hash + reference,
+# never raw content. Gated behind `streaming` with the rest of `stream.rs`.
+blake3 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt"] }
 # 0.37 is selected because upstream xberg requires half 2.7.x; older LanceDB
 # releases pin half 2.4.x and cannot resolve beside it.
@@ -68,7 +75,9 @@ arrow-array = { version = "58.0.0", optional = true }
 arrow-schema = { version = "58.0.0", optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+# "time" backs `tokio::time::timeout` in the egress-audit non-blocking regression test
+# (stream.rs, issue #148).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 # Proof, in the live-Postgres test suite, that this crate's 0100+ migrations
 # and hacienda-core's own 0001-0099 migrations can run against one shared
 # database without a `_sqlx_migrations` version collision (see
