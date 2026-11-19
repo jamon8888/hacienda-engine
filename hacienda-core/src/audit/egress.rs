@@ -222,8 +222,12 @@ mod tests {
         let first = record.to_entry_inputs(Some("avocat-7".to_string()), "0.1.0", None);
         let second = record.to_entry_inputs(Some("avocat-7".to_string()), "0.1.0", None);
         let ids_first: std::collections::HashSet<_> = first.iter().map(|i| i.id.as_str()).collect();
-        let ids_second: std::collections::HashSet<_> = second.iter().map(|i| i.id.as_str()).collect();
-        assert!(ids_first.is_disjoint(&ids_second), "two dispatches reused audit entry IDs");
+        let ids_second: std::collections::HashSet<_> =
+            second.iter().map(|i| i.id.as_str()).collect();
+        assert!(
+            ids_first.is_disjoint(&ids_second),
+            "two dispatches reused audit entry IDs"
+        );
         assert_eq!(ids_first.len(), first.len());
         assert_eq!(ids_second.len(), second.len());
     }
