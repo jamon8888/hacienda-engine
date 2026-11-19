@@ -1335,18 +1335,28 @@ mod tests {
             chunk_metadata: serde_json::Value::Null,
             document: None,
         };
-        let context = RetrievedContext { chunks: vec![chunk] };
+        let context = RetrievedContext {
+            chunks: vec![chunk],
+        };
         let mut config = guarded_llm_test_config();
         config.system_prompt = Some("SYS".to_string());
         let event = build_egress_event(&config, "USER", &context, "rag-answer");
         assert!(
-            !event.parts.iter().any(|p| p.role == EgressRole::ContextChunk),
+            !event
+                .parts
+                .iter()
+                .any(|p| p.role == EgressRole::ContextChunk),
             "undelivered chunks must not be audited as transmitted"
         );
         config.system_prompt = None;
         let event = build_egress_event(&config, "USER", &context, "rag-answer");
         assert_eq!(
-            event.parts.iter().filter(|p| p.role == EgressRole::ContextChunk).count(), 1
+            event
+                .parts
+                .iter()
+                .filter(|p| p.role == EgressRole::ContextChunk)
+                .count(),
+            1
         );
     }
 
