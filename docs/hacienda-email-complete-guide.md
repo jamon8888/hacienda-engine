@@ -468,6 +468,113 @@ L'inventaire des outils est vérifié par le test anti-dérive
 `registers_exactly_the_documented_tools`, qui inclut `"email_redact"` dans la liste
 attendue (14 outils au total sur cette branche).
 
+### 6.4 Configuration du serveur MCP dans Claude Desktop
+
+Le serveur MCP de hacienda utilise **exclusivement le transport stdio** (M1a) : il ne
+monte pas de port HTTP/SSE. C'est le client (Claude Desktop) qui le lance comme processus
+enfant et qui lui parle via stdin/stdout. La commande est :
+
+```bash
+hacienda mcp serve
+```
+
+Elle accepte les options globales de la CLI :
+
+- `--config <PATH>` : chemin vers un `hacienda.toml` (sinon découverte automatique) ;
+- `--config-json <JSON>` : configuration inline, prioritaire sur `--config`.
+
+> **Frontière de confiance.** Le serveur appelle la facade avec `Caller::Trusted` : un
+> agent n'est pas un réviseur humain. C'est pourquoi l'inventaire MCP exclut
+> volontairement l'outil de révélation `pii_reveal` — la révélation d'un jeton reste dans
+> le viewer Tauri authentifié et audité. Le serveur tourne jusqu'à la déconnexion du
+> client ; il n'existe pas encore d'arrêt propre du facade store (le processus s'appuie
+> sur le teardown du système d'exploitation).
+
+#### Fichier de configuration Claude Desktop
+
+Éditez `claude_desktop_config.json` :
+
+| Système | Emplacement |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+Exemple minimal :
+
+```json
+{
+  "mcpServers": {
+    "hacienda": {
+      "command": "/Users/moi/.cargo/bin/hacienda",
+      "args": ["mcp", "serve", "--config", "/Users/moi/.config/hacienda/hacienda.toml"]
+    }
+  }
+}
+```
+
+Avec des secrets d'environnement (utile si la configuration du facade en a besoin ;
+l'outil email n'en réclame pas, voir ci-dessous) :
+
+```json
+{
+  "mcpServers": {
+    "hacienda": {
+      "command": "/Users/moi/.cargo/bin/hacienda",
+      "args": ["mcp", "serve", "--config", "/Users/moi/.config/hacienda/hacienda.toml"],
+      "env": {
+        "HACIENDA_EMAIL_WORK_ACCESS_TOKEN": "ya29.…",
+        "HACIENDA_EMAIL_WORK_PASSWORD": "…"
+      }
+    }
+  }
+}
+```
+
+Points importants :
+
+- utilisez un **chemin absolu** vers le binaire `hacienda` : Claude Desktop ne compte
+  pas sur le `PATH` du shell interactif ;
+- `mcp` puis `serve` sont deux niveaux de sous-commandes distincts (`hacienda mcp serve`) ;
+- `--config` est un argument **global** de la CLI : il peut aussi être placé avant
+  `mcp serve` ;
+- après modification du fichier, **redémarrez Claude Desktop** pour que le serveur soit
+  relancé ; les 14 outils, dont `email_redact`, doivent alors apparaître dans la liste des
+  outils.
+
+#### Appel de l'outil depuis Claude Desktop
+
+`email_redact` ne prend que deux paramètres, définis dans
+`hacienda-mcp/src/params.rs` (`EmailRedactParams`) :
+
+```json
+{ "source": "/Users/moi/Mail/INBOX", "output": "/Users/moi/Mail/redacted" }
+```
+
+Une formulation naturelle suffit, par exemple : *« Redact the PII in the Maildir at
+`/Users/moi/Mail/INBOX` and write the result to `/Users/moi/Mail/redacted` »*. Le serveur
+construit alors un `EmailConfig` avec `EmailBackend::Maildir { path: params.source }`,
+le compte `"mcp"` et les valeurs par défaut (mode `redact`, règles standards), puis
+exécute `EmailOperation::Redact` sur les corps **et les en-têtes**.
+
+**Limite à connaître :** l'outil MCP email est **câblé en dur sur Maildir local**. Il ne
+lit ni le fichier `email.toml` décrit au § 4, ni les variables `HACIENDA_EMAIL_*`, et ne
+sait donc pas se connecter à IMAP ni utiliser XOAUTH2. Pour une boîte distante (Gmail,
+Outlook), passez par la CLI `hacienda email --email-config …` ou par
+`POST /v1/email/process` (§ 6.2) ; un futur outil MCP « process » générique comblerait
+ce gap.
+
+#### Dépannage
+
+- Le serveur ne démarre pas : lancez `hacienda mcp serve` dans un terminal — il doit
+  rester en attente sur stdin sans afficher d'erreur ;
+- `email_redact` renvoie `email processor: …` : vérifiez que `source` est un **chemin
+  Maildir valide** et que le répertoire `output` est accessible en écriture ;
+- aucun outil n'apparaît dans Claude Desktop : vérifiez le chemin absolu du binaire, la
+  syntaxe JSON du fichier et le redémarrage de l'application ;
+- les logs du serveur vont sur stderr ; avec stdio, **n'écrivez rien sur stdout** (le
+  protocole JSON-RPC l'utilise).
+
 ---
 
 ## 7. Vérification et tests
