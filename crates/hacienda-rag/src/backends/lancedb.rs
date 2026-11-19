@@ -618,6 +618,111 @@ impl RagStore for LanceDbStore {
         Ok(id)
     }
 
+    async fn upsert_documents(
+        &self,
+        collection: &str,
+        items: &[(DocumentRecord, Vec<ChunkRecord>)],
+    ) -> RagResult<Vec<DocumentId>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _write = self.write_lock.lock().await;
+        let spec = self.require_spec(collection).await?;
+        for (_, chunks) in items {
+            for chunk in chunks {
+                validate_chunk_side_vectors(chunk)?;
+                if chunk.embedding.len() as u32 != spec.embedding_dim {
+                    return Err(RagError::EmbeddingDimMismatch {
+                        expected: spec.embedding_dim,
+                        got: chunk.embedding.len() as u32,
+                    });
+                }
+            }
+        }
+        let (docs, chunk_table) = self.collection_tables(collection).await?;
+        let ingested_at = now_secs();
+
+        // Compute all ids deterministically (no full-table scan) and scope
+        // every chunk from its parent document, exactly like the single path.
+        let mut ids = Vec::with_capacity(items.len());
+        let mut rows: Vec<StoredChunk> = Vec::new();
+        for (document, chunks) in items {
+            let id = document.external_id.as_ref().map_or_else(
+                || DocumentId(format!("doc-{}", Uuid::new_v4())),
+                |external| {
+                    let mut key = collection.as_bytes().to_vec();
+                    key.push(0);
+                    key.extend_from_slice(external.as_bytes());
+                    DocumentId(format!(
+                        "doc-ext-{}",
+                        Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
+                    ))
+                },
+            );
+            for record in chunks {
+                let mut scoped = record.clone();
+                if scoped.dossier_id.is_none() {
+                    scoped.dossier_id = document.dossier_id.clone();
+                }
+                if scoped.version_ref.is_none() {
+                    scoped.version_ref = document.version_ref.clone();
+                }
+                rows.push(StoredChunk {
+                    id: ChunkId(format!("{}:{}", id.0, scoped.ordinal)),
+                    document_id: id.clone(),
+                    record: scoped,
+                });
+            }
+            ids.push(id);
+        }
+
+        // One merge_insert for all documents, one for all chunks, one FTS
+        // check per batch instead of one transaction per message.
+        let doc_batch = document_batch_many(items, &ids, ingested_at)?;
+        let mut doc_merge = docs.merge_insert(&["doc_id"]);
+        doc_merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        doc_merge
+            .execute(Box::new(one_batch(doc_batch, document_schema())))
+            .await
+            .map(|_| ())
+            .map_err(backend_err)?;
+
+        let old_chunks = format!(
+            "doc_id IN ({})",
+            ids.iter()
+                .map(|id| format!("'{}'", sql_quote(&id.0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if rows.is_empty() {
+            // No new chunks: remove any previous chunks of these documents.
+            chunk_table
+                .delete(&old_chunks)
+                .await
+                .map(|_| ())
+                .map_err(backend_err)?;
+        } else {
+            let chunk_rows = chunk_batch(&rows, spec.embedding_dim)?;
+            let mut chunk_merge = chunk_table.merge_insert(&["chunk_id"]);
+            chunk_merge
+                .when_matched_update_all(None)
+                .when_not_matched_insert_all()
+                .when_not_matched_by_source_delete(Some(old_chunks));
+            chunk_merge
+                .execute(Box::new(one_batch(
+                    chunk_rows,
+                    chunk_schema(spec.embedding_dim),
+                )))
+                .await
+                .map(|_| ())
+                .map_err(backend_err)?;
+        }
+        self.ensure_fts_index(&chunk_table, false).await?;
+        Ok(ids)
+    }
+
     async fn delete_documents(&self, collection: &str, ids: &[DocumentId]) -> RagResult<u64> {
         let _write = self.write_lock.lock().await;
         self.require_spec(collection).await?;
@@ -1119,6 +1224,93 @@ fn document_batch(
     )
     .map_err(backend_err)
 }
+
+/// Build one Arrow batch with a row per (document, id) pair, for batched upserts.
+fn document_batch_many(
+    items: &[(DocumentRecord, Vec<ChunkRecord>)],
+    ids: &[DocumentId],
+    ingested_at: i64,
+) -> RagResult<RecordBatch> {
+    RecordBatch::try_new(
+        document_schema(),
+        vec![
+            Arc::new(StringArray::from(
+                ids.iter().map(|id| id.0.as_str()).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.external_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.title.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.mime.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.source_uri.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.full_text.as_str())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| {
+                        json_string(&serde_json::to_value(&doc.keywords).unwrap_or_default())
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| json_string(&doc.entities))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| json_string(&doc.labels))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| json_string(&doc.metadata))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(vec![ingested_at; items.len()])),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.dossier_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.version_ref.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .map_err(backend_err)
+}
+
 fn chunk_batch(rows: &[StoredChunk], dim: u32) -> RagResult<RecordBatch> {
     let values = rows
         .iter()
@@ -1554,6 +1746,63 @@ mod tests {
         let stats = store.collection_stats("emails").await.unwrap();
         assert_eq!(stats.documents, 50);
         assert_eq!(stats.chunks, 50);
+    }
+
+    #[tokio::test]
+    async fn batch_upsert_is_idempotent_and_replaces_chunks() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("batch", 2))
+            .await
+            .unwrap();
+
+        let items: Vec<(DocumentRecord, Vec<ChunkRecord>)> = (0..20)
+            .map(|i| {
+                (
+                    DocumentRecord {
+                        external_id: Some(format!("email:batch:uid-{i}")),
+                        full_text: format!("body {i}"),
+                        dossier_id: Some("dossier-1".into()),
+                        ..Default::default()
+                    },
+                    vec![chunk(&format!("c{i}"), 0, vec![1.0, 0.0])],
+                )
+            })
+            .collect();
+        let ids = store.upsert_documents("batch", &items).await.unwrap();
+        assert_eq!(ids.len(), 20);
+        let stats = store.collection_stats("batch").await.unwrap();
+        assert_eq!(stats.documents, 20);
+        assert_eq!(stats.chunks, 20);
+
+        // Re-upsert the batch: identical ids, no duplicate documents; give the
+        // first document two chunks so its old chunk must be replaced.
+        let mut updated = items.clone();
+        updated[0].0.full_text = "body 0 v2".into();
+        updated[0].1 = vec![
+            chunk("c0-new", 0, vec![0.0, 1.0]),
+            chunk("c0-extra", 1, vec![1.0, 0.0]),
+        ];
+        assert_eq!(
+            store.upsert_documents("batch", &updated).await.unwrap(),
+            ids
+        );
+        let stats = store.collection_stats("batch").await.unwrap();
+        assert_eq!(stats.documents, 20);
+        assert_eq!(stats.chunks, 21);
+
+        // Dossier scoping survived the batched merge (parent -> chunks).
+        let (_, stored) = store
+            .get_document_chunks("batch", &ids[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored
+            .iter()
+            .all(|c| c.dossier_id.as_deref() == Some("dossier-1")));
     }
 
     #[tokio::test]

@@ -461,6 +461,13 @@ regroupées dans le nouveau `RagStore::optimize()` (no-op par défaut, implémen
 `LanceDbStore` via `table.optimize(OptimizeAction::All)`). À appeler **une fois par lot**,
 pas par document.
 
+`RagStore::upsert_documents` permet d'écrire tout un lot en une seule passe :
+`LanceDbStore` n'ouvre les tables qu'une fois, construit un seul `RecordBatch`
+pour les documents et un seul pour les chunks, et exécute un `merge_insert` par
+table au lieu d'un par message. Les backends sans support spécifique gardent le
+comportement par défaut (boucle sur `upsert_document`). L'idempotence et le
+`dossier_id` sont préservés — utiliser cette API pour l'ingestion email par pages.
+
 `Archive` / `Redact` écrivent toujours des fichiers `.eml` locaux
 (`archive.rs::save_message` : seul `text_body`, pas l'RFC 5322 brute, pas une
 vraie structure Maildir `cur/new/tmp`) : ce sont deux chemins distincts,

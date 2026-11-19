@@ -100,6 +100,25 @@ pub trait RagStore: Send + Sync + 'static {
         chunks: &[ChunkRecord],
     ) -> RagResult<DocumentId>;
 
+    /// Upsert several documents (with their chunks) as one batch.
+    ///
+    /// Bulk ingestion should prefer this over repeated `upsert_document` calls:
+    /// batch-aware backends open the tables and run `merge_insert` once for the
+    /// whole batch instead of once per document. The default implementation
+    /// loops over the single-document path for backends without batching.
+    /// Returns ids in the same order as `items`.
+    async fn upsert_documents(
+        &self,
+        collection: &str,
+        items: &[(DocumentRecord, Vec<ChunkRecord>)],
+    ) -> RagResult<Vec<DocumentId>> {
+        let mut ids = Vec::with_capacity(items.len());
+        for (document, chunks) in items {
+            ids.push(self.upsert_document(collection, document, chunks).await?);
+        }
+        Ok(ids)
+    }
+
     /// Delete documents (and their chunks) by id. Returns the number removed.
     ///
     /// # Errors
