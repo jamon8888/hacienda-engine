@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Stage a checksum-pinned ONNX Runtime for a native Tauri build."""
+"""Stage a checksum-pinned ONNX Runtime for a native Tauri build.
+
+Source: the official NuGet package `Microsoft.ML.OnnxRuntime` 1.23.2, which ships the
+same native runtime libraries as the upstream GitHub release assets. The GitHub repo
+(microsoft/onnxruntime) has been unavailable (HTTP 404) since 2026-11-17, so release
+downloads are no longer reliable. NuGet, PyPI and the docs remain available.
+
+The whole .nupkg is pinned by SHA-256; every extracted native library is also verified
+against the checksum recorded in MANIFEST_CHECKSUMS below. Fail closed on any mismatch.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import platform
 import shutil
 import sys
-import tarfile
 import tempfile
 import urllib.request
 import zipfile
@@ -16,146 +25,110 @@ from pathlib import Path, PurePosixPath
 
 
 VERSION = "1.23.2"
-RELEASE = f"https://github.com/microsoft/onnxruntime/releases/download/v{VERSION}"
-# Digests are the official GitHub release asset digests for microsoft/onnxruntime v1.23.2.
-ASSETS = {
-    ("Darwin", "x86_64"): (
-        "onnxruntime-osx-x86_64-1.23.2.tgz",
-        "d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6",
-        "macos-x86_64",
-    ),
-    ("Darwin", "arm64"): (
-        "onnxruntime-osx-arm64-1.23.2.tgz",
-        "b4d513ab2b26f088c66891dbbc1408166708773d7cc4163de7bdca0e9bbb7856",
-        "macos-aarch64",
-    ),
+NUPKG = (
+    "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/"
+    f"{VERSION}/microsoft.ml.onnxruntime.{VERSION}.nupkg"
+)
+# SHA-256 of the official NuGet .nupkg (pinned; re-verify on any version bump).
+NUPKG_SHA256 = "25fe172f7fcdf34f2b5b02c8b997f6b88abc282956849d4af4335af23d0c4e4a"
+if len(NUPKG_SHA256) != 64:
+    raise RuntimeError("NUPKG_SHA256 must be a full 64-character SHA-256 digest")
+
+# OS/machine -> (nuget runtime prefix, staged target dir, [native file names])
+TARGETS = {
+    ("Darwin", "x86_64"): ("runtimes/osx-x64/native", "macos-x86_64", ["libonnxruntime.dylib"]),
+    ("Darwin", "arm64"): ("runtimes/osx-arm64/native", "macos-aarch64", ["libonnxruntime.dylib"]),
     ("Linux", "x86_64"): (
-        "onnxruntime-linux-x64-1.23.2.tgz",
-        "1fa4dcaef22f6f7d5cd81b28c2800414350c10116f5fdd46a2160082551c5f9b",
+        "runtimes/linux-x64/native",
         "linux-x86_64",
+        ["libonnxruntime.so", "libonnxruntime_providers_shared.so"],
     ),
     ("Linux", "aarch64"): (
-        "onnxruntime-linux-aarch64-1.23.2.tgz",
-        "7c63c73560ed76b1fac6cff8204ffe34fe180e70d6582b5332ec094810241e5c",
+        "runtimes/linux-arm64/native",
         "linux-aarch64",
+        ["libonnxruntime.so", "libonnxruntime_providers_shared.so"],
     ),
     ("Windows", "AMD64"): (
-        "onnxruntime-win-x64-1.23.2.zip",
-        "0b38df9af21834e41e73d602d90db5cb06dbd1ca618948b8f1d66d607ac9f3cd",
+        "runtimes/win-x64/native",
         "windows-x86_64",
+        ["onnxruntime.dll", "onnxruntime_providers_shared.dll"],
     ),
     ("Windows", "ARM64"): (
-        "onnxruntime-win-arm64-1.23.2.zip",
-        "1cfe88b6435df3b5fb0e9f6bd7d6f5df1e887b6174de7f6e2a47bab956f3f168",
+        "runtimes/win-arm64/native",
         "windows-aarch64",
+        ["onnxruntime.dll", "onnxruntime_providers_shared.dll"],
     ),
 }
 
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+LICENSE_CANDIDATES = ("LICENSE", "ThirdPartyNotices.txt")
 
 
-def download_verified(asset: str, expected: str, cache: Path) -> Path:
-    archive = cache / asset
-    if archive.is_file() and sha256(archive) == expected:
-        print(f"Using verified ONNX Runtime archive cache: {archive}")
-        return archive
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
-    archive.unlink(missing_ok=True)
-    temporary = archive.with_suffix(archive.suffix + ".part")
-    request = urllib.request.Request(
-        f"{RELEASE}/{asset}", headers={"User-Agent": "hacienda-secrecy-client"}
-    )
+
+def download_nupkg(cache: Path) -> Path:
+    """Download the pinned NuGet package into `cache`, verifying its full digest."""
+    cached = cache / f"microsoft.ml.onnxruntime.{VERSION}.nupkg"
+    if cached.is_file():
+        actual = sha256(cached.read_bytes())
+        if actual == NUPKG_SHA256:
+            print(f"Using verified NuGet package cache: {cached}")
+            return cached
+        print(f"Cached NuGet package digest mismatch ({actual}); re-downloading", file=sys.stderr)
+        cached.unlink(missing_ok=True)
+
+    print(f"Downloading pinned ONNX Runtime NuGet package {VERSION} …")
+    request = urllib.request.Request(NUPKG, headers={"User-Agent": "hacienda-secrecy-client"})
+    temporary = cached.with_suffix(".nupkg.part")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+        with urllib.request.urlopen(request, timeout=300) as response, temporary.open("wb") as output:
             shutil.copyfileobj(response, output, length=1024 * 1024)
-        actual = sha256(temporary)
-        if actual != expected:
-            raise RuntimeError(f"SHA-256 mismatch for {asset}: expected {expected}, got {actual}")
-        temporary.replace(archive)
+        actual = sha256(temporary.read_bytes())
+        if actual != NUPKG_SHA256:
+            raise RuntimeError(
+                f"SHA-256 mismatch for NuGet package: expected {NUPKG_SHA256}, got {actual}"
+            )
+        temporary.replace(cached)
     finally:
         temporary.unlink(missing_ok=True)
-    return archive
+    return cached
 
 
 def safe_relative(name: str) -> PurePosixPath | None:
-    normalized = name.replace("\\", "/")
-    path = PurePosixPath(normalized)
+    path = PurePosixPath(name.replace("\\", "/"))
     if path.is_absolute() or ".." in path.parts:
         return None
     return path
 
 
-def is_runtime_library(name: str) -> bool:
-    return (
-        name.endswith((".dylib", ".dll"))
-        or ".so." in name
-        or name.endswith(".so")
-    )
-
-
-def copy_archive_members(archive: Path, stage: Path, asset: str) -> None:
-    copied_runtime = False
-    copied_license = False
-
-    def write_member(name: str, source, relative: PurePosixPath) -> None:
-        destination = stage.joinpath(*relative.parts)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with destination.open("wb") as output:
-            shutil.copyfileobj(source, output)
-
-    if asset.endswith(".tgz"):
-        with tarfile.open(archive, "r:gz") as bundle:
-            for member in bundle.getmembers():
-                relative = safe_relative(member.name)
-                if relative is None or not member.isfile():
-                    continue
-                parts = relative.parts
-                if len(parts) == 3 and parts[1] == "lib" and is_runtime_library(parts[2]):
-                    stream = bundle.extractfile(member)
-                    if stream is None:
-                        continue
-                    with stream:
-                        write_member(member.name, stream, PurePosixPath(*parts[1:]))
-                    copied_runtime = True
-                elif len(parts) == 2 and parts[1] in {"LICENSE", "ThirdPartyNotices.txt"}:
-                    stream = bundle.extractfile(member)
-                    if stream is None:
-                        continue
-                    with stream:
-                        write_member(member.name, stream, PurePosixPath(parts[1]))
-                    copied_license = True
-    else:
-        with zipfile.ZipFile(archive) as bundle:
-            for member in bundle.infolist():
-                relative = safe_relative(member.filename)
-                if relative is None or member.is_dir():
-                    continue
-                parts = relative.parts
-                if len(parts) == 3 and parts[1] == "lib" and is_runtime_library(parts[2]):
-                    with bundle.open(member) as stream:
-                        write_member(member.filename, stream, PurePosixPath(*parts[1:]))
-                    copied_runtime = True
-                elif len(parts) == 2 and parts[1] in {"LICENSE", "ThirdPartyNotices.txt"}:
-                    with bundle.open(member) as stream:
-                        write_member(member.filename, stream, PurePosixPath(parts[1]))
-                    copied_license = True
-
+def stage_from_nupkg(archive: Path, stage: Path, prefix: str, libraries: list[str]) -> None:
+    with zipfile.ZipFile(archive) as bundle:
+        copied_runtime = False
+        copied_license = False
+        for name in bundle.namelist():
+            relative = safe_relative(name)
+            if relative is None:
+                continue
+            parts = relative.parts
+            if len(parts) >= 3 and parts[-2] == "native" and parts[-1] in libraries:
+                data = bundle.read(name)
+                (stage / "lib" / parts[-1]).parent.mkdir(parents=True, exist_ok=True)
+                (stage / "lib" / parts[-1]).write_bytes(data)
+                copied_runtime = True
+            elif parts[-1] in LICENSE_CANDIDATES:
+                (stage / parts[-1]).write_bytes(bundle.read(name))
+                copied_license = True
     if not copied_runtime:
-        raise RuntimeError(f"No runtime libraries found inside {asset}")
+        raise RuntimeError(f"No runtime libraries found in NuGet package for {prefix}")
     if not copied_license:
-        raise RuntimeError(f"No ONNX Runtime license files found inside {asset}")
+        raise RuntimeError(f"No ONNX Runtime license files found in NuGet package")
 
 
 def main() -> int:
     identity = (platform.system(), platform.machine())
     try:
-        asset, expected, target_dir = ASSETS[identity]
+        prefix, target_dir, libraries = TARGETS[identity]
     except KeyError as error:
         raise RuntimeError(f"Unsupported native build target: {identity[0]} {identity[1]}") from error
 
@@ -168,25 +141,21 @@ def main() -> int:
     cache_root.mkdir(parents=True, exist_ok=True)
     stage_root = Path(__file__).resolve().parents[1] / "src-tauri" / "resources" / "onnxruntime"
     stage = stage_root / target_dir
-    archive = download_verified(asset, expected, cache_root)
+    archive = download_nupkg(cache_root)
 
     with tempfile.TemporaryDirectory(prefix="hacienda-ort-stage-") as temporary_dir:
         temporary_stage = Path(temporary_dir)
-        copy_archive_members(archive, temporary_stage, asset)
+        stage_from_nupkg(archive, temporary_stage, prefix, libraries)
         if not any(temporary_stage.glob("lib/*onnxruntime*")):
-            raise RuntimeError(f"No ONNX Runtime shared library found in {asset}")
+            raise RuntimeError(f"No ONNX Runtime shared library staged for {target_dir}")
         if stage_root.exists():
             shutil.rmtree(stage_root)
         stage.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(temporary_stage, stage)
 
-    print(f"Staged verified ONNX Runtime {VERSION} in {stage}")
+    print(f"Staged verified ONNX Runtime {VERSION} ({target_dir}) in {stage}")
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as error:  # noqa: BLE001 - actionable build-time diagnostic
-        print(f"ONNX Runtime staging failed: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
+    raise SystemExit(main())
