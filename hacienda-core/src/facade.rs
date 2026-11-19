@@ -20,8 +20,8 @@ use crate::redaction::{
 };
 use crate::reveal_ticket::{
     is_high_sensitivity_scope, new_ticket_id, ticket_window, token_header, DocumentDossierIndex,
-    DossierAcl, InMemoryDocumentDossierIndex, RevealTicket, RevealTicketError, RevealTicketRequest,
-    RevealTicketStatus, RevealTicketStore,
+    DossierAcl, RevealTicket, RevealTicketError, RevealTicketRequest, RevealTicketStatus,
+    RevealTicketStore,
 };
 use crate::review::store::ReviewStore;
 use crate::review::{ReviewConfig, ReviewQueue, ReviewRequest};
@@ -2561,6 +2561,7 @@ fn key_error(error: crate::redaction::PseudonymError) -> HaciendaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reveal_ticket::InMemoryDocumentDossierIndex;
     use crate::audit::store::AuditStore;
     use crate::audit::{AuditEntry, AuditEntryInput, AuditError, FileAuditStore, NodeId};
     use crate::auth::authn::TokenResolver as _;

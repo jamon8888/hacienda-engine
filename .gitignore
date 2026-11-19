@@ -148,5 +148,7 @@ CLAUDE.md
 apps/hacienda-secrecy-client/src-tauri/resources/onnxruntime/
 
 # Per-worktree private Cargo target dirs (CodeRabbit fixes)
+target-i6/
 target-i7/
 target-cr157/
+target-cr160/

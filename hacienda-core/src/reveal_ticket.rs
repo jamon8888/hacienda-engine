@@ -478,7 +478,9 @@ impl RevealTicketStore {
                         .map(|expires| (expires.with_timezone(&Utc), key.clone()))
                 })
                 .collect();
-            dead.sort();
+            // Sort by expiry only: `TenantId` does not implement `Ord`, and the key's
+            // tuple would otherwise require it. Ties are harmless for a bounded purge.
+            dead.sort_by_key(|(expires, _)| *expires);
             for (_, key) in dead.into_iter().take(tickets.len() - MAX_RETAINED_TICKETS) {
                 tickets.remove(&key);
             }
