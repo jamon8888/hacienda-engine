@@ -751,7 +751,10 @@ mod tests {
 
     #[test]
     fn high_sensitivity_scope_recognises_tokens_and_field_scope() {
-        assert!(is_high_sensitivity_scope(&["[EMAIL:k1:AAAA]".to_owned()], &[]) == false);
+        assert!(!is_high_sensitivity_scope(
+            &["[EMAIL:k1:AAAA]".to_owned()],
+            &[]
+        ));
         assert!(is_high_sensitivity_scope(
             &["[SSN:k1:AAAA]".to_owned()],
             &[]
