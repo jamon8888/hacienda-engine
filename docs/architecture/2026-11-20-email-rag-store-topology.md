@@ -14,7 +14,7 @@ récurrentes (« il faut un LanceDB séparé pour les emails »).
 est **logique** (tenant + dossier + type de collection), pas **physique** (un seul
 fichier LanceDB / une seule base Postgres).
 
-```
+```text
 ApiState.rag_store: Option<Arc<dyn RagStore>>
         │
         ├── /v1/documents/*  → collection "<tenant>:<name>"     (documents)
