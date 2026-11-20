@@ -220,6 +220,10 @@ impl LanceDbStore {
         let chunks = self
             .open_table(&Self::table_name(collection, "chunks"))
             .await?;
+        // Every read/upsert path goes through here: migrate legacy tables in
+        // place so readers never hit a missing tenant_id/acl column.
+        migrate_scoping_columns(&docs).await?;
+        migrate_scoping_columns(&chunks).await?;
         Ok((docs, chunks))
     }
 
@@ -404,6 +408,8 @@ impl LanceDbStore {
                         metadata: json_value_at(&batch, "metadata", row)?,
                         dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
                         version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
+                        tenant_id: empty_as_none(string_at(&batch, "tenant_id", row)?),
+                        acl: json_value_at(&batch, "acl", row)?,
                     },
                     ingested_at: int_at(&batch, "ingested_at", row)?,
                 });
@@ -437,6 +443,8 @@ impl LanceDbStore {
                         chunk_metadata: json_value_at(&batch, "chunk_metadata", row)?,
                         dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
                         version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
+                        tenant_id: empty_as_none(string_at(&batch, "tenant_id", row)?),
+                        acl: json_value_at(&batch, "acl", row)?,
                     },
                 });
             }
@@ -611,6 +619,9 @@ impl RagStore for LanceDbStore {
         // mismatched schema rather than publishing unusable collection metadata.
         let docs = self.open_table(&docs_name).await?;
         let chunks = self.open_table(&chunks_name).await?;
+        // Migrate pre-scoping tables so the schema check below sees the new columns.
+        migrate_scoping_columns(&docs).await?;
+        migrate_scoping_columns(&chunks).await?;
         if docs.schema().await.map_err(backend_err)?.as_ref() != document_schema().as_ref()
             || chunks.schema().await.map_err(backend_err)?.as_ref()
                 != chunk_schema(spec.embedding_dim).as_ref()
@@ -989,10 +1000,13 @@ impl RagStore for LanceDbStore {
                 // authenticated tenant. Enforce before scoring so a sibling
                 // tenant's chunks are never scored or surfaced. Legacy rows
                 // with tenant_id=None mean the default tenant.
+                // Own the tenant string so the borrow of `chunk` ends here and
+                // `chunk` can be moved into `scored` below.
                 let effective_tenant = effective_tenant(
                     chunk.record.tenant_id.as_deref(),
                     doc.record.tenant_id.as_deref(),
-                );
+                )
+                .to_string();
                 if let Some(tenant) = &query.tenant_id {
                     if effective_tenant != tenant.as_str() {
                         continue;
@@ -1061,7 +1075,7 @@ impl RagStore for LanceDbStore {
                     chunk,
                     doc.id.0.clone(),
                     primary,
-                    effective_tenant.to_string(),
+                    effective_tenant,
                     chunk_acl.clone(),
                 ));
             }
@@ -1329,6 +1343,9 @@ fn document_schema() -> SchemaRef {
         Field::new("ingested_at", DataType::Int64, false),
         Field::new("dossier_id", DataType::Utf8, false),
         Field::new("version_ref", DataType::Utf8, false),
+        // Nullable: added by schema evolution to pre-scoping collections via AllNulls.
+        Field::new("tenant_id", DataType::Utf8, true),
+        Field::new("acl", DataType::Utf8, true),
     ]))
 }
 fn chunk_schema(dim: u32) -> SchemaRef {
@@ -1351,7 +1368,36 @@ fn chunk_schema(dim: u32) -> SchemaRef {
         Field::new("chunk_metadata", DataType::Utf8, false),
         Field::new("dossier_id", DataType::Utf8, false),
         Field::new("version_ref", DataType::Utf8, false),
+        // Nullable: added by schema evolution to pre-scoping collections via AllNulls.
+        Field::new("tenant_id", DataType::Utf8, true),
+        Field::new("acl", DataType::Utf8, true),
     ]))
+}
+
+/// Add the tenant/ACL scoping columns to a pre-existing table that was created
+/// before those fields existed. `AllNulls` is a metadata-only change: legacy
+/// rows then read as "default tenant / owner-only ACL" via the readers.
+async fn migrate_scoping_columns(table: &lancedb::Table) -> RagResult<()> {
+    use lancedb::table::NewColumnTransform;
+    let schema = table.schema().await.map_err(backend_err)?;
+    let mut additions = Vec::new();
+    for name in ["tenant_id", "acl"] {
+        if schema.index_of(name).is_err() {
+            additions.push(arrow_schema::Field::new(name, DataType::Utf8, true));
+        }
+    }
+    if additions.is_empty() {
+        return Ok(());
+    }
+    table
+        .add_columns()
+        .transform(NewColumnTransform::AllNulls(Arc::new(
+            arrow_schema::Schema::new(additions),
+        )))
+        .execute()
+        .await
+        .map_err(backend_err)?;
+    Ok(())
 }
 
 fn json_string(value: &serde_json::Value) -> String {
@@ -1412,6 +1458,13 @@ fn document_batch(
                 .version_ref
                 .as_deref()
                 .unwrap_or("")])),
+            Arc::new(StringArray::from(vec![doc
+                .tenant_id
+                .as_deref()
+                .unwrap_or("")])),
+            Arc::new(StringArray::from(vec![json_string(
+                &doc.acl.clone().unwrap_or(serde_json::Value::Null),
+            )])),
         ],
     )
     .map_err(backend_err)
@@ -1498,6 +1551,20 @@ fn document_batch_many(
                     .map(|(doc, _)| doc.version_ref.as_deref().unwrap_or(""))
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.tenant_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| {
+                        json_string(&doc.acl.clone().unwrap_or(serde_json::Value::Null))
+                    })
+                    .collect::<Vec<_>>(),
+            )),
         ],
     )
     .map_err(backend_err)
@@ -1575,6 +1642,16 @@ fn chunk_batch(rows: &[StoredChunk], dim: u32) -> RagResult<RecordBatch> {
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|r| r.record.version_ref.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|r| r.record.tenant_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|r| json_string(&r.record.acl.clone().unwrap_or(serde_json::Value::Null)))
                     .collect::<Vec<_>>(),
             )),
         ],

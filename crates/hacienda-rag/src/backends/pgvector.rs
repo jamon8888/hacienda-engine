@@ -1663,6 +1663,8 @@ mod live_tests {
             chunk_metadata: serde_json::Value::Null,
             dossier_id: None,
             version_ref: None,
+            tenant_id: None,
+            acl: None,
         }
     }
 
