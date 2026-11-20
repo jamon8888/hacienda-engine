@@ -52,3 +52,16 @@ those surfaces therefore requires building an `EmailProcessor` **per request fro
 the authenticated tenant's config** (`AuthContext`/`TenantCtx` already extracted by
 `hacienda-api/src/handlers/mod.rs`), never a process-wide trusted instance. This
 is tracked as the final Phase-5 step, not skipped.
+
+## Deferred CodeRabbit findings (PR #166 — heavy-lift, not in this pass)
+
+- **lancedb.rs:650 — legacy random document IDs.** Collections written by the
+  pre-batch-upsert code stored `doc-<uuid>` IDs for documents that had an
+  external_id. The new deterministic `doc-ext-<v5(collection,external)>` IDs do
+  not migrate those rows, so re-upserting such a document can insert a second
+  copy. Requires a one-off migration / lookup-by-external_id before adopting
+  deterministic IDs. Tracked separately.
+- **lancedb.rs:690 — document/chunk atomicity.** `upsert_documents` commits the
+  document row, then the chunk rows; if the second write fails the store holds
+  updated text with stale chunks. A proper fix needs a staging/transaction
+  protocol at the RagStore layer (beyond the write lock). Tracked separately.
