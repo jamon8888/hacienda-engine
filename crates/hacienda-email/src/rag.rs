@@ -339,7 +339,17 @@ pub async fn index_for_rag(
                         .await
                     {
                         Ok((redacted, _)) => {
-                            let chunks = chunk(&redacted, chunk_sz, config.rag.chunk_overlap);
+                            // Chunking is CPU-bound and may be slow on a large
+                            // message; move it off the async executor onto a
+                            // blocking worker instead of stalling other tasks.
+                            let overlap = config.rag.chunk_overlap;
+                            let text = redacted.clone();
+                            let chunks = tokio::task::spawn_blocking(move || {
+                                chunk(&text, chunk_sz, overlap)
+                            })
+                            .await
+                            .map_err(|e| EmailError::Rag(format!("chunking task failed: {e}")))
+                            .and_then(|r| r);
                             (
                                 envelope.id.clone(),
                                 Some((envelope, redacted, chunks)),
@@ -449,9 +459,7 @@ pub async fn index_for_rag(
             // resumes after the last successfully ingested message.
             if let Some(rag) = &rag {
                 if persist && ingested_uid > 0 {
-                    if let Err(e) =
-                        write_watermark(rag, &mailbox, &index, ingested_uid).await
-                    {
+                    if let Err(e) = write_watermark(rag, &mailbox, &index, ingested_uid).await {
                         errors.push(format!("Failed to persist watermark: {e}"));
                     }
                 }
@@ -690,13 +698,18 @@ mod tests {
         // Highest UID only, not a count.
         let seen = vec![17u64, 42, 9, 3];
         let highest = seen.iter().copied().max().unwrap();
-        write_watermark(&rag, mailbox, index, highest).await.unwrap();
+        write_watermark(&rag, mailbox, index, highest)
+            .await
+            .unwrap();
         assert_eq!(read_watermark(&rag, mailbox, index).await.unwrap(), 42);
 
         // A different mailbox has its own independent checkpoint.
         assert_eq!(read_watermark(&rag, "Archive", index).await.unwrap(), 0);
         // And so does a different target index.
-        assert_eq!(read_watermark(&rag, mailbox, "other-index").await.unwrap(), 0);
+        assert_eq!(
+            read_watermark(&rag, mailbox, "other-index").await.unwrap(),
+            0
+        );
 
         // A new batch with lower UIDs must be skipped entirely.
         let cutoff = read_watermark(&rag, mailbox, index).await.unwrap();

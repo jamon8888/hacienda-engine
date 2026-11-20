@@ -628,25 +628,62 @@ impl RagStore for LanceDbStore {
         }
         let _write = self.write_lock.lock().await;
         let spec = self.require_spec(collection).await?;
-        for (_, chunks) in items {
-            for chunk in chunks {
+        for (item_index, (document, chunks)) in items.iter().enumerate() {
+            for (chunk_ordinal, chunk) in chunks.iter().enumerate() {
                 validate_chunk_side_vectors(chunk)?;
                 if chunk.embedding.len() as u32 != spec.embedding_dim {
-                    return Err(RagError::EmbeddingDimMismatch {
-                        expected: spec.embedding_dim,
-                        got: chunk.embedding.len() as u32,
-                    });
+                    return Err(RagError::Backend(Box::new(std::io::Error::other(format!(
+                        "upsert_documents into '{collection}': document #{item_index} \
+                         (external_id {:?}) chunk #{chunk_ordinal} has embedding dimension {}, \
+                         expected {}. Regenerate the embedding with dimension {} for this collection.",
+                        document.external_id,
+                        chunk.embedding.len(),
+                        spec.embedding_dim,
+                        spec.embedding_dim
+                    )))));
                 }
             }
         }
+        // Coalesce repeated identities with last-item-wins BEFORE computing ids
+        // or batches. Two items with the same external_id would otherwise map to
+        // the same deterministic doc_id and be forwarded twice to merge_insert,
+        // whose LanceDB 0.37.1 contract leaves multiple matches undefined.
+        // Keep only the last item's complete chunk set; preserve the original
+        // input-to-position mapping so the returned Vec<DocumentId> matches the
+        // caller's item order (a deduped slot reports the surviving id).
+        let mut deduped: Vec<&(DocumentRecord, Vec<ChunkRecord>)> = Vec::with_capacity(items.len());
+        let mut by_identity: HashMap<String, usize> = HashMap::new();
+        let mut position_to_slot: Vec<usize> = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let key = item
+                .0
+                .external_id
+                .clone()
+                .map(|id| format!("ext:{id}"))
+                .unwrap_or_else(|| format!("anon:{i}")); // anonymous items are always distinct
+            let slot = match by_identity.get(&key) {
+                Some(&slot) => {
+                    deduped[slot] = item; // last-item-wins
+                    slot
+                }
+                None => {
+                    let slot = deduped.len();
+                    by_identity.insert(key, slot);
+                    deduped.push(item);
+                    slot
+                }
+            };
+            position_to_slot.push(slot);
+        }
+
         let (docs, chunk_table) = self.collection_tables(collection).await?;
         let ingested_at = now_secs();
 
         // Compute all ids deterministically (no full-table scan) and scope
         // every chunk from its parent document, exactly like the single path.
-        let mut ids = Vec::with_capacity(items.len());
+        let mut ids = Vec::with_capacity(deduped.len());
         let mut rows: Vec<StoredChunk> = Vec::new();
-        for (document, chunks) in items {
+        for (document, chunks) in deduped.iter().map(|item| (&item.0, &item.1)) {
             let id = document.external_id.as_ref().map_or_else(
                 || DocumentId(format!("doc-{}", Uuid::new_v4())),
                 |external| {
@@ -677,8 +714,9 @@ impl RagStore for LanceDbStore {
         }
 
         // One merge_insert for all documents, one for all chunks, one FTS
-        // check per batch instead of one transaction per message.
-        let doc_batch = document_batch_many(items, &ids, ingested_at)?;
+        // check per batch instead of one transaction per message. Build the
+        // document batch from the DEDUPED items so its rows align with `ids`.
+        let doc_batch = document_batch_many(&deduped, &ids, ingested_at)?;
         let mut doc_merge = docs.merge_insert(&["doc_id"]);
         doc_merge
             .when_matched_update_all(None)
@@ -720,7 +758,12 @@ impl RagStore for LanceDbStore {
                 .map_err(backend_err)?;
         }
         self.ensure_fts_index(&chunk_table, false).await?;
-        Ok(ids)
+        // Map each caller position to the id of its surviving (possibly
+        // deduped) item so the returned vector matches the input order.
+        Ok(position_to_slot
+            .into_iter()
+            .map(|slot| ids[slot].clone())
+            .collect())
     }
 
     async fn delete_documents(&self, collection: &str, ids: &[DocumentId]) -> RagResult<u64> {
@@ -1227,7 +1270,7 @@ fn document_batch(
 
 /// Build one Arrow batch with a row per (document, id) pair, for batched upserts.
 fn document_batch_many(
-    items: &[(DocumentRecord, Vec<ChunkRecord>)],
+    items: &[&(DocumentRecord, Vec<ChunkRecord>)],
     ids: &[DocumentId],
     ingested_at: i64,
 ) -> RagResult<RecordBatch> {
@@ -1683,6 +1726,78 @@ mod tests {
         assert_eq!(store.delete_documents("docs", &[first]).await.unwrap(), 1);
         assert_eq!(store.collection_stats("docs").await.unwrap().documents, 0);
         assert_eq!(store.collection_stats("docs").await.unwrap().chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn bulk_upsert_coalesces_duplicate_external_ids_last_wins() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("dedup", 2))
+            .await
+            .unwrap();
+
+        // Two items share one external_id with different chunk sets; a third
+        // is distinct. Last-item-wins must keep only the second chunk set,
+        // and the returned ids must still line up with all three inputs.
+        let items = vec![
+            (
+                DocumentRecord {
+                    external_id: Some("email:shared".into()),
+                    full_text: "v1".into(),
+                    ..Default::default()
+                },
+                vec![chunk("old", 0, vec![1.0, 0.0])],
+            ),
+            (
+                DocumentRecord {
+                    external_id: Some("email:shared".into()),
+                    full_text: "v2".into(),
+                    ..Default::default()
+                },
+                vec![
+                    chunk("new-a", 0, vec![1.0, 0.0]),
+                    chunk("new-b", 1, vec![0.0, 1.0]),
+                ],
+            ),
+            (
+                DocumentRecord {
+                    external_id: Some("email:other".into()),
+                    full_text: "other".into(),
+                    ..Default::default()
+                },
+                vec![chunk("other-c", 0, vec![1.0, 0.0])],
+            ),
+        ];
+
+        let ids = store.upsert_documents("dedup", &items).await.unwrap();
+        assert_eq!(ids.len(), 3, "one id per input position");
+        assert_eq!(ids[0], ids[1], "duplicate external_id shares one id");
+
+        // The surviving content is the LAST item's; the first item's chunk is gone.
+        let (doc, chunks) = store
+            .get_document_chunks("dedup", &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.full_text, "v2", "last item's document won");
+        let contents: Vec<_> = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(contents.contains(&"new-a") && contents.contains(&"new-b"));
+        assert!(
+            !contents.contains(&"old"),
+            "stale chunk from first item survived"
+        );
+
+        // The distinct item is unaffected.
+        assert_ne!(ids[2], ids[0]);
+        let (_, other) = store
+            .get_document_chunks("dedup", &ids[2])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.len(), 1);
     }
 
     #[tokio::test]

@@ -32,22 +32,19 @@ pub async fn extract_attachments(
 
 /// Process a single attachment through xberg.
 pub async fn process_attachment(attachment: &EmailAttachment) -> Result<ExtractedAttachment> {
-    // The same xberg call serves both branches: it is idempotent on empty bytes
-    // and there is no meaningful distinction between the two former arms.
-    let content = extract_text_with_xberg(
-        &attachment.content,
-        &attachment.content_type,
-        &attachment.filename,
-    )
-    .await?;
+    // Never trust the sender-declared Content-Type: sniff the real bytes so a
+    // mislabeled payload is extracted with the correct xberg extractor.
+    let mime = detect_mime_type(&attachment.content, &attachment.filename);
+    let content = extract_text_with_xberg(&attachment.content, &mime, &attachment.filename).await?;
 
     Ok(ExtractedAttachment {
         filename: attachment.filename.clone(),
-        mime_type: attachment.content_type.clone(),
+        mime_type: mime,
         content,
         metadata: serde_json::json!({
             "size": attachment.size,
             "content_id": attachment.content_id,
+            "declared_mime": attachment.content_type,
             "extractor": "xberg",
         }),
     })
@@ -133,7 +130,17 @@ fn sanitize_filename(filename: &str) -> String {
 }
 
 /// Detect MIME type from content/extension.
-pub fn detect_mime_type(_content: &[u8], filename: &str) -> String {
+pub fn detect_mime_type(content: &[u8], filename: &str) -> String {
+    // Content sniffing wins over the sender-declared Content-Type (untrusted)
+    // and over the filename extension. A crafted "invoice.pdf" that is really
+    // an executable is treated as what it actually is.
+    #[cfg(any(feature = "rag", feature = "attachments"))]
+    if let Ok(detected) = xberg::detect_mime_type_from_bytes(content) {
+        if !detected.is_empty() && detected != "application/octet-stream" {
+            return detected;
+        }
+    }
+    // Fallback: extension-based guess (still better than trusting the header).
     mime_guess::from_path(filename)
         .first()
         .map(|m| m.to_string())

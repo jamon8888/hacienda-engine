@@ -57,16 +57,27 @@ pub async fn extract_ner(
         }
     }
 
-    // Save entities to JSON
+    // Save entities to JSON. Each error names the operation and output path so
+    // the caller can tell a directory failure from a write failure.
     if let Some(parent) = Path::new(&output).parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(EmailError::Io)?;
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            EmailError::Io(std::io::Error::other(format!(
+                "NER: failed to create output directory '{}': {e}",
+                parent.display()
+            )))
+        })?;
     }
-    let json = serde_json::to_string_pretty(&all_entities).map_err(EmailError::Serde)?;
-    tokio::fs::write(&output, json)
-        .await
-        .map_err(EmailError::Io)?;
+    let json = serde_json::to_string_pretty(&all_entities).map_err(|e| {
+        EmailError::Ner(format!(
+            "failed to serialize {} entities for '{output}': {e}",
+            all_entities.len()
+        ))
+    })?;
+    tokio::fs::write(&output, json).await.map_err(|e| {
+        EmailError::Io(std::io::Error::other(format!(
+            "NER: failed to write entities to '{output}': {e}"
+        )))
+    })?;
 
     Ok(crate::models::EmailResponse {
         success: errors.is_empty(),
