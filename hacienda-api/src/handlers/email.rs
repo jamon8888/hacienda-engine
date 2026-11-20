@@ -8,7 +8,11 @@
 //! mailbox with credentials it supplied. The route's `DocumentsProcess`
 //! capability gate (see `routes.rs`) is the first line of defence.
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    http::{request::Parts, StatusCode},
+    Json,
+};
 use hacienda_email::{
     config::EmailBackend, EmailConfig, EmailDestination, EmailOperation, EmailProcessor,
     EmailRequest, EmailSource, OAuthProvider, PipelineStep, PrivacyMode,
@@ -16,7 +20,13 @@ use hacienda_email::{
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
-use crate::{error::ApiError, extract::Json as SafeJson, state::ApiState};
+use crate::{
+    dto::AsyncJobResponse,
+    error::ApiError,
+    extract::Json as SafeJson,
+    handlers::{caller_from_arc, extract_auth_context},
+    state::ApiState,
+};
 
 /// Body for `POST /v1/email/process`.
 #[derive(Debug, Deserialize)]
@@ -173,43 +183,8 @@ fn dest_of(path: String) -> EmailDestination {
     EmailDestination::Maildir { path }
 }
 
-/// `POST /v1/email/process`
-///
-/// OpenAPI body schemas are intentionally omitted here: the request embeds
-/// `hacienda_email` enum types which do not implement utoipa's `ToSchema`, and
-/// adding that derive across the email crate would leak an API concern into the
-/// domain layer. The route, auth requirement and status codes are still documented.
-#[utoipa::path(
-    post,
-    path = "/v1/email/process",
-    tag = "email",
-    operation_id = "processEmail",
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "Email operation result"),
-        (status = 400, description = "Invalid email request"),
-        (status = 401, description = "Missing or invalid credentials"),
-        (status = 403, description = "Caller lacks documents:process")
-    )
-)]
-pub async fn process_email(
-    State(state): State<ApiState>,
-    SafeJson(body): SafeJson<EmailProcessRequest>,
-) -> Result<Json<EmailProcessResponse>, ApiError> {
-    let start = Instant::now();
-    let config = build_config(&body)?;
-    // Per-request processor: never shared across tenants (design D5).
-    let mut processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
-    // Same RAG store as document ingestion: emails become searchable through
-    // the existing /v1/rag/* retrieve endpoints, scoped by dossier_id.
-    if let Some(store) = state.rag_store.clone() {
-        processor = processor.with_rag_store(store);
-    }
-    if let Some(dossier) = body.dossier_id.as_deref() {
-        processor = processor.with_dossier_id(dossier);
-    }
-
-    let operation = match &body.operation {
+fn build_operation(operation: &EmailOperationDto) -> EmailOperation {
+    match operation {
         EmailOperationDto::Archive {
             source,
             output,
@@ -248,8 +223,158 @@ pub async fn process_email(
                 PipelineStep::Redact,
             ],
         },
-    };
+    }
+}
 
+/// `POST /v1/email/process/async` — the large-mailbox surface.
+///
+/// Same request body and per-request/per-tenant isolation as the sync route
+/// (design D5), but the work runs in a background job: the caller gets `202`
+/// and a `job_id` back immediately and polls `/v1/jobs/{id}` instead of holding
+/// the HTTP connection for the whole ingestion.
+#[utoipa::path(
+    post,
+    path = "/v1/email/process/async",
+    tag = "email",
+    operation_id = "processEmailAsync",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 202, description = "Job accepted; poll /v1/jobs/{id}"),
+        (status = 400, description = "Invalid email request"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
+pub async fn process_email_async(
+    State(state): State<ApiState>,
+    parts: Parts,
+    SafeJson(body): SafeJson<EmailProcessRequest>,
+) -> Result<(StatusCode, Json<AsyncJobResponse>), ApiError> {
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+    let owner = caller.principal_id().map(str::to_owned);
+
+    // Validate before creating the job: a malformed backend or config must be
+    // a 400, not a job that fails a second later.
+    build_config(&body)?;
+
+    let job = state
+        .jobs
+        .create(&tenant, owner)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to create async email job");
+            ApiError::internal()
+        })?;
+    let job_id = job.id.clone();
+
+    let task_jobs = state.jobs.clone();
+    let task_store = state.rag_store.clone();
+    let task_dossier = body.dossier_id.clone();
+    let task_tenant = tenant.clone();
+    let task_job_id = job_id.clone();
+    let operation = build_operation(&body.operation);
+    let config = build_config(&body)?;
+
+    tokio::spawn(async move {
+        use hacienda_core::jobs::JobStatus;
+
+        if let Err(e) = task_jobs
+            .transition(&task_tenant, &task_job_id, JobStatus::Queued, JobStatus::Running)
+            .await
+        {
+            tracing::error!(job_id = %task_job_id, error = %e, "failed to transition email job to Running");
+            return;
+        }
+
+        let result = async {
+            let config = config;
+            let mut processor = EmailProcessor::new(config)
+                .await
+                .map_err(to_api_error)?;
+            if let Some(store) = task_store {
+                processor = processor.with_rag_store(store);
+            }
+            if let Some(dossier) = task_dossier.as_deref() {
+                processor = processor.with_dossier_id(dossier);
+            }
+            processor
+                .process(EmailRequest {
+                    operation,
+                    config_overrides: None,
+                })
+                .await
+                .map_err(to_api_error)
+        }
+        .await;
+
+        match result {
+            Ok(response) => match serde_json::to_string(&response) {
+                Ok(json) => {
+                    if let Err(e) =
+                        task_jobs.finish(&task_tenant, &task_job_id, json).await
+                    {
+                        tracing::error!(
+                            job_id = %task_job_id, error = %e,
+                            "failed to mark email job as succeeded"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(job_id = %task_job_id, error = %e, "failed to serialize email job result");
+                    let _ = task_jobs
+                        .fail(&task_tenant, &task_job_id, "serialization failed".to_string())
+                        .await;
+                }
+            },
+            Err(e) => {
+                let _ = task_jobs
+                    .fail(&task_tenant, &task_job_id, e.to_string())
+                    .await;
+            }
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(AsyncJobResponse { job_id })))
+}
+
+/// `POST /v1/email/process`
+///
+/// OpenAPI body schemas are intentionally omitted here: the request embeds
+/// `hacienda_email` enum types which do not implement utoipa's `ToSchema`, and
+/// adding that derive across the email crate would leak an API concern into the
+/// domain layer. The route, auth requirement and status codes are still documented.
+#[utoipa::path(
+    post,
+    path = "/v1/email/process",
+    tag = "email",
+    operation_id = "processEmail",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Email operation result"),
+        (status = 400, description = "Invalid email request"),
+        (status = 401, description = "Missing or invalid credentials"),
+        (status = 403, description = "Caller lacks documents:process")
+    )
+)]
+pub async fn process_email(
+    State(state): State<ApiState>,
+    SafeJson(body): SafeJson<EmailProcessRequest>,
+) -> Result<Json<EmailProcessResponse>, ApiError> {
+    let start = Instant::now();
+    let config = build_config(&body)?;
+    // Per-request processor: never shared across tenants (design D5).
+    let mut processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
+    // Same RAG store as document ingestion: emails become searchable through
+    // the existing /v1/rag/* retrieve endpoints, scoped by dossier_id.
+    if let Some(store) = state.rag_store.clone() {
+        processor = processor.with_rag_store(store);
+    }
+    if let Some(dossier) = body.dossier_id.as_deref() {
+        processor = processor.with_dossier_id(dossier);
+    }
+    let operation = build_operation(&body.operation);
     let response = processor
         .process(EmailRequest {
             operation,

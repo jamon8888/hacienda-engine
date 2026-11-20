@@ -29,6 +29,10 @@ pub struct RagIngestion<'a> {
     pub optimize_after_run: bool,
     /// Set false for a single-shot call (unit tests) to skip the watermark write.
     pub persist_watermark: bool,
+    /// Optional progress callback: called after each committed page with
+    /// `(page, pages_done, messages_done, chunks_done)`. Lets a background job
+    /// report live progress (`JobStore::update_progress`).
+    pub on_page: Option<&'a (dyn Fn(u32, usize, usize, usize) + Send + Sync)>,
 }
 
 /// Build the document + chunks for one redacted email.
@@ -243,6 +247,7 @@ pub async fn index_for_rag(
 
     let mut total_chunks = 0usize;
     let mut total_indexed = 0usize;
+    let mut total_messages = 0usize;
     let mut errors: Vec<String> = Vec::new();
     let mut last_uid: u64 = 0;
 
@@ -352,6 +357,7 @@ pub async fn index_for_rag(
             let mut prepared: Vec<(DocumentRecord, Vec<ChunkRecord>)> =
                 Vec::with_capacity(outputs.len());
             for (envelope, redacted, chunks) in outputs {
+                total_messages += 1;
                 total_chunks += chunks.len();
                 if let Some(rag) = &rag {
                     let (document, records) =
@@ -382,6 +388,13 @@ pub async fn index_for_rag(
             break;
         }
         page += 1;
+        // Report the page that was just committed so a background job can
+        // publish live progress (and a client can see it is not stuck).
+        if let Some(rag) = &rag {
+            if let Some(on_page) = rag.on_page {
+                on_page(page - 1, (page as usize) - 1, total_messages, total_chunks);
+            }
+        }
     }
 
     if let Some(rag) = &rag {
@@ -552,6 +565,7 @@ mod tests {
             incremental: false,
             optimize_after_run: false,
             persist_watermark: false,
+            on_page: None,
         };
         let chunks = vec!["chunk one".to_string(), "chunk two".to_string()];
         let count = upsert_email(&rag, collection, &envelope(), "[REDACTED] body", &chunks)
@@ -601,6 +615,7 @@ mod tests {
             incremental: true,
             optimize_after_run: false,
             persist_watermark: true,
+            on_page: None,
         };
 
         // No watermark present yet.

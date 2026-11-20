@@ -97,6 +97,7 @@ impl EmailProcessor {
                 incremental: config.ingestion.incremental,
                 optimize_after_run: config.ingestion.optimize_after_run,
                 persist_watermark: true,
+                on_page: None,
             });
 
         match input.operation {

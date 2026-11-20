@@ -119,6 +119,11 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         make_router: || post(email::process_email),
     },
     RouteSpec {
+        path: "/v1/email/process/async",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(email::process_email_async),
+    },
+    RouteSpec {
         path: "/v1/pii/scan",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || post(pii::scan_text),
