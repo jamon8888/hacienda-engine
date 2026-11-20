@@ -14,8 +14,9 @@ use crate::query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 use crate::scoring::{max_sim, sparse_dot};
 use crate::store::RagStore;
 use crate::types::{
-    validate_chunk_side_vectors, ChunkId, ChunkRecord, CollectionSpec, CollectionStats,
-    DistanceMetric, DocumentId, DocumentRecord, DocumentSummary, PrimaryScore, RetrievedChunk,
+    acl_mentions, effective_tenant, validate_chunk_side_vectors, ChunkId, ChunkRecord,
+    CollectionSpec, CollectionStats, DistanceMetric, DocumentId, DocumentRecord, DocumentSummary,
+    PrimaryScore, RetrievedChunk, DEFAULT_TENANT,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -120,7 +121,15 @@ fn resolve_field(
             "source_uri" => doc.source_uri.clone().map(serde_json::Value::String),
             "dossier_id" => doc.dossier_id.clone().map(serde_json::Value::String),
             "version_ref" => doc.version_ref.clone().map(serde_json::Value::String),
-            "tenant_id" => doc.tenant_id.as_deref().map(|s| serde_json::Value::String(s.to_string())),
+            // Legacy rows with no tenant belong to the default tenant; expose
+            // that as the field value so tenant equality filters still match.
+            "tenant_id" => Some(serde_json::Value::String(
+                doc.tenant_id
+                    .as_deref()
+                    .unwrap_or(DEFAULT_TENANT)
+                    .to_string(),
+            )),
+            "acl" => doc.acl.clone(),
             "keywords" => serde_json::to_value(&doc.keywords).ok(),
             "labels" => Some(doc.labels.clone()),
             "entities" => Some(doc.entities.clone()),
@@ -135,7 +144,14 @@ fn resolve_field(
             "external_id" => chunk.external_id.clone().map(serde_json::Value::String),
             "dossier_id" => chunk.dossier_id.clone().map(serde_json::Value::String),
             "version_ref" => chunk.version_ref.clone().map(serde_json::Value::String),
-            "tenant_id" => chunk.tenant_id.as_deref().map(|s| serde_json::Value::String(s.to_string())),
+            "tenant_id" => Some(serde_json::Value::String(
+                chunk
+                    .tenant_id
+                    .as_deref()
+                    .unwrap_or(DEFAULT_TENANT)
+                    .to_string(),
+            )),
+            "acl" => chunk.acl.clone(),
             path if path.starts_with("chunk_metadata.") => {
                 json_pointer(&chunk.chunk_metadata, &path["chunk_metadata.".len()..])
             }
@@ -224,6 +240,7 @@ fn to_retrieved_chunk(
                 .unwrap_or_else(|| summarize(&c.document_id, &DocumentRecord::default()))
         }),
         tenant_id: c.record.tenant_id.clone(),
+        acl: c.record.acl.clone(),
     }
 }
 
@@ -357,6 +374,15 @@ impl RagStore for InMemoryVectorStore {
             if record.version_ref.is_none() {
                 record.version_ref = document.version_ref.clone();
             }
+            // Row-level authorization: a chunk inherits the parent document's
+            // tenant/ACL unless it was explicitly scoped. Without this, chunks
+            // can carry missing or inconsistent authorization metadata.
+            if record.tenant_id.is_none() {
+                record.tenant_id = document.tenant_id.clone();
+            }
+            if record.acl.is_none() {
+                record.acl = document.acl.clone();
+            }
             coll.chunks.push(StoredChunk {
                 id: ChunkId(format!("{}:{}", doc_id.0, chunk.ordinal)),
                 document_id: doc_id.clone(),
@@ -459,6 +485,31 @@ impl RagStore for InMemoryVectorStore {
                 }
                 if let Some(version_ref) = &query.version_ref {
                     if c.record.version_ref.as_deref() != Some(version_ref.as_str()) {
+                        return false;
+                    }
+                }
+                let doc_tenant = coll
+                    .documents
+                    .get(&c.document_id)
+                    .and_then(|d| d.record.tenant_id.as_deref());
+                let owner = effective_tenant(c.record.tenant_id.as_deref(), doc_tenant);
+                // Hard tenant boundary before scoring.
+                if let Some(tenant) = &query.tenant_id {
+                    if owner != tenant.as_str() {
+                        return false;
+                    }
+                }
+                // Hard ACL boundary before scoring: the caller's reference must
+                // be granted by the row's ACL (or be the owner tenant).
+                if let Some(reference) = &query.acl_reference {
+                    let acl = c.record.acl.as_ref().or_else(|| {
+                        coll.documents
+                            .get(&c.document_id)
+                            .and_then(|d| d.record.acl.as_ref())
+                    });
+                    if !acl.is_some_and(|a| acl_mentions(a, reference))
+                        && owner != reference.as_str()
+                    {
                         return false;
                     }
                 }

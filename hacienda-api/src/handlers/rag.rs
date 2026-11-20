@@ -17,7 +17,10 @@ use axum::{
 };
 use hacienda_core::tenancy::TenantCtx;
 use hacienda_core::{auth::Caller, jobs::JobStatus, HaciendaFacade};
-use hacienda_rag::{CollectionSpec, DocumentId, DocumentSummary, Filter, FilterField, RetrieveOutput, RetrieveQuery, RetrievedChunk};
+use hacienda_rag::{
+    acl_mentions, CollectionSpec, DocumentId, DocumentSummary, Filter, FilterField, RetrieveOutput,
+    RetrieveQuery, RetrievedChunk, DEFAULT_TENANT,
+};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -136,13 +139,20 @@ pub(crate) fn merge_with_tenant_filter(
     }
 }
 
-/// Post-retrieval authorization check: drop any chunk whose `tenant_id` does
-/// not match the calling tenant. Defense-in-depth — with a correct
-/// pre-retrieval filter this never removes anything, but it catches backend
-/// misconfigurations or callers that bypass the filter.
+/// Post-retrieval authorization check: keep a chunk only when its effective
+/// tenant matches the caller OR its ACL grants the caller. A missing tenant
+/// means the DEFAULT tenant (legacy rows written before per-tenant scoping),
+/// so those rows stay visible to the default tenant instead of being silently
+/// dropped by backends that return `tenant_id=None`.
 pub(crate) fn enforce_post_retrieval_tenant(ctx: &TenantCtx, chunks: &mut Vec<RetrievedChunk>) {
     let tenant = ctx.tenant.as_str();
-    chunks.retain(|c| c.tenant_id.as_deref() == Some(tenant));
+    chunks.retain(|c| {
+        let owner = c.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+        if owner == tenant {
+            return true;
+        }
+        c.acl.as_ref().is_some_and(|acl| acl_mentions(acl, tenant))
+    });
 }
 
 /// Redact one retrieval text surface before it can be put in an HTTP response.
@@ -563,6 +573,11 @@ pub async fn retrieve(
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::not_found)?;
 
+    // Server-side hard boundaries: never trust tenant/ACL fields from the
+    // request body. Stamp the authenticated tenant so every backend enforces
+    // the boundary before scoring; the filter below is the defense-in-depth
+    // layer for backends whose filter IR predates the tenant column.
+    query.tenant_id = Some(tenant_ctx.tenant.as_str().to_string());
     // Pre-retrieval authorization filter: only the calling tenant's rows are
     // eligible for scoring. ANDed with any caller-supplied filter.
     query.filter = merge_with_tenant_filter(

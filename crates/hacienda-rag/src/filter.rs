@@ -80,6 +80,7 @@ impl FilterField {
             "dossier_id",
             "version_ref",
             "tenant_id",
+            "acl",
         ];
         if DOC_FIELDS.contains(&path) || path.starts_with("metadata.") {
             return Ok(());
@@ -98,6 +99,7 @@ impl FilterField {
             "dossier_id",
             "version_ref",
             "tenant_id",
+            "acl",
         ];
         if CHUNK_FIELDS.contains(&path) || path.starts_with("chunk_metadata.") {
             return Ok(());

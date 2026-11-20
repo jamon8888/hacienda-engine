@@ -62,7 +62,7 @@ use crate::store::RagStore;
 use crate::types::{
     validate_chunk_side_vectors, ChunkId, ChunkRecord, CollectionSpec, CollectionStats,
     DistanceMetric, DocumentId, DocumentRecord, DocumentSummary, IndexMethod, PrimaryScore,
-    RetrievedChunk,
+    RetrievedChunk, DEFAULT_TENANT,
 };
 use async_trait::async_trait;
 use pgvector::Vector as PgVector;
@@ -82,6 +82,8 @@ const RRF_K: f64 = 60.0;
 const CHUNK_DOC_COLUMNS: &str =
     "c.id, c.document_id, c.ordinal, c.external_id, c.content, c.chunk_metadata, \
      c.dossier_id AS doc_dossier_id, c.version_ref AS doc_version_ref, \
+     coalesce(c.tenant_id, d.tenant_id) AS effective_tenant_id, \
+     coalesce(c.acl, d.acl) AS effective_acl, \
      d.external_id AS doc_external_id, d.title AS doc_title, d.mime AS doc_mime, \
      d.keywords AS doc_keywords, d.labels AS doc_labels, d.entities AS doc_entities, \
      d.metadata AS doc_metadata, d.ingested_at AS doc_ingested_at";
@@ -406,7 +408,7 @@ impl RagStore for PgVectorStore {
             sqlx::query(
                 "UPDATE rag_documents SET title = $1, mime = $2, source_uri = $3, full_text = $4, \
                  keywords = $5, entities = $6, labels = $7, metadata = $8, dossier_id = $9, \
-                 version_ref = $10 WHERE id = $11",
+                 version_ref = $10, tenant_id = $11, acl = $12 WHERE id = $13",
             )
             .bind(&document.title)
             .bind(&document.mime)
@@ -418,6 +420,8 @@ impl RagStore for PgVectorStore {
             .bind(&document.metadata)
             .bind(&document.dossier_id)
             .bind(&document.version_ref)
+            .bind(&document.tenant_id)
+            .bind(&document.acl)
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -433,8 +437,8 @@ impl RagStore for PgVectorStore {
             sqlx::query_scalar(
                 "INSERT INTO rag_documents \
                  (collection, external_id, title, mime, source_uri, full_text, keywords, entities, labels, metadata, \
-                  dossier_id, version_ref) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
+                  dossier_id, version_ref, tenant_id, acl) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
             )
             .bind(collection)
             .bind(&document.external_id)
@@ -448,6 +452,8 @@ impl RagStore for PgVectorStore {
             .bind(&document.metadata)
             .bind(&document.dossier_id)
             .bind(&document.version_ref)
+            .bind(&document.tenant_id)
+            .bind(&document.acl)
             .fetch_one(&mut *tx)
             .await
             .map_err(pg_err)?
@@ -475,10 +481,12 @@ impl RagStore for PgVectorStore {
             let effective_dossier_id = chunk.dossier_id.as_ref().or(document.dossier_id.as_ref());
             let effective_version_ref =
                 chunk.version_ref.as_ref().or(document.version_ref.as_ref());
+            let effective_tenant_id = chunk.tenant_id.as_ref().or(document.tenant_id.as_ref());
+            let effective_acl = chunk.acl.as_ref().or(document.acl.as_ref());
             sqlx::query(
                 "INSERT INTO rag_chunks \
-                 (document_id, collection, external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata, dossier_id, version_ref) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                 (document_id, collection, external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata, dossier_id, version_ref, tenant_id, acl) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             )
             .bind(doc_id)
             .bind(collection)
@@ -491,6 +499,8 @@ impl RagStore for PgVectorStore {
             .bind(&chunk.chunk_metadata)
             .bind(effective_dossier_id.map(|s| s.as_str()))
             .bind(effective_version_ref.map(|s| s.as_str()))
+            .bind(effective_tenant_id.map(|s| s.as_str()))
+            .bind(effective_acl)
             .execute(&mut *tx)
             .await
             .map_err(pg_err)?;
@@ -698,7 +708,7 @@ impl RagStore for PgVectorStore {
 
         let doc_row = sqlx::query(
             "SELECT external_id, title, mime, source_uri, full_text, keywords, entities, labels, metadata, \
-             dossier_id, version_ref \
+             dossier_id, version_ref, tenant_id, acl \
              FROM rag_documents WHERE id = $1 AND collection = $2",
         )
         .bind(doc_uuid)
@@ -715,7 +725,7 @@ impl RagStore for PgVectorStore {
 
         let chunk_rows = sqlx::query(
             "SELECT external_id, ordinal, content, embedding, sparse_embedding, multi_vector, chunk_metadata, \
-             dossier_id, version_ref \
+             dossier_id, version_ref, tenant_id, acl \
              FROM rag_chunks WHERE document_id = $1 ORDER BY ordinal",
         )
         .bind(doc_uuid)
@@ -1066,6 +1076,28 @@ fn push_scope_filter(qb: &mut QueryBuilder<'_, Postgres>, query: &RetrieveQuery)
         qb.push(" AND c.version_ref = ");
         qb.push_bind(version_ref.clone());
     }
+    // Hard tenant boundary before scoring. NULL tenant means default tenant
+    // (legacy rows); compare the coalesced value so those stay eligible for
+    // the default tenant and excluded for everyone else.
+    if let Some(tenant) = &query.tenant_id {
+        qb.push(" AND coalesce(c.tenant_id, coalesce(d.tenant_id, '");
+        qb.push(DEFAULT_TENANT);
+        qb.push("')) = ");
+        qb.push_bind(tenant.clone());
+    }
+    // Hard ACL boundary: the caller's reference must be granted by the row's
+    // ACL (or be the owner tenant). NULL ACL means owner-only.
+    if let Some(reference) = &query.acl_reference {
+        qb.push(
+            " AND (coalesce(c.acl, d.acl) ? 'tenants' AND coalesce(c.acl, d.acl)->'tenants' @> ",
+        );
+        qb.push_bind(serde_json::json!([reference]));
+        qb.push(" OR coalesce(c.tenant_id, coalesce(d.tenant_id, '");
+        qb.push(DEFAULT_TENANT);
+        qb.push("')) = ");
+        qb.push_bind(reference.clone());
+        qb.push(")");
+    }
     Ok(())
 }
 
@@ -1164,6 +1196,8 @@ fn document_row_to_record(row: &PgRow) -> RagResult<DocumentRecord> {
         metadata: row.try_get("metadata").map_err(pg_err)?,
         dossier_id: row.try_get("dossier_id").map_err(pg_err)?,
         version_ref: row.try_get("version_ref").map_err(pg_err)?,
+        tenant_id: row.try_get("tenant_id").map_err(pg_err)?,
+        acl: row.try_get("acl").map_err(pg_err)?,
     })
 }
 
@@ -1192,6 +1226,8 @@ fn chunk_row_to_record(row: &PgRow) -> RagResult<ChunkRecord> {
         chunk_metadata: row.try_get("chunk_metadata").map_err(pg_err)?,
         dossier_id: row.try_get("dossier_id").map_err(pg_err)?,
         version_ref: row.try_get("version_ref").map_err(pg_err)?,
+        tenant_id: row.try_get("tenant_id").map_err(pg_err)?,
+        acl: row.try_get("acl").map_err(pg_err)?,
     })
 }
 
@@ -1222,6 +1258,8 @@ struct RowFields {
     doc_ingested_at: Option<chrono::DateTime<chrono::Utc>>,
     doc_dossier_id: Option<String>,
     doc_version_ref: Option<String>,
+    effective_tenant_id: Option<String>,
+    effective_acl: Option<serde_json::Value>,
 }
 
 impl RowFields {
@@ -1243,6 +1281,8 @@ impl RowFields {
             doc_ingested_at: row.try_get("doc_ingested_at").map_err(pg_err)?,
             doc_dossier_id: row.try_get("doc_dossier_id").map_err(pg_err)?,
             doc_version_ref: row.try_get("doc_version_ref").map_err(pg_err)?,
+            effective_tenant_id: row.try_get("effective_tenant_id").map_err(pg_err)?,
+            effective_acl: row.try_get("effective_acl").map_err(pg_err)?,
         })
     }
 
@@ -1275,7 +1315,8 @@ impl RowFields {
                 dossier_id: self.doc_dossier_id.clone(),
                 version_ref: self.doc_version_ref.clone(),
             }),
-            tenant_id: None,
+            tenant_id: self.effective_tenant_id,
+            acl: self.effective_acl,
         }
     }
 }

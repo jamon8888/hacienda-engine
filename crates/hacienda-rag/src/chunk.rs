@@ -92,7 +92,8 @@ mod tests {
     #[test]
     fn should_return_a_single_chunk_for_short_text() {
         let config = ChunkingConfig::default();
-        let chunks = chunk_full_text("hello world", &config, None).expect("chunking should succeed");
+        let chunks =
+            chunk_full_text("hello world", &config, None).expect("chunking should succeed");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].content, "hello world");
     }

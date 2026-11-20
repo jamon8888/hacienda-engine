@@ -722,6 +722,7 @@ mod tests {
             chunk_metadata: serde_json::Value::Null,
             document: None,
             tenant_id: None,
+            acl: None,
         };
         let context = RetrievedContext {
             chunks: vec![chunk],
@@ -803,6 +804,7 @@ mod tests {
             chunk_metadata: serde_json::Value::Null,
             document: None,
             tenant_id: None,
+            acl: None,
         }
     }
 
@@ -1336,6 +1338,8 @@ mod tests {
             primary_score: PrimaryScore::Vector { score: 1.0 },
             chunk_metadata: serde_json::Value::Null,
             document: None,
+            tenant_id: None,
+            acl: None,
         };
         let context = RetrievedContext {
             chunks: vec![chunk],

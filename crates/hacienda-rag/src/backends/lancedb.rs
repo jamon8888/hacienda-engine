@@ -17,9 +17,9 @@ use crate::filter::{Filter, FilterField, FilterNamespace};
 use crate::query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 use crate::store::RagStore;
 use crate::types::{
-    validate_chunk_side_vectors, ChunkId, ChunkRecord, CollectionSpec, CollectionStats,
-    DistanceMetric, DocumentId, DocumentRecord, DocumentSummary, IndexMethod, PrimaryScore,
-    RetrievedChunk,
+    acl_mentions, effective_tenant, validate_chunk_side_vectors, ChunkId, ChunkRecord,
+    CollectionSpec, CollectionStats, DistanceMetric, DocumentId, DocumentRecord, DocumentSummary,
+    IndexMethod, PrimaryScore, RetrievedChunk,
 };
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
@@ -985,6 +985,30 @@ impl RagStore for LanceDbStore {
                         continue;
                     }
                 }
+                // Hard tenant boundary: the API stamps documents with the
+                // authenticated tenant. Enforce before scoring so a sibling
+                // tenant's chunks are never scored or surfaced. Legacy rows
+                // with tenant_id=None mean the default tenant.
+                let effective_tenant = effective_tenant(
+                    chunk.record.tenant_id.as_deref(),
+                    doc.record.tenant_id.as_deref(),
+                );
+                if let Some(tenant) = &query.tenant_id {
+                    if effective_tenant != tenant.as_str() {
+                        continue;
+                    }
+                }
+                // Hard ACL boundary: the caller's acl_reference must be present
+                // in the row's ACL (or be the owner tenant). Unscoped when absent.
+                let chunk_acl = chunk.record.acl.clone().or_else(|| doc.record.acl.clone());
+                if let Some(reference) = &query.acl_reference {
+                    let acl_grants = chunk_acl
+                        .as_ref()
+                        .is_some_and(|acl| acl_mentions(acl, reference));
+                    if !acl_grants && effective_tenant != reference.as_str() {
+                        continue;
+                    }
+                }
                 if query
                     .filter
                     .as_ref()
@@ -1032,7 +1056,14 @@ impl RagStore for LanceDbStore {
                     }
                     RetrieveMode::Sparse | RetrieveMode::LateInteraction => unreachable!(),
                 };
-                scored.push((score, chunk, doc.id.0.clone(), primary));
+                scored.push((
+                    score,
+                    chunk,
+                    doc.id.0.clone(),
+                    primary,
+                    effective_tenant.to_string(),
+                    chunk_acl.clone(),
+                ));
             }
             if query.mode == RetrieveMode::Hybrid {
                 let candidate_limit =
@@ -1088,25 +1119,28 @@ impl RagStore for LanceDbStore {
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
             if query.group_by_document {
                 let mut seen = HashSet::new();
-                scored.retain(|(_, chunk, _, _)| seen.insert(chunk.document_id.0.clone()));
+                scored.retain(|(_, chunk, _, _, _, _)| seen.insert(chunk.document_id.0.clone()));
             }
             let chunks = scored
                 .into_iter()
                 .take(query.top_k as usize)
-                .map(|(score, chunk, doc_id, primary)| RetrievedChunk {
-                    id: chunk.id,
-                    document_id: chunk.document_id,
-                    ordinal: chunk.record.ordinal,
-                    external_id: chunk.record.external_id,
-                    content: query.include_content.then_some(chunk.record.content),
-                    score,
-                    primary_score: primary,
-                    chunk_metadata: chunk.record.chunk_metadata,
-                    document: query
-                        .include_document
-                        .then(|| summarize(&docs_by_id[&doc_id])),
-                    tenant_id: None,
-                })
+                .map(
+                    |(score, chunk, doc_id, primary, tenant, acl)| RetrievedChunk {
+                        id: chunk.id,
+                        document_id: chunk.document_id,
+                        ordinal: chunk.record.ordinal,
+                        external_id: chunk.record.external_id,
+                        content: query.include_content.then_some(chunk.record.content),
+                        score,
+                        primary_score: primary,
+                        chunk_metadata: chunk.record.chunk_metadata,
+                        document: query
+                            .include_document
+                            .then(|| summarize(&docs_by_id[&doc_id])),
+                        tenant_id: Some(tenant),
+                        acl,
+                    },
+                )
                 .collect();
             Ok(RetrieveOutput {
                 mode: query.mode,

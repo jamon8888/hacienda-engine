@@ -115,7 +115,7 @@ pub struct RetrieveQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
     /// Hard retrieval boundary: when set, only chunks whose parent document's
-    /// [`DocumentRecord::acl_reference`] equals this value are eligible,
+    /// [`DocumentRecord::acl`] mentions this value are eligible,
     /// regardless of mode, filter, or top_k. Complements [`tenant_id`](Self::tenant_id):
     /// both combine with a logical AND.
     #[serde(default, skip_serializing_if = "Option::is_none")]

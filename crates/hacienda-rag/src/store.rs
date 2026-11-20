@@ -13,7 +13,7 @@
 //! externally.
 //!
 //! Rows carry [`crate::types::DocumentRecord::tenant_id`] and
-//! [`crate::types::DocumentRecord::acl_reference`] (denormalized onto chunks at
+//! [`crate::types::DocumentRecord::acl`] (denormalized onto chunks at
 //! upsert), and [`crate::query::RetrieveQuery`] carries `tenant_id` and
 //! `acl_reference` as hard retrieval boundaries. Backends enforce these
 //! boundaries *before* scoring — a chunk the caller is not authorized for is

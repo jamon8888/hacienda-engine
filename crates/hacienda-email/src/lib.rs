@@ -111,6 +111,7 @@ impl EmailProcessor {
                 store,
                 dossier_id: self.dossier_id.as_deref(),
                 account: &config.account,
+                tenant_id: Some(&config.account),
                 page_size: config.ingestion.page_size.max(1),
                 max_pages: config.ingestion.max_pages,
                 concurrency: config.ingestion.concurrency.max(1),

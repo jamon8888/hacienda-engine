@@ -400,6 +400,34 @@ pub struct RetrievedChunk {
     /// post-retrieval authorization checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    /// Access control list of this chunk, populated by the backend for
+    /// post-retrieval authorization checks (same shape as `ChunkRecord::acl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<serde_json::Value>,
+}
+
+/// Tenant id used for rows written before per-tenant scoping existed.
+pub const DEFAULT_TENANT: &str = "default";
+
+/// True when an ACL value grants access to `reference`.
+///
+/// ACLs are caller-defined JSON; the conventional shape is
+/// `{"tenants": ["acme", "globex"]}`. We accept any string occurrence of the
+/// reference anywhere in the value so custom shapes keep working. Owner
+/// tenants are checked separately by the caller.
+pub fn acl_mentions(acl: &serde_json::Value, reference: &str) -> bool {
+    match acl {
+        serde_json::Value::String(s) => s == reference,
+        serde_json::Value::Array(items) => items.iter().any(|v| acl_mentions(v, reference)),
+        serde_json::Value::Object(map) => map.values().any(|v| acl_mentions(v, reference)),
+        _ => false,
+    }
+}
+
+/// Effective tenant of a chunk: its own value, else the parent document's,
+/// else the default tenant for legacy rows.
+pub fn effective_tenant<'a>(chunk_tenant: Option<&'a str>, doc_tenant: Option<&'a str>) -> &'a str {
+    chunk_tenant.or(doc_tenant).unwrap_or(DEFAULT_TENANT)
 }
 
 /// Aggregate statistics for a collection.
