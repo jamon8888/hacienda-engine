@@ -24,15 +24,25 @@ pub trait EmailClient: Send + Sync {
     /// List envelopes in a mailbox (newest first, capped at `limit`).
     async fn list_envelopes(&self, mailbox: &str, limit: Option<usize>) -> Result<Vec<Envelope>>;
     /// List one page of envelopes. `page` is 1-indexed; `page_size` bounds memory
-    /// for large mailboxes. Backends without native pagination fall back to the
-    /// first page so callers can still make progress page by page.
+    /// for large mailboxes.
+    ///
+    /// Backends WITHOUT native pagination must return an explicit error for
+    /// `page > 1` rather than silently re-serving page 1: a caller looping over
+    /// pages would otherwise see the same full page forever (duplicate filtering
+    /// does not terminate the loop), and with `max_pages = 0` there is no stop
+    /// condition. Page 1 still succeeds so single-page callers keep working.
     async fn list_envelopes_page(
         &self,
         mailbox: &str,
         page: u32,
         page_size: u32,
     ) -> Result<Vec<Envelope>> {
-        let _ = page;
+        if page > 1 {
+            return Err(EmailError::Backend(format!(
+                "backend does not support pagination (requested page {page} of '{mailbox}'); \
+                 use page 1 or a paginating backend"
+            )));
+        }
         self.list_envelopes(mailbox, Some(page_size as usize)).await
     }
     /// Search envelopes in a mailbox using the backend's native query syntax.

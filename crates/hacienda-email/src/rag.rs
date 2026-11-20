@@ -88,11 +88,14 @@ fn build_email_records(
     (document, records)
 }
 
-/// Watermark collection for incremental ingestion (one row per account/mailbox).
+/// Watermark collection for incremental ingestion (one row per account/mailbox/index).
 const WATERMARK_COLLECTION: &str = "email-watermarks";
 
-fn watermark_external_id(account: &str, mailbox: &str) -> String {
-    format!("watermark:{account}:{mailbox}")
+/// A checkpoint is scoped to the account, mailbox AND target index: reusing an
+/// INBOX watermark for an Archive run (or for a different collection) would
+/// silently skip un-ingested messages.
+fn watermark_external_id(account: &str, mailbox: &str, index: &str) -> String {
+    format!("watermark:{account}:{mailbox}:{index}")
 }
 
 /// Numeric UID of an envelope, when the backend exposes one (IMAP does).
@@ -100,48 +103,68 @@ fn envelope_uid(envelope: &Envelope) -> Option<u64> {
     envelope.id.trim().parse::<u64>().ok()
 }
 
-/// Highest already-ingested UID for this account+mailbox, or 0 when unknown.
-async fn read_watermark(rag: &RagIngestion<'_>) -> u64 {
+/// Highest already-ingested UID for this account+mailbox+index, or 0 when the
+/// checkpoint is genuinely absent. Storage errors are propagated (never treated
+/// as "no checkpoint"): a transient lookup failure must not trigger a full
+/// re-ingestion or disappear from the final response.
+async fn read_watermark(rag: &RagIngestion<'_>, mailbox: &str, index: &str) -> Result<u64> {
     let store = rag.store;
-    if store
+    let id = watermark_external_id(rag.account, mailbox, index);
+    // A missing watermark collection is genuine "no checkpoint yet" → 0.
+    // A failure to CHECK, however, is a real storage error and must propagate.
+    let collection_exists = store
         .get_collection(WATERMARK_COLLECTION)
         .await
-        .unwrap_or(None)
-        .is_none()
-    {
-        return 0;
+        .map_err(|e| {
+            EmailError::Rag(format!(
+                "watermark collection lookup failed in '{WATERMARK_COLLECTION}' for '{id}': {e}. \
+                 Re-run once the store is reachable; ingestion was not started."
+            ))
+        })?
+        .is_some();
+    if !collection_exists {
+        return Ok(0);
     }
     let (docs, _total) = store
         .list_documents(WATERMARK_COLLECTION, 500, 0)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            EmailError::Rag(format!(
+                "watermark lookup failed in '{WATERMARK_COLLECTION}' for '{id}': {e}. \
+                 Re-run once the store is reachable; ingestion was not started."
+            ))
+        })?;
     for doc in docs {
-        if doc.external_id.as_deref() == Some(&watermark_external_id(rag.account, "INBOX")) {
-            // The UID lives in the document metadata.
+        if doc.external_id.as_deref() == Some(id.as_str()) {
             if let Some(uid) = doc.metadata.get("last_uid").and_then(|v| v.as_u64()) {
-                return uid;
+                return Ok(uid);
             }
         }
     }
-    0
+    Ok(0)
 }
 
-/// Remember the highest UID ingested in this run (one row, upserted).
-async fn write_watermark(rag: &RagIngestion<'_>, watermark: u64) -> Result<()> {
+/// Remember the highest UID *successfully ingested* in this run (one row, upserted).
+async fn write_watermark(
+    rag: &RagIngestion<'_>,
+    mailbox: &str,
+    index: &str,
+    watermark: u64,
+) -> Result<()> {
     let store = rag.store;
     if store
         .get_collection(WATERMARK_COLLECTION)
         .await
-        .map_err(|e| EmailError::Rag(format!("get collection failed: {e}")))?
+        .map_err(|e| EmailError::Rag(format!("get watermark collection failed: {e}")))?
         .is_none()
     {
         store
             .ensure_collection(&CollectionSpec::new(WATERMARK_COLLECTION, 0))
             .await
-            .map_err(|e| EmailError::Rag(format!("ensure collection failed: {e}")))?;
+            .map_err(|e| EmailError::Rag(format!("ensure watermark collection failed: {e}")))?;
     }
     let doc = DocumentRecord {
-        external_id: Some(watermark_external_id(rag.account, "INBOX")),
+        external_id: Some(watermark_external_id(rag.account, mailbox, index)),
         title: Some("email ingestion watermark".to_string()),
         full_text: "watermark".to_string(),
         metadata: serde_json::json!({ "last_uid": watermark }),
@@ -237,7 +260,9 @@ pub async fn index_for_rag(
         ),
         None => (
             config.ingestion.page_size,
-            0,
+            // Honor max_pages even with no injected store (P2 finding): the
+            // caller's config bound must apply on every path.
+            config.ingestion.max_pages,
             config.ingestion.concurrency,
             config.ingestion.incremental,
             config.ingestion.optimize_after_run,
@@ -249,13 +274,18 @@ pub async fn index_for_rag(
     let mut total_indexed = 0usize;
     let mut total_messages = 0usize;
     let mut errors: Vec<String> = Vec::new();
-    let mut last_uid: u64 = 0;
+    // The watermark is a one-time cutoff captured before the scan. It never
+    // advances during selection: a mailbox that gains a newer message mid-scan
+    // must not shift the cutoff and cause already-seen messages to be skipped.
+    let mut cutoff_uid: u64 = 0;
+    // Highest UID whose ingestion actually succeeded — this (not the cutoff)
+    // is what gets checkpointed, so failed messages are retried next run.
+    let mut ingested_uid: u64 = 0;
 
-    // Inbox is the canonical mailbox for highlighting point 1.
     if let Some(rag) = &rag {
         ensure_collection(rag, &index).await?;
         if incremental {
-            last_uid = read_watermark(rag).await;
+            cutoff_uid = read_watermark(rag, &mailbox, &index).await?;
         }
     }
 
@@ -269,15 +299,13 @@ pub async fn index_for_rag(
         let mut selected: Vec<Envelope> = Vec::with_capacity(envelopes.len());
         for envelope in &envelopes {
             let uid = envelope_uid(envelope);
-            // Skip messages already ingested in a previous run (watermark) and
-            // duplicates already handled inside this run.
-            if uid.is_some_and(|uid| uid <= last_uid) || seen.contains(envelope.id.as_str()) {
+            // Skip messages below the fixed cutoff and duplicates handled in
+            // this run. The cutoff does NOT move here — only successful
+            // ingestion advances `ingested_uid` (checkpointed at the end).
+            if uid.is_some_and(|uid| uid <= cutoff_uid) || seen.contains(envelope.id.as_str()) {
                 continue;
             }
             seen.insert(envelope.id.clone());
-            if let Some(uid) = uid {
-                last_uid = last_uid.max(uid);
-            }
             selected.push(envelope.clone());
         }
 
@@ -356,9 +384,15 @@ pub async fn index_for_rag(
 
             let mut prepared: Vec<(DocumentRecord, Vec<ChunkRecord>)> =
                 Vec::with_capacity(outputs.len());
+            // UIDs of messages in this batch; only promoted to the checkpoint
+            // if the whole batch upsert succeeds.
+            let mut batch_uids: Vec<u64> = Vec::with_capacity(outputs.len());
             for (envelope, redacted, chunks) in outputs {
                 total_messages += 1;
                 total_chunks += chunks.len();
+                if let Some(uid) = envelope_uid(&envelope) {
+                    batch_uids.push(uid);
+                }
                 if let Some(rag) = &rag {
                     let (document, records) =
                         build_email_records(rag, &envelope, &redacted, &chunks);
@@ -367,17 +401,43 @@ pub async fn index_for_rag(
             }
 
             // One batch upsert per page — the same call documents use.
-            if let Some(rag) = &rag {
-                if !prepared.is_empty() {
+            let batch_ok = if let Some(rag) = &rag {
+                if prepared.is_empty() {
+                    true
+                } else {
                     let chunk_count: usize = prepared.iter().map(|(_, c)| c.len()).sum();
                     match rag.store.upsert_documents(&index, &prepared).await {
-                        Ok(_) => total_indexed += chunk_count,
-                        Err(e) => errors.push(format!(
-                            "RAG batch upsert failed for {} documents: {e}",
-                            prepared.len()
-                        )),
+                        Ok(_) => {
+                            total_indexed += chunk_count;
+                            true
+                        }
+                        Err(e) => {
+                            errors.push(format!(
+                                "RAG batch upsert failed for {} documents: {e}",
+                                prepared.len()
+                            ));
+                            false
+                        }
                     }
                 }
+            } else {
+                true
+            };
+            // Only checkpoint messages whose ingestion succeeded. A failed or
+            // partially-failed batch leaves the watermark unchanged so those
+            // messages are retried on the next run (no silent data loss).
+            if batch_ok {
+                for uid in batch_uids {
+                    ingested_uid = ingested_uid.max(uid);
+                }
+            }
+        }
+
+        // Report the page that was just committed BEFORE any break, so a
+        // max_pages-limited run still publishes its final progress.
+        if let Some(rag) = &rag {
+            if let Some(on_page) = rag.on_page {
+                on_page(page - 1, (page - 1) as usize, total_messages, total_chunks);
             }
         }
 
@@ -385,21 +445,25 @@ pub async fn index_for_rag(
             break;
         }
         if max_pages > 0 && page >= max_pages {
+            // Persist the continuation point when we stop early so the next run
+            // resumes after the last successfully ingested message.
+            if let Some(rag) = &rag {
+                if persist && ingested_uid > 0 {
+                    if let Err(e) =
+                        write_watermark(rag, &mailbox, &index, ingested_uid).await
+                    {
+                        errors.push(format!("Failed to persist watermark: {e}"));
+                    }
+                }
+            }
             break;
         }
         page += 1;
-        // Report the page that was just committed so a background job can
-        // publish live progress (and a client can see it is not stuck).
-        if let Some(rag) = &rag {
-            if let Some(on_page) = rag.on_page {
-                on_page(page - 1, (page as usize) - 1, total_messages, total_chunks);
-            }
-        }
     }
 
     if let Some(rag) = &rag {
-        if persist && last_uid > 0 {
-            if let Err(e) = write_watermark(rag, last_uid).await {
+        if persist && ingested_uid > 0 {
+            if let Err(e) = write_watermark(rag, &mailbox, &index, ingested_uid).await {
                 errors.push(format!("Failed to persist watermark: {e}"));
             }
         }
@@ -618,19 +682,27 @@ mod tests {
             on_page: None,
         };
 
+        let (mailbox, index) = ("INBOX", "email-corpus");
+
         // No watermark present yet.
-        assert_eq!(read_watermark(&rag).await, 0);
+        assert_eq!(read_watermark(&rag, mailbox, index).await.unwrap(), 0);
 
         // Highest UID only, not a count.
         let seen = vec![17u64, 42, 9, 3];
         let highest = seen.iter().copied().max().unwrap();
-        write_watermark(&rag, highest).await.unwrap();
-        assert_eq!(read_watermark(&rag).await, 42);
+        write_watermark(&rag, mailbox, index, highest).await.unwrap();
+        assert_eq!(read_watermark(&rag, mailbox, index).await.unwrap(), 42);
+
+        // A different mailbox has its own independent checkpoint.
+        assert_eq!(read_watermark(&rag, "Archive", index).await.unwrap(), 0);
+        // And so does a different target index.
+        assert_eq!(read_watermark(&rag, mailbox, "other-index").await.unwrap(), 0);
 
         // A new batch with lower UIDs must be skipped entirely.
+        let cutoff = read_watermark(&rag, mailbox, index).await.unwrap();
         let mut ran = 0usize;
         for uid in seen {
-            if uid <= read_watermark(&rag).await {
+            if uid <= cutoff {
                 continue;
             }
             ran += 1;
@@ -639,13 +711,13 @@ mod tests {
 
         // A batch with one newer UID must be processed exactly once.
         for uid in [42u64, 43, 43] {
-            if uid <= read_watermark(&rag).await {
+            if uid <= read_watermark(&rag, mailbox, index).await.unwrap() {
                 continue;
             }
             ran += 1;
-            write_watermark(&rag, uid).await.unwrap();
+            write_watermark(&rag, mailbox, index, uid).await.unwrap();
         }
         assert_eq!(ran, 1);
-        assert_eq!(read_watermark(&rag).await, 43);
+        assert_eq!(read_watermark(&rag, mailbox, index).await.unwrap(), 43);
     }
 }
