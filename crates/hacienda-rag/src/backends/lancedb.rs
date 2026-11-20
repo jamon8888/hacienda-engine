@@ -282,6 +282,36 @@ impl LanceDbStore {
         Ok(out)
     }
 
+    /// Look up an already-stored document by its external_id using a targeted
+    /// SQL filter (no full-table scan). This preserves the legacy `doc-<uuid>`
+    /// ID that pre-deterministic-ID collections stored, so re-upserting does
+    /// not create a duplicate document with a second ID.
+    async fn lookup_existing_doc_id(
+        &self,
+        docs: &Table,
+        external_id: &str,
+    ) -> RagResult<Option<DocumentId>> {
+        let filter = format!("external_id = '{}'", sql_quote(external_id));
+        let batches = docs
+            .query()
+            .only_if(&filter)
+            .execute()
+            .await
+            .map_err(backend_err)?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(backend_err)?;
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                let id = string_at(batch, "doc_id", row)?;
+                if !id.is_empty() {
+                    return Ok(Some(DocumentId(id)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     async fn read_documents(&self, table: &Table) -> RagResult<Vec<StoredDocument>> {
         let batches = table
             .query()
@@ -567,23 +597,26 @@ impl RagStore for LanceDbStore {
             }
         }
         let (docs, chunk_table) = self.collection_tables(collection).await?;
-        // Compute the identity deterministically instead of scanning the whole
-        // documents table on every upsert. The old `read_documents()` linear
-        // search made bulk ingestion O(n²) (one full table scan per message).
-        // `merge_insert` keeps re-upserts idempotent, and `replace_chunks`
-        // removes the chunks of the previous version of the same id.
-        let id = document.external_id.as_ref().map_or_else(
-            || DocumentId(format!("doc-{}", Uuid::new_v4())),
-            |external| {
-                let mut key = collection.as_bytes().to_vec();
-                key.push(0);
-                key.extend_from_slice(external.as_bytes());
-                DocumentId(format!(
-                    "doc-ext-{}",
-                    Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
-                ))
-            },
-        );
+        // Preserve a legacy stored ID when re-upserting an external_id that was
+        // written before deterministic IDs existed (finding 650). The lookup is
+        // a targeted SQL filter, not a full-table scan. New documents still get
+        // a deterministic ID so repeated upserts are idempotent.
+        let id = match document.external_id.as_ref() {
+            Some(external) => {
+                if let Some(existing) = self.lookup_existing_doc_id(&docs, external).await? {
+                    existing
+                } else {
+                    let mut key = collection.as_bytes().to_vec();
+                    key.push(0);
+                    key.extend_from_slice(external.as_bytes());
+                    DocumentId(format!(
+                        "doc-ext-{}",
+                        Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
+                    ))
+                }
+            }
+            None => DocumentId(format!("doc-{}", Uuid::new_v4())),
+        };
         // Le document est la source autoritative du scoping juridique : les
         // chunks produits par le chunking côté API (dossier_id / version_ref
         // à None) héritent du scope de leur document parent à l'upsert, sinon
@@ -679,23 +712,28 @@ impl RagStore for LanceDbStore {
         let (docs, chunk_table) = self.collection_tables(collection).await?;
         let ingested_at = now_secs();
 
-        // Compute all ids deterministically (no full-table scan) and scope
-        // every chunk from its parent document, exactly like the single path.
+        // Resolve each identity: reuse any legacy stored ID for the external_id
+        // (finding 650), otherwise derive a deterministic one. Targeted SQL
+        // lookups keep this O(items) rather than O(items × table size).
         let mut ids = Vec::with_capacity(deduped.len());
         let mut rows: Vec<StoredChunk> = Vec::new();
         for (document, chunks) in deduped.iter().map(|item| (&item.0, &item.1)) {
-            let id = document.external_id.as_ref().map_or_else(
-                || DocumentId(format!("doc-{}", Uuid::new_v4())),
-                |external| {
-                    let mut key = collection.as_bytes().to_vec();
-                    key.push(0);
-                    key.extend_from_slice(external.as_bytes());
-                    DocumentId(format!(
-                        "doc-ext-{}",
-                        Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
-                    ))
-                },
-            );
+            let id = match document.external_id.as_ref() {
+                Some(external) => {
+                    if let Some(existing) = self.lookup_existing_doc_id(&docs, external).await? {
+                        existing
+                    } else {
+                        let mut key = collection.as_bytes().to_vec();
+                        key.push(0);
+                        key.extend_from_slice(external.as_bytes());
+                        DocumentId(format!(
+                            "doc-ext-{}",
+                            Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
+                        ))
+                    }
+                }
+                None => DocumentId(format!("doc-{}", Uuid::new_v4())),
+            };
             for record in chunks {
                 let mut scoped = record.clone();
                 if scoped.dossier_id.is_none() {
