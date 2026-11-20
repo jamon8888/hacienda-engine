@@ -69,6 +69,26 @@ impl EmailProcessor {
 
     /// Process an email request
     pub async fn process(&self, input: EmailRequest) -> Result<EmailResponse> {
+        self.process_inner(input, None).await
+    }
+
+    /// Process an email request with a per-page progress callback (used by the
+    /// async HTTP job to publish live progress). The callback receives
+    /// `(page, pages_done, messages_done, chunks_done)` after each committed
+    /// page. Other callers use [`Self::process`].
+    pub async fn process_with_progress<'a>(
+        &self,
+        input: EmailRequest,
+        on_page: &'a (dyn Fn(u32, usize, usize, usize) + Send + Sync),
+    ) -> Result<EmailResponse> {
+        self.process_inner(input, Some(on_page)).await
+    }
+
+    async fn process_inner(
+        &self,
+        input: EmailRequest,
+        on_page: Option<&(dyn Fn(u32, usize, usize, usize) + Send + Sync)>,
+    ) -> Result<EmailResponse> {
         let config = input.config_overrides.as_ref().unwrap_or(&self.config);
 
         // Per-tenant privacy mode (design D1): if an override selects a different
@@ -97,7 +117,7 @@ impl EmailProcessor {
                 incremental: config.ingestion.incremental,
                 optimize_after_run: config.ingestion.optimize_after_run,
                 persist_watermark: true,
-                on_page: None,
+                on_page,
             });
 
         match input.operation {

@@ -132,10 +132,63 @@ fn to_api_error(e: hacienda_email::EmailError) -> ApiError {
     ApiError::invalid_request(format!("email operation failed: {e}"))
 }
 
+/// Resolve a request-supplied Maildir path inside the authenticated tenant's
+/// storage root (finding: "Confine request Maildir paths", PR #166).
+///
+/// The root is server-owned — `HACIENDA_MAILBOX_ROOT`, never from the request —
+/// and the tenant id is appended, so one tenant cannot point at another's
+/// mailbox. Both the root and the joined path are canonicalized (resolving `..`
+/// and symlinks) before the containment check; anything escaping the root is
+/// rejected. If the root is unset, the route is fail-closed: no path is
+/// accepted until an operator configures a boundary.
+fn resolve_tenant_maildir(requested: &str, account: &str) -> Result<String, ApiError> {
+    let root = std::env::var_os("HACIENDA_MAILBOX_ROOT").ok_or_else(|| {
+        ApiError::invalid_request(
+            "email Maildir access requires the server to set HACIENDA_MAILBOX_ROOT",
+        )
+    })?;
+    let root = std::path::Path::new(&root);
+    // Reject absolute or parent-traversal request paths outright.
+    let requested_path = std::path::Path::new(requested);
+    if requested_path.is_absolute()
+        || requested_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(ApiError::invalid_request(
+            "Maildir path must be relative to the tenant's mailbox root",
+        ));
+    }
+    let root_canonical = root.canonicalize().map_err(|e| {
+        ApiError::invalid_request(format!(
+            "HACIENDA_MAILBOX_ROOT is not accessible: {e}. Configure an existing directory."
+        ))
+    })?;
+    // Join root/account/requested; create the leaf if absent so the client can
+    // open it, but canonicalize the result to resolve any symlinks.
+    let candidate = root_canonical.join(account).join(requested_path);
+    if let Some(parent) = candidate.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ApiError::invalid_request(format!("cannot prepare tenant mailbox directory: {e}"))
+        })?;
+    }
+    let candidate_canonical = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.clone());
+    if !candidate_canonical.starts_with(&root_canonical) {
+        return Err(ApiError::invalid_request(
+            "Maildir path resolves outside the tenant's mailbox root",
+        ));
+    }
+    Ok(candidate_canonical.to_string_lossy().into_owned())
+}
+
 fn build_config(body: &EmailProcessRequest, account: String) -> Result<EmailConfig, ApiError> {
     // Exhaustive by construction: EmailBackendDto has exactly one variant.
     let backend = match &body.backend {
-        EmailBackendDto::Maildir { path } => EmailBackend::Maildir { path: path.clone() },
+        EmailBackendDto::Maildir { path } => EmailBackend::Maildir {
+            path: resolve_tenant_maildir(path, &account)?,
+        },
     };
     let mode = match body.privacy_mode.mode {
         PrivacyModeValue::Redact => PrivacyMode::Redact,
@@ -159,38 +212,44 @@ fn dest_of(path: String) -> EmailDestination {
     EmailDestination::Maildir { path }
 }
 
-fn build_operation(operation: &EmailOperationDto) -> EmailOperation {
-    match operation {
+/// Build the operation, confining every request-supplied Maildir/source/output
+/// path to the authenticated tenant's root (same boundary as build_config).
+fn build_operation(
+    operation: &EmailOperationDto,
+    account: &str,
+) -> Result<EmailOperation, ApiError> {
+    let resolve = |p: &str| resolve_tenant_maildir(p, account);
+    Ok(match operation {
         EmailOperationDto::Archive {
             source,
             output,
             since,
         } => EmailOperation::Archive {
-            source: source_of(source.clone()),
-            destination: dest_of(output.clone()),
+            source: source_of(resolve(source)?),
+            destination: dest_of(resolve(output)?),
             since: since.clone(),
             before: None,
             mailbox: Some("INBOX".to_string()),
             include_attachments: true,
         },
         EmailOperationDto::ExtractNER { source, output } => EmailOperation::ExtractNER {
-            source: source_of(source.clone()),
-            output: output.clone(),
+            source: source_of(resolve(source)?),
+            output: resolve(output)?,
             model: None,
         },
         EmailOperationDto::Redact { source, output } => EmailOperation::Redact {
-            source: source_of(source.clone()),
-            destination: dest_of(output.clone()),
+            source: source_of(resolve(source)?),
+            destination: dest_of(resolve(output)?),
             rules: None,
         },
         EmailOperationDto::IndexForRag { source, index } => EmailOperation::IndexForRag {
-            source: source_of(source.clone()),
+            source: source_of(resolve(source)?),
             index_name: index.clone(),
             chunk_size: None,
         },
         EmailOperationDto::Pipeline { source, output } => EmailOperation::Pipeline {
-            source: source_of(source.clone()),
-            destination: dest_of(output.clone()),
+            source: source_of(resolve(source)?),
+            destination: dest_of(resolve(output)?),
             steps: vec![
                 PipelineStep::Archive,
                 PipelineStep::ExtractAttachments,
@@ -199,7 +258,7 @@ fn build_operation(operation: &EmailOperationDto) -> EmailOperation {
                 PipelineStep::Redact,
             ],
         },
-    }
+    })
 }
 
 /// `POST /v1/email/process/async` — the large-mailbox surface.
@@ -247,7 +306,7 @@ pub async fn process_email_async(
     let task_dossier = body.dossier_id.clone();
     let task_tenant = tenant.clone();
     let task_job_id = job_id.clone();
-    let operation = build_operation(&body.operation);
+    let operation = build_operation(&body.operation, tenant.as_str())?;
     let config = build_config(&body, tenant.as_str().to_string())?;
 
     tokio::spawn(async move {
@@ -275,18 +334,46 @@ pub async fn process_email_async(
             if let Some(dossier) = task_dossier.as_deref() {
                 processor = processor.with_dossier_id(dossier);
             }
+            // Publish per-page progress to this tenant's job. The callback must
+            // be sync, so each tick spawns a fire-and-forget update with cloned
+            // Arcs; a failed tick is only logged and never fails ingestion.
+            let progress_jobs = task_jobs.clone();
+            let progress_tenant = task_tenant.clone();
+            let progress_job_id = task_job_id.clone();
+            let on_page = move |page: u32, pages_done: usize, messages: usize, chunks: usize| {
+                let jobs = progress_jobs.clone();
+                let tenant = progress_tenant.clone();
+                let id = progress_job_id.clone();
+                tokio::spawn(async move {
+                    let json = serde_json::json!({
+                        "page": page,
+                        "pages_done": pages_done,
+                        "messages": messages,
+                        "chunks": chunks,
+                    });
+                    if let Err(e) = jobs
+                        .update_progress(&tenant, &id, json.to_string())
+                        .await
+                    {
+                        tracing::warn!(job_id = %id, error = %e, "failed to publish email job progress");
+                    }
+                });
+            };
             processor
-                .process(EmailRequest {
-                    operation,
-                    config_overrides: None,
-                })
+                .process_with_progress(
+                    EmailRequest {
+                        operation,
+                        config_overrides: None,
+                    },
+                    &on_page,
+                )
                 .await
                 .map_err(to_api_error)
         }
         .await;
 
         match result {
-            Ok(response) => match serde_json::to_string(&response) {
+            Ok(response) if response.success => match serde_json::to_string(&response) {
                 Ok(json) => {
                     if let Err(e) = task_jobs.finish(&task_tenant, &task_job_id, json).await {
                         tracing::error!(
@@ -306,6 +393,19 @@ pub async fn process_email_async(
                         .await;
                 }
             },
+            // `index_for_rag` reports per-message failures via `success=false`
+            // while still returning Ok — a run where every message failed must
+            // NOT be recorded as a successful job. Fail the job and keep the
+            // structured errors for the operator.
+            Ok(response) => {
+                let reason = if response.errors.is_empty() {
+                    "email processing reported failure without details".to_string()
+                } else {
+                    format!("email processing failed: {}", response.errors.join("; "))
+                };
+                tracing::error!(job_id = %task_job_id, "{}", reason);
+                let _ = task_jobs.fail(&task_tenant, &task_job_id, reason).await;
+            }
             Err(e) => {
                 let _ = task_jobs
                     .fail(&task_tenant, &task_job_id, e.to_string())
@@ -357,7 +457,7 @@ pub async fn process_email(
     if let Some(dossier) = body.dossier_id.as_deref() {
         processor = processor.with_dossier_id(dossier);
     }
-    let operation = build_operation(&body.operation);
+    let operation = build_operation(&body.operation, tenant.as_str())?;
     let response = processor
         .process(EmailRequest {
             operation,

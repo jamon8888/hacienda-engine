@@ -65,3 +65,13 @@ is tracked as the final Phase-5 step, not skipped.
   document row, then the chunk rows; if the second write fails the store holds
   updated text with stale chunks. A proper fix needs a staging/transaction
   protocol at the RagStore layer (beyond the write lock). Tracked separately.
+
+## HTTP Maildir security boundary (CodeRabbit PR #166 round 2)
+
+`POST /v1/email/process` and `/v1/email/process/async` confine every
+request-supplied Maildir path to a server-owned root:
+`HACIENDA_MAILBOX_ROOT/<tenant-id>/<requested-relative-path>`. The root is
+server configuration (never from the request); the path is rejected if it is
+absolute, contains `..`, or canonicalizes (symlinks resolved) outside the root.
+If the env var is unset the routes are fail-closed (400). This prevents one
+authenticated tenant from reading/indexing another tenant's mailbox.

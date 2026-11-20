@@ -125,20 +125,33 @@ async fn read_watermark(rag: &RagIngestion<'_>, mailbox: &str, index: &str) -> R
     if !collection_exists {
         return Ok(0);
     }
-    let (docs, _total) = store
-        .list_documents(WATERMARK_COLLECTION, 500, 0)
-        .await
-        .map_err(|e| {
-            EmailError::Rag(format!(
-                "watermark lookup failed in '{WATERMARK_COLLECTION}' for '{id}': {e}. \
-                 Re-run once the store is reachable; ingestion was not started."
-            ))
-        })?;
-    for doc in docs {
-        if doc.external_id.as_deref() == Some(id.as_str()) {
-            if let Some(uid) = doc.metadata.get("last_uid").and_then(|v| v.as_u64()) {
-                return Ok(uid);
+    // Walk every checkpoint page: with many account/mailbox/index rows a match
+    // can fall beyond the first 500, and treating that as "absent" would restart
+    // ingestion from UID zero (finding: "Search all checkpoint pages").
+    let page_size = 500u32;
+    let mut offset = 0u32;
+    loop {
+        let (docs, total) = store
+            .list_documents(WATERMARK_COLLECTION, page_size, offset)
+            .await
+            .map_err(|e| {
+                EmailError::Rag(format!(
+                    "watermark lookup failed in '{WATERMARK_COLLECTION}' for '{id}' \
+                     (offset {offset}): {e}. Re-run once the store is reachable; \
+                     ingestion was not started."
+                ))
+            })?;
+        let page_empty = docs.is_empty();
+        for doc in docs {
+            if doc.external_id.as_deref() == Some(id.as_str()) {
+                if let Some(uid) = doc.metadata.get("last_uid").and_then(|v| v.as_u64()) {
+                    return Ok(uid);
+                }
             }
+        }
+        offset = offset.saturating_add(page_size);
+        if u64::from(offset) >= total || page_empty {
+            break;
         }
     }
     Ok(0)
@@ -444,10 +457,12 @@ pub async fn index_for_rag(
         }
 
         // Report the page that was just committed BEFORE any break, so a
-        // max_pages-limited run still publishes its final progress.
+        // max_pages-limited run still publishes its final progress. `page` is
+        // the just-completed (1-indexed) page because the increment happens
+        // after this block; do NOT subtract one.
         if let Some(rag) = &rag {
             if let Some(on_page) = rag.on_page {
-                on_page(page - 1, (page - 1) as usize, total_messages, total_chunks);
+                on_page(page, page as usize, total_messages, total_chunks);
             }
         }
 

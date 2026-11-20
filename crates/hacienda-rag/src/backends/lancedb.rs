@@ -291,16 +291,32 @@ impl LanceDbStore {
         docs: &Table,
         external_id: &str,
     ) -> RagResult<Option<DocumentId>> {
+        // An empty external_id is how anonymous documents are persisted. It
+        // must never be treated as a real identity: a query for `""` would
+        // match the first anonymous document and overwrite it.
+        if external_id.is_empty() {
+            return Ok(None);
+        }
         let filter = format!("external_id = '{}'", sql_quote(external_id));
         let batches = docs
             .query()
             .only_if(&filter)
             .execute()
             .await
-            .map_err(backend_err)?
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "identity lookup for external_id '{external_id}': failed to execute query ({e}). \
+                     Retry once the store is reachable."
+                ))))
+            })?
             .try_collect::<Vec<_>>()
             .await
-            .map_err(backend_err)?;
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "identity lookup for external_id '{external_id}': failed to read results ({e}). \
+                     Retry once the store is reachable."
+                ))))
+            })?;
         for batch in &batches {
             for row in 0..batch.num_rows() {
                 let id = string_at(batch, "doc_id", row)?;
@@ -310,6 +326,56 @@ impl LanceDbStore {
             }
         }
         Ok(None)
+    }
+
+    /// Resolve many legacy external_ids in one projected query (finding:
+    /// "Batch the legacy-ID lookups"). Only `external_id` and `doc_id` are
+    /// fetched, and a single `IN (...)` filter replaces N round trips.
+    async fn lookup_existing_doc_ids(
+        &self,
+        docs: &Table,
+        external_ids: &[String],
+    ) -> RagResult<HashMap<String, DocumentId>> {
+        let mut found = HashMap::new();
+        let valid: Vec<&String> = external_ids.iter().filter(|id| !id.is_empty()).collect();
+        if valid.is_empty() {
+            return Ok(found);
+        }
+        let list = valid
+            .iter()
+            .map(|id| format!("'{}'", sql_quote(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let filter = format!("external_id IN ({list})");
+        let batches = docs
+            .query()
+            .only_if(&filter)
+            .execute()
+            .await
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "batch identity lookup for {} external_ids: query failed ({e}). Retry once the store is reachable.",
+                    valid.len()
+                ))))
+            })?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "batch identity lookup for {} external_ids: read failed ({e}). Retry once the store is reachable.",
+                    valid.len()
+                ))))
+            })?;
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                let ext = empty_as_none(string_at(batch, "external_id", row)?);
+                let id = string_at(batch, "doc_id", row)?;
+                if let (Some(ext), true) = (ext, !id.is_empty()) {
+                    found.insert(ext, DocumentId(id));
+                }
+            }
+        }
+        Ok(found)
     }
 
     async fn read_documents(&self, table: &Table) -> RagResult<Vec<StoredDocument>> {
@@ -712,16 +778,22 @@ impl RagStore for LanceDbStore {
         let (docs, chunk_table) = self.collection_tables(collection).await?;
         let ingested_at = now_secs();
 
-        // Resolve each identity: reuse any legacy stored ID for the external_id
-        // (finding 650), otherwise derive a deterministic one. Targeted SQL
-        // lookups keep this O(items) rather than O(items × table size).
+        // Resolve all legacy external_ids in ONE projected query (no N round
+        // trips). Reuse any stored ID so re-upsert cannot duplicate a document
+        // written before deterministic IDs existed (finding 650).
+        let external_ids: Vec<String> = deduped
+            .iter()
+            .filter_map(|item| item.0.external_id.clone().filter(|id| !id.is_empty()))
+            .collect();
+        let existing_ids = self.lookup_existing_doc_ids(&docs, &external_ids).await?;
+
         let mut ids = Vec::with_capacity(deduped.len());
         let mut rows: Vec<StoredChunk> = Vec::new();
         for (document, chunks) in deduped.iter().map(|item| (&item.0, &item.1)) {
-            let id = match document.external_id.as_ref() {
+            let id = match document.external_id.as_ref().filter(|id| !id.is_empty()) {
                 Some(external) => {
-                    if let Some(existing) = self.lookup_existing_doc_id(&docs, external).await? {
-                        existing
+                    if let Some(existing) = existing_ids.get(external) {
+                        existing.clone()
                     } else {
                         let mut key = collection.as_bytes().to_vec();
                         key.push(0);

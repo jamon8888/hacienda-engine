@@ -62,20 +62,23 @@ pub async fn extract_ner(
     if let Some(parent) = Path::new(&output).parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
             EmailError::Io(std::io::Error::other(format!(
-                "NER: failed to create output directory '{}': {e}",
+                "NER: failed to create output directory '{}': {e}. \
+                 Check the path is writable and the parent exists.",
                 parent.display()
             )))
         })?;
     }
     let json = serde_json::to_string_pretty(&all_entities).map_err(|e| {
         EmailError::Ner(format!(
-            "failed to serialize {} entities for '{output}': {e}",
+            "NER: failed to serialize {} entities for '{output}': {e}. \
+             Retry after checking the result data is serializable.",
             all_entities.len()
         ))
     })?;
     tokio::fs::write(&output, json).await.map_err(|e| {
         EmailError::Io(std::io::Error::other(format!(
-            "NER: failed to write entities to '{output}': {e}"
+            "NER: failed to write entities to '{output}': {e}. \
+             Check the path is writable and free disk space is available."
         )))
     })?;
 
