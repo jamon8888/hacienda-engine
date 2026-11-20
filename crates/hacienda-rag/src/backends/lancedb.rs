@@ -409,7 +409,7 @@ impl LanceDbStore {
                         dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
                         version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
                         tenant_id: empty_as_none(string_at(&batch, "tenant_id", row)?),
-                        acl: json_value_at(&batch, "acl", row)?,
+                        acl: optional_json_value_at(&batch, "acl", row)?,
                     },
                     ingested_at: int_at(&batch, "ingested_at", row)?,
                 });
@@ -444,7 +444,7 @@ impl LanceDbStore {
                         dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
                         version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
                         tenant_id: empty_as_none(string_at(&batch, "tenant_id", row)?),
-                        acl: json_value_at(&batch, "acl", row)?,
+                        acl: optional_json_value_at(&batch, "acl", row)?,
                     },
                 });
             }
@@ -1703,6 +1703,22 @@ fn vector_at(batch: &RecordBatch, name: &str, row: usize) -> RagResult<Vec<f32>>
 fn json_value_at(batch: &RecordBatch, name: &str, row: usize) -> RagResult<serde_json::Value> {
     serde_json::from_str(&string_at(batch, name, row)?).map_err(backend_err)
 }
+/// Read an optional JSON column: the serialized `null` sentinel and an empty
+/// string (legacy AllNulls columns) both mean "absent".
+fn optional_json_value_at(
+    batch: &RecordBatch,
+    name: &str,
+    row: usize,
+) -> RagResult<Option<serde_json::Value>> {
+    let raw = string_at(batch, name, row)?;
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match json_value_at(batch, name, row)? {
+        serde_json::Value::Null => Ok(None),
+        other => Ok(Some(other)),
+    }
+}
 fn json_at<T: serde::de::DeserializeOwned>(
     batch: &RecordBatch,
     name: &str,
@@ -1894,6 +1910,8 @@ mod tests {
             chunk_metadata: serde_json::json!({"ordinal": ordinal}),
             dossier_id: None,
             version_ref: None,
+            tenant_id: None,
+            acl: None,
         }
     }
 
