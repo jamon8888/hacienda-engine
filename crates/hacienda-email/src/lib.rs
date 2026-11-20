@@ -76,10 +76,10 @@ impl EmailProcessor {
     /// async HTTP job to publish live progress). The callback receives
     /// `(page, pages_done, messages_done, chunks_done)` after each committed
     /// page. Other callers use [`Self::process`].
-    pub async fn process_with_progress<'a>(
+    pub async fn process_with_progress(
         &self,
         input: EmailRequest,
-        on_page: &'a (dyn Fn(u32, usize, usize, usize) + Send + Sync),
+        on_page: &(dyn Fn(u32, usize, usize, usize) + Send + Sync),
     ) -> Result<EmailResponse> {
         self.process_inner(input, Some(on_page)).await
     }

@@ -754,12 +754,16 @@ impl RagStore for LanceDbStore {
         let mut by_identity: HashMap<String, usize> = HashMap::new();
         let mut position_to_slot: Vec<usize> = Vec::with_capacity(items.len());
         for (i, item) in items.iter().enumerate() {
+            // An empty external_id is NOT an identity — treat it as anonymous
+            // so two `Some("")` items don't collapse into one (which would drop
+            // documents and chunks). Anonymous items are always distinct.
             let key = item
                 .0
                 .external_id
-                .clone()
+                .as_ref()
+                .filter(|id| !id.is_empty())
                 .map(|id| format!("ext:{id}"))
-                .unwrap_or_else(|| format!("anon:{i}")); // anonymous items are always distinct
+                .unwrap_or_else(|| format!("anon:{i}"));
             let slot = match by_identity.get(&key) {
                 Some(&slot) => {
                     deduped[slot] = item; // last-item-wins
