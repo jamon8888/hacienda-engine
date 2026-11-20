@@ -1472,7 +1472,7 @@ impl HaciendaFacade {
             let mut approvers: Vec<&str> = request.approvers.iter().map(String::as_str).collect();
             approvers.sort_unstable();
             approvers.dedup();
-            if approvers.len() < 2 || approvers.iter().any(|a| *a == subject.as_str()) {
+            if approvers.len() < 2 || approvers.contains(&subject.as_str()) {
                 return Err(RevealTicketError::InsufficientApprovers.into());
             }
         }
