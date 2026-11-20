@@ -20,6 +20,7 @@ use hacienda_email::{
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+use crate::handlers::rag::scope_collection_name;
 use crate::{
     dto::AsyncJobResponse,
     error::ApiError,
@@ -241,6 +242,7 @@ fn dest_of(path: String) -> EmailDestination {
 async fn build_operation(
     operation: &EmailOperationDto,
     account: &str,
+    tenant_ctx: &hacienda_core::tenancy::TenantCtx,
 ) -> Result<EmailOperation, ApiError> {
     Ok(match operation {
         EmailOperationDto::Archive {
@@ -267,7 +269,12 @@ async fn build_operation(
         },
         EmailOperationDto::IndexForRag { source, index } => EmailOperation::IndexForRag {
             source: source_of(resolve_tenant_maildir(source, account).await?),
-            index_name: index.clone(),
+            // Same tenant-scoping rule as /v1/rag/* so emails indexed as
+            // "email-corpus" are retrievable under "{tenant}:email-corpus".
+            index_name: Some(scope_collection_name(
+                tenant_ctx,
+                index.as_deref().unwrap_or("email-corpus"),
+            )),
             chunk_size: None,
         },
         EmailOperationDto::Pipeline { source, output } => EmailOperation::Pipeline {
@@ -317,7 +324,7 @@ pub async fn process_email_async(
     // (e.g. output="../escape") must be a 400 with no orphan job persisted.
     // The account is derived from the authenticated tenant, never the body.
     let config = build_config(&body, tenant.as_str().to_string()).await?;
-    let operation = build_operation(&body.operation, tenant.as_str()).await?;
+    let operation = build_operation(&body.operation, tenant.as_str(), &caller.tenant_ctx()).await?;
 
     let job = state.jobs.create(&tenant, owner).await.map_err(|e| {
         tracing::error!(error = %e, "failed to create async email job");
@@ -495,7 +502,7 @@ pub async fn process_email(
     if let Some(dossier) = body.dossier_id.as_deref() {
         processor = processor.with_dossier_id(dossier);
     }
-    let operation = build_operation(&body.operation, tenant.as_str()).await?;
+    let operation = build_operation(&body.operation, tenant.as_str(), &caller.tenant_ctx()).await?;
     let response = processor
         .process(EmailRequest {
             operation,

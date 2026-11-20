@@ -222,8 +222,8 @@ impl LanceDbStore {
             .await?;
         // Every read/upsert path goes through here: migrate legacy tables in
         // place so readers never hit a missing tenant_id/acl column.
-        migrate_scoping_columns(&docs).await?;
-        migrate_scoping_columns(&chunks).await?;
+        migrate_scoping_columns(&docs, &Self::table_name(collection, "documents")).await?;
+        migrate_scoping_columns(&chunks, &Self::table_name(collection, "chunks")).await?;
         Ok((docs, chunks))
     }
 
@@ -620,8 +620,8 @@ impl RagStore for LanceDbStore {
         let docs = self.open_table(&docs_name).await?;
         let chunks = self.open_table(&chunks_name).await?;
         // Migrate pre-scoping tables so the schema check below sees the new columns.
-        migrate_scoping_columns(&docs).await?;
-        migrate_scoping_columns(&chunks).await?;
+        migrate_scoping_columns(&docs, &docs_name).await?;
+        migrate_scoping_columns(&chunks, &chunks_name).await?;
         if docs.schema().await.map_err(backend_err)?.as_ref() != document_schema().as_ref()
             || chunks.schema().await.map_err(backend_err)?.as_ref()
                 != chunk_schema(spec.embedding_dim).as_ref()
@@ -1007,14 +1007,16 @@ impl RagStore for LanceDbStore {
                     doc.record.tenant_id.as_deref(),
                 )
                 .to_string();
-                if let Some(tenant) = &query.tenant_id {
-                    if effective_tenant != tenant.as_str() {
-                        continue;
-                    }
-                }
                 // Hard ACL boundary: the caller's acl_reference must be present
                 // in the row's ACL (or be the owner tenant). Unscoped when absent.
                 let chunk_acl = chunk.record.acl.clone().or_else(|| doc.record.acl.clone());
+                if let Some(tenant) = &query.tenant_id {
+                    if effective_tenant != tenant.as_str()
+                        && !chunk_acl.as_ref().is_some_and(|a| acl_mentions(a, tenant))
+                    {
+                        continue;
+                    }
+                }
                 if let Some(reference) = &query.acl_reference {
                     let acl_grants = chunk_acl
                         .as_ref()
@@ -1377,9 +1379,14 @@ fn chunk_schema(dim: u32) -> SchemaRef {
 /// Add the tenant/ACL scoping columns to a pre-existing table that was created
 /// before those fields existed. `AllNulls` is a metadata-only change: legacy
 /// rows then read as "default tenant / owner-only ACL" via the readers.
-async fn migrate_scoping_columns(table: &lancedb::Table) -> RagResult<()> {
+async fn migrate_scoping_columns(table: &lancedb::Table, table_name: &str) -> RagResult<()> {
     use lancedb::table::NewColumnTransform;
-    let schema = table.schema().await.map_err(backend_err)?;
+    let schema = table.schema().await.map_err(|e| {
+        RagError::Backend(Box::new(std::io::Error::other(format!(
+            "schema migration for '{table_name}': failed to read schema ({e}). \
+             Retry once the store is reachable."
+        ))))
+    })?;
     let mut additions = Vec::new();
     for name in ["tenant_id", "acl"] {
         if schema.index_of(name).is_err() {
@@ -1396,7 +1403,12 @@ async fn migrate_scoping_columns(table: &lancedb::Table) -> RagResult<()> {
         )))
         .execute()
         .await
-        .map_err(backend_err)?;
+        .map_err(|e| {
+            RagError::Backend(Box::new(std::io::Error::other(format!(
+                "schema migration for '{table_name}': failed to add tenant/ACL columns ({e}). \
+                 Reopen the collection once the store is writable."
+            ))))
+        })?;
     Ok(())
 }
 

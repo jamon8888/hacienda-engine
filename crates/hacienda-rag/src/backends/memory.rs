@@ -493,21 +493,25 @@ impl RagStore for InMemoryVectorStore {
                     .get(&c.document_id)
                     .and_then(|d| d.record.tenant_id.as_deref());
                 let owner = effective_tenant(c.record.tenant_id.as_deref(), doc_tenant);
-                // Hard tenant boundary before scoring.
+                let row_acl = c.record.acl.as_ref().or_else(|| {
+                    coll.documents
+                        .get(&c.document_id)
+                        .and_then(|d| d.record.acl.as_ref())
+                });
+                // Hard tenant boundary before scoring. A row is eligible when
+                // its owner matches the caller OR its ACL explicitly grants
+                // the caller (cross-tenant sharing via ACL is supported).
                 if let Some(tenant) = &query.tenant_id {
-                    if owner != tenant.as_str() {
+                    if owner != tenant.as_str() && !row_acl.is_some_and(|a| acl_mentions(a, tenant))
+                    {
                         return false;
                     }
                 }
-                // Hard ACL boundary before scoring: the caller's reference must
-                // be granted by the row's ACL (or be the owner tenant).
+                // Hard ACL boundary before scoring: when a dossier/case
+                // reference is supplied, the row's ACL must mention it (or be
+                // the owner). Combined with the tenant check above by AND.
                 if let Some(reference) = &query.acl_reference {
-                    let acl = c.record.acl.as_ref().or_else(|| {
-                        coll.documents
-                            .get(&c.document_id)
-                            .and_then(|d| d.record.acl.as_ref())
-                    });
-                    if !acl.is_some_and(|a| acl_mentions(a, reference))
+                    if !row_acl.is_some_and(|a| acl_mentions(a, reference))
                         && owner != reference.as_str()
                     {
                         return false;

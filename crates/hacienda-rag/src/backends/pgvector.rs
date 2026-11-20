@@ -1080,10 +1080,17 @@ fn push_scope_filter(qb: &mut QueryBuilder<'_, Postgres>, query: &RetrieveQuery)
     // (legacy rows); compare the coalesced value so those stay eligible for
     // the default tenant and excluded for everyone else.
     if let Some(tenant) = &query.tenant_id {
-        qb.push(" AND coalesce(c.tenant_id, coalesce(d.tenant_id, '");
+        // Owner match OR an ACL that explicitly grants this tenant (cross-tenant
+        // sharing via ACL is part of the contract).
+        qb.push(" AND (coalesce(c.tenant_id, coalesce(d.tenant_id, '");
         qb.push(DEFAULT_TENANT);
         qb.push("')) = ");
         qb.push_bind(tenant.clone());
+        qb.push(
+            " OR (coalesce(c.acl, d.acl) ? 'tenants' AND coalesce(c.acl, d.acl)->'tenants' @> ",
+        );
+        qb.push_bind(serde_json::json!([tenant]));
+        qb.push("))");
     }
     // Hard ACL boundary: the caller's reference must be granted by the row's
     // ACL (or be the owner tenant). NULL ACL means owner-only.

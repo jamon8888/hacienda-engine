@@ -106,9 +106,9 @@ pub struct RetrieveQuery {
     /// can never surface chunks from a sibling document in the same collection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document_id: Option<DocumentId>,
-    /// Hard retrieval boundary: when set, only chunks whose parent document's
-    /// [`DocumentRecord::tenant_id`] equals this value are eligible, regardless
-    /// of mode, filter, or top_k. Resolved server-side from the caller's
+    /// Hard retrieval boundary: when set, a chunk is eligible when its owner
+    /// tenant equals this value OR its ACL explicitly grants this tenant
+    /// (cross-tenant sharing via ACL). Resolved server-side from the caller's
     /// authenticated tenant — never taken from the client payload. Complements
     /// [`document_id`](Self::document_id), [`dossier_id`](Self::dossier_id) and
     /// [`version_ref`](Self::version_ref): all four combine with a logical AND.
