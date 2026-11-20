@@ -2,6 +2,8 @@
 target/
 # Per-agent scratch target dir (CARGO_TARGET_DIR=target-i1, see issue workflow)
 target-i1/
+# Private scratch target dir for the email plugin (CARGO_TARGET_DIR=target-email)
+target-email/
 Cargo.lock
 
 # Build artifacts

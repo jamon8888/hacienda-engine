@@ -41,6 +41,8 @@ use crate::state::ApiState;
         crate::handlers::documents::process_documents,
         crate::handlers::documents::process_documents_async,
         crate::handlers::claude_messages::messages,
+        crate::handlers::email::process_email,
+        crate::handlers::email::process_email_async,
         crate::handlers::pii::scan_text,
         crate::handlers::pii::redact_text,
         crate::handlers::pii::pii_config,

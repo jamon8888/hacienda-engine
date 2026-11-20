@@ -1,0 +1,77 @@
+[package]
+name = "hacienda-email"
+version.workspace = true
+edition.workspace = true
+description = "Email processing plugin for hacienda: archive, NER, RAG, redact"
+license.workspace = true
+categories = ["email", "ai", "nlp", "rag"]
+keywords = ["email", "imap", "maildir", "ner", "rag", "pii", "redaction"]
+
+[features]
+default = ["imap", "maildir", "rustls-ring"]
+# Backend features. `io-email` 0.1 gates each protocol behind its own feature and
+# also needs `client` + a TLS provider to expose `EmailClientStd::connect_*`.
+# We deliberately do NOT depend on the standalone `io-imap`/`io-maildir` crates:
+# `io-email` 0.1 depends on the 0.1 line of those crates, while the workspace
+# declares 0.6 — pulling both into one graph caused the original `MaildirClient`
+# type mismatch. All protocol access goes through `io_email`'s own re-exports.
+imap = ["io-email/imap"]
+jmap = ["io-email/jmap"]
+maildir = ["io-email/maildir"]
+m2dir = ["io-email/m2dir"]
+smtp = ["io-email/smtp"]
+# Gmail / Microsoft Graph are not implemented by io-email 0.1; kept as declared
+# features so the config enum round-trips, but build_client rejects them at runtime.
+gmail = []
+msgraph = []
+# TLS providers must be enabled on io-email (which forwards to its 0.0.1
+# pimalaya-stream) for `connect_imap` to exist.
+rustls-ring = ["io-email/rustls-ring"]
+rustls-aws = ["io-email/rustls-aws"]
+native-tls = ["io-email/native-tls"]
+# Pipeline features. PII redaction lives in hacienda-core and is always
+# available; the feature only toggles whether the Mutex-backed facade is built.
+ner = ["hacienda-core/ner-candle"]
+rag = ["hacienda-rag/chunking", "dep:xberg"]
+attachments = ["dep:xberg"]
+redact = []
+# Offline fast tests with a mock IMAP server.
+mock = []
+
+[dependencies]
+# Hacienda core
+hacienda-core = { path = "../../hacienda-core" }
+hacienda-rag = { path = "../../crates/hacienda-rag" }
+
+# Pimalaya ecosystem — a single protocol facade. `io-email` 0.1 already pulls
+# the matching 0.1 `io-imap`/`io-maildir` and 0.0.1 `pimalaya-stream` crates, so
+# `Sasl`, `Tls` and `MaildirClient` all come from its own dependency graph.
+io-email = { version = "0.1", default-features = false, optional = true }
+# `connect_imap` takes `pimalaya_stream::sasl::Sasl` / `tls::Tls` from the 0.0.1
+# line (what io-email 0.1 depends on). Needed to build the credentials.
+pimalaya-stream = { version = "0.0.1", default-features = false }
+# xberg is used for real attachment/text extraction and (under the `rag`
+# feature) for the chunking config type. Optional so the default IMAP/Maildir
+# build stays lean.
+xberg = { workspace = true, optional = true }
+
+# Core
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true, features = ["std"] }
+anyhow = { workspace = true }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+url = { version = "2", features = ["serde"] }
+secrecy = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+toml = { workspace = true }
+mail-parser = "0.11"
+gethostname = { workspace = true }
+mime_guess = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

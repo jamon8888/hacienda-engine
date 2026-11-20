@@ -1,0 +1,338 @@
+use crate::error::{EmailError, Result};
+use serde::{Deserialize, Serialize};
+
+/// Email plugin configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailConfig {
+    /// Backend to use: "imap" | "maildir" | "jmap" | "gmail" | "msgraph"
+    pub backend: EmailBackend,
+
+    /// Account name (matches config.toml account section)
+    pub account: String,
+
+    /// Archive output path (for Maildir/local storage)
+    pub archive_path: Option<String>,
+
+    /// NER model configuration
+    pub ner: NerConfig,
+
+    /// RAG indexing configuration
+    pub rag: RagConfig,
+
+    /// Redaction rules
+    pub redaction: RedactionConfig,
+    /// Tuning for large-mailbox RAG ingestion (pagination, batching, limits).
+    #[serde(default)]
+    pub ingestion: IngestionConfig,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            backend: EmailBackend::Imap {
+                server: "imaps://imap.example.com".to_string(),
+                username: "user@example.com".to_string(),
+            },
+            account: "default".to_string(),
+            archive_path: None,
+            ner: NerConfig::default(),
+            rag: RagConfig::default(),
+            redaction: RedactionConfig::default(),
+            ingestion: IngestionConfig::default(),
+        }
+    }
+}
+
+/// Tuning knobs for ingesting large mailboxes without exhausting memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestionConfig {
+    /// Envelopes fetched per IMAP page. Default 200.
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
+    /// Stop after this many pages (0 = unlimited). Default 0.
+    #[serde(default)]
+    pub max_pages: u32,
+    /// Messages prepared concurrently after fetch. IMAP fetches stay serialized
+    /// behind the client's Mutex; this only bounds redaction/chunking tasks.
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+    /// Skip messages already ingested in a previous run by remembering the
+    /// highest UID per (account, mailbox) in the RAG store. Default true.
+    #[serde(default = "default_true")]
+    pub incremental: bool,
+    /// Call `RagStore::optimize()` once at the end of a run (compaction + FTS).
+    #[serde(default = "default_true")]
+    pub optimize_after_run: bool,
+}
+
+fn default_page_size() -> u32 {
+    200
+}
+fn default_concurrency() -> usize {
+    4
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for IngestionConfig {
+    fn default() -> Self {
+        Self {
+            page_size: default_page_size(),
+            max_pages: 0,
+            concurrency: default_concurrency(),
+            incremental: default_true(),
+            optimize_after_run: default_true(),
+        }
+    }
+}
+
+/// Backend configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum EmailBackend {
+    #[serde(rename = "imap")]
+    Imap { server: String, username: String },
+
+    #[serde(rename = "maildir")]
+    Maildir { path: String },
+
+    #[serde(rename = "jmap")]
+    Jmap { server: String, token: String },
+
+    #[serde(rename = "gmail")]
+    Gmail {
+        client_id: String,
+        client_secret: String,
+    },
+
+    #[serde(rename = "msgraph")]
+    Msgraph {
+        tenant_id: String,
+        client_id: String,
+    },
+
+    /// OAuth 2.0 over IMAP using the XOAUTH2 SASL mechanism. Works for both
+    /// Gmail (`imap.gmail.com`) and Outlook (`outlook.office365.com`) with an
+    /// access token obtained from the provider's consent flow.
+    #[serde(rename = "oauth")]
+    OAuth {
+        /// IMAP host, e.g. `imaps://imap.gmail.com` or
+        /// `imaps://outlook.office365.com`.
+        server: String,
+        /// The account's email address (the SASL authcid).
+        username: String,
+        /// `gmail` or `outlook` — used only to pick the default host and to
+        /// name the token environment variable.
+        provider: OAuthProvider,
+        /// Optional external token broker command (e.g. `["ortie", "token",
+        /// "show", "-a", "outlook"]`). Follows the Himalaya/Pimalaya pattern:
+        /// the plugin never performs the OAuth grant itself; a helper returns a
+        /// fresh access token on stdout at connection time, which is how token
+        /// refresh works during a long-lived MCP session. When absent, the token
+        /// is read from `HACIENDA_EMAIL_<ACCOUNT>_ACCESS_TOKEN`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_command: Option<Vec<String>>,
+    },
+}
+
+/// Supported OAuth providers for the XOAUTH2 IMAP backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OAuthProvider {
+    Gmail,
+    Outlook,
+}
+
+impl OAuthProvider {
+    /// Default implicit-TLS IMAP endpoint for the provider.
+    pub fn imap_url(&self) -> &'static str {
+        match self {
+            OAuthProvider::Gmail => "imaps://imap.gmail.com:993",
+            OAuthProvider::Outlook => "imaps://outlook.office365.com:993",
+        }
+    }
+}
+
+/// NER model configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NerConfig {
+    /// Model name (e.g., "gliner-multi-v2.1")
+    pub model: String,
+
+    /// Confidence threshold for entity extraction (default: 0.5)
+    pub confidence_threshold: f32,
+
+    /// Entity types to extract (default: standard NER types)
+    pub entity_types: Vec<String>,
+
+    /// Batch size for processing (default: 32)
+    pub batch_size: usize,
+}
+
+impl Default for NerConfig {
+    fn default() -> Self {
+        Self {
+            model: "gliner-multi-v2.1".to_string(),
+            confidence_threshold: 0.5,
+            entity_types: vec![
+                "PERSON".to_string(),
+                "ORG".to_string(),
+                "EMAIL".to_string(),
+                "PHONE".to_string(),
+                "LOC".to_string(),
+                "DATE".to_string(),
+                "MONEY".to_string(),
+            ],
+            batch_size: 32,
+        }
+    }
+}
+
+/// RAG indexing configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagConfig {
+    /// Chunk size for text splitting (default: 512)
+    pub chunk_size: usize,
+
+    /// Chunk overlap for context preservation (default: 50)
+    pub chunk_overlap: usize,
+
+    /// Embedding model name (default: "all-MiniLM-L6-v2")
+    pub embedding_model: String,
+
+    /// Vector index name (default: "email-corpus")
+    pub index_name: String,
+}
+
+impl Default for RagConfig {
+    fn default() -> Self {
+        Self {
+            chunk_size: 512,
+            chunk_overlap: 50,
+            embedding_model: "all-MiniLM-L6-v2".to_string(),
+            index_name: "email-corpus".to_string(),
+        }
+    }
+}
+
+/// Privacy mode selected per tenant / caller (design decision D1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyMode {
+    /// Irreversibly mask PII before persisting or indexing. Fail-closed and
+    /// the default: plaintext never leaves the client.
+    #[default]
+    Redact,
+    /// Replace PII with reversible, per-tenant keyed tokens. Reveal is a
+    /// separate, audited operation. Requires a pseudonymisation key resolver.
+    Pseudonymize,
+}
+
+/// Redaction configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedactionConfig {
+    /// Rules to apply for redaction
+    pub rules: Vec<RedactionRule>,
+
+    /// Replacement string for redacted content (default: "[REDACTED]")
+    pub replacement: String,
+
+    /// Preserve format of redacted content (default: true)
+    pub preserve_format: bool,
+
+    /// Privacy mode for this tenant (default: redact).
+    #[serde(default)]
+    pub mode: PrivacyMode,
+}
+
+impl Default for RedactionConfig {
+    fn default() -> Self {
+        Self {
+            rules: vec![
+                RedactionRule::Email,
+                RedactionRule::Phone,
+                RedactionRule::Ssn,
+                RedactionRule::CreditCard,
+                RedactionRule::Iban,
+            ],
+            replacement: "[REDACTED]".to_string(),
+            preserve_format: true,
+            mode: PrivacyMode::Redact,
+        }
+    }
+}
+
+/// Redaction rule types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RedactionRule {
+    #[serde(rename = "email")]
+    Email,
+    #[serde(rename = "phone")]
+    Phone,
+    #[serde(rename = "ssn")]
+    Ssn,
+    #[serde(rename = "credit_card")]
+    CreditCard,
+    #[serde(rename = "iban")]
+    Iban,
+    #[serde(rename = "ip")]
+    Ip,
+    #[serde(rename = "custom")]
+    Custom { pattern: String, label: String },
+}
+
+/// Load configuration from TOML file
+pub fn load_config(path: &str) -> Result<EmailConfig> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| EmailError::Config(format!("Failed to read config file: {}", e)))?;
+
+    let config: EmailConfig = toml::from_str(&content)
+        .map_err(|e| EmailError::Config(format!("Failed to parse config: {}", e)))?;
+
+    Ok(config)
+}
+
+/// Load configuration with secrets from environment
+pub fn load_config_with_secrets(path: &str) -> Result<EmailConfig> {
+    let mut config = load_config(path)?;
+
+    // Override secrets from environment variables
+    match &mut config.backend {
+        EmailBackend::Imap {
+            username: _,
+            server: _,
+        } => {
+            // Secrets are resolved at client-build time from the environment;
+            // no plaintext is stored in the config struct.
+        }
+        EmailBackend::Jmap { token, .. } => {
+            if let Ok(t) = std::env::var(format!(
+                "HACIENDA_EMAIL_{}_TOKEN",
+                config.account.to_uppercase()
+            )) {
+                *token = t;
+            }
+        }
+        EmailBackend::Gmail { client_secret, .. } => {
+            if let Ok(s) = std::env::var(format!(
+                "HACIENDA_EMAIL_{}_CLIENT_SECRET",
+                config.account.to_uppercase()
+            )) {
+                *client_secret = s;
+            }
+        }
+        EmailBackend::Msgraph { client_id, .. } => {
+            if let Ok(id) = std::env::var(format!(
+                "HACIENDA_EMAIL_{}_CLIENT_ID",
+                config.account.to_uppercase()
+            )) {
+                *client_id = id;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(config)
+}

@@ -1472,7 +1472,7 @@ impl HaciendaFacade {
             let mut approvers: Vec<&str> = request.approvers.iter().map(String::as_str).collect();
             approvers.sort_unstable();
             approvers.dedup();
-            if approvers.len() < 2 || approvers.iter().any(|a| *a == subject.as_str()) {
+            if approvers.len() < 2 || approvers.contains(&subject.as_str()) {
                 return Err(RevealTicketError::InsufficientApprovers.into());
             }
         }
@@ -2561,7 +2561,6 @@ fn key_error(error: crate::redaction::PseudonymError) -> HaciendaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reveal_ticket::InMemoryDocumentDossierIndex;
     use crate::audit::store::AuditStore;
     use crate::audit::{AuditEntry, AuditEntryInput, AuditError, FileAuditStore, NodeId};
     use crate::auth::authn::TokenResolver as _;
@@ -2571,6 +2570,7 @@ mod tests {
     use crate::redaction::{
         EnvKeyResolver, RedactionConfig, RedactionMode, ACTIVE_KEY_VAR, KEY_BYTES,
     };
+    use crate::reveal_ticket::InMemoryDocumentDossierIndex;
     use crate::review::{
         FileReviewStore, InMemoryReviewStore, QueueStats, ReviewConfig, ReviewDecision,
         ReviewError, ReviewQueueItem, ReviewRequest, ReviewStatus,

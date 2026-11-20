@@ -51,6 +51,16 @@ pub trait RagStore: Send + Sync + 'static {
     /// What this backend supports (full-text, hybrid, filtering, index methods).
     fn capabilities(&self) -> Capabilities;
 
+    /// Compact storage and rebuild search indices after a large batch of writes.
+    ///
+    /// LanceDB accumulates many small fragments and moves updated rows out of
+    /// the vector/FTS indices; queries degrade until `optimize()` is called.
+    /// Backends that do not need maintenance keep the default no-op. Callers
+    /// doing bulk ingestion should invoke this once per batch, not per document.
+    async fn optimize(&self) -> RagResult<()> {
+        Ok(())
+    }
+
     /// Create the collection if it does not exist.
     ///
     /// # Errors
@@ -89,6 +99,25 @@ pub trait RagStore: Send + Sync + 'static {
         document: &DocumentRecord,
         chunks: &[ChunkRecord],
     ) -> RagResult<DocumentId>;
+
+    /// Upsert several documents (with their chunks) as one batch.
+    ///
+    /// Bulk ingestion should prefer this over repeated `upsert_document` calls:
+    /// batch-aware backends open the tables and run `merge_insert` once for the
+    /// whole batch instead of once per document. The default implementation
+    /// loops over the single-document path for backends without batching.
+    /// Returns ids in the same order as `items`.
+    async fn upsert_documents(
+        &self,
+        collection: &str,
+        items: &[(DocumentRecord, Vec<ChunkRecord>)],
+    ) -> RagResult<Vec<DocumentId>> {
+        let mut ids = Vec::with_capacity(items.len());
+        for (document, chunks) in items {
+            ids.push(self.upsert_document(collection, document, chunks).await?);
+        }
+        Ok(ids)
+    }
 
     /// Delete documents (and their chunks) by id. Returns the number removed.
     ///

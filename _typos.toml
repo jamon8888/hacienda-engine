@@ -29,6 +29,10 @@ extend-exclude = [
   "docs/wayfinder/",
   "docs/hacienda-guide-ia-fr.md",
   "docs/setup-harnais-ia-fr.md",
+  # French prose guide for the email plugin (same language class as the exclusions
+  # above): an English spell-checker only produces wrong "corrections" here
+  # ("branche" -> "branch", "contexte" -> "context", "composants" -> "components").
+  "docs/hacienda-email-complete-guide.md",
   # apps/hacienda-studio/components/extend/layout-blocks.tsx embeds verbatim excerpts from
   # academic papers (as page-builder demo content) plus generated block ids —
   # hyphenated line-break artifacts ("transfor- mation"), author-name fragments, and random

@@ -32,12 +32,15 @@
 //!
 //! # Tool inventory
 //!
-//! Thirteen tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
-//! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands:
+//! Fourteen tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
+//! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands (the Xberg and
+//! email tools are the exceptions: they drive their own backends directly — the email
+//! tool drives `hacienda_email::EmailProcessor`):
 //!
 //! | Tool | Facade method | Mirrors |
 //! | --- | --- | --- |
 //! | `documents_process` | `process_batch_with_auth` | `POST /v1/documents`, `hacienda extract` |
+//! | `email_redact` | (`EmailProcessor::process`) | `POST /v1/email/process`, `hacienda email redact` |
 //! | `pii_scan` | `scan_text_with_auth` | `POST /v1/pii/scan` |
 //! | `pii_redact` | `redact_text_with_auth` | `POST /v1/pii/redact` |
 //! | `audit_verify` | `verify_audit_with_auth` | `GET /v1/audit/verify` |
@@ -58,8 +61,8 @@ use std::sync::Arc;
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};
 use params::{
-    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams, EmptyParams,
-    MimeDetectParams, TextParams,
+    AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams,
+    EmailRedactParams, EmptyParams, MimeDetectParams, TextParams,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -164,6 +167,56 @@ impl HaciendaMcp {
             .await
             .map_err(map_hacienda_error)?;
         json_tool_result(&result)
+    }
+
+    /// Redact PII in emails from a local Maildir (body and headers).
+    #[tool(
+        description = "Redact PII in emails from a local Maildir using hacienda's PII engine. \
+            Redacts message bodies AND headers (From/To/Cc/Subject) and writes the redacted \
+            messages to the output directory. Uses the irreversible mask mode by default \
+            (professional-secrecy safe). Runs in-process (Caller::Trusted), like the CLI.",
+        annotations(
+            title = "Redact Emails",
+            read_only_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn email_redact(
+        &self,
+        Parameters(params): Parameters<EmailRedactParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use hacienda_email::config::EmailBackend;
+        use hacienda_email::{
+            EmailConfig, EmailDestination, EmailOperation, EmailProcessor, EmailRequest,
+            EmailSource,
+        };
+
+        let config = EmailConfig {
+            backend: EmailBackend::Maildir {
+                path: params.source.clone(),
+            },
+            account: "mcp".to_string(),
+            ..Default::default()
+        };
+        let processor = EmailProcessor::new(config)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("email processor: {e}"), None))?;
+        let response = processor
+            .process(EmailRequest {
+                operation: EmailOperation::Redact {
+                    source: EmailSource::Maildir {
+                        path: params.source,
+                    },
+                    destination: EmailDestination::Maildir {
+                        path: params.output,
+                    },
+                    rules: None,
+                },
+                config_overrides: None,
+            })
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("email redaction: {e}"), None))?;
+        json_tool_result(&response)
     }
 
     /// Scan raw text for PII, without rewriting it.
@@ -699,6 +752,7 @@ mod tests {
             "cache_warm",
             "detect_mime_type",
             "get_capabilities",
+            "email_redact",
             "get_version",
             "list_formats",
             "pii_redact",

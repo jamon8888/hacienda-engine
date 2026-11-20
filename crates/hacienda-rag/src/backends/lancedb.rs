@@ -32,6 +32,7 @@ use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::index::{Index, IndexType};
 use lancedb::query::ExecutableQuery;
 use lancedb::query::QueryBase;
+use lancedb::table::OptimizeAction;
 use lancedb::{Connection, Table};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -281,6 +282,102 @@ impl LanceDbStore {
         Ok(out)
     }
 
+    /// Look up an already-stored document by its external_id using a targeted
+    /// SQL filter (no full-table scan). This preserves the legacy `doc-<uuid>`
+    /// ID that pre-deterministic-ID collections stored, so re-upserting does
+    /// not create a duplicate document with a second ID.
+    async fn lookup_existing_doc_id(
+        &self,
+        docs: &Table,
+        external_id: &str,
+    ) -> RagResult<Option<DocumentId>> {
+        // An empty external_id is how anonymous documents are persisted. It
+        // must never be treated as a real identity: a query for `""` would
+        // match the first anonymous document and overwrite it.
+        if external_id.is_empty() {
+            return Ok(None);
+        }
+        let filter = format!("external_id = '{}'", sql_quote(external_id));
+        let batches = docs
+            .query()
+            .only_if(&filter)
+            .execute()
+            .await
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "identity lookup for external_id '{external_id}': failed to execute query ({e}). \
+                     Retry once the store is reachable."
+                ))))
+            })?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "identity lookup for external_id '{external_id}': failed to read results ({e}). \
+                     Retry once the store is reachable."
+                ))))
+            })?;
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                let id = string_at(batch, "doc_id", row)?;
+                if !id.is_empty() {
+                    return Ok(Some(DocumentId(id)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Resolve many legacy external_ids in one projected query (finding:
+    /// "Batch the legacy-ID lookups"). Only `external_id` and `doc_id` are
+    /// fetched, and a single `IN (...)` filter replaces N round trips.
+    async fn lookup_existing_doc_ids(
+        &self,
+        docs: &Table,
+        external_ids: &[String],
+    ) -> RagResult<HashMap<String, DocumentId>> {
+        let mut found = HashMap::new();
+        let valid: Vec<&String> = external_ids.iter().filter(|id| !id.is_empty()).collect();
+        if valid.is_empty() {
+            return Ok(found);
+        }
+        let list = valid
+            .iter()
+            .map(|id| format!("'{}'", sql_quote(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let filter = format!("external_id IN ({list})");
+        let batches = docs
+            .query()
+            .only_if(&filter)
+            .execute()
+            .await
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "batch identity lookup for {} external_ids: query failed ({e}). Retry once the store is reachable.",
+                    valid.len()
+                ))))
+            })?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| {
+                RagError::Backend(Box::new(std::io::Error::other(format!(
+                    "batch identity lookup for {} external_ids: read failed ({e}). Retry once the store is reachable.",
+                    valid.len()
+                ))))
+            })?;
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                let ext = empty_as_none(string_at(batch, "external_id", row)?);
+                let id = string_at(batch, "doc_id", row)?;
+                if let (Some(ext), true) = (ext, !id.is_empty()) {
+                    found.insert(ext, DocumentId(id));
+                }
+            }
+        }
+        Ok(found)
+    }
+
     async fn read_documents(&self, table: &Table) -> RagResult<Vec<StoredDocument>> {
         let batches = table
             .query()
@@ -462,6 +559,24 @@ impl RagStore for LanceDbStore {
         }
     }
 
+    async fn optimize(&self) -> RagResult<()> {
+        let _write = self.write_lock.lock().await;
+        for spec in self.read_metadata().await? {
+            let (docs, chunks) = self.collection_tables(&spec.name).await?;
+            // LanceDB accumulates small fragments on every write; compact both
+            // tables and rebuild the FTS index once for the whole batch.
+            docs.optimize(OptimizeAction::All)
+                .await
+                .map_err(backend_err)?;
+            chunks
+                .optimize(OptimizeAction::All)
+                .await
+                .map_err(backend_err)?;
+            self.ensure_fts_index(&chunks, true).await?;
+        }
+        Ok(())
+    }
+
     async fn ensure_collection(&self, spec: &CollectionSpec) -> RagResult<()> {
         let _write = self.write_lock.lock().await;
         if let Some(existing) = self.spec(&spec.name).await? {
@@ -548,30 +663,26 @@ impl RagStore for LanceDbStore {
             }
         }
         let (docs, chunk_table) = self.collection_tables(collection).await?;
-        let existing = self.read_documents(&docs).await?;
-        let id = document
-            .external_id
-            .as_ref()
-            .and_then(|external| {
-                existing
-                    .iter()
-                    .find(|d| d.record.external_id.as_ref() == Some(external))
-                    .map(|d| d.id.clone())
-            })
-            .unwrap_or_else(|| {
-                document.external_id.as_ref().map_or_else(
-                    || DocumentId(format!("doc-{}", Uuid::new_v4())),
-                    |external| {
-                        let mut key = collection.as_bytes().to_vec();
-                        key.push(0);
-                        key.extend_from_slice(external.as_bytes());
-                        DocumentId(format!(
-                            "doc-ext-{}",
-                            Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
-                        ))
-                    },
-                )
-            });
+        // Preserve a legacy stored ID when re-upserting an external_id that was
+        // written before deterministic IDs existed (finding 650). The lookup is
+        // a targeted SQL filter, not a full-table scan. New documents still get
+        // a deterministic ID so repeated upserts are idempotent.
+        let id = match document.external_id.as_ref() {
+            Some(external) => {
+                if let Some(existing) = self.lookup_existing_doc_id(&docs, external).await? {
+                    existing
+                } else {
+                    let mut key = collection.as_bytes().to_vec();
+                    key.push(0);
+                    key.extend_from_slice(external.as_bytes());
+                    DocumentId(format!(
+                        "doc-ext-{}",
+                        Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
+                    ))
+                }
+            }
+            None => DocumentId(format!("doc-{}", Uuid::new_v4())),
+        };
         // Le document est la source autoritative du scoping juridique : les
         // chunks produits par le chunking côté API (dossier_id / version_ref
         // à None) héritent du scope de leur document parent à l'upsert, sinon
@@ -598,8 +709,175 @@ impl RagStore for LanceDbStore {
             .await?;
         self.merge_document(&docs, &id, document, now_secs())
             .await?;
-        self.ensure_fts_index(&chunk_table, true).await?;
+        // Do NOT rebuild the FTS index on every upsert: LanceDB documents that
+        // repeated `create_index(...).replace(true)` is expensive and that a
+        // rebuild belongs after a whole batch. New rows stay searchable via
+        // flat scan until `optimize()` folds them into the index.
+        self.ensure_fts_index(&chunk_table, false).await?;
         Ok(id)
+    }
+
+    async fn upsert_documents(
+        &self,
+        collection: &str,
+        items: &[(DocumentRecord, Vec<ChunkRecord>)],
+    ) -> RagResult<Vec<DocumentId>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _write = self.write_lock.lock().await;
+        let spec = self.require_spec(collection).await?;
+        for (item_index, (document, chunks)) in items.iter().enumerate() {
+            for (chunk_ordinal, chunk) in chunks.iter().enumerate() {
+                validate_chunk_side_vectors(chunk)?;
+                if chunk.embedding.len() as u32 != spec.embedding_dim {
+                    return Err(RagError::Backend(Box::new(std::io::Error::other(format!(
+                        "upsert_documents into '{collection}': document #{item_index} \
+                         (external_id {:?}) chunk #{chunk_ordinal} has embedding dimension {}, \
+                         expected {}. Regenerate the embedding with dimension {} for this collection.",
+                        document.external_id,
+                        chunk.embedding.len(),
+                        spec.embedding_dim,
+                        spec.embedding_dim
+                    )))));
+                }
+            }
+        }
+        // Coalesce repeated identities with last-item-wins BEFORE computing ids
+        // or batches. Two items with the same external_id would otherwise map to
+        // the same deterministic doc_id and be forwarded twice to merge_insert,
+        // whose LanceDB 0.37.1 contract leaves multiple matches undefined.
+        // Keep only the last item's complete chunk set; preserve the original
+        // input-to-position mapping so the returned Vec<DocumentId> matches the
+        // caller's item order (a deduped slot reports the surviving id).
+        let mut deduped: Vec<&(DocumentRecord, Vec<ChunkRecord>)> = Vec::with_capacity(items.len());
+        let mut by_identity: HashMap<String, usize> = HashMap::new();
+        let mut position_to_slot: Vec<usize> = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            // An empty external_id is NOT an identity — treat it as anonymous
+            // so two `Some("")` items don't collapse into one (which would drop
+            // documents and chunks). Anonymous items are always distinct.
+            let key = item
+                .0
+                .external_id
+                .as_ref()
+                .filter(|id| !id.is_empty())
+                .map(|id| format!("ext:{id}"))
+                .unwrap_or_else(|| format!("anon:{i}"));
+            let slot = match by_identity.get(&key) {
+                Some(&slot) => {
+                    deduped[slot] = item; // last-item-wins
+                    slot
+                }
+                None => {
+                    let slot = deduped.len();
+                    by_identity.insert(key, slot);
+                    deduped.push(item);
+                    slot
+                }
+            };
+            position_to_slot.push(slot);
+        }
+
+        let (docs, chunk_table) = self.collection_tables(collection).await?;
+        let ingested_at = now_secs();
+
+        // Resolve all legacy external_ids in ONE projected query (no N round
+        // trips). Reuse any stored ID so re-upsert cannot duplicate a document
+        // written before deterministic IDs existed (finding 650).
+        let external_ids: Vec<String> = deduped
+            .iter()
+            .filter_map(|item| item.0.external_id.clone().filter(|id| !id.is_empty()))
+            .collect();
+        let existing_ids = self.lookup_existing_doc_ids(&docs, &external_ids).await?;
+
+        let mut ids = Vec::with_capacity(deduped.len());
+        let mut rows: Vec<StoredChunk> = Vec::new();
+        for (document, chunks) in deduped.iter().map(|item| (&item.0, &item.1)) {
+            let id = match document.external_id.as_ref().filter(|id| !id.is_empty()) {
+                Some(external) => {
+                    if let Some(existing) = existing_ids.get(external) {
+                        existing.clone()
+                    } else {
+                        let mut key = collection.as_bytes().to_vec();
+                        key.push(0);
+                        key.extend_from_slice(external.as_bytes());
+                        DocumentId(format!(
+                            "doc-ext-{}",
+                            Uuid::new_v5(&Uuid::NAMESPACE_OID, &key)
+                        ))
+                    }
+                }
+                None => DocumentId(format!("doc-{}", Uuid::new_v4())),
+            };
+            for record in chunks {
+                let mut scoped = record.clone();
+                if scoped.dossier_id.is_none() {
+                    scoped.dossier_id = document.dossier_id.clone();
+                }
+                if scoped.version_ref.is_none() {
+                    scoped.version_ref = document.version_ref.clone();
+                }
+                rows.push(StoredChunk {
+                    id: ChunkId(format!("{}:{}", id.0, scoped.ordinal)),
+                    document_id: id.clone(),
+                    record: scoped,
+                });
+            }
+            ids.push(id);
+        }
+
+        // One merge_insert for all documents, one for all chunks, one FTS
+        // check per batch instead of one transaction per message. Build the
+        // document batch from the DEDUPED items so its rows align with `ids`.
+        let doc_batch = document_batch_many(&deduped, &ids, ingested_at)?;
+        let mut doc_merge = docs.merge_insert(&["doc_id"]);
+        doc_merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        doc_merge
+            .execute(Box::new(one_batch(doc_batch, document_schema())))
+            .await
+            .map(|_| ())
+            .map_err(backend_err)?;
+
+        let old_chunks = format!(
+            "doc_id IN ({})",
+            ids.iter()
+                .map(|id| format!("'{}'", sql_quote(&id.0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if rows.is_empty() {
+            // No new chunks: remove any previous chunks of these documents.
+            chunk_table
+                .delete(&old_chunks)
+                .await
+                .map(|_| ())
+                .map_err(backend_err)?;
+        } else {
+            let chunk_rows = chunk_batch(&rows, spec.embedding_dim)?;
+            let mut chunk_merge = chunk_table.merge_insert(&["chunk_id"]);
+            chunk_merge
+                .when_matched_update_all(None)
+                .when_not_matched_insert_all()
+                .when_not_matched_by_source_delete(Some(old_chunks));
+            chunk_merge
+                .execute(Box::new(one_batch(
+                    chunk_rows,
+                    chunk_schema(spec.embedding_dim),
+                )))
+                .await
+                .map(|_| ())
+                .map_err(backend_err)?;
+        }
+        self.ensure_fts_index(&chunk_table, false).await?;
+        // Map each caller position to the id of its surviving (possibly
+        // deduped) item so the returned vector matches the input order.
+        Ok(position_to_slot
+            .into_iter()
+            .map(|slot| ids[slot].clone())
+            .collect())
     }
 
     async fn delete_documents(&self, collection: &str, ids: &[DocumentId]) -> RagResult<u64> {
@@ -1103,6 +1381,93 @@ fn document_batch(
     )
     .map_err(backend_err)
 }
+
+/// Build one Arrow batch with a row per (document, id) pair, for batched upserts.
+fn document_batch_many(
+    items: &[&(DocumentRecord, Vec<ChunkRecord>)],
+    ids: &[DocumentId],
+    ingested_at: i64,
+) -> RagResult<RecordBatch> {
+    RecordBatch::try_new(
+        document_schema(),
+        vec![
+            Arc::new(StringArray::from(
+                ids.iter().map(|id| id.0.as_str()).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.external_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.title.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.mime.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.source_uri.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.full_text.as_str())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| {
+                        json_string(&serde_json::to_value(&doc.keywords).unwrap_or_default())
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| json_string(&doc.entities))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| json_string(&doc.labels))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| json_string(&doc.metadata))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(vec![ingested_at; items.len()])),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.dossier_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.version_ref.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .map_err(backend_err)
+}
+
 fn chunk_batch(rows: &[StoredChunk], dim: u32) -> RagResult<RecordBatch> {
     let values = rows
         .iter()
@@ -1475,6 +1840,198 @@ mod tests {
         assert_eq!(store.delete_documents("docs", &[first]).await.unwrap(), 1);
         assert_eq!(store.collection_stats("docs").await.unwrap().documents, 0);
         assert_eq!(store.collection_stats("docs").await.unwrap().chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn bulk_upsert_coalesces_duplicate_external_ids_last_wins() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("dedup", 2))
+            .await
+            .unwrap();
+
+        // Two items share one external_id with different chunk sets; a third
+        // is distinct. Last-item-wins must keep only the second chunk set,
+        // and the returned ids must still line up with all three inputs.
+        let items = vec![
+            (
+                DocumentRecord {
+                    external_id: Some("email:shared".into()),
+                    full_text: "v1".into(),
+                    ..Default::default()
+                },
+                vec![chunk("old", 0, vec![1.0, 0.0])],
+            ),
+            (
+                DocumentRecord {
+                    external_id: Some("email:shared".into()),
+                    full_text: "v2".into(),
+                    ..Default::default()
+                },
+                vec![
+                    chunk("new-a", 0, vec![1.0, 0.0]),
+                    chunk("new-b", 1, vec![0.0, 1.0]),
+                ],
+            ),
+            (
+                DocumentRecord {
+                    external_id: Some("email:other".into()),
+                    full_text: "other".into(),
+                    ..Default::default()
+                },
+                vec![chunk("other-c", 0, vec![1.0, 0.0])],
+            ),
+        ];
+
+        let ids = store.upsert_documents("dedup", &items).await.unwrap();
+        assert_eq!(ids.len(), 3, "one id per input position");
+        assert_eq!(ids[0], ids[1], "duplicate external_id shares one id");
+
+        // The surviving content is the LAST item's; the first item's chunk is gone.
+        let (doc, chunks) = store
+            .get_document_chunks("dedup", &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.full_text, "v2", "last item's document won");
+        let contents: Vec<_> = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(contents.contains(&"new-a") && contents.contains(&"new-b"));
+        assert!(
+            !contents.contains(&"old"),
+            "stale chunk from first item survived"
+        );
+
+        // The distinct item is unaffected.
+        assert_ne!(ids[2], ids[0]);
+        let (_, other) = store
+            .get_document_chunks("dedup", &ids[2])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bulk_upsert_is_idempotent_and_optimize_is_safe() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("emails", 2))
+            .await
+            .unwrap();
+
+        // 50 distinct external ids -> 50 distinct deterministic document ids.
+        let mut ids = Vec::new();
+        for i in 0..50 {
+            let doc = DocumentRecord {
+                external_id: Some(format!("email:work:INBOX:uid-{i}")),
+                full_text: format!("body {i}"),
+                ..Default::default()
+            };
+            ids.push(
+                store
+                    .upsert_document(
+                        "emails",
+                        &doc,
+                        &[chunk(&format!("c{i}"), 0, vec![1.0, 0.0])],
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let distinct: HashSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), 50);
+
+        // Re-ingesting the same UIDs must reuse the same ids (no duplicates).
+        for (i, id) in ids.iter().enumerate() {
+            let doc = DocumentRecord {
+                external_id: Some(format!("email:work:INBOX:uid-{i}")),
+                full_text: format!("body {i} v2"),
+                ..Default::default()
+            };
+            assert_eq!(
+                store
+                    .upsert_document(
+                        "emails",
+                        &doc,
+                        &[chunk(&format!("c{i}"), 0, vec![1.0, 0.0])],
+                    )
+                    .await
+                    .unwrap(),
+                *id
+            );
+        }
+        let stats = store.collection_stats("emails").await.unwrap();
+        assert_eq!(stats.documents, 50);
+        assert_eq!(stats.chunks, 50);
+
+        // Compaction + FTS rebuild after the batch must not change the data.
+        store.optimize().await.unwrap();
+        let stats = store.collection_stats("emails").await.unwrap();
+        assert_eq!(stats.documents, 50);
+        assert_eq!(stats.chunks, 50);
+    }
+
+    #[tokio::test]
+    async fn batch_upsert_is_idempotent_and_replaces_chunks() {
+        let dir = tempdir().unwrap();
+        let store = LanceDbStore::connect(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .ensure_collection(&CollectionSpec::new("batch", 2))
+            .await
+            .unwrap();
+
+        let items: Vec<(DocumentRecord, Vec<ChunkRecord>)> = (0..20)
+            .map(|i| {
+                (
+                    DocumentRecord {
+                        external_id: Some(format!("email:batch:uid-{i}")),
+                        full_text: format!("body {i}"),
+                        dossier_id: Some("dossier-1".into()),
+                        ..Default::default()
+                    },
+                    vec![chunk(&format!("c{i}"), 0, vec![1.0, 0.0])],
+                )
+            })
+            .collect();
+        let ids = store.upsert_documents("batch", &items).await.unwrap();
+        assert_eq!(ids.len(), 20);
+        let stats = store.collection_stats("batch").await.unwrap();
+        assert_eq!(stats.documents, 20);
+        assert_eq!(stats.chunks, 20);
+
+        // Re-upsert the batch: identical ids, no duplicate documents; give the
+        // first document two chunks so its old chunk must be replaced.
+        let mut updated = items.clone();
+        updated[0].0.full_text = "body 0 v2".into();
+        updated[0].1 = vec![
+            chunk("c0-new", 0, vec![0.0, 1.0]),
+            chunk("c0-extra", 1, vec![1.0, 0.0]),
+        ];
+        assert_eq!(
+            store.upsert_documents("batch", &updated).await.unwrap(),
+            ids
+        );
+        let stats = store.collection_stats("batch").await.unwrap();
+        assert_eq!(stats.documents, 20);
+        assert_eq!(stats.chunks, 21);
+
+        // Dossier scoping survived the batched merge (parent -> chunks).
+        let (_, stored) = store
+            .get_document_chunks("batch", &ids[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored
+            .iter()
+            .all(|c| c.dossier_id.as_deref() == Some("dossier-1")));
     }
 
     #[tokio::test]
