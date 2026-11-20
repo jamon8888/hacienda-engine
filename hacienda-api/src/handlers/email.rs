@@ -15,7 +15,7 @@ use axum::{
 };
 use hacienda_email::{
     config::EmailBackend, EmailConfig, EmailDestination, EmailOperation, EmailProcessor,
-    EmailRequest, EmailSource, OAuthProvider, PipelineStep, PrivacyMode,
+    EmailRequest, EmailSource, PipelineStep, PrivacyMode,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -29,11 +29,20 @@ use crate::{
 };
 
 /// Body for `POST /v1/email/process`.
+///
+/// SECURITY: there is deliberately no `account` field and no OAuth backend
+/// variant here. Both would let a caller choose which server-side secrets to
+/// read (`account` → `HACIENDA_EMAIL_<ACCOUNT>_*`), which program to execute
+/// (`token_command`) and which endpoint to ship the token to (`server`) — a
+/// remote-code-execution plus cross-tenant credential-theft vector (CodeRabbit
+/// PR #166, `backend.rs:505`). The account is instead derived from the
+/// authenticated tenant, and only the local Maildir backend is reachable over
+/// HTTP. Gmail/Outlook OAuth stays available on the CLI/MCP surfaces, which run
+/// in-process from a trusted local config file.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmailProcessRequest {
-    /// Account name used to resolve `HACIENDA_EMAIL_<ACCOUNT>_*` secrets.
-    pub account: String,
-    /// Backend selection. `maildir` needs a `path`; `oauth` needs a provider.
+    /// Local Maildir path to read from. Only backend accepted over HTTP.
     pub backend: EmailBackendDto,
     /// Privacy mode for this request (per-tenant choice, design D1).
     #[serde(default)]
@@ -47,30 +56,12 @@ pub struct EmailProcessRequest {
     pub dossier_id: Option<String>,
 }
 
+/// Only the local Maildir backend is accepted over the network. See the
+/// security note on [`EmailProcessRequest`] for why OAuth is excluded.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EmailBackendDto {
-    Maildir {
-        path: String,
-    },
-    OAuth {
-        /// Optional server URL; empty uses the provider's default IMAP endpoint.
-        #[serde(default)]
-        server: String,
-        username: String,
-        provider: OAuthProviderDto,
-        /// External token broker command, e.g. `["ortie","token","show","-a","outlook"]`.
-        /// The token is resolved at connection time, never from the request body.
-        #[serde(default)]
-        token_command: Option<Vec<String>>,
-    },
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OAuthProviderDto {
-    Gmail,
-    Outlook,
+    Maildir { path: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,26 +132,10 @@ fn to_api_error(e: hacienda_email::EmailError) -> ApiError {
     ApiError::invalid_request(format!("email operation failed: {e}"))
 }
 
-fn build_config(body: &EmailProcessRequest) -> Result<EmailConfig, ApiError> {
+fn build_config(body: &EmailProcessRequest, account: String) -> Result<EmailConfig, ApiError> {
+    // Exhaustive by construction: EmailBackendDto has exactly one variant.
     let backend = match &body.backend {
         EmailBackendDto::Maildir { path } => EmailBackend::Maildir { path: path.clone() },
-        EmailBackendDto::OAuth {
-            server,
-            username,
-            provider,
-            token_command,
-        } => {
-            let provider = match provider {
-                OAuthProviderDto::Gmail => OAuthProvider::Gmail,
-                OAuthProviderDto::Outlook => OAuthProvider::Outlook,
-            };
-            EmailBackend::OAuth {
-                server: server.clone(),
-                username: username.clone(),
-                provider,
-                token_command: token_command.clone(),
-            }
-        }
     };
     let mode = match body.privacy_mode.mode {
         PrivacyModeValue::Redact => PrivacyMode::Redact,
@@ -168,7 +143,8 @@ fn build_config(body: &EmailProcessRequest) -> Result<EmailConfig, ApiError> {
     };
     let mut config = EmailConfig {
         backend,
-        account: body.account.clone(),
+        // The account comes from the authenticated tenant, never the request body.
+        account,
         ..Default::default()
     };
     config.redaction.mode = mode;
@@ -256,17 +232,14 @@ pub async fn process_email_async(
     let owner = caller.principal_id().map(str::to_owned);
 
     // Validate before creating the job: a malformed backend or config must be
-    // a 400, not a job that fails a second later.
-    build_config(&body)?;
+    // a 400, not a job that fails a second later. The account is derived from
+    // the authenticated tenant, never from the request body.
+    build_config(&body, tenant.as_str().to_string())?;
 
-    let job = state
-        .jobs
-        .create(&tenant, owner)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to create async email job");
-            ApiError::internal()
-        })?;
+    let job = state.jobs.create(&tenant, owner).await.map_err(|e| {
+        tracing::error!(error = %e, "failed to create async email job");
+        ApiError::internal()
+    })?;
     let job_id = job.id.clone();
 
     let task_jobs = state.jobs.clone();
@@ -275,13 +248,18 @@ pub async fn process_email_async(
     let task_tenant = tenant.clone();
     let task_job_id = job_id.clone();
     let operation = build_operation(&body.operation);
-    let config = build_config(&body)?;
+    let config = build_config(&body, tenant.as_str().to_string())?;
 
     tokio::spawn(async move {
         use hacienda_core::jobs::JobStatus;
 
         if let Err(e) = task_jobs
-            .transition(&task_tenant, &task_job_id, JobStatus::Queued, JobStatus::Running)
+            .transition(
+                &task_tenant,
+                &task_job_id,
+                JobStatus::Queued,
+                JobStatus::Running,
+            )
             .await
         {
             tracing::error!(job_id = %task_job_id, error = %e, "failed to transition email job to Running");
@@ -290,9 +268,7 @@ pub async fn process_email_async(
 
         let result = async {
             let config = config;
-            let mut processor = EmailProcessor::new(config)
-                .await
-                .map_err(to_api_error)?;
+            let mut processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
             if let Some(store) = task_store {
                 processor = processor.with_rag_store(store);
             }
@@ -312,9 +288,7 @@ pub async fn process_email_async(
         match result {
             Ok(response) => match serde_json::to_string(&response) {
                 Ok(json) => {
-                    if let Err(e) =
-                        task_jobs.finish(&task_tenant, &task_job_id, json).await
-                    {
+                    if let Err(e) = task_jobs.finish(&task_tenant, &task_job_id, json).await {
                         tracing::error!(
                             job_id = %task_job_id, error = %e,
                             "failed to mark email job as succeeded"
@@ -324,7 +298,11 @@ pub async fn process_email_async(
                 Err(e) => {
                     tracing::error!(job_id = %task_job_id, error = %e, "failed to serialize email job result");
                     let _ = task_jobs
-                        .fail(&task_tenant, &task_job_id, "serialization failed".to_string())
+                        .fail(
+                            &task_tenant,
+                            &task_job_id,
+                            "serialization failed".to_string(),
+                        )
                         .await;
                 }
             },
@@ -360,10 +338,15 @@ pub async fn process_email_async(
 )]
 pub async fn process_email(
     State(state): State<ApiState>,
+    parts: Parts,
     SafeJson(body): SafeJson<EmailProcessRequest>,
 ) -> Result<Json<EmailProcessResponse>, ApiError> {
     let start = Instant::now();
-    let config = build_config(&body)?;
+    // Derive the account from the authenticated tenant (never the body).
+    let ctx = extract_auth_context(&parts);
+    let caller = caller_from_arc(&ctx);
+    let tenant = caller.tenant_ctx().tenant;
+    let config = build_config(&body, tenant.as_str().to_string())?;
     // Per-request processor: never shared across tenants (design D5).
     let mut processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
     // Same RAG store as document ingestion: emails become searchable through
@@ -391,4 +374,61 @@ pub async fn process_email(
         errors: response.errors,
         processing_time_ms: start.elapsed().as_millis() as u64,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request body must never smuggle in the OAuth/RCE fields removed after
+    /// CodeRabbit PR #166 (`backend.rs:505`). `deny_unknown_fields` turns each
+    /// into a hard 400 instead of silently ignoring the attempt.
+    #[test]
+    fn http_body_rejects_account_oauth_and_token_command_fields() {
+        let op = r#""operation":{"operation":"index_for_rag","source":"/tmp/mail"}"#;
+        for (field, payload) in [
+            (
+                "account",
+                format!(
+                    r#"{{"account":"victim","backend":{{"type":"maildir","path":"/tmp"}},{op}}}"#
+                ),
+            ),
+            (
+                "oauth backend",
+                format!(
+                    r#"{{"backend":{{"type":"oauth","username":"u","provider":"gmail","token_command":["rm","-rf","/"]}},{op}}}"#
+                ),
+            ),
+            (
+                "token_command",
+                format!(
+                    r#"{{"backend":{{"type":"maildir","path":"/tmp","token_command":["sh"]}},{op}}}"#
+                ),
+            ),
+            (
+                "server",
+                format!(
+                    r#"{{"backend":{{"type":"maildir","path":"/tmp"}},{op},"server":"evil.example"}}"#
+                ),
+            ),
+        ] {
+            let err = match serde_json::from_str::<EmailProcessRequest>(&payload) {
+                Err(e) => e,
+                Ok(_) => panic!("insecure payload with {field} was accepted: {payload}"),
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unknown field") || msg.contains("unknown variant"),
+                "payload with {field} was rejected for the wrong reason: {err}"
+            );
+        }
+    }
+
+    /// The minimal Maildir-only body still parses (guard against over-restricting).
+    #[test]
+    fn http_body_accepts_maildir_backend() {
+        let payload = r#"{"backend":{"type":"maildir","path":"/tmp/mail"},"operation":{"operation":"index_for_rag","source":"/tmp/mail"}}"#;
+        let request = serde_json::from_str::<EmailProcessRequest>(payload).unwrap();
+        assert!(matches!(request.backend, EmailBackendDto::Maildir { .. }));
+    }
 }
