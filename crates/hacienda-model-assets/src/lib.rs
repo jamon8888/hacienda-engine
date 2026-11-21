@@ -151,23 +151,22 @@ fn verify_bytes(
     })
 }
 
-/// Hex-encoded SHA-256 of a byte slice.
-pub fn hex_digest(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
+/// Lowercase hex encoding of raw bytes (no hashing).
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(64);
-    for byte in hasher.finalize() {
+    for byte in bytes.as_ref() {
         let _ = write!(out, "{byte:02x}");
     }
     out
 }
 
-fn verify_file(
-    model_id: &str,
-    asset: &PinnedAsset,
-    dir: &Path,
-) -> Result<(), ModelAssetsError> {
+/// Hex-encoded SHA-256 of a byte slice.
+pub fn hex_digest(bytes: &[u8]) -> String {
+    hex_encode(Sha256::digest(bytes))
+}
+
+fn verify_file(model_id: &str, asset: &PinnedAsset, dir: &Path) -> Result<(), ModelAssetsError> {
     let path = dir.join(&asset.path);
     if !path.is_file() {
         return Err(ModelAssetsError::MissingAsset {
@@ -196,16 +195,21 @@ fn verify_file(
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; BUFFER_SIZE];
     loop {
-        let read = reader.read(&mut buffer).map_err(|source| ModelAssetsError::Read {
-            path: path.clone(),
-            source,
-        })?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|source| ModelAssetsError::Read {
+                path: path.clone(),
+                source,
+            })?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = hex_digest(&hasher.finalize());
+    // `finalize()` is already SHA-256(file); re-hashing it would compare
+    // SHA256(SHA256(file)) with the registry's SHA256(file) and reject every
+    // correct asset.
+    let actual = hex_encode(hasher.finalize());
     if actual == asset.sha256 {
         return Ok(());
     }
@@ -219,8 +223,8 @@ fn verify_file(
 
 /// Verify a local model directory against every asset pinned in the registry.
 pub fn verify_dir(model_id: &str, dir: &Path) -> Result<(), ModelAssetsError> {
-    let entry = model_entry(model_id)
-        .ok_or_else(|| ModelAssetsError::UnknownModel(model_id.to_owned()))?;
+    let entry =
+        model_entry(model_id).ok_or_else(|| ModelAssetsError::UnknownModel(model_id.to_owned()))?;
     for asset in &entry.assets {
         verify_file(model_id, asset, dir)?;
     }
@@ -276,6 +280,36 @@ mod tests {
         let err = verify_bytes("m", "model", bytes, &"0".repeat(64))
             .expect_err("changed digest must fail");
         assert!(matches!(err, ModelAssetsError::DigestMismatch { .. }));
+    }
+
+    /// Regression for the double-hash bug: `verify_file` must compare the
+    /// file's own SHA-256 with the registry pin, not SHA256(SHA256(file)).
+    #[test]
+    fn verify_file_accepts_matching_pinned_digest() {
+        let dir = std::env::temp_dir().join(format!(
+            "hacienda-model-assets-verify-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp model dir");
+        let bytes = b"pinned model bytes";
+        std::fs::write(dir.join("model.safetensors"), bytes).expect("write pinned asset");
+
+        let asset = PinnedAsset {
+            role: "model".to_string(),
+            path: "model.safetensors".to_string(),
+            sha256: hex_digest(bytes),
+            size: Some(bytes.len() as u64),
+        };
+        verify_file("m", &asset, &dir).expect("a correct pinned file must verify");
+
+        let mut changed = asset;
+        changed.sha256 = "0".repeat(64);
+        assert!(matches!(
+            verify_file("m", &changed, &dir),
+            Err(ModelAssetsError::DigestMismatch { .. })
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
