@@ -72,9 +72,9 @@ pub use stream::{
     LlmEgressAuditor, LlmEgressEvent, Redactor, RetrievedContext, TokenUsage,
 };
 pub use types::{
-    ChunkId, ChunkRecord, CollectionSpec, CollectionStats, DistanceMetric, DocumentId,
-    DocumentRecord, DocumentSummary, IndexMethod, MultiVector, PrimaryScore, RetrievedChunk,
-    SparseVector,
+    acl_mentions, effective_tenant, ChunkId, ChunkRecord, CollectionSpec, CollectionStats,
+    DistanceMetric, DocumentId, DocumentRecord, DocumentSummary, IndexMethod, MultiVector,
+    PrimaryScore, RetrievedChunk, SparseVector, DEFAULT_TENANT,
 };
 #[cfg(feature = "chunking")]
 pub use xberg::chunking::ChunkingConfig;

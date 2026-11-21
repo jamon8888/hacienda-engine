@@ -17,6 +17,9 @@ pub struct RagIngestion<'a> {
     /// Legal dossier used for retrieval scoping (mirrors document ingestion).
     pub dossier_id: Option<&'a str>,
     pub account: &'a str,
+    /// Owning tenant stamped on ingested rows. The API overrides this from the
+    /// authenticated TenantCtx; local callers use the account name.
+    pub tenant_id: Option<&'a str>,
     /// Envelopes per IMAP page (bounded memory for large mailboxes).
     pub page_size: u32,
     /// Stop after this many pages; 0 = unlimited.
@@ -69,6 +72,8 @@ fn build_email_records(
         }),
         dossier_id: rag.dossier_id.map(str::to_string),
         version_ref: None,
+        tenant_id: rag.tenant_id.map(str::to_string),
+        acl: None,
     };
     let records: Vec<ChunkRecord> = chunks
         .iter()
@@ -83,6 +88,8 @@ fn build_email_records(
             chunk_metadata: serde_json::Value::Null,
             dossier_id: rag.dossier_id.map(str::to_string),
             version_ref: None,
+            tenant_id: rag.tenant_id.map(str::to_string),
+            acl: None,
         })
         .collect();
     (document, records)
@@ -586,7 +593,9 @@ fn chunk(text: &str, chunk_size: usize, overlap: usize) -> Result<Vec<String>> {
             embedding: None,
             ..Default::default()
         };
-        let records = chunk_full_text(text, &config)
+        // Only chunk content is consumed here; tenant scoping is stamped later
+        // on the final ChunkRecord in build_email_records.
+        let records = chunk_full_text(text, &config, None)
             .map_err(|e| EmailError::Rag(format!("chunking failed: {e}")))?;
         Ok(records.into_iter().map(|r| r.content).collect())
     }
@@ -646,6 +655,7 @@ mod tests {
             store: &store,
             dossier_id: Some("dossier-42"),
             account: "work",
+            tenant_id: Some("work"),
             page_size: 500,
             max_pages: 0,
             concurrency: 2,
@@ -696,6 +706,7 @@ mod tests {
             store: &store,
             dossier_id: None,
             account: "work",
+            tenant_id: Some("work"),
             page_size: 500,
             max_pages: 0,
             concurrency: 2,

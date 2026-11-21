@@ -20,6 +20,7 @@ use hacienda_email::{
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+use crate::handlers::rag::scope_collection_name;
 use crate::{
     dto::AsyncJobResponse,
     error::ApiError,
@@ -206,8 +207,10 @@ async fn resolve_tenant_maildir(requested: &str, account: &str) -> Result<String
 
 async fn build_config(
     body: &EmailProcessRequest,
-    account: String,
+    ctx: &hacienda_core::tenancy::TenantCtx,
 ) -> Result<EmailConfig, ApiError> {
+    // The account comes from the authenticated tenant, never the request body.
+    let account = ctx.tenant.as_str().to_string();
     // Exhaustive by construction: EmailBackendDto has exactly one variant.
     let backend = match &body.backend {
         EmailBackendDto::Maildir { path } => EmailBackend::Maildir {
@@ -225,6 +228,11 @@ async fn build_config(
         ..Default::default()
     };
     config.redaction.mode = mode;
+    // All RAG writes in this request must use the tenant-scoped collection.
+    // The Pipeline variant has no index field of its own; its RagIndex step
+    // falls back to this config value, so scoping here covers every path
+    // (IndexForRag explicitly scopes its own index_name as well).
+    config.rag.index_name = scope_collection_name(ctx, "email-corpus");
     Ok(config)
 }
 
@@ -241,6 +249,7 @@ fn dest_of(path: String) -> EmailDestination {
 async fn build_operation(
     operation: &EmailOperationDto,
     account: &str,
+    tenant_ctx: &hacienda_core::tenancy::TenantCtx,
 ) -> Result<EmailOperation, ApiError> {
     Ok(match operation {
         EmailOperationDto::Archive {
@@ -267,7 +276,12 @@ async fn build_operation(
         },
         EmailOperationDto::IndexForRag { source, index } => EmailOperation::IndexForRag {
             source: source_of(resolve_tenant_maildir(source, account).await?),
-            index_name: index.clone(),
+            // Same tenant-scoping rule as /v1/rag/* so emails indexed as
+            // "email-corpus" are retrievable under "{tenant}:email-corpus".
+            index_name: Some(scope_collection_name(
+                tenant_ctx,
+                index.as_deref().unwrap_or("email-corpus"),
+            )),
             chunk_size: None,
         },
         EmailOperationDto::Pipeline { source, output } => EmailOperation::Pipeline {
@@ -316,8 +330,8 @@ pub async fn process_email_async(
     // Validate backend AND operation before creating the job: a malformed path
     // (e.g. output="../escape") must be a 400 with no orphan job persisted.
     // The account is derived from the authenticated tenant, never the body.
-    let config = build_config(&body, tenant.as_str().to_string()).await?;
-    let operation = build_operation(&body.operation, tenant.as_str()).await?;
+    let config = build_config(&body, &caller.tenant_ctx()).await?;
+    let operation = build_operation(&body.operation, tenant.as_str(), &caller.tenant_ctx()).await?;
 
     let job = state.jobs.create(&tenant, owner).await.map_err(|e| {
         tracing::error!(error = %e, "failed to create async email job");
@@ -484,7 +498,7 @@ pub async fn process_email(
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let tenant = caller.tenant_ctx().tenant;
-    let config = build_config(&body, tenant.as_str().to_string()).await?;
+    let config = build_config(&body, &caller.tenant_ctx()).await?;
     // Per-request processor: never shared across tenants (design D5).
     let mut processor = EmailProcessor::new(config).await.map_err(to_api_error)?;
     // Same RAG store as document ingestion: emails become searchable through
@@ -495,7 +509,7 @@ pub async fn process_email(
     if let Some(dossier) = body.dossier_id.as_deref() {
         processor = processor.with_dossier_id(dossier);
     }
-    let operation = build_operation(&body.operation, tenant.as_str()).await?;
+    let operation = build_operation(&body.operation, tenant.as_str(), &caller.tenant_ctx()).await?;
     let response = processor
         .process(EmailRequest {
             operation,

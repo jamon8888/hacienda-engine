@@ -17,9 +17,9 @@ use crate::filter::{Filter, FilterField, FilterNamespace};
 use crate::query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 use crate::store::RagStore;
 use crate::types::{
-    validate_chunk_side_vectors, ChunkId, ChunkRecord, CollectionSpec, CollectionStats,
-    DistanceMetric, DocumentId, DocumentRecord, DocumentSummary, IndexMethod, PrimaryScore,
-    RetrievedChunk,
+    acl_mentions, effective_tenant, validate_chunk_side_vectors, ChunkId, ChunkRecord,
+    CollectionSpec, CollectionStats, DistanceMetric, DocumentId, DocumentRecord, DocumentSummary,
+    IndexMethod, PrimaryScore, RetrievedChunk,
 };
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
@@ -65,7 +65,7 @@ pub struct LanceDbStore {
     db: Connection,
     fts_ready: Arc<AtomicBool>,
     fts_lock: Arc<futures::lock::Mutex<()>>,
-    write_lock: Arc<futures::lock::Mutex<()>>,
+    write_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl LanceDbStore {
@@ -80,7 +80,7 @@ impl LanceDbStore {
             db,
             fts_ready: Arc::new(AtomicBool::new(false)),
             fts_lock: Arc::new(futures::lock::Mutex::new(())),
-            write_lock: Arc::new(futures::lock::Mutex::new(())),
+            write_lock: Arc::new(tokio::sync::RwLock::new(())),
         };
         store.refresh_fts_status().await?;
         Ok(store)
@@ -220,6 +220,10 @@ impl LanceDbStore {
         let chunks = self
             .open_table(&Self::table_name(collection, "chunks"))
             .await?;
+        // Every read/upsert path goes through here: migrate legacy tables in
+        // place so readers never hit a missing tenant_id/acl column.
+        migrate_scoping_columns(&docs, &Self::table_name(collection, "documents")).await?;
+        migrate_scoping_columns(&chunks, &Self::table_name(collection, "chunks")).await?;
         Ok((docs, chunks))
     }
 
@@ -404,6 +408,8 @@ impl LanceDbStore {
                         metadata: json_value_at(&batch, "metadata", row)?,
                         dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
                         version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
+                        tenant_id: empty_as_none(string_at(&batch, "tenant_id", row)?),
+                        acl: optional_json_value_at(&batch, "acl", row)?,
                     },
                     ingested_at: int_at(&batch, "ingested_at", row)?,
                 });
@@ -437,6 +443,8 @@ impl LanceDbStore {
                         chunk_metadata: json_value_at(&batch, "chunk_metadata", row)?,
                         dossier_id: empty_as_none(string_at(&batch, "dossier_id", row)?),
                         version_ref: empty_as_none(string_at(&batch, "version_ref", row)?),
+                        tenant_id: empty_as_none(string_at(&batch, "tenant_id", row)?),
+                        acl: optional_json_value_at(&batch, "acl", row)?,
                     },
                 });
             }
@@ -560,7 +568,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn optimize(&self) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         for spec in self.read_metadata().await? {
             let (docs, chunks) = self.collection_tables(&spec.name).await?;
             // LanceDB accumulates small fragments on every write; compact both
@@ -578,7 +586,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         if let Some(existing) = self.spec(&spec.name).await? {
             if existing.embedding_dim != spec.embedding_dim
                 || existing.distance_metric != spec.distance_metric
@@ -611,6 +619,9 @@ impl RagStore for LanceDbStore {
         // mismatched schema rather than publishing unusable collection metadata.
         let docs = self.open_table(&docs_name).await?;
         let chunks = self.open_table(&chunks_name).await?;
+        // Migrate pre-scoping tables so the schema check below sees the new columns.
+        migrate_scoping_columns(&docs, &docs_name).await?;
+        migrate_scoping_columns(&chunks, &chunks_name).await?;
         if docs.schema().await.map_err(backend_err)?.as_ref() != document_schema().as_ref()
             || chunks.schema().await.map_err(backend_err)?.as_ref()
                 != chunk_schema(spec.embedding_dim).as_ref()
@@ -626,7 +637,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn drop_collection(&self, collection: &str) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         self.require_spec(collection).await?;
         for suffix in ["documents", "chunks"] {
             let name = Self::table_name(collection, suffix);
@@ -651,7 +662,7 @@ impl RagStore for LanceDbStore {
         document: &DocumentRecord,
         chunks: &[ChunkRecord],
     ) -> RagResult<DocumentId> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         let spec = self.require_spec(collection).await?;
         for chunk in chunks {
             validate_chunk_side_vectors(chunk)?;
@@ -725,7 +736,7 @@ impl RagStore for LanceDbStore {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         let spec = self.require_spec(collection).await?;
         for (item_index, (document, chunks)) in items.iter().enumerate() {
             for (chunk_ordinal, chunk) in chunks.iter().enumerate() {
@@ -881,7 +892,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn delete_documents(&self, collection: &str, ids: &[DocumentId]) -> RagResult<u64> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         self.require_spec(collection).await?;
         let count = self
             .delete_doc_rows(collection, &ids.iter().map(|id| id.0.clone()).collect())
@@ -894,7 +905,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn delete_by_filter(&self, collection: &str, filter: &Filter) -> RagResult<u64> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         filter.validate()?;
         let (_, docs, chunks) = self.read_collection_rows(collection).await?;
         let ids = docs
@@ -916,7 +927,14 @@ impl RagStore for LanceDbStore {
     }
 
     async fn retrieve(&self, collection: &str, query: &RetrieveQuery) -> RagResult<RetrieveOutput> {
-        let (spec, docs, chunks) = self.read_collection_rows(collection).await?;
+        // Hold a read guard across BOTH table reads so the document ACL and the
+        // chunk content come from one consistent state. A concurrent upsert
+        // holds the write guard; without this, a replacement chunk could be
+        // paired with a stale document ACL that still grants the caller.
+        let (spec, docs, chunks) = {
+            let _read = self.write_lock.read().await;
+            self.read_collection_rows(collection).await?
+        };
         query.validate(&spec)?;
         if query.mode == RetrieveMode::Hybrid && query.query_vector.is_none() {
             return Err(RagError::InvalidQuery(
@@ -985,6 +1003,35 @@ impl RagStore for LanceDbStore {
                         continue;
                     }
                 }
+                // Hard tenant boundary: the API stamps documents with the
+                // authenticated tenant. Enforce before scoring so a sibling
+                // tenant's chunks are never scored or surfaced. Legacy rows
+                // with tenant_id=None mean the default tenant.
+                // Own the tenant string so the borrow of `chunk` ends here and
+                // `chunk` can be moved into `scored` below.
+                let effective_tenant = effective_tenant(
+                    chunk.record.tenant_id.as_deref(),
+                    doc.record.tenant_id.as_deref(),
+                )
+                .to_string();
+                // Hard ACL boundary: the caller's acl_reference must be present
+                // in the row's ACL (or be the owner tenant). Unscoped when absent.
+                let chunk_acl = chunk.record.acl.clone().or_else(|| doc.record.acl.clone());
+                if let Some(tenant) = &query.tenant_id {
+                    if effective_tenant != tenant.as_str()
+                        && !chunk_acl.as_ref().is_some_and(|a| acl_mentions(a, tenant))
+                    {
+                        continue;
+                    }
+                }
+                if let Some(reference) = &query.acl_reference {
+                    let acl_grants = chunk_acl
+                        .as_ref()
+                        .is_some_and(|acl| acl_mentions(acl, reference));
+                    if !acl_grants && effective_tenant != reference.as_str() {
+                        continue;
+                    }
+                }
                 if query
                     .filter
                     .as_ref()
@@ -1032,7 +1079,14 @@ impl RagStore for LanceDbStore {
                     }
                     RetrieveMode::Sparse | RetrieveMode::LateInteraction => unreachable!(),
                 };
-                scored.push((score, chunk, doc.id.0.clone(), primary));
+                scored.push((
+                    score,
+                    chunk,
+                    doc.id.0.clone(),
+                    primary,
+                    effective_tenant,
+                    chunk_acl.clone(),
+                ));
             }
             if query.mode == RetrieveMode::Hybrid {
                 let candidate_limit =
@@ -1088,24 +1142,28 @@ impl RagStore for LanceDbStore {
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
             if query.group_by_document {
                 let mut seen = HashSet::new();
-                scored.retain(|(_, chunk, _, _)| seen.insert(chunk.document_id.0.clone()));
+                scored.retain(|(_, chunk, _, _, _, _)| seen.insert(chunk.document_id.0.clone()));
             }
             let chunks = scored
                 .into_iter()
                 .take(query.top_k as usize)
-                .map(|(score, chunk, doc_id, primary)| RetrievedChunk {
-                    id: chunk.id,
-                    document_id: chunk.document_id,
-                    ordinal: chunk.record.ordinal,
-                    external_id: chunk.record.external_id,
-                    content: query.include_content.then_some(chunk.record.content),
-                    score,
-                    primary_score: primary,
-                    chunk_metadata: chunk.record.chunk_metadata,
-                    document: query
-                        .include_document
-                        .then(|| summarize(&docs_by_id[&doc_id])),
-                })
+                .map(
+                    |(score, chunk, doc_id, primary, tenant, acl)| RetrievedChunk {
+                        id: chunk.id,
+                        document_id: chunk.document_id,
+                        ordinal: chunk.record.ordinal,
+                        external_id: chunk.record.external_id,
+                        content: query.include_content.then_some(chunk.record.content),
+                        score,
+                        primary_score: primary,
+                        chunk_metadata: chunk.record.chunk_metadata,
+                        document: query
+                            .include_document
+                            .then(|| summarize(&docs_by_id[&doc_id])),
+                        tenant_id: Some(tenant),
+                        acl,
+                    },
+                )
                 .collect();
             Ok(RetrieveOutput {
                 mode: query.mode,
@@ -1178,7 +1236,10 @@ impl RagStore for LanceDbStore {
         collection: &str,
         document: &DocumentId,
     ) -> RagResult<Option<(DocumentRecord, Vec<ChunkRecord>)>> {
-        let (_, docs, mut chunks) = self.read_collection_rows(collection).await?;
+        let (_, docs, mut chunks) = {
+            let _read = self.write_lock.read().await;
+            self.read_collection_rows(collection).await?
+        };
         let Some(doc) = docs.into_iter().find(|d| d.id == *document) else {
             return Ok(None);
         };
@@ -1196,7 +1257,7 @@ impl RagStore for LanceDbStore {
         document: &DocumentId,
         embeddings: &[(u32, Vec<f32>)],
     ) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         let spec = self.require_spec(collection).await?;
         for (_, embedding) in embeddings {
             if embedding.len() as u32 != spec.embedding_dim {
@@ -1294,6 +1355,9 @@ fn document_schema() -> SchemaRef {
         Field::new("ingested_at", DataType::Int64, false),
         Field::new("dossier_id", DataType::Utf8, false),
         Field::new("version_ref", DataType::Utf8, false),
+        // Nullable: added by schema evolution to pre-scoping collections via AllNulls.
+        Field::new("tenant_id", DataType::Utf8, true),
+        Field::new("acl", DataType::Utf8, true),
     ]))
 }
 fn chunk_schema(dim: u32) -> SchemaRef {
@@ -1316,7 +1380,46 @@ fn chunk_schema(dim: u32) -> SchemaRef {
         Field::new("chunk_metadata", DataType::Utf8, false),
         Field::new("dossier_id", DataType::Utf8, false),
         Field::new("version_ref", DataType::Utf8, false),
+        // Nullable: added by schema evolution to pre-scoping collections via AllNulls.
+        Field::new("tenant_id", DataType::Utf8, true),
+        Field::new("acl", DataType::Utf8, true),
     ]))
+}
+
+/// Add the tenant/ACL scoping columns to a pre-existing table that was created
+/// before those fields existed. `AllNulls` is a metadata-only change: legacy
+/// rows then read as "default tenant / owner-only ACL" via the readers.
+async fn migrate_scoping_columns(table: &lancedb::Table, table_name: &str) -> RagResult<()> {
+    use lancedb::table::NewColumnTransform;
+    let schema = table.schema().await.map_err(|e| {
+        RagError::Backend(Box::new(std::io::Error::other(format!(
+            "schema migration for '{table_name}': failed to read schema ({e}). \
+             Retry once the store is reachable."
+        ))))
+    })?;
+    let mut additions = Vec::new();
+    for name in ["tenant_id", "acl"] {
+        if schema.index_of(name).is_err() {
+            additions.push(arrow_schema::Field::new(name, DataType::Utf8, true));
+        }
+    }
+    if additions.is_empty() {
+        return Ok(());
+    }
+    table
+        .add_columns()
+        .transform(NewColumnTransform::AllNulls(Arc::new(
+            arrow_schema::Schema::new(additions),
+        )))
+        .execute()
+        .await
+        .map_err(|e| {
+            RagError::Backend(Box::new(std::io::Error::other(format!(
+                "schema migration for '{table_name}': failed to add tenant/ACL columns ({e}). \
+                 Reopen the collection once the store is writable."
+            ))))
+        })?;
+    Ok(())
 }
 
 fn json_string(value: &serde_json::Value) -> String {
@@ -1377,6 +1480,13 @@ fn document_batch(
                 .version_ref
                 .as_deref()
                 .unwrap_or("")])),
+            Arc::new(StringArray::from(vec![doc
+                .tenant_id
+                .as_deref()
+                .unwrap_or("")])),
+            Arc::new(StringArray::from(vec![json_string(
+                &doc.acl.clone().unwrap_or(serde_json::Value::Null),
+            )])),
         ],
     )
     .map_err(backend_err)
@@ -1463,6 +1573,20 @@ fn document_batch_many(
                     .map(|(doc, _)| doc.version_ref.as_deref().unwrap_or(""))
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| doc.tenant_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                items
+                    .iter()
+                    .map(|(doc, _)| {
+                        json_string(&doc.acl.clone().unwrap_or(serde_json::Value::Null))
+                    })
+                    .collect::<Vec<_>>(),
+            )),
         ],
     )
     .map_err(backend_err)
@@ -1542,6 +1666,16 @@ fn chunk_batch(rows: &[StoredChunk], dim: u32) -> RagResult<RecordBatch> {
                     .map(|r| r.record.version_ref.as_deref().unwrap_or(""))
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|r| r.record.tenant_id.as_deref().unwrap_or(""))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|r| json_string(&r.record.acl.clone().unwrap_or(serde_json::Value::Null)))
+                    .collect::<Vec<_>>(),
+            )),
         ],
     )
     .map_err(backend_err)
@@ -1590,6 +1724,22 @@ fn vector_at(batch: &RecordBatch, name: &str, row: usize) -> RagResult<Vec<f32>>
 }
 fn json_value_at(batch: &RecordBatch, name: &str, row: usize) -> RagResult<serde_json::Value> {
     serde_json::from_str(&string_at(batch, name, row)?).map_err(backend_err)
+}
+/// Read an optional JSON column: the serialized `null` sentinel and an empty
+/// string (legacy AllNulls columns) both mean "absent".
+fn optional_json_value_at(
+    batch: &RecordBatch,
+    name: &str,
+    row: usize,
+) -> RagResult<Option<serde_json::Value>> {
+    let raw = string_at(batch, name, row)?;
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match json_value_at(batch, name, row)? {
+        serde_json::Value::Null => Ok(None),
+        other => Ok(Some(other)),
+    }
 }
 fn json_at<T: serde::de::DeserializeOwned>(
     batch: &RecordBatch,
@@ -1782,6 +1932,8 @@ mod tests {
             chunk_metadata: serde_json::json!({"ordinal": ordinal}),
             dossier_id: None,
             version_ref: None,
+            tenant_id: None,
+            acl: None,
         }
     }
 

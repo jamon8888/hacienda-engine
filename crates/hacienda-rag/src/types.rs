@@ -173,6 +173,18 @@ pub struct DocumentRecord {
     /// `None` for documents ingested before this contract existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
+    /// Owning tenant — every row belongs to exactly one trust domain. `None`
+    /// means the default tenant. The API layer overrides this from the
+    /// authenticated `TenantCtx` on every upsert, so callers cannot impersonate
+    /// another tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// Access control list: which additional tenants (besides `tenant_id`) may
+    /// read this document. Absent means owner-only access. Serialized as
+    /// `{"tenants": ["acme", "globex"]}` or similar; interpretation is
+    /// backend-dependent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<serde_json::Value>,
 }
 
 /// Chunk record for upsertion.
@@ -203,6 +215,14 @@ pub struct ChunkRecord {
     /// Document version the parent document grounds on, for retrieval scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_ref: Option<String>,
+    /// Owning tenant — inherited from the parent document at ingest time. `None`
+    /// means the default tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// Access control list, inherited from the parent document. Absent means
+    /// owner-only access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<serde_json::Value>,
 }
 
 /// Sparse (SPLADE-style) embedding: parallel arrays, indices sorted ascending.
@@ -376,6 +396,38 @@ pub struct RetrievedChunk {
     /// Parent document summary (present when `include_document` was requested).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document: Option<DocumentSummary>,
+    /// Tenant this chunk belongs to, populated by the backend for
+    /// post-retrieval authorization checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// Access control list of this chunk, populated by the backend for
+    /// post-retrieval authorization checks (same shape as `ChunkRecord::acl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<serde_json::Value>,
+}
+
+/// Tenant id used for rows written before per-tenant scoping existed.
+pub const DEFAULT_TENANT: &str = "default";
+
+/// True when an ACL value grants access to `reference`.
+///
+/// ACLs are caller-defined JSON; the conventional shape is
+/// `{"tenants": ["acme", "globex"]}`. We accept any string occurrence of the
+/// reference anywhere in the value so custom shapes keep working. Owner
+/// tenants are checked separately by the caller.
+pub fn acl_mentions(acl: &serde_json::Value, reference: &str) -> bool {
+    match acl {
+        serde_json::Value::String(s) => s == reference,
+        serde_json::Value::Array(items) => items.iter().any(|v| acl_mentions(v, reference)),
+        serde_json::Value::Object(map) => map.values().any(|v| acl_mentions(v, reference)),
+        _ => false,
+    }
+}
+
+/// Effective tenant of a chunk: its own value, else the parent document's,
+/// else the default tenant for legacy rows.
+pub fn effective_tenant<'a>(chunk_tenant: Option<&'a str>, doc_tenant: Option<&'a str>) -> &'a str {
+    chunk_tenant.or(doc_tenant).unwrap_or(DEFAULT_TENANT)
 }
 
 /// Aggregate statistics for a collection.
@@ -450,6 +502,8 @@ mod tests {
             chunk_metadata: serde_json::Value::Null,
             dossier_id: Some("dossier-1".to_string()),
             version_ref: Some("v-2024".to_string()),
+            tenant_id: Some("acme".to_string()),
+            acl: Some(serde_json::json!({"tenants": ["globex"]})),
         };
         let json = serde_json::to_value(&chunk).unwrap();
         assert_eq!(json["dossier_id"], "dossier-1");

@@ -29,6 +29,7 @@ vérification et qu'une lecture partielle mènerait à des conclusions fausses.
 | Document | Contenu |
 | --- | --- |
 | [`2026-07-31-analyse-architecture-et-pistes-produit.md`](2026-07-31-analyse-architecture-et-pistes-produit.md) | Évaluation du dépôt (API, SDK, RAG, multi-tenance, persistance, observabilité), rôle réel de `xberg`, ce que l'amont livre, position concurrentielle face à Xberg Enterprise, pistes business |
+| [`2026-11-20-email-rag-store-topology.md`](2026-11-20-email-rag-store-topology.md) | Pourquoi documents et emails partagent un seul `RagStore` (isolation logique par tenant/dossier, garde de confidentialité unique) et dans quel cas séparer physiquement les stores |
 
 ### Programme et specs
 
