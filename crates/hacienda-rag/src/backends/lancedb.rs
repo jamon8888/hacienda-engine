@@ -65,7 +65,7 @@ pub struct LanceDbStore {
     db: Connection,
     fts_ready: Arc<AtomicBool>,
     fts_lock: Arc<futures::lock::Mutex<()>>,
-    write_lock: Arc<futures::lock::Mutex<()>>,
+    write_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl LanceDbStore {
@@ -80,7 +80,7 @@ impl LanceDbStore {
             db,
             fts_ready: Arc::new(AtomicBool::new(false)),
             fts_lock: Arc::new(futures::lock::Mutex::new(())),
-            write_lock: Arc::new(futures::lock::Mutex::new(())),
+            write_lock: Arc::new(tokio::sync::RwLock::new(())),
         };
         store.refresh_fts_status().await?;
         Ok(store)
@@ -568,7 +568,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn optimize(&self) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         for spec in self.read_metadata().await? {
             let (docs, chunks) = self.collection_tables(&spec.name).await?;
             // LanceDB accumulates small fragments on every write; compact both
@@ -586,7 +586,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         if let Some(existing) = self.spec(&spec.name).await? {
             if existing.embedding_dim != spec.embedding_dim
                 || existing.distance_metric != spec.distance_metric
@@ -637,7 +637,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn drop_collection(&self, collection: &str) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         self.require_spec(collection).await?;
         for suffix in ["documents", "chunks"] {
             let name = Self::table_name(collection, suffix);
@@ -662,7 +662,7 @@ impl RagStore for LanceDbStore {
         document: &DocumentRecord,
         chunks: &[ChunkRecord],
     ) -> RagResult<DocumentId> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         let spec = self.require_spec(collection).await?;
         for chunk in chunks {
             validate_chunk_side_vectors(chunk)?;
@@ -736,7 +736,7 @@ impl RagStore for LanceDbStore {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         let spec = self.require_spec(collection).await?;
         for (item_index, (document, chunks)) in items.iter().enumerate() {
             for (chunk_ordinal, chunk) in chunks.iter().enumerate() {
@@ -892,7 +892,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn delete_documents(&self, collection: &str, ids: &[DocumentId]) -> RagResult<u64> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         self.require_spec(collection).await?;
         let count = self
             .delete_doc_rows(collection, &ids.iter().map(|id| id.0.clone()).collect())
@@ -905,7 +905,7 @@ impl RagStore for LanceDbStore {
     }
 
     async fn delete_by_filter(&self, collection: &str, filter: &Filter) -> RagResult<u64> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         filter.validate()?;
         let (_, docs, chunks) = self.read_collection_rows(collection).await?;
         let ids = docs
@@ -927,7 +927,14 @@ impl RagStore for LanceDbStore {
     }
 
     async fn retrieve(&self, collection: &str, query: &RetrieveQuery) -> RagResult<RetrieveOutput> {
-        let (spec, docs, chunks) = self.read_collection_rows(collection).await?;
+        // Hold a read guard across BOTH table reads so the document ACL and the
+        // chunk content come from one consistent state. A concurrent upsert
+        // holds the write guard; without this, a replacement chunk could be
+        // paired with a stale document ACL that still grants the caller.
+        let (spec, docs, chunks) = {
+            let _read = self.write_lock.read().await;
+            self.read_collection_rows(collection).await?
+        };
         query.validate(&spec)?;
         if query.mode == RetrieveMode::Hybrid && query.query_vector.is_none() {
             return Err(RagError::InvalidQuery(
@@ -1229,7 +1236,10 @@ impl RagStore for LanceDbStore {
         collection: &str,
         document: &DocumentId,
     ) -> RagResult<Option<(DocumentRecord, Vec<ChunkRecord>)>> {
-        let (_, docs, mut chunks) = self.read_collection_rows(collection).await?;
+        let (_, docs, mut chunks) = {
+            let _read = self.write_lock.read().await;
+            self.read_collection_rows(collection).await?
+        };
         let Some(doc) = docs.into_iter().find(|d| d.id == *document) else {
             return Ok(None);
         };
@@ -1247,7 +1257,7 @@ impl RagStore for LanceDbStore {
         document: &DocumentId,
         embeddings: &[(u32, Vec<f32>)],
     ) -> RagResult<()> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.write_lock.write().await;
         let spec = self.require_spec(collection).await?;
         for (_, embedding) in embeddings {
             if embedding.len() as u32 != spec.embedding_dim {

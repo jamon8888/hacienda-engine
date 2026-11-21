@@ -18,7 +18,7 @@ fichier LanceDB / une seule base Postgres).
 ApiState.rag_store: Option<Arc<dyn RagStore>>
         │
         ├── /v1/documents/*  → collection "<tenant>:<name>"     (documents)
-        ├── /v1/email/*      → collection "email-corpus"        (emails redactés)
+        ├── /v1/email/*      → collection "<tenant>:email-corpus" (emails redactés)
         └── /v1/rag/*        → retrieve() sur les deux, avec les mêmes filtres
 ```
 
@@ -27,7 +27,10 @@ Le plugin email reçoit le même `Arc<dyn RagStore>` que les documents via
 sont indexés après redaction obligatoire (design D2 du plugin) dans la collection
 `email-corpus` (config `RagConfig.index_name`), avec `tenant_id` et `dossier_id`
 estampés sur chaque ligne, puis **interrogeables par les mêmes endpoints
-`/v1/rag/*/retrieve`** que les documents.
+`/v1/rag/*/retrieve`** que les documents. Pour un tenant non par défaut, le nom
+de collection reçoit le même préfixe que les documents (`{tenant}:email-corpus`) :
+le handler étampe ce nom côté serveur sur toutes les écritures RAG, y compris
+l'étape `RagIndex` du `Pipeline` qui n'a pas de champ `index` propre.
 
 ---
 
