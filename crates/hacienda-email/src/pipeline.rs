@@ -171,7 +171,12 @@ async fn extract_attachments_from_source(
                 let extracted = match crate::attachments::extract_attachments(&message).await {
                     Ok(v) => v,
                     Err(e) => {
-                        errors.push(format!("Attachment extraction failed: {e}"));
+                        // P0: never embed the extractor error text, which can
+                        // quote a sender-controlled (PII-bearing) filename.
+                        errors.push(format!(
+                            "Attachment extraction failed ({})",
+                            crate::attachments::attachment_error_category(&e)
+                        ));
                         continue;
                     }
                 };
@@ -187,9 +192,12 @@ async fn extract_attachments_from_source(
                         .await
                     {
                         Ok(_) => count += 1,
-                        Err(e) => errors.push(format!(
-                            "Redaction failed for attachment {} — refusing to persist: {e}",
-                            item.filename
+                        // P0: `item.filename` and the PII error text are both
+                        // untrusted surfaces; only a token and a fixed category
+                        // may reach EmailResponse.errors (HTTP sync/job output).
+                        Err(e) => errors.push(crate::attachments::attachment_redaction_error(
+                            &item.filename,
+                            &e,
                         )),
                     }
                 }

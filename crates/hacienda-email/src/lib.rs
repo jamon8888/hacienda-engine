@@ -14,6 +14,7 @@ pub mod pii;
 pub mod pipeline;
 pub mod rag;
 pub mod redact;
+pub mod redacted;
 
 use crate::backend::EmailClient;
 use std::sync::Arc;
