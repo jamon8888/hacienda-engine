@@ -10,6 +10,49 @@ use crate::error::{EmailError, Result};
 use crate::models::{EmailAttachment, ExtractedAttachment};
 use std::path::Path;
 
+/// Content-free diagnostic label for a sender-controlled attachment name.
+///
+/// Filenames arrive from the wire and can embed PII (a person's name, an SSN,
+/// ...). Hashing through the crate's domain-separated metadata token keeps
+/// diagnostics correlatable without ever echoing the clear name into stderr or
+/// an `EmailResponse.errors` entry served by HTTP sync/job polling.
+pub(crate) fn attachment_diagnostic_token(filename: &str) -> String {
+    crate::redacted::metadata_token("attachment", filename)
+}
+
+/// Fixed, content-free category for an attachment failure.
+///
+/// Extractor/PII error strings are deliberately not forwarded: they can quote
+/// the submitted filename or redacted content, which would re-open the leak on
+/// a different surface. Only the variant category is safe to emit.
+pub(crate) fn attachment_error_category(err: &EmailError) -> &'static str {
+    match err {
+        EmailError::Attachment(_) => "attachment extraction error",
+        EmailError::Redaction(_) => "redaction error",
+        _ => "processing error",
+    }
+}
+
+/// The exact stderr line emitted for a failed attachment. Kept as a pure
+/// function so tests can assert that the *produced log* is content-free.
+pub(crate) fn attachment_failure_log(filename: &str, err: &EmailError) -> String {
+    format!(
+        "Failed to process attachment {}: {}",
+        attachment_diagnostic_token(filename),
+        attachment_error_category(err)
+    )
+}
+
+/// The exact `EmailResponse.errors` entry emitted when attachment text
+/// redaction fails. Pure for the same testability reason.
+pub(crate) fn attachment_redaction_error(filename: &str, err: &EmailError) -> String {
+    format!(
+        "Redaction failed for attachment {} — refusing to persist ({})",
+        attachment_diagnostic_token(filename),
+        attachment_error_category(err)
+    )
+}
+
 /// Extract and process all attachments of a message via xberg.
 pub async fn extract_attachments(
     message: &crate::models::EmailMessage,
@@ -19,11 +62,9 @@ pub async fn extract_attachments(
         match process_attachment(attachment).await {
             Ok(extracted) => results.push(extracted),
             Err(e) => {
-                // One bad attachment must not fail the whole message.
-                eprintln!(
-                    "Failed to process attachment {}: {}",
-                    attachment.filename, e
-                );
+                // One bad attachment must not fail the whole message. Never log
+                // the raw filename: it is sender-controlled and may carry PII.
+                eprintln!("{}", attachment_failure_log(&attachment.filename, &e));
             }
         }
     }
@@ -69,9 +110,11 @@ pub async fn extract_text_with_xberg(
         Some(filename.to_string()),
     );
     let config = ExtractionConfig::default();
-    let output = extract(input, &config)
-        .await
-        .map_err(|e| EmailError::Attachment(format!("xberg extraction failed: {e}")))?;
+    let output = extract(input, &config).await.map_err(|_| {
+        // xberg's Display text can echo the submitted filename. Emit a
+        // fixed message so no clear name reaches a log or an HTTP response.
+        EmailError::Attachment("xberg extraction failed".to_string())
+    })?;
 
     Ok(output
         .results
@@ -150,4 +193,58 @@ pub fn detect_mime_type(content: &[u8], filename: &str) -> String {
 /// Resolve a path reference (kept for API compatibility).
 pub fn as_path(path: &str) -> &Path {
     Path::new(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sentinel sender-controlled filename: it embeds PII in several shapes.
+    /// Any of these fragments reaching an error or log surface is a leak.
+    const SENTINEL_FILENAME: &str = "Contrat-Jane-Doe-SSN-123-45-6789-2026.pdf";
+    const PII_FRAGMENTS: [&str; 4] = [SENTINEL_FILENAME, "Jane-Doe", "Jane Doe", "123-45-6789"];
+
+    fn assert_content_free(surface: &str, label: &str) {
+        for fragment in PII_FRAGMENTS {
+            assert!(
+                !surface.contains(fragment),
+                "{label} leaked raw attachment name fragment {fragment:?}: {surface}"
+            );
+        }
+        assert!(
+            surface.contains(&attachment_diagnostic_token(SENTINEL_FILENAME)),
+            "{label} lost its correlation token: {surface}"
+        );
+    }
+
+    /// Regression for the stderr leak: the underlying extractor error echoes
+    /// the sentinel name, but the log actually produced must not.
+    #[test]
+    fn attachment_failure_log_never_prints_raw_filename() {
+        let failing =
+            EmailError::Attachment(format!("xberg extraction failed for {SENTINEL_FILENAME}"));
+        let produced_log = attachment_failure_log(SENTINEL_FILENAME, &failing);
+        assert_content_free(&produced_log, "stderr log");
+    }
+
+    /// Regression for the `EmailResponse.errors` leak consumed by HTTP sync/job
+    /// polling: a sentinel filename failing during redaction must not appear.
+    #[test]
+    fn attachment_redaction_error_never_returns_raw_filename() {
+        let failing = EmailError::Redaction(format!(
+            "redaction failed for attachment {SENTINEL_FILENAME}"
+        ));
+        let error_entry = attachment_redaction_error(SENTINEL_FILENAME, &failing);
+        assert_content_free(&error_entry, "EmailResponse.errors entry");
+    }
+
+    /// Tokens must stay correlatable but never derivable from the clear name.
+    #[test]
+    fn diagnostic_tokens_are_stable_and_content_free() {
+        let first = attachment_diagnostic_token(SENTINEL_FILENAME);
+        assert_eq!(first, attachment_diagnostic_token(SENTINEL_FILENAME));
+        assert_ne!(first, attachment_diagnostic_token("other.pdf"));
+        assert!(!first.contains("Jane"));
+        assert!(!first.contains("123-45-6789"));
+    }
 }

@@ -3856,6 +3856,7 @@ dependencies = [
  "chrono",
  "data-encoding",
  "hacienda-installation",
+ "hacienda-model-assets",
  "indexed_db_futures",
  "rand 0.8.8",
  "regex",
@@ -3934,6 +3935,16 @@ dependencies = [
  "tokio",
  "tracing",
  "xberg",
+]
+
+[[package]]
+name = "hacienda-model-assets"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

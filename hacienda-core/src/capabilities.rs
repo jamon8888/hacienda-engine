@@ -27,6 +27,10 @@ pub struct CapabilityReport {
     pub capabilities: Vec<CapabilityStatus>,
     pub embedding_mode: &'static str,
     pub onnx_runtime: CapabilityStatus,
+    /// Readiness of the model-backed NER half of PII detection.
+    pub ner_model: CapabilityStatus,
+    /// Pinned id of the NER model that actually loaded, `None` for regex-only.
+    pub ner_model_id: Option<String>,
 }
 
 /// Compose the common capability report from surface-specific runtime checks.
@@ -48,6 +52,24 @@ pub fn report(
             Some("configure a RAG store before starting embedding migration jobs")
         } else {
             None
+        },
+    };
+
+    let ner_model_id = crate::pii::ner::loaded_model_id().map(str::to_owned);
+    let ner_model_compiled = cfg!(any(
+        all(feature = "ner-candle", not(target_arch = "wasm32")),
+        all(feature = "ner-candle-wasm", target_arch = "wasm32"),
+    ));
+    let ner_model = CapabilityStatus {
+        name: "ner_model",
+        compiled: ner_model_compiled,
+        runtime_ready: ner_model_id.is_some(),
+        reason: if ner_model_id.is_some() {
+            None
+        } else if ner_model_compiled {
+            Some("regex-only: configure [pii.model] model_id and model_dir to load GLiNER2")
+        } else {
+            Some("rebuild with ner-candle (or ner-candle-wasm) to enable model-backed NER")
         },
     };
 
@@ -73,6 +95,7 @@ pub fn report(
                 reason: None,
             },
             embedding_migration,
+            ner_model.clone(),
         ],
         embedding_mode: if embedding_compiled {
             "real"
@@ -80,6 +103,8 @@ pub fn report(
             "presets_only"
         },
         onnx_runtime,
+        ner_model,
+        ner_model_id,
     }
 }
 
@@ -188,5 +213,30 @@ mod tests {
             report.capabilities[3].reason,
             Some("configure a RAG store before starting embedding migration jobs")
         );
+    }
+
+    #[test]
+    fn report_advertises_ner_model_readiness_from_loaded_state() {
+        let report = report(
+            "test",
+            false,
+            CapabilityStatus {
+                name: "onnx_runtime",
+                compiled: false,
+                runtime_ready: false,
+                reason: None,
+            },
+            true,
+        );
+        let status = report
+            .capabilities
+            .iter()
+            .find(|capability| capability.name == "ner_model")
+            .expect("ner_model capability must be reported");
+        assert_eq!(status.name, "ner_model");
+        // No model has been loaded in this test process: regex-only, reported
+        // honestly instead of echoing a configuration that may never have worked.
+        assert!(!status.runtime_ready);
+        assert!(report.ner_model_id.is_none());
     }
 }

@@ -4294,6 +4294,7 @@ dependencies = [
 name = "hacienda-client-core"
 version = "0.1.0"
 dependencies = [
+ "hacienda-installation",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
@@ -4311,6 +4312,8 @@ dependencies = [
  "blake3",
  "chrono",
  "data-encoding",
+ "hacienda-installation",
+ "hacienda-model-assets",
  "indexed_db_futures",
  "rand 0.8.8",
  "regex",
@@ -4327,6 +4330,26 @@ dependencies = [
  "web-time",
  "xberg",
  "zeroize",
+]
+
+[[package]]
+name = "hacienda-installation"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
+name = "hacienda-model-assets"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -4358,6 +4381,7 @@ dependencies = [
  "hacienda-backend",
  "hacienda-client-core",
  "hacienda-core",
+ "hacienda-model-assets",
  "hacienda-rag",
  "keyring",
  "rfd",

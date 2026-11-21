@@ -58,6 +58,15 @@ pub enum PiiError {
     #[error("model backend unavailable: {0}")]
     ModelUnavailable(String),
 
+    /// A pinned model was selected but its local files do not match the
+    /// registry's SHA-256 digests. Refused before any bytes reach the backend.
+    #[error("model asset integrity check failed for '{model_id}'")]
+    ModelIntegrity {
+        model_id: String,
+        #[source]
+        source: hacienda_model_assets::ModelAssetsError,
+    },
+
     #[error("reading configuration from {path}")]
     ConfigIo {
         path: String,

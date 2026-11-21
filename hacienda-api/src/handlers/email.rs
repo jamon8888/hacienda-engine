@@ -17,12 +17,12 @@ use hacienda_email::{
     config::EmailBackend, EmailConfig, EmailDestination, EmailOperation, EmailProcessor,
     EmailRequest, EmailSource, PipelineStep, PrivacyMode,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::time::Instant;
 
 use crate::handlers::rag::scope_collection_name;
 use crate::{
-    dto::AsyncJobResponse,
+    dto::{AsyncJobResponse, EmailOperationResultDto},
     error::ApiError,
     extract::Json as SafeJson,
     handlers::{caller_from_arc, extract_auth_context},
@@ -116,17 +116,20 @@ pub enum EmailOperationDto {
     },
 }
 
-/// Response body for an email operation.
-#[derive(Debug, Serialize)]
-pub struct EmailProcessResponse {
-    pub success: bool,
-    pub processed_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redaction_stats: Option<hacienda_email::models::RedactionStats>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rag_stats: Option<hacienda_email::models::RagIndexStats>,
-    pub errors: Vec<String>,
-    pub processing_time_ms: u64,
+/// Serialize the transport-safe DTO that is written to `Job.result_json` by the
+/// async email route and handed back by job polling.
+///
+/// Both routes go through [`EmailOperationResultDto::from_response`], so no
+/// raw `ExtractedEntity.text` can reach a job payload or an HTTP response. This
+/// helper is the exact serialization path exercised by the non-leak test below.
+fn serialize_job_result(
+    response: &hacienda_email::models::EmailResponse,
+    processing_time_ms: u64,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&EmailOperationResultDto::from_response(
+        response,
+        processing_time_ms,
+    ))
 }
 
 fn to_api_error(e: hacienda_email::EmailError) -> ApiError {
@@ -386,6 +389,7 @@ pub async fn process_email_async(
             }
         });
 
+        let started = Instant::now();
         let progress_tx_for_cb = progress_tx.clone();
         let result = async {
             let config = config;
@@ -425,26 +429,32 @@ pub async fn process_email_async(
         let _ = progress_consumer.await;
 
         match result {
-            Ok(response) if response.success => match serde_json::to_string(&response) {
-                Ok(json) => {
-                    if let Err(e) = task_jobs.finish(&task_tenant, &task_job_id, json).await {
-                        tracing::error!(
-                            job_id = %task_job_id, error = %e,
-                            "failed to mark email job as succeeded"
-                        );
+            // Store only the transport-safe DTO. Serializing `response` directly
+            // would persist `ExtractedEntity.text` (raw PII mentions) in
+            // `Job.result_json` and expose it through job polling — the P0.2
+            // leak. `serialize_job_result` is the single, tested projection.
+            Ok(response) if response.success => {
+                match serialize_job_result(&response, started.elapsed().as_millis() as u64) {
+                    Ok(json) => {
+                        if let Err(e) = task_jobs.finish(&task_tenant, &task_job_id, json).await {
+                            tracing::error!(
+                                job_id = %task_job_id, error = %e,
+                                "failed to mark email job as succeeded"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(job_id = %task_job_id, error = %e, "failed to serialize email job result");
+                        let _ = task_jobs
+                            .fail(
+                                &task_tenant,
+                                &task_job_id,
+                                "serialization failed".to_string(),
+                            )
+                            .await;
                     }
                 }
-                Err(e) => {
-                    tracing::error!(job_id = %task_job_id, error = %e, "failed to serialize email job result");
-                    let _ = task_jobs
-                        .fail(
-                            &task_tenant,
-                            &task_job_id,
-                            "serialization failed".to_string(),
-                        )
-                        .await;
-                }
-            },
+            }
             // `index_for_rag` reports per-message failures via `success=false`
             // while still returning Ok — a run where every message failed must
             // NOT be recorded as a successful job. Fail the job and keep the
@@ -492,7 +502,7 @@ pub async fn process_email(
     State(state): State<ApiState>,
     parts: Parts,
     SafeJson(body): SafeJson<EmailProcessRequest>,
-) -> Result<Json<EmailProcessResponse>, ApiError> {
+) -> Result<Json<EmailOperationResultDto>, ApiError> {
     let start = Instant::now();
     // Derive the account from the authenticated tenant (never the body).
     let ctx = extract_auth_context(&parts);
@@ -518,14 +528,12 @@ pub async fn process_email(
         .await
         .map_err(to_api_error)?;
 
-    Ok(Json(EmailProcessResponse {
-        success: response.success,
-        processed_count: response.processed_count,
-        redaction_stats: response.redaction_stats,
-        rag_stats: response.rag_stats,
-        errors: response.errors,
-        processing_time_ms: start.elapsed().as_millis() as u64,
-    }))
+    // Same transport DTO as the async job path. The raw `entities` field of the
+    // domain response is never serialized here (P0.2).
+    Ok(Json(EmailOperationResultDto::from_response(
+        &response,
+        start.elapsed().as_millis() as u64,
+    )))
 }
 
 #[cfg(test)]
@@ -582,5 +590,158 @@ mod tests {
         let payload = r#"{"backend":{"type":"maildir","path":"/tmp/mail"},"operation":{"operation":"index_for_rag","source":"/tmp/mail"}}"#;
         let request = serde_json::from_str::<EmailProcessRequest>(payload).unwrap();
         assert!(matches!(request.backend, EmailBackendDto::Maildir { .. }));
+    }
+
+    /// A domain response whose `ExtractedEntity.text` fields contain clear-text
+    /// PII must produce a job-result JSON that carries none of it (P0.2).
+    /// `serialize_job_result` is the exact function the async handler uses to
+    /// write `Job.result_json`, so this covers the polling surface too.
+    #[test]
+    fn async_job_result_never_serializes_raw_entity_text() {
+        use hacienda_email::models::{EmailResponse, ExtractedEntity};
+
+        let secrets = [
+            "SENTINEL_CLEARTEXT_MENTION_JEAN_DUPONT",
+            "jean.dupont@example.com",
+            "+33 6 12 34 56 78",
+            "SENTINEL_RAW_EMAIL_ID",
+        ];
+        let response = EmailResponse {
+            success: true,
+            processed_count: 3,
+            output_path: Some("/srv/mail/redacted/INBOX/secret.mbox".to_string()),
+            entities: Some(vec![
+                ExtractedEntity {
+                    text: secrets[0].to_string(),
+                    label: "Person".to_string(),
+                    confidence: 0.99,
+                    email_id: secrets[3].to_string(),
+                    span: (10, 41),
+                },
+                ExtractedEntity {
+                    text: secrets[1].to_string(),
+                    label: "Email".to_string(),
+                    confidence: 0.98,
+                    email_id: secrets[3].to_string(),
+                    span: (42, 64),
+                },
+                ExtractedEntity {
+                    text: secrets[2].to_string(),
+                    label: "PhoneNumber".to_string(),
+                    confidence: 0.97,
+                    email_id: secrets[3].to_string(),
+                    span: (65, 82),
+                },
+            ]),
+            rag_stats: None,
+            redaction_stats: None,
+            errors: vec![],
+        };
+
+        let json = serialize_job_result(&response, 12).unwrap();
+
+        // No raw mention, identifier, or server output path may survive.
+        for secret in secrets
+            .iter()
+            .copied()
+            .chain(std::iter::once("/srv/mail/redacted/INBOX/secret.mbox"))
+        {
+            assert!(
+                !json.contains(secret),
+                "clear-text value leaked into Job.result_json: {secret}\njson: {json}"
+            );
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = value.as_object().unwrap();
+        for forbidden in [
+            "entities",
+            "text",
+            "output_path",
+            "mention",
+            "span",
+            "email_id",
+            "label",
+        ] {
+            assert!(
+                !obj.contains_key(forbidden),
+                "forbidden entity carrier `{forbidden}` present in job result: {json}"
+            );
+        }
+        assert_eq!(obj["entities_found"].as_u64(), Some(3));
+        assert_eq!(obj["schema_version"].as_u64(), Some(1));
+        assert_eq!(obj["success"].as_bool(), Some(true));
+        assert_eq!(obj["processed_count"].as_u64(), Some(3));
+    }
+
+    /// The synchronous HTTP response and the asynchronous job result must be
+    /// the very same DTO — not two shapes that merely both happen to redact.
+    #[test]
+    fn sync_and_async_routes_emit_the_same_transport_dto() {
+        use hacienda_email::models::{EmailResponse, ExtractedEntity};
+
+        let response = EmailResponse {
+            success: true,
+            processed_count: 1,
+            output_path: Some("/srv/mail/out.mbox".to_string()),
+            entities: Some(vec![ExtractedEntity {
+                text: "SENTINEL_SYNC_ASYNC".to_string(),
+                label: "Person".to_string(),
+                confidence: 0.9,
+                email_id: "msg-1".to_string(),
+                span: (0, 19),
+            }]),
+            rag_stats: None,
+            redaction_stats: None,
+            errors: vec![],
+        };
+
+        // Sync route: axum serializes this value directly.
+        let sync =
+            serde_json::to_value(EmailOperationResultDto::from_response(&response, 7)).unwrap();
+        // Async route: this is what lands in Job.result_json and is polled back.
+        let async_json = serialize_job_result(&response, 7).unwrap();
+        let async_value: serde_json::Value = serde_json::from_str(&async_json).unwrap();
+
+        assert_eq!(
+            sync, async_value,
+            "sync HTTP response and async job result must share one DTO shape"
+        );
+        assert!(!async_json.contains("SENTINEL_SYNC_ASYNC"));
+    }
+
+    /// Pin the DTO's top-level contract. If a future change reintroduces an
+    /// `entities`/`text` carrier, this test fails loudly instead of silently
+    /// widening the confidentiality boundary.
+    #[test]
+    fn email_result_dto_contract_has_no_entity_carrier() {
+        let dto = EmailOperationResultDto {
+            schema_version: 1,
+            success: true,
+            processed_count: 1,
+            redaction_stats: None,
+            rag_stats: None,
+            entities_found: 0,
+            errors: vec![],
+            processing_time_ms: 0,
+        };
+        let value = serde_json::to_value(&dto).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "schema_version",
+            "success",
+            "processed_count",
+            "entities_found",
+            "errors",
+            "processing_time_ms",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(keys, expected);
     }
 }

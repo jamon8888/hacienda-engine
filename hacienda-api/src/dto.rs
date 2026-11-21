@@ -335,6 +335,64 @@ pub struct AsyncJobResponse {
     pub job_id: String,
 }
 
+/// Transport-safe result of an email operation.
+///
+/// This is the single wire representation shared by the synchronous
+/// `POST /v1/email/process` response and the asynchronous
+/// `POST /v1/email/process/async` job result persisted in `Job.result_json`
+/// (and returned by `/v1/jobs/{id}` and `/v1/jobs/{id}/result` polling).
+///
+/// SECURITY (P0.2): the domain type `hacienda_email::models::EmailResponse`
+/// carries `entities: Option<Vec<ExtractedEntity>>`, whose `text` field holds the
+/// raw mention reconstructed from the original message. That field MUST NOT
+/// cross the HTTP boundary nor be persisted in a job. This DTO has no entity
+/// field at all — only a content-free `entities_found` count. Entity detail, if
+/// ever needed by a UI, must come from a separate short-lived, audited viewer
+/// capability, never from a job payload.
+#[derive(Debug, Serialize)]
+pub struct EmailOperationResultDto {
+    /// Wire schema version; bumped on any shape change.
+    pub schema_version: u32,
+    pub success: bool,
+    pub processed_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redaction_stats: Option<hacienda_email::models::RedactionStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rag_stats: Option<hacienda_email::models::RagIndexStats>,
+    /// Number of NER entities detected. A count only — no text, offsets, ids or labels.
+    pub entities_found: usize,
+    pub errors: Vec<String>,
+    pub processing_time_ms: u64,
+}
+
+impl EmailOperationResultDto {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// Project a domain email response onto the single transport representation.
+    ///
+    /// This is the only place `EmailResponse` is projected for the wire. Both
+    /// the sync handler and the async job writer go through it, which is what
+    /// structurally guarantees the two paths cannot diverge on confidentiality:
+    /// there is no code path that serializes `EmailResponse` directly.
+    pub fn from_response(
+        response: &hacienda_email::models::EmailResponse,
+        processing_time_ms: u64,
+    ) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            success: response.success,
+            processed_count: response.processed_count,
+            redaction_stats: response.redaction_stats.clone(),
+            rag_stats: response.rag_stats.clone(),
+            // Content-free projection: the raw mentions in `response.entities`
+            // are deliberately dropped here and never enter the job/HTTP result.
+            entities_found: response.entities.as_ref().map_or(0, Vec::len),
+            errors: response.errors.clone(),
+            processing_time_ms,
+        }
+    }
+}
+
 /// Response from `GET /v1/jobs/{id}`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct JobResponse {

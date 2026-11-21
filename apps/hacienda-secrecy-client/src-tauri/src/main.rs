@@ -17,12 +17,9 @@ use hacienda_core::{
     HaciendaConfig,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     env,
-    fs::File,
-    io::{BufReader, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -140,7 +137,6 @@ const LOCAL_KEYRING_USER: &str = "local-full-pseudonym-key-v1";
 const NER_MODEL_DIR_ENV: &str = "HACIENDA_NER_MODEL_DIR";
 const NER_MODEL_APP_DATA_RELATIVE_DIR: &str = "models/gliner2-pii";
 const PINNED_NER_MODEL_ID: &str = "fastino/gliner2-privacy-filter-PII-multi";
-const PINNED_NER_MODEL_REVISION: &str = "1cb4166094dc58fa8d836429f060d6c95f62b495";
 const LOCAL_EMBEDDING_PRESET: &str = "multilingual";
 const LOCAL_EMBEDDING_VERSION: u32 = 1;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -164,42 +160,10 @@ const ONNXRUNTIME_LIBRARY_FILE: &str = "libonnxruntime.so.1.23.2";
 const ONNXRUNTIME_LIBRARY_FILE: &str = "onnxruntime.dll";
 const LOCAL_EMBEDDING_COLLECTION: &str = "documents-multilingual-v1";
 
-#[derive(Clone, Copy)]
-struct PinnedModelAsset {
-    relative_path: &'static str,
-    size: u64,
-    sha256: &'static str,
-}
-
-// Keep this allowlist in sync with models/gliner2-pii/manifest.json. Runtime
-// validation deliberately does not trust a model-provided manifest.
-const PINNED_NER_MODEL_ASSETS: &[PinnedModelAsset] = &[
-    PinnedModelAsset {
-        relative_path: "config.json",
-        size: 252,
-        sha256: "164f17362bcf9d114067d3465e7374bfdd79ce6b605acb745de5a49dabb9595c",
-    },
-    PinnedModelAsset {
-        relative_path: "encoder_config/config.json",
-        size: 895,
-        sha256: "f27dd63cc43a248d2566f0b6ad7a115db353676ce0561dcbca45bac766464c1a",
-    },
-    PinnedModelAsset {
-        relative_path: "model.safetensors",
-        size: 1_228_421_964,
-        sha256: "0280f6f39f6012da50b6640bad438d9b7e763a1b0102094115d1b710c4dd79b6",
-    },
-    PinnedModelAsset {
-        relative_path: "tokenizer.json",
-        size: 16_020_604,
-        sha256: "f6df10ec83bea993035b2dd7c39345a3d4fcf23421c2adb6cb4ffc1e6d1bc4b5",
-    },
-    PinnedModelAsset {
-        relative_path: "tokenizer_config.json",
-        size: 711,
-        sha256: "233beed1f1095cccfc7907cde31a8d90a0c6aa4fdfaf6493f8e55fd162e81ae6",
-    },
-];
+// The asset allowlist now lives in `model-assets/registry.json`, shared with
+// Studio's `model-digests.ts` and `hacienda-core`'s native loader through
+// `hacienda-model-assets`. Runtime validation deliberately does not trust a
+// model-provided manifest; it checks the pinned bytes and then the architecture.
 
 #[derive(Debug)]
 enum NerModelError {
@@ -224,34 +188,17 @@ fn validate_ner_model_assets(model_dir: &Path) -> Result<(), NerModelError> {
         return Err(NerModelError::Unavailable);
     }
     validate_optional_manifest_identity(model_dir)?;
-    for asset in PINNED_NER_MODEL_ASSETS {
-        let path = model_dir.join(asset.relative_path);
-        let metadata = path.metadata().map_err(|_| NerModelError::Invalid)?;
-        if !metadata.is_file() || metadata.len() != asset.size {
-            return Err(NerModelError::Invalid);
-        }
-        let file = File::open(path).map_err(|_| NerModelError::Invalid)?;
-        let mut reader = BufReader::new(file);
-        let mut digest = Sha256::new();
-        let mut buffer = [0_u8; 1024 * 1024];
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|_| NerModelError::Invalid)?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
-        if format!("{:x}", digest.finalize()) != asset.sha256 {
-            return Err(NerModelError::Invalid);
-        }
-    }
-
+    hacienda_model_assets::verify_dir(PINNED_NER_MODEL_ID, model_dir).map_err(|error| {
+        eprintln!("[ner] pinned model asset verification failed: {error}");
+        NerModelError::Invalid
+    })?;
     validate_ner_model_architecture(model_dir)
 }
 
 fn validate_optional_manifest_identity(model_dir: &Path) -> Result<(), NerModelError> {
+    let expected_revision = hacienda_model_assets::model_entry(PINNED_NER_MODEL_ID)
+        .and_then(|entry| entry.revision.as_deref())
+        .ok_or(NerModelError::Invalid)?;
     let path = model_dir.join("manifest.json");
     if !path.is_file() {
         return Ok(());
@@ -262,7 +209,7 @@ fn validate_optional_manifest_identity(model_dir: &Path) -> Result<(), NerModelE
     .map_err(|_| NerModelError::Invalid)?;
     if manifest.get("model_id").and_then(serde_json::Value::as_str) != Some(PINNED_NER_MODEL_ID)
         || manifest.get("revision").and_then(serde_json::Value::as_str)
-            != Some(PINNED_NER_MODEL_REVISION)
+            != Some(expected_revision)
     {
         return Err(NerModelError::Invalid);
     }
@@ -3037,7 +2984,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let path =
                 std::env::temp_dir().join(format!("hacienda-size-{}.bin", uuid::Uuid::new_v4()));
-            let file = File::create(&path).expect("fixture");
+            let file = std::fs::File::create(&path).expect("fixture");
             file.set_len(xberg::SecurityLimits::default().max_archive_size as u64 + 1)
                 .expect("sparse file");
             drop(file);
