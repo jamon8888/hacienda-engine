@@ -125,8 +125,8 @@ pub(crate) fn tenant_authorization_filter(ctx: &TenantCtx) -> Filter {
 
 /// Merge the mandatory tenant filter with a caller-supplied filter. If the
 /// caller supplied none, the tenant filter stands alone. If the caller
-/// supplied one, the two are ANDed so the tenant constraint is always
-/// enforced on top of any caller constraint.
+/// supplied one, the two are combined with a logical AND so the tenant
+/// constraint is always enforced on top of any caller constraint.
 pub(crate) fn merge_with_tenant_filter(
     tenant_filter: Filter,
     caller_filter: Option<Filter>,
@@ -579,7 +579,7 @@ pub async fn retrieve(
     // layer for backends whose filter IR predates the tenant column.
     query.tenant_id = Some(tenant_ctx.tenant.as_str().to_string());
     // Pre-retrieval authorization filter: only the calling tenant's rows are
-    // eligible for scoring. ANDed with any caller-supplied filter.
+    // eligible for scoring, combined with any caller-supplied filter.
     query.filter = merge_with_tenant_filter(
         tenant_authorization_filter(&tenant_ctx),
         query.filter.take(),
