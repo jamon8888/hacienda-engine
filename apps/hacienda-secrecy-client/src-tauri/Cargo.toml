@@ -23,6 +23,9 @@ async-trait = "0.1"
 blake3 = "1"
 hacienda-core = { path = "../../../hacienda-core" }
 hacienda-client-core = { path = "../../../crates/hacienda-client-core" }
+# Shared pinned NER model identity (same registry Studio imports). The Tauri
+# host still owns download/cache; this crate verifies the resolved directory.
+hacienda-model-assets = { path = "../../../crates/hacienda-model-assets" }
 hacienda-backend = { path = "../../../crates/hacienda-backend", features = ["lancedb"] }
 hacienda-rag = { path = "../../../crates/hacienda-rag", features = ["lancedb"] }
 futures = "0.3"

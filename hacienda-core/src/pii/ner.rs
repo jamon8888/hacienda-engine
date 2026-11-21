@@ -6,7 +6,7 @@
 
 use crate::pii::types::{ModelEntity, PiiCategory};
 use crate::pii::PiiError;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use xberg::text::ner::NerBackend;
 use xberg::types::entity::{Entity, EntityCategory};
 
@@ -22,6 +22,23 @@ pub(crate) const DEFAULT_CATEGORIES: &[EntityCategory] = &[
     EntityCategory::Email,
     EntityCategory::Phone,
 ];
+
+/// Identity of the model that actually loaded, recorded once per process.
+///
+/// Capability reports read this instead of echoing configuration: a pipeline
+/// configured for a model that failed to load must never advertise itself as
+/// model-backed. `OnceLock` is deliberate — swapping models mid-process would
+/// invalidate the facade's shared detector and every cached pipeline.
+static LOADED_MODEL_ID: OnceLock<String> = OnceLock::new();
+
+/// Pinned model id of the loaded NER backend, if one was loaded.
+pub fn loaded_model_id() -> Option<&'static str> {
+    LOADED_MODEL_ID.get().map(String::as_str)
+}
+
+fn record_loaded_model_id(model_id: &str) {
+    let _ = LOADED_MODEL_ID.set(model_id.to_owned());
+}
 
 /// [`DEFAULT_CATEGORIES`], extended with `vertical`'s labels as `EntityCategory::Custom`
 /// entries when one is configured.
@@ -115,6 +132,29 @@ impl NerDetector {
                     source: Box::new(source),
                 })?;
         Ok(Self::new(backend))
+    }
+
+    /// Load a pinned GLiNER2 model, verifying the local directory against the
+    /// shared registry before any bytes reach Candle.
+    ///
+    /// The host still owns download and caching; this guard only enforces the
+    /// integrity contract at the seam. Unpinned/private models should use
+    /// [`from_candle_local`](Self::from_candle_local) directly.
+    #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+    pub fn from_candle_local_verified(
+        model_dir: &std::path::Path,
+        lora_adapter_dir: Option<&std::path::Path>,
+        model_id: &str,
+    ) -> Result<Self, PiiError> {
+        hacienda_model_assets::verify_dir(model_id, model_dir).map_err(|source| {
+            PiiError::ModelIntegrity {
+                model_id: model_id.to_owned(),
+                source,
+            }
+        })?;
+        let detector = Self::from_candle_local(model_dir, lora_adapter_dir)?;
+        record_loaded_model_id(model_id);
+        Ok(detector)
     }
 
     /// [`from_candle_local`](Self::from_candle_local)'s wasm32 sibling: loads the same

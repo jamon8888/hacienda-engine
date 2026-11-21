@@ -379,9 +379,17 @@ fn load_detector(config: &PipelineConfig) -> Result<NerDetector, PiiError> {
     let model_dir = config.model.model_dir.as_deref().ok_or_else(|| {
         PiiError::ModelUnavailable("model.enabled is true but no model_dir is set".into())
     })?;
-    let mut detector =
-        NerDetector::from_candle_local(model_dir, config.model.lora_adapter_dir.as_deref())?
-            .with_threshold(config.model_threshold_default);
+    let loaded = match &config.model.model_id {
+        Some(model_id) => NerDetector::from_candle_local_verified(
+            model_dir,
+            config.model.lora_adapter_dir.as_deref(),
+            model_id,
+        )?,
+        None => {
+            NerDetector::from_candle_local(model_dir, config.model.lora_adapter_dir.as_deref())?
+        }
+    };
+    let mut detector = loaded.with_threshold(config.model_threshold_default);
     if let Some(vertical) = &config.vertical {
         // Extend, not replace: a finance vertical must still find people. See
         // `ner::categories_with_vertical`.

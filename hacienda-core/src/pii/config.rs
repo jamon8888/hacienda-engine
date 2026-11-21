@@ -301,6 +301,12 @@ pub struct ModelConfig {
     pub enabled: bool,
     /// Directory holding the GLiNER2 base weights, tokenizer, and config.
     pub model_dir: Option<PathBuf>,
+    /// Pinned model identity, e.g. `jamon8888/gliner2-guardrails-pii-f16`.
+    ///
+    /// When set, native loading verifies `model_dir` against the shared
+    /// `hacienda-model-assets` registry before handing any bytes to Candle.
+    /// `None` preserves the existing behaviour for privately fine-tuned models.
+    pub model_id: Option<String>,
     /// Directory holding a PEFT LoRA adapter to merge into the base weights at load.
     pub lora_adapter_dir: Option<PathBuf>,
 }
