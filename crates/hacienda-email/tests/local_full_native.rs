@@ -12,9 +12,7 @@
 //! and a replayed capability is rejected too.
 
 use hacienda_core::audit::{AuditStore, InMemoryAuditStore};
-use hacienda_core::redaction::pseudonym::{
-    KeyId, PseudonymKey, Pseudonymiser, KEY_BYTES,
-};
+use hacienda_core::redaction::pseudonym::{KeyId, PseudonymKey, Pseudonymiser, KEY_BYTES};
 use hacienda_core::redaction::{KeyResolver, PseudonymError};
 use hacienda_core::tenancy::TenantId;
 use hacienda_core::HaciendaConfig;
@@ -39,10 +37,7 @@ const CLEAR_SSN: &str = "123-45-6789";
 struct SharedKeyResolver(Zeroizing<[u8; KEY_BYTES]>);
 
 impl KeyResolver for SharedKeyResolver {
-    fn active(
-        &self,
-        _tenant: &TenantId,
-    ) -> std::result::Result<PseudonymKey, PseudonymError> {
+    fn active(&self, _tenant: &TenantId) -> std::result::Result<PseudonymKey, PseudonymError> {
         PseudonymKey::from_bytes(KeyId::new("local")?, self.0.as_ref())
     }
 

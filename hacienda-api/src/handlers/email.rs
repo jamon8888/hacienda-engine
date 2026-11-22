@@ -771,17 +771,13 @@ mod tests {
         let json = serialize_job_result(&response, 12).unwrap();
 
         // No raw mention, identifier, diagnostic, filename or output path may survive.
-        for secret in secrets
-            .iter()
-            .copied()
-            .chain([
-                "/srv/mail/redacted/INBOX/secret.mbox",
-                "SENTINEL_RAW_EMAIL_ID",
-                "os error 2",
-                "secret-jean-dupont.mbox",
-                "jean.dupont@example.com",
-            ])
-        {
+        for secret in secrets.iter().copied().chain([
+            "/srv/mail/redacted/INBOX/secret.mbox",
+            "SENTINEL_RAW_EMAIL_ID",
+            "os error 2",
+            "secret-jean-dupont.mbox",
+            "jean.dupont@example.com",
+        ]) {
             assert!(
                 !json.contains(secret),
                 "clear-text value leaked into Job.result_json: {secret}\njson: {json}"

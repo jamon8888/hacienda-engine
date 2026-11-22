@@ -425,11 +425,17 @@ async fn rag_rows_are_scoped_to_a_with_a_keyed_metadata() {
     qa.query_vector = Some(Vec::new());
     qa.tenant_id = Some(TENANT_A.to_string());
     let out_a = store.retrieve(collection, &qa).await.unwrap();
-    assert!(!out_a.chunks.is_empty(), "A must retrieve its own email chunks");
+    assert!(
+        !out_a.chunks.is_empty(),
+        "A must retrieve its own email chunks"
+    );
 
     let mut qb = RetrieveQuery::vector(10);
     qb.query_vector = Some(Vec::new());
     qb.tenant_id = Some(TENANT_B.to_string());
     let out_b = store.retrieve(collection, &qb).await.unwrap();
-    assert!(out_b.chunks.is_empty(), "B must not retrieve A's email chunks");
+    assert!(
+        out_b.chunks.is_empty(),
+        "B must not retrieve A's email chunks"
+    );
 }

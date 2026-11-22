@@ -404,7 +404,13 @@ impl EmailSessionService {
         for envelope in envelopes {
             let mut token_domains = HashMap::new();
             let subject = self
-                .mint(caller, &tenant, "subject", &envelope.subject, &mut token_domains)
+                .mint(
+                    caller,
+                    &tenant,
+                    "subject",
+                    &envelope.subject,
+                    &mut token_domains,
+                )
                 .await?;
             let from = self
                 .address_tokens(caller, &tenant, &envelope.from, &mut token_domains)
@@ -480,7 +486,11 @@ impl EmailSessionService {
         let job = JobProjection {
             job_ref: opaque_ref("job"),
             account_ref: account_ref.to_owned(),
-            status: if response.success { "completed" } else { "failed" },
+            status: if response.success {
+                "completed"
+            } else {
+                "failed"
+            },
             messages_processed: response.processed_count,
             chunks_persisted: response
                 .rag_stats
@@ -489,7 +499,10 @@ impl EmailSessionService {
                 .unwrap_or(0),
             errors: response.errors.len(),
         };
-        self.jobs.lock().await.insert(job.job_ref.clone(), job.clone());
+        self.jobs
+            .lock()
+            .await
+            .insert(job.job_ref.clone(), job.clone());
         Ok(job)
     }
 
@@ -532,7 +545,9 @@ impl EmailSessionService {
         let messages = self.messages.lock().await;
         let mut hits = Vec::with_capacity(output.chunks.len());
         for chunk in output.chunks {
-            let Some(content) = chunk.content else { continue };
+            let Some(content) = chunk.content else {
+                continue;
+            };
             let (content_token_only, _) = self
                 .pii
                 .redact(caller, &content, &[], "", false)
@@ -549,8 +564,8 @@ impl EmailSessionService {
                 .as_ref()
                 .and_then(|document| document.external_id.as_deref())
                 .or(chunk.external_id.as_deref());
-            let message_ref = external
-                .and_then(|external| resolve_message_ref(&messages, account_ref, external));
+            let message_ref =
+                external.and_then(|external| resolve_message_ref(&messages, account_ref, external));
             hits.push(EmailSearchHit {
                 message_ref,
                 content_token_only,
@@ -679,11 +694,11 @@ impl EmailSessionService {
         if let Some(capability) = self.capabilities.lock().await.get_mut(capability_ref) {
             capability.consumed = true;
         }
-        let digest =
-            blake3::hash(format!("{capability_ref}:{message_ref}:{domain}").as_bytes())
-                .to_hex()
-                .to_string();
-        self.append_audit(&tenant, "email_message_reveal", digest).await?;
+        let digest = blake3::hash(format!("{capability_ref}:{message_ref}:{domain}").as_bytes())
+            .to_hex()
+            .to_string();
+        self.append_audit(&tenant, "email_message_reveal", digest)
+            .await?;
         Ok(ViewerOpenResponse { opened: true })
     }
 
@@ -824,9 +839,7 @@ fn resolve_message_ref(
         .find(|(_, message)| {
             message.account_ref == account_ref
                 && (message.uid == uid || uid.ends_with(&message.uid))
-                && (message.mailbox == mailbox
-                    || mailbox.is_empty()
-                    || message.mailbox.is_empty())
+                && (message.mailbox == mailbox || mailbox.is_empty() || message.mailbox.is_empty())
         })
         .map(|(message_ref, _)| message_ref.clone())
 }
@@ -844,7 +857,9 @@ fn maildir_original_path(root: &Path, mailbox: &str, uid: &str) -> PathBuf {
     for base in bases {
         for subdir in ["cur", "new"] {
             let dir = base.join(subdir);
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();

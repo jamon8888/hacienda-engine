@@ -27,9 +27,9 @@ use crate::{
         audit, audit_review, auth, capabilities, claude_messages, documents, email, info, jobs,
         keys, openapi, pii, presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
     },
-    team_email,
     quota::quota_middleware,
     state::ApiState,
+    team_email,
 };
 
 /// How a route is accessed.
@@ -1251,7 +1251,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let text = std::str::from_utf8(&body).unwrap();
-        assert!(!text.contains("bob@example.com"), "error echoed candidate PII");
+        assert!(
+            !text.contains("bob@example.com"),
+            "error echoed candidate PII"
+        );
     }
 
     /// With `pii:reveal` the mint still works and stays deterministic/tenant-keyed

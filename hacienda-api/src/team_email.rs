@@ -23,10 +23,10 @@ use axum::{extract::Path, extract::State, http::request::Parts, http::StatusCode
 use hacienda_core::auth::{AuthContext, Caller, Capability};
 use hacienda_rag::{RetrieveMode, RetrieveQuery};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::dto::{AsyncJobResponse, EmailOperationResultDto};
@@ -300,9 +300,12 @@ fn safe_relative_path(path: &str) -> bool {
     let path = std::path::Path::new(path);
     !path.as_os_str().is_empty()
         && !path.is_absolute()
-        && !path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
+        && !path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
 }
 
 fn safe_ref(value: &str) -> bool {
@@ -362,10 +365,9 @@ impl EmailSourceRegistry {
         if registry.sources.is_empty() && std::env::var_os("HACIENDA_MAILBOX_ROOT").is_some() {
             let mut mailboxes = HashMap::new();
             mailboxes.insert("inbox".to_string(), "INBOX".to_string());
-            registry.sources.insert(
-                "default".to_string(),
-                SourceRecord { mailboxes },
-            );
+            registry
+                .sources
+                .insert("default".to_string(), SourceRecord { mailboxes });
         }
         registry
     }
@@ -477,10 +479,19 @@ impl ViewerCapabilityStore {
         chrono::Utc::now().to_rfc3339()
     }
 
-    fn issue(&self, request: &ViewerCapabilityRequest, tenant: &str, principal: &str) -> ViewerCapabilityDto {
+    fn issue(
+        &self,
+        request: &ViewerCapabilityRequest,
+        tenant: &str,
+        principal: &str,
+    ) -> ViewerCapabilityDto {
         // Two UUIDs (256 bits of entropy) behind a typed prefix: unguessable, carries no
         // tenant/document/path information, and not derivable from any renderer input.
-        let capability_ref = format!("vcap_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let capability_ref = format!(
+            "vcap_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
         // `expires_at` is the actual expiry instant, not the issue time. Both clocks are
         // derived from the same TTL so the rendered deadline cannot outlive the record.
         let expires_at = Instant::now() + self.ttl;
@@ -656,9 +667,7 @@ impl ViewerCapabilityStore {
             action: action.to_string(),
             tenant: ctx.tenant.as_str().to_string(),
             principal: ctx.principal_id.clone(),
-            document_ref: record
-                .map(|r| r.document_ref.clone())
-                .unwrap_or_default(),
+            document_ref: record.map(|r| r.document_ref.clone()).unwrap_or_default(),
             email_ref: record.map(|r| r.email_ref.clone()).unwrap_or_default(),
             attachment_ref: record.and_then(|r| r.attachment_ref.clone()),
             capability_ref: capability_ref.to_string(),
@@ -793,18 +802,9 @@ fn downstream_operation(request: &EmailIngestRequest, maildir: &str) -> EmailOpe
             source,
             index: None,
         },
-        EmailIngestOperationDto::ExtractNer => EmailOperationDto::ExtractNER {
-            source,
-            output,
-        },
-        EmailIngestOperationDto::Redact => EmailOperationDto::Redact {
-            source,
-            output,
-        },
-        EmailIngestOperationDto::Pipeline => EmailOperationDto::Pipeline {
-            source,
-            output,
-        },
+        EmailIngestOperationDto::ExtractNer => EmailOperationDto::ExtractNER { source, output },
+        EmailIngestOperationDto::Redact => EmailOperationDto::Redact { source, output },
+        EmailIngestOperationDto::Pipeline => EmailOperationDto::Pipeline { source, output },
     }
 }
 
@@ -1080,11 +1080,10 @@ pub async fn issue_viewer_capability(
     {
         return Err(ApiError::invalid_request("Invalid viewer reference."));
     }
-    let capability = state.viewer_capabilities.issue(
-        &request,
-        ctx.tenant.as_str(),
-        &ctx.principal_id,
-    );
+    let capability =
+        state
+            .viewer_capabilities
+            .issue(&request, ctx.tenant.as_str(), &ctx.principal_id);
     state.viewer_capabilities.audit_event(
         None,
         &ctx,
@@ -1210,7 +1209,9 @@ pub async fn viewer_audit(
     ctx.require_capability(Capability::AuditRead)
         .map_err(|_| ApiError::forbidden())?;
     Ok(Json(
-        state.viewer_capabilities.audit_for_tenant(ctx.tenant.as_str()),
+        state
+            .viewer_capabilities
+            .audit_for_tenant(ctx.tenant.as_str()),
     ))
 }
 
@@ -1314,9 +1315,7 @@ mod tests {
             .body(())
             .expect("building an empty request cannot fail")
             .into_parts();
-        parts
-            .extensions
-            .insert(AuthExtension(Arc::clone(auth)));
+        parts.extensions.insert(AuthExtension(Arc::clone(auth)));
         parts
     }
 
@@ -1326,14 +1325,23 @@ mod tests {
         let base = r#"{"source_ref":"default","mailbox_ref":"inbox","operation":{"operation":"index_for_rag"}}"#;
         assert!(serde_json::from_str::<EmailIngestRequest>(base).is_ok());
         for (field, body) in [
-            ("backend", base.replace('}', r#","backend":{"type":"maildir","path":"/etc"}}"#)),
+            (
+                "backend",
+                base.replace('}', r#","backend":{"type":"maildir","path":"/etc"}}"#),
+            ),
             ("path", base.replace('}', r#","path":"/etc"}"#)),
             ("token", base.replace('}', r#","token":"oauth-secret"}"#)),
             ("password", base.replace('}', r#","password":"hunter2"}"#)),
             ("server", base.replace('}', r#","server":"evil.example"}"#)),
-            ("token_command", base.replace('}', r#","token_command":["sh"]}"#)),
+            (
+                "token_command",
+                base.replace('}', r#","token_command":["sh"]}"#),
+            ),
             ("text", base.replace('}', r#","text":"raw message body"}"#)),
-            ("message", base.replace('}', r#","message":"raw message body"}"#)),
+            (
+                "message",
+                base.replace('}', r#","message":"raw message body"}"#),
+            ),
         ] {
             let result = serde_json::from_str::<EmailIngestRequest>(&body);
             assert!(
@@ -1378,7 +1386,9 @@ mod tests {
                 "capability leaked `{secret}`"
             );
         }
-        assert!(store.authorize(&dto.capability_ref, &ctx("acme", "alice", &[]), "open").is_ok());
+        assert!(store
+            .authorize(&dto.capability_ref, &ctx("acme", "alice", &[]), "open")
+            .is_ok());
     }
 
     /// Cross-tenant and cross-principal use of a capability is denied and audited.
@@ -1392,7 +1402,11 @@ mod tests {
         let issued = store.issue(&request, "acme", "alice");
         for (tenant, principal) in [("globex", "alice"), ("acme", "bob")] {
             let err = store
-                .authorize(&issued.capability_ref, &ctx(tenant, principal, &[]), "reveal")
+                .authorize(
+                    &issued.capability_ref,
+                    &ctx(tenant, principal, &[]),
+                    "reveal",
+                )
                 .expect_err("foreign use must be denied");
             assert_eq!(err.code, crate::error::ApiErrorCode::Forbidden);
         }
@@ -1448,7 +1462,10 @@ mod tests {
             .expect_err("a consumed capability must not be reusable");
         assert_eq!(replay.code, crate::error::ApiErrorCode::NotFound);
         let audit = store.audit_for_tenant("acme");
-        assert!(audit.events.iter().any(|event| event.outcome == "consumed_projection"));
+        assert!(audit
+            .events
+            .iter()
+            .any(|event| event.outcome == "consumed_projection"));
         assert!(audit.events.iter().any(|event| event.outcome == "replayed"));
         // A cross-principal replay is denied and audited, never served.
         let cross = store
@@ -1505,10 +1522,26 @@ mod tests {
             delivery: ViewerDeliveryDto::ServerSide,
         };
         let value = serde_json::to_value(&dto).unwrap();
-        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         for forbidden in [
-            "text", "body", "subject", "from", "to", "path", "password", "token", "oauth",
-            "raw", "content", "message", "attachment_data",
+            "text",
+            "body",
+            "subject",
+            "from",
+            "to",
+            "path",
+            "password",
+            "token",
+            "oauth",
+            "raw",
+            "content",
+            "message",
+            "attachment_data",
         ] {
             assert!(!keys.contains(&forbidden), "renderer DTO has `{forbidden}`");
         }
@@ -1519,7 +1552,12 @@ mod tests {
             email_ref: "ref_email".to_string(),
         };
         let value = serde_json::to_value(&reveal).unwrap();
-        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert!(!keys.contains(&"value"));
         assert!(!keys.contains(&"plaintext"));
         assert!(!keys.contains(&"text"));

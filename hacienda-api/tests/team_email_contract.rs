@@ -25,7 +25,7 @@ use hacienda_core::{
     HaciendaConfig, HaciendaFacade,
 };
 use hacienda_rag::{
-    ChunkRecord, CollectionSpec, DistanceMetric, DocumentRecord, IndexMethod, InMemoryVectorStore,
+    ChunkRecord, CollectionSpec, DistanceMetric, DocumentRecord, InMemoryVectorStore, IndexMethod,
     RagStore,
 };
 use std::sync::Arc;
@@ -85,8 +85,12 @@ fn test_state_with_store() -> (ApiState, Arc<dyn RagStore>) {
     );
     tokens.insert(
         LIMITED,
-        Token::new("id-limited", "carol", CapabilitySet::new([Capability::DocumentsProcess]))
-            .with_tenant(TenantId::new("acme")),
+        Token::new(
+            "id-limited",
+            "carol",
+            CapabilitySet::new([Capability::DocumentsProcess]),
+        )
+        .with_tenant(TenantId::new("acme")),
     );
 
     let store: Arc<dyn RagStore> = Arc::new(InMemoryVectorStore::new("team-contract"));
@@ -106,13 +110,7 @@ fn test_state_with_store() -> (ApiState, Arc<dyn RagStore>) {
     (state, store)
 }
 
-async fn call(
-    app: &Router,
-    method: &str,
-    uri: &str,
-    token: &str,
-    body: Option<&str>,
-) -> Response {
+async fn call(app: &Router, method: &str, uri: &str, token: &str, body: Option<&str>) -> Response {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -166,7 +164,10 @@ async fn capability_is_tenant_and_principal_bound_and_cross_tenant_use_is_audite
         .to_string();
     assert!(capability_ref.starts_with("vcap_"));
     for secret in ["acme", "alice", "doc1", "msg1", "EMAIL"] {
-        assert!(!capability_ref.contains(secret), "capability leaked `{secret}`");
+        assert!(
+            !capability_ref.contains(secret),
+            "capability leaked `{secret}`"
+        );
     }
 
     // Same principal, different tenant: denied. Same tenant, different principal
@@ -191,7 +192,8 @@ async fn capability_is_tenant_and_principal_bound_and_cross_tenant_use_is_audite
 
     // The audit trail is visible only to the caller's own tenant, and is itself
     // content-free (refs, action and outcome only).
-    let globex_audit = response_json(call(&app, "GET", "/v1/team/viewer/audit", TENANT_B, None).await).await;
+    let globex_audit =
+        response_json(call(&app, "GET", "/v1/team/viewer/audit", TENANT_B, None).await).await;
     let events = globex_audit["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["outcome"], "denied");
@@ -203,7 +205,8 @@ async fn capability_is_tenant_and_principal_bound_and_cross_tenant_use_is_audite
         assert!(!audit_text.contains(secret), "audit leaked `{secret}`");
     }
 
-    let acme_audit = response_json(call(&app, "GET", "/v1/team/viewer/audit", TENANT_A, None).await).await;
+    let acme_audit =
+        response_json(call(&app, "GET", "/v1/team/viewer/audit", TENANT_A, None).await).await;
     assert_eq!(acme_audit["events"][0]["outcome"], "issued");
     assert_eq!(acme_audit["events"].as_array().unwrap().len(), 1);
 }
@@ -258,7 +261,10 @@ async fn ingest_dto_rejects_paths_credentials_and_raw_message_text_over_http() {
         );
         let text = response_text(response).await;
         for secret in ["/etc", "oauth-secret", "hunter2", "jean.dupont@example.com"] {
-            assert!(!text.contains(secret), "error for `{field}` leaked `{secret}`");
+            assert!(
+                !text.contains(secret),
+                "error for `{field}` leaked `{secret}`"
+            );
         }
     }
 }
@@ -286,9 +292,9 @@ async fn team_ingest_errors_are_a_content_free_count() {
         redaction_stats: None,
         errors: sentinels.iter().map(|value| (*value).to_string()).collect(),
     };
-    let wire = serde_json::to_value(
-        hacienda_api::dto::EmailOperationResultDto::from_response(&domain, 4),
-    )
+    let wire = serde_json::to_value(hacienda_api::dto::EmailOperationResultDto::from_response(
+        &domain, 4,
+    ))
     .unwrap();
     let text = wire.to_string();
     for sentinel in sentinels {
@@ -297,7 +303,10 @@ async fn team_ingest_errors_are_a_content_free_count() {
             "Team ingest response leaked `{sentinel}`: {text}"
         );
     }
-    assert!(wire.get("errors").is_none(), "raw error array must not exist");
+    assert!(
+        wire.get("errors").is_none(),
+        "raw error array must not exist"
+    );
     assert_eq!(wire["error_count"].as_u64(), Some(sentinels.len() as u64));
 }
 
@@ -316,7 +325,10 @@ async fn team_ingest_failure_response_is_content_free() {
     assert_eq!(response.status().as_u16(), 400);
     let text = response_text(response).await;
     assert!(!text.contains(secret_path), "error echoed the path: {text}");
-    assert!(!text.contains("os error"), "error echoed an IO diagnostic: {text}");
+    assert!(
+        !text.contains("os error"),
+        "error echoed an IO diagnostic: {text}"
+    );
 }
 
 /// The viewer `open` consumes a short-lived capability and returns a typed,
@@ -413,7 +425,10 @@ async fn viewer_open_returns_a_content_safe_projection_and_rejects_replay() {
     assert_eq!(projection["projection_kind"], "redacted_token_only");
     assert_eq!(projection["document_ref"], document_ref);
     assert_eq!(projection["email_ref"], email_ref);
-    assert!(projection.get("opened").is_none(), "opened boolean must be gone");
+    assert!(
+        projection.get("opened").is_none(),
+        "opened boolean must be gone"
+    );
     let projection_text = projection.to_string();
     for secret in [raw, "invoice-jean-dupont.pdf", "Re:", "acme:email-corpus"] {
         assert!(
@@ -438,7 +453,8 @@ async fn viewer_open_returns_a_content_safe_projection_and_rejects_replay() {
     )
     .await;
     assert_eq!(replay.status().as_u16(), 404);
-    let acme_audit = response_json(call(&app, "GET", "/v1/team/viewer/audit", TENANT_A, None).await).await;
+    let acme_audit =
+        response_json(call(&app, "GET", "/v1/team/viewer/audit", TENANT_A, None).await).await;
     let outcomes: Vec<&str> = acme_audit["events"]
         .as_array()
         .unwrap()
@@ -475,7 +491,10 @@ async fn viewer_open_returns_a_content_safe_projection_and_rejects_replay() {
     .await;
     assert_eq!(cross.status().as_u16(), 404);
     let cross_text = response_text(cross).await;
-    assert!(!cross_text.contains(raw), "cross-tenant response leaked PII");
+    assert!(
+        !cross_text.contains(raw),
+        "cross-tenant response leaked PII"
+    );
 }
 
 /// Team ingestion rejects pseudonymization: there is no safe multi-tenant
@@ -487,9 +506,16 @@ async fn team_ingest_rejects_pseudonymize_on_sync_and_async_routes() {
     let body = r#"{"source_ref":"default","mailbox_ref":"inbox","operation":{"operation":"index_for_rag"},"privacy_mode":"pseudonymize"}"#;
     for path in ["/v1/team/email/ingest", "/v1/team/email/ingest/async"] {
         let response = call(&app, "POST", path, TENANT_A, Some(body)).await;
-        assert_eq!(response.status().as_u16(), 400, "{path} accepted pseudonymize");
+        assert_eq!(
+            response.status().as_u16(),
+            400,
+            "{path} accepted pseudonymize"
+        );
         let text = response_text(response).await;
-        assert!(!text.contains("pseudonym"), "error echoed a diagnostic: {text}");
+        assert!(
+            !text.contains("pseudonym"),
+            "error echoed a diagnostic: {text}"
+        );
     }
 }
 
@@ -509,9 +535,14 @@ async fn deterministic_token_oracle_requires_pii_reveal() {
         "denial echoed the candidate: {denied_text}"
     );
 
-    let first = response_json(call(&app, "POST", "/v1/pii/token", TENANT_A, Some(body)).await).await;
-    let second = response_json(call(&app, "POST", "/v1/pii/token", TENANT_A, Some(body)).await).await;
-    assert_eq!(first["token"], second["token"], "mint must stay deterministic");
+    let first =
+        response_json(call(&app, "POST", "/v1/pii/token", TENANT_A, Some(body)).await).await;
+    let second =
+        response_json(call(&app, "POST", "/v1/pii/token", TENANT_A, Some(body)).await).await;
+    assert_eq!(
+        first["token"], second["token"],
+        "mint must stay deterministic"
+    );
     assert!(first["token"].as_str().unwrap().starts_with("[EMAIL:"));
 }
 
@@ -523,9 +554,7 @@ async fn search_never_accepts_a_path_as_a_source_ref() {
         "POST",
         "/v1/team/email/search",
         TENANT_A,
-        Some(
-            r#"{"source_ref":"/srv/mail","mailbox_ref":"inbox","query_text":"review"}"#,
-        ),
+        Some(r#"{"source_ref":"/srv/mail","mailbox_ref":"inbox","query_text":"review"}"#),
     )
     .await;
     assert_eq!(response.status().as_u16(), 400);

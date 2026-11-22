@@ -312,8 +312,22 @@ mod tests {
         //
         // (path, method, capability, request DTO or "", success status, response DTO or "")
         const TEAM_ENDPOINT_CONTRACTS: &[(&str, &str, &str, &str, &str, &str)] = &[
-            ("/v1/team/email/sources", "get", "documents:process", "", "200", "EmailSourcesResponse"),
-            ("/v1/team/email/ingest", "post", "documents:process", "EmailIngestRequest", "200", ""),
+            (
+                "/v1/team/email/sources",
+                "get",
+                "documents:process",
+                "",
+                "200",
+                "EmailSourcesResponse",
+            ),
+            (
+                "/v1/team/email/ingest",
+                "post",
+                "documents:process",
+                "EmailIngestRequest",
+                "200",
+                "",
+            ),
             (
                 "/v1/team/email/ingest/async",
                 "post",
@@ -322,7 +336,14 @@ mod tests {
                 "202",
                 "AsyncJobResponse",
             ),
-            ("/v1/team/email/search", "post", "documents:process", "EmailSearchRequest", "200", "EmailSearchResponse"),
+            (
+                "/v1/team/email/search",
+                "post",
+                "documents:process",
+                "EmailSearchRequest",
+                "200",
+                "EmailSearchResponse",
+            ),
             (
                 "/v1/team/viewer/capability",
                 "post",
@@ -347,10 +368,19 @@ mod tests {
                 "200",
                 "ViewerProjectionDto",
             ),
-            ("/v1/team/viewer/audit", "get", "audit:read", "", "200", "ViewerAuditResponse"),
+            (
+                "/v1/team/viewer/audit",
+                "get",
+                "audit:read",
+                "",
+                "200",
+                "ViewerAuditResponse",
+            ),
         ];
 
-        for &(path, method, capability, request_dto, status, response_dto) in TEAM_ENDPOINT_CONTRACTS {
+        for &(path, method, capability, request_dto, status, response_dto) in
+            TEAM_ENDPOINT_CONTRACTS
+        {
             // The route table remains the authority for each path's access decision.
             let spec = ROUTE_TABLE
                 .iter()
@@ -373,7 +403,9 @@ mod tests {
             );
             assert!(
                 operation["security"].as_array().is_some_and(|schemes| {
-                    schemes.iter().any(|scheme| scheme.get("bearerAuth").is_some())
+                    schemes
+                        .iter()
+                        .any(|scheme| scheme.get("bearerAuth").is_some())
                 }),
                 "{method} {path} must require bearerAuth"
             );
