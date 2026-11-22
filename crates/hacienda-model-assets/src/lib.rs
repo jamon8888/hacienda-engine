@@ -6,19 +6,21 @@
 //! that accepts a local directory. No network access lives here, so the crate
 //! is safe for native CLI, API, Tauri hosts and offline deployments.
 //!
-//! The registry is embedded at compile time from `model-assets/registry.json`,
-//! the same file Studio's `model-digests.ts` imports. One registry, two hosts.
+//! The registry is validated and embedded at build time from
+//! `model-assets/registry.json`, the same file Studio's `model-digests.ts`
+//! imports. An invalid registry fails the build — it is never silently
+//! replaced by an empty one. One registry, two hosts.
 //! Verification streams files: the pinned model alone is ~1.2 GB.
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use thiserror::Error;
 
-const REGISTRY_JSON: &str = include_str!("../../../model-assets/registry.json");
 const BUFFER_SIZE: usize = 1024 * 1024;
 
 /// Model used when a host does not override its model id.
@@ -53,11 +55,13 @@ struct Registry {
     models: Vec<PinnedModel>,
 }
 
+// Parsed and validated by `build.rs`; the generated values are typed statics,
+// so initialization cannot fail and needs no panic path.
+include!(concat!(env!("OUT_DIR"), "/registry_generated.rs"));
+
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        serde_json::from_str(REGISTRY_JSON).expect("embedded model registry must be valid JSON")
-    })
+    REGISTRY.get_or_init(validated_registry)
 }
 
 /// Registry schema version, bumped when roles or filenames change.
@@ -100,30 +104,65 @@ pub fn digests_for(model_id: &str) -> Option<AssetDigests> {
     })
 }
 
+/// The verification step that failed, retained so callers can tell metadata
+/// inspection, opening and byte-streaming failures apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetOperation {
+    /// Inspecting file metadata before hashing (existence and size checks).
+    InspectMetadata,
+    /// Opening the pinned asset file.
+    Open,
+    /// Streaming the asset bytes through the SHA-256 hasher.
+    Stream,
+}
+
+impl fmt::Display for AssetOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InspectMetadata => "inspecting metadata",
+            Self::Open => "opening",
+            Self::Stream => "streaming",
+        })
+    }
+}
+
 /// Errors while checking that local bytes match the pinned model identity.
+///
+/// Every variant keeps the operation, the input, the root cause (where one
+/// exists) and a recovery suggestion. The display text is safe to log; hosts
+/// may still map it to a generic UI message.
 #[derive(Debug, Error)]
 pub enum ModelAssetsError {
-    #[error("model '{0}' is not pinned in the shared registry")]
+    #[error(
+        "model '{0}' is not pinned in the shared registry; re-download the pinned model or update the registry"
+    )]
     UnknownModel(String),
 
-    #[error("missing model asset {path} (role: {role})")]
+    #[error("model asset {path} (role: {role}) is missing; re-download the pinned model")]
     MissingAsset { role: String, path: PathBuf },
 
-    #[error("model asset {path} has size {actual}, expected {expected}")]
+    #[error(
+        "model asset {path} has size {actual}, expected {expected}; re-download the pinned asset"
+    )]
     SizeMismatch {
         path: PathBuf,
         expected: u64,
         actual: u64,
     },
 
-    #[error("reading model asset {path}: {source}")]
+    #[error(
+        "model asset {path}: {operation} failed: {source}; check file permissions or re-download the pinned asset"
+    )]
     Read {
+        operation: AssetOperation,
         path: PathBuf,
         #[source]
         source: io::Error,
     },
 
-    #[error("SHA-256 mismatch for {role} of '{model_id}': expected {expected}, got {actual}")]
+    #[error(
+        "SHA-256 mismatch for {role} of '{model_id}': expected {expected}, got {actual}; re-download the pinned asset"
+    )]
     DigestMismatch {
         model_id: String,
         role: String,
@@ -175,6 +214,7 @@ fn verify_file(model_id: &str, asset: &PinnedAsset, dir: &Path) -> Result<(), Mo
         });
     }
     let metadata = fs::metadata(&path).map_err(|source| ModelAssetsError::Read {
+        operation: AssetOperation::InspectMetadata,
         path: path.clone(),
         source,
     })?;
@@ -188,6 +228,7 @@ fn verify_file(model_id: &str, asset: &PinnedAsset, dir: &Path) -> Result<(), Mo
         }
     }
     let file = File::open(&path).map_err(|source| ModelAssetsError::Read {
+        operation: AssetOperation::Open,
         path: path.clone(),
         source,
     })?;
@@ -198,6 +239,7 @@ fn verify_file(model_id: &str, asset: &PinnedAsset, dir: &Path) -> Result<(), Mo
         let read = reader
             .read(&mut buffer)
             .map_err(|source| ModelAssetsError::Read {
+                operation: AssetOperation::Stream,
                 path: path.clone(),
                 source,
             })?;
@@ -234,6 +276,7 @@ pub fn verify_dir(model_id: &str, dir: &Path) -> Result<(), ModelAssetsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn registry_pins_full_digests_for_both_models() {
@@ -322,5 +365,90 @@ mod tests {
         assert!(matches!(err, ModelAssetsError::UnknownModel(_)));
         let err = verify_dir(DEFAULT_MODEL_ID, &dir).expect_err("missing file must fail");
         assert!(matches!(err, ModelAssetsError::MissingAsset { .. }));
+    }
+
+    #[test]
+    fn verification_errors_carry_operation_path_source_and_recovery() {
+        use std::error::Error as _;
+
+        for (operation, label) in [
+            (AssetOperation::InspectMetadata, "inspecting metadata"),
+            (AssetOperation::Open, "opening"),
+            (AssetOperation::Stream, "streaming"),
+        ] {
+            let err = ModelAssetsError::Read {
+                operation,
+                path: PathBuf::from("models/model.safetensors"),
+                source: io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+            };
+            let rendered = err.to_string();
+            assert!(rendered.contains(label), "{rendered}");
+            assert!(rendered.contains("models/model.safetensors"), "{rendered}");
+            assert!(rendered.contains("permission denied"), "{rendered}");
+            assert!(
+                rendered.contains("re-download the pinned asset"),
+                "{rendered}"
+            );
+            assert!(err.source().is_some(), "the io::Error must stay reachable");
+        }
+
+        let contextual = [
+            ModelAssetsError::UnknownModel("unknown/model".to_owned()),
+            ModelAssetsError::MissingAsset {
+                role: "model".to_owned(),
+                path: PathBuf::from("model.safetensors"),
+            },
+            ModelAssetsError::SizeMismatch {
+                path: PathBuf::from("model.safetensors"),
+                expected: 10,
+                actual: 9,
+            },
+            ModelAssetsError::DigestMismatch {
+                model_id: "m".to_owned(),
+                role: "model".to_owned(),
+                expected: "a".repeat(64),
+                actual: "b".repeat(64),
+            },
+        ];
+        for err in contextual {
+            assert!(
+                err.to_string().contains("re-download"),
+                "missing recovery suggestion: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_validated_registry_has_unique_ids_and_relative_paths() {
+        let registry = registry();
+        let ids: HashSet<&str> = registry
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        assert_eq!(ids.len(), registry.models.len(), "model ids must be unique");
+        for model in &registry.models {
+            assert!(
+                !model.assets.is_empty(),
+                "model '{}' has no assets",
+                model.id
+            );
+            for asset in &model.assets {
+                let path = Path::new(&asset.path);
+                assert!(!path.is_absolute(), "{}", asset.path);
+                assert!(
+                    !path.components().any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    }),
+                    "{} must not escape the model directory",
+                    asset.path
+                );
+            }
+        }
     }
 }

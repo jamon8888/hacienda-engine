@@ -19,7 +19,7 @@ pub mod validators;
 pub use config::{CliOverrides, ModelConfig, PipelineConfig, VerticalConfig};
 pub use engine::RegexEngine;
 pub use merge::{merge_entities, MergedEntity};
-pub use ner::NerDetector;
+pub use ner::{NerDetector, NerRuntimeState};
 pub use patterns::builtin_patterns;
 pub use pipeline::{PiiPipeline, PipelineMetrics, PipelineResult};
 pub use types::{

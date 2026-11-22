@@ -23,36 +23,157 @@ pub(crate) fn attachment_diagnostic_token(_filename: &str) -> &'static str {
     "attachment"
 }
 
+/// Allowlisted, content-free cause categories for an attachment failure.
+///
+/// The category is chosen from the error *variant*, never from extractor or PII
+/// text, so it can be emitted on a public surface without re-opening the leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachmentFailureCategory {
+    Extraction,
+    Redaction,
+    Processing,
+}
+
+impl AttachmentFailureCategory {
+    /// Fixed label safe for stderr and `EmailResponse.errors`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Extraction => "attachment extraction error",
+            Self::Redaction => "redaction error",
+            Self::Processing => "processing error",
+        }
+    }
+
+    /// The operation that failed, for operator guidance.
+    pub(crate) const fn operation(self) -> &'static str {
+        match self {
+            Self::Extraction => "attachment text extraction",
+            Self::Redaction => "attachment text redaction",
+            Self::Processing => "attachment processing",
+        }
+    }
+
+    /// Approved, fixed recovery suggestion — never derived from untrusted text.
+    pub(crate) const fn suggestion(self) -> &'static str {
+        match self {
+            Self::Extraction => "retry with a supported attachment format",
+            Self::Redaction => {
+                "the attachment is not persisted; retry after the PII service is available"
+            }
+            Self::Processing => "retry the message or contact the administrator",
+        }
+    }
+}
+
+impl From<&EmailError> for AttachmentFailureCategory {
+    fn from(err: &EmailError) -> Self {
+        match err {
+            EmailError::Attachment(_) => Self::Extraction,
+            EmailError::Redaction(_) => Self::Redaction,
+            _ => Self::Processing,
+        }
+    }
+}
+
+/// Structured attachment failure retained inside the crate.
+///
+/// The extractor's own error text is kept in `cause` for in-process diagnosis,
+/// but it is deliberately excluded from both `Display` and `Debug`. Every
+/// public rendering goes through [`Self::safe_message`], which only contains an
+/// approved category, the failed operation and a recovery suggestion. The raw
+/// cause and the sender-controlled filename must never reach stderr or HTTP.
+#[derive(Clone)]
+pub(crate) struct AttachmentFailure {
+    category: AttachmentFailureCategory,
+    cause: String,
+}
+
+impl AttachmentFailure {
+    /// Map an extractor error into an approved category, retaining its text
+    /// internally while keeping every public surface content-free.
+    pub(crate) fn extraction(err: impl std::fmt::Display) -> Self {
+        Self {
+            category: AttachmentFailureCategory::Extraction,
+            cause: err.to_string(),
+        }
+    }
+
+    pub(crate) fn category(&self) -> AttachmentFailureCategory {
+        self.category
+    }
+
+    /// Internal-only cause. Must never be logged or returned to a client: it is
+    /// untrusted extractor text that can echo the submitted filename.
+    pub(crate) fn internal_cause(&self) -> &str {
+        &self.cause
+    }
+
+    /// Fixed, content-free summary used on every public surface.
+    pub(crate) fn safe_message(&self) -> String {
+        format!(
+            "{} failed ({}); {}",
+            self.category.operation(),
+            self.category.label(),
+            self.category.suggestion()
+        )
+    }
+}
+
+impl std::fmt::Debug for AttachmentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachmentFailure")
+            .field("category", &self.category)
+            .field("operation", &self.category.operation())
+            .field("suggestion", &self.category.suggestion())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for AttachmentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.safe_message())
+    }
+}
+
+impl From<AttachmentFailure> for EmailError {
+    fn from(failure: AttachmentFailure) -> Self {
+        // Only the approved summary crosses the crate boundary; the retained
+        // extractor cause is intentionally dropped here.
+        EmailError::Attachment(failure.to_string())
+    }
+}
+
 /// Fixed, content-free category for an attachment failure.
 ///
 /// Extractor/PII error strings are deliberately not forwarded: they can quote
 /// the submitted filename or redacted content, which would re-open the leak on
 /// a different surface. Only the variant category is safe to emit.
 pub(crate) fn attachment_error_category(err: &EmailError) -> &'static str {
-    match err {
-        EmailError::Attachment(_) => "attachment extraction error",
-        EmailError::Redaction(_) => "redaction error",
-        _ => "processing error",
-    }
+    AttachmentFailureCategory::from(err).label()
 }
 
 /// The exact stderr line emitted for a failed attachment. Kept as a pure
 /// function so tests can assert that the *produced log* is content-free.
 pub(crate) fn attachment_failure_log(filename: &str, err: &EmailError) -> String {
+    let category = AttachmentFailureCategory::from(err);
     format!(
-        "Failed to process attachment {}: {}",
+        "Failed to process attachment {}: {} failed ({}); {}",
         attachment_diagnostic_token(filename),
-        attachment_error_category(err)
+        category.operation(),
+        category.label(),
+        category.suggestion()
     )
 }
 
 /// The exact `EmailResponse.errors` entry emitted when attachment text
 /// redaction fails. Pure for the same testability reason.
 pub(crate) fn attachment_redaction_error(filename: &str, err: &EmailError) -> String {
+    let category = AttachmentFailureCategory::from(err);
     format!(
-        "Redaction failed for attachment {} — refusing to persist ({})",
+        "Redaction failed for attachment {} — refusing to persist ({}); {}",
         attachment_diagnostic_token(filename),
-        attachment_error_category(err)
+        category.label(),
+        category.suggestion()
     )
 }
 
@@ -105,6 +226,19 @@ pub async fn extract_text_with_xberg(
     mime_type: &str,
     filename: &str,
 ) -> Result<String> {
+    // The inner error keeps the extractor cause internally; the conversion to
+    // `EmailError` emits only its safe, content-free summary.
+    extract_text_with_xberg_inner(content, mime_type, filename)
+        .await
+        .map_err(EmailError::from)
+}
+
+#[cfg(any(feature = "rag", feature = "attachments"))]
+async fn extract_text_with_xberg_inner(
+    content: &[u8],
+    mime_type: &str,
+    filename: &str,
+) -> std::result::Result<String, AttachmentFailure> {
     use xberg::{extract, ExtractInput, ExtractionConfig};
 
     let input = ExtractInput::from_bytes(
@@ -113,11 +247,11 @@ pub async fn extract_text_with_xberg(
         Some(filename.to_string()),
     );
     let config = ExtractionConfig::default();
-    let output = extract(input, &config).await.map_err(|_| {
-        // xberg's Display text can echo the submitted filename. Emit a
-        // fixed message so no clear name reaches a log or an HTTP response.
-        EmailError::Attachment("xberg extraction failed".to_string())
-    })?;
+    // xberg's Display text can echo the submitted filename. Keep it as the
+    // internal cause, but let only the approved summary escape this crate.
+    let output = extract(input, &config)
+        .await
+        .map_err(AttachmentFailure::extraction)?;
 
     Ok(output
         .results
@@ -251,5 +385,56 @@ mod tests {
         assert!(!first.contains("Jane"));
         assert!(!first.contains("123-45-6789"));
         assert!(!first.contains("pdf"));
+    }
+
+    /// The extractor cause is retained in-process for diagnosis, but Display,
+    /// Debug and the public `EmailError` carry only the approved safe summary.
+    #[test]
+    fn attachment_failure_retains_cause_but_displays_only_safe_summary() {
+        let raw = format!("xberg could not decode {SENTINEL_FILENAME}");
+        let failure = AttachmentFailure::extraction(raw.as_str());
+
+        // Internal retention: the cause is still inspectable inside the crate.
+        assert!(failure.internal_cause().contains(SENTINEL_FILENAME));
+        assert_eq!(failure.category(), AttachmentFailureCategory::Extraction);
+
+        let category = AttachmentFailureCategory::Extraction;
+        let display = failure.to_string();
+        assert!(display.contains(category.operation()));
+        assert!(display.contains(category.label()));
+        assert!(display.contains(category.suggestion()));
+        assert!(!display.contains(SENTINEL_FILENAME));
+        assert!(!display.contains("xberg"));
+
+        // Debug must not become a back-channel for the raw extractor text.
+        let debug = format!("{failure:?}");
+        assert!(!debug.contains(SENTINEL_FILENAME));
+        assert!(!debug.contains("xberg"));
+
+        // Crossing the crate boundary keeps only the safe summary.
+        let public = EmailError::from(failure);
+        let public_display = public.to_string();
+        assert!(!public_display.contains(SENTINEL_FILENAME));
+        assert!(public_display.contains(category.suggestion()));
+    }
+
+    /// Logs and `EmailResponse.errors` entries carry operation/recovery
+    /// guidance from the allowlisted category, never from untrusted text.
+    #[test]
+    fn attachment_surfaces_carry_operation_and_recovery_guidance() {
+        let extraction = EmailError::Attachment("ignored extractor text".to_string());
+        let log = attachment_failure_log(SENTINEL_FILENAME, &extraction);
+        let category = AttachmentFailureCategory::Extraction;
+        assert!(log.contains(category.operation()), "{log}");
+        assert!(log.contains(category.label()), "{log}");
+        assert!(log.contains(category.suggestion()), "{log}");
+        assert_content_free(&log, "stderr log");
+
+        let redaction = EmailError::Redaction("ignored PII text".to_string());
+        let http = attachment_redaction_error(SENTINEL_FILENAME, &redaction);
+        let category = AttachmentFailureCategory::Redaction;
+        assert!(http.contains(category.label()), "{http}");
+        assert!(http.contains(category.suggestion()), "{http}");
+        assert_content_free(&http, "EmailResponse.errors entry");
     }
 }

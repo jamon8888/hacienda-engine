@@ -94,10 +94,15 @@ pub trait JobStore: Send + Sync {
     /// updates happen many times over a job's `Running` lifetime and carry no
     /// status change — folding them into `transition`'s compare-and-swap
     /// would force every progress tick to also re-assert `Running == Running`,
-    /// racing against a concurrent `finish`/`fail` for no benefit. Callable
-    /// regardless of current status (including after completion) so a worker
-    /// that reports one last progress tick right before `finish` never fails
-    /// on a race it cannot observe.
+    /// racing against a concurrent `finish`/`fail` for no benefit.
+    ///
+    /// Only a `Running` job accepts a progress update. A late tick racing a
+    /// terminal transition is a no-op that returns the current job, not an
+    /// error — so a worker still cannot fail because of a race it cannot
+    /// observe. Critically, a no-op tick must not advance `updated_at`: for a
+    /// terminal job that field is the terminal-transition time used to measure
+    /// retention age, and letting a late tick overwrite it would make a
+    /// completed job stay visible indefinitely.
     async fn update_progress(
         &self,
         tenant: &TenantId,
@@ -112,6 +117,20 @@ pub trait JobStore: Send + Sync {
         tenant: &TenantId,
         filter: Option<JobStatus>,
     ) -> Result<Vec<Job>, JobError>;
+
+    /// Permanently remove one job. Optional so existing backends keep compiling:
+    /// the default is a typed "unsupported" error, and a retention policy that
+    /// calls it simply logs the warning instead of failing job creation.
+    ///
+    /// Implementations MUST scope the delete by `tenant` as well as `id` — a
+    /// cross-tenant delete must be a silent no-op, not a distinguishable error.
+    /// Returns `true` when a row was actually removed.
+    async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, JobError> {
+        let _ = (tenant, id);
+        Err(JobError::DeleteUnsupported(
+            std::any::type_name::<Self>().into(),
+        ))
+    }
 }
 
 /// In-memory [`JobStore`] backed by a `Mutex<HashMap>`.
@@ -221,6 +240,11 @@ impl JobStore for InMemoryJobStore {
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
+        // A duplicate terminal write is a no-op: `updated_at` is the terminal
+        // transition time used for retention and must not be refreshed.
+        if matches!(job.status, JobStatus::Succeeded | JobStatus::Failed) {
+            return Ok(job.clone());
+        }
         job.status = JobStatus::Succeeded;
         job.result_json = Some(result_json);
         job.updated_at = now_rfc3339();
@@ -236,6 +260,9 @@ impl JobStore for InMemoryJobStore {
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
+        if matches!(job.status, JobStatus::Succeeded | JobStatus::Failed) {
+            return Ok(job.clone());
+        }
         job.status = JobStatus::Failed;
         job.error = Some(error);
         job.updated_at = now_rfc3339();
@@ -256,6 +283,11 @@ impl JobStore for InMemoryJobStore {
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
             .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
+        // A late tick from a worker that lost a race to finish/fail must not
+        // move `updated_at` (the terminal timestamp) or overwrite progress.
+        if job.status != JobStatus::Running {
+            return Ok(job.clone());
+        }
         job.progress_json = Some(progress_json);
         job.updated_at = now_rfc3339();
         Ok(job.clone())
@@ -288,6 +320,24 @@ impl JobStore for InMemoryJobStore {
                 .then_with(|| a.id.cmp(&b.id))
         });
         Ok(jobs)
+    }
+
+    async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, JobError> {
+        let mut guard = self
+            .jobs
+            .lock()
+            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+        // Check tenant *before* removing: `HashMap::remove` would otherwise
+        // delete another tenant's row before the filter could reject it. A
+        // cross-tenant delete is a silent no-op, indistinguishable from a
+        // missing id (D-S1b-1).
+        let belongs_to_tenant = guard
+            .get(id)
+            .is_some_and(|j| j.tenant_id == tenant.as_str());
+        if !belongs_to_tenant {
+            return Ok(false);
+        }
+        Ok(guard.remove(id).is_some())
     }
 }
 
@@ -436,6 +486,10 @@ mod tests {
     async fn should_overwrite_progress_when_update_progress_repeats() {
         let store = InMemoryJobStore::new();
         let job = store.create(&t(), None).await.unwrap();
+        store
+            .transition(&t(), &job.id, JobStatus::Queued, JobStatus::Running)
+            .await
+            .unwrap();
 
         let updated = store
             .update_progress(&t(), &job.id, r#"{"done":1,"total":10}"#.to_string())
@@ -529,5 +583,86 @@ mod tests {
         // A different tenant sees neither, regardless of owner.
         let other_tenant_jobs = store.list(&t2(), None).await.unwrap();
         assert!(other_tenant_jobs.is_empty());
+    }
+
+    /// The retention seam must never let one tenant reclaim another tenant's row.
+    #[tokio::test]
+    async fn delete_is_tenant_scoped_and_idempotent() {
+        let store = InMemoryJobStore::new();
+        let job = store.create(&t(), None).await.unwrap();
+
+        assert!(!store.delete(&t2(), &job.id).await.unwrap());
+        assert!(
+            store.get(&t(), &job.id).await.unwrap().is_some(),
+            "a rejected cross-tenant delete must leave the row untouched"
+        );
+
+        assert!(store.delete(&t(), &job.id).await.unwrap());
+        assert!(!store.delete(&t(), &job.id).await.unwrap());
+        assert!(store.get(&t(), &job.id).await.unwrap().is_none());
+    }
+
+    /// A progress tick that arrives after `finish` is ignored. Its `updated_at`
+    /// is the terminal-transition time used for retention, so a late tick must
+    /// not move it or revive the job's visible lifetime.
+    #[tokio::test]
+    async fn progress_after_terminal_is_a_no_op_that_keeps_terminal_time() {
+        let store = InMemoryJobStore::new();
+        let job = store.create(&t(), None).await.unwrap();
+        store
+            .transition(&t(), &job.id, JobStatus::Queued, JobStatus::Running)
+            .await
+            .unwrap();
+        let finished = store.finish(&t(), &job.id, "{}".to_owned()).await.unwrap();
+        let terminal_time = finished.updated_at.clone();
+
+        let after = store
+            .update_progress(&t(), &job.id, r#"{"late":true}"#.to_owned())
+            .await
+            .unwrap();
+        assert_eq!(after.status, JobStatus::Succeeded);
+        assert_eq!(after.updated_at, terminal_time);
+        assert_eq!(after.progress_json, finished.progress_json);
+    }
+
+    /// Duplicate terminal writes must not refresh the retention timestamp or
+    /// overwrite the first terminal result/reason.
+    #[tokio::test]
+    async fn duplicate_finish_and_fail_keep_the_first_terminal_time() {
+        let store = InMemoryJobStore::new();
+
+        let succeeded = store.create(&t(), None).await.unwrap();
+        let first = store
+            .finish(&t(), &succeeded.id, r#"{"first":true}"#.to_owned())
+            .await
+            .unwrap();
+        let again = store
+            .finish(&t(), &succeeded.id, r#"{"second":true}"#.to_owned())
+            .await
+            .unwrap();
+        assert_eq!(again.updated_at, first.updated_at);
+        assert_eq!(again.result_json, first.result_json);
+        assert_eq!(again.status, JobStatus::Succeeded);
+
+        let failed = store.create(&t(), None).await.unwrap();
+        let first_fail = store
+            .fail(&t(), &failed.id, "first".to_owned())
+            .await
+            .unwrap();
+        let again = store
+            .fail(&t(), &failed.id, "second".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(again.updated_at, first_fail.updated_at);
+        assert_eq!(again.error.as_deref(), Some("first"));
+        assert_eq!(again.status, JobStatus::Failed);
+
+        // A failed job cannot be overwritten by a later finish either.
+        let cross = store
+            .finish(&t(), &failed.id, "{}".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(cross.updated_at, first_fail.updated_at);
+        assert_eq!(cross.status, JobStatus::Failed);
     }
 }

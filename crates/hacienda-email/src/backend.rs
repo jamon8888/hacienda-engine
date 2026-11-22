@@ -12,7 +12,7 @@
 //! decoded with `mail-parser` into the plugin's simplified [`EmailMessage`].
 
 use crate::error::{EmailError, Result};
-use crate::models::{EmailAddress, EmailAttachment, EmailMessage, Envelope, Flag, Mailbox};
+use crate::models::{EmailAddress, EmailMessage, Envelope, Flag, Mailbox};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -129,15 +129,19 @@ mod convert {
 
     /// Parse raw RFC 5322 bytes into the plugin's simplified message model.
     pub(crate) fn message(raw: &[u8], mailbox: &str, id: &str) -> Result<EmailMessage> {
-        use mail_parser::MimeHeaders;
-
         let parsed = mail_parser::MessageParser::default()
             .parse(raw)
-            .ok_or_else(|| EmailError::Backend("failed to parse RFC 5322 message".to_string()))?;
+            .ok_or_else(|| EmailError::Backend(crate::mime::MIME_PARSE_ERROR.to_string()))?;
 
-        // body_text/body_html take a body-part position and return Cow<str>.
-        let text_body = parsed.body_text(0).map(|s| s.into_owned());
-        let html_body = parsed.body_html(0).map(|s| s.into_owned());
+        // MIME-tree-aware extraction: walk the RFC 2045 part tree so nested
+        // multiparts and message/rfc822 bodies are collected, and attachment
+        // parts (disposition, filename or non-text media type) never end up in
+        // the body. This replaces the flat `body_text(0)` / `body_html(0)`
+        // heuristic that silently dropped every body part but the first.
+        let mime = crate::mime::parse_message_parts(&parsed);
+        let text_body = mime.text_body;
+        let html_body = mime.html_body;
+        let attachments = mime.attachments;
 
         let addr = |a: &mail_parser::Addr<'_>| EmailAddress {
             name: a.name.as_ref().map(|n| n.to_string()),
@@ -157,27 +161,6 @@ mod convert {
                 None => Vec::new(),
             }
         };
-
-        let attachments = parsed
-            .attachments()
-            .enumerate()
-            .map(|(i, a)| EmailAttachment {
-                filename: a
-                    .attachment_name()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| format!("attachment-{i}")),
-                content_type: a
-                    .content_type()
-                    .map(|ct| {
-                        let sub = ct.c_subtype.as_ref().map(|s| s.as_ref()).unwrap_or("");
-                        format!("{}/{}", ct.c_type, sub)
-                    })
-                    .unwrap_or_else(|| "application/octet-stream".to_string()),
-                size: a.contents().len(),
-                content_id: a.content_id().map(|v| v.to_string()),
-                content: a.contents().to_vec(),
-            })
-            .collect();
 
         Ok(EmailMessage {
             id: id.to_string(),
@@ -594,5 +577,49 @@ pub async fn build_client(config: &crate::config::EmailConfig) -> Result<Arc<dyn
         other => Err(EmailError::Config(format!(
             "backend {other:?} is not enabled or not implemented"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A multipart/mixed message with two body text parts and one attachment.
+    /// The old `body_text(0)` heuristic only kept the first text part.
+    const MULTIPART_TWO_BODIES: &[u8] = concat!(
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"parts\"\r\n",
+        "\r\n",
+        "--parts\r\n",
+        "Content-Type: text/plain\r\n",
+        "\r\n",
+        "First body fragment\r\n",
+        "--parts\r\n",
+        "Content-Type: text/plain\r\n",
+        "\r\n",
+        "Second body fragment\r\n",
+        "--parts\r\n",
+        "Content-Type: application/pdf; name=\"report.pdf\"\r\n",
+        "Content-Disposition: attachment; filename=\"report.pdf\"\r\n",
+        "\r\n",
+        "JVBERi0K\r\n",
+        "--parts--\r\n"
+    )
+    .as_bytes();
+
+    #[test]
+    fn message_uses_mime_tree_for_all_body_parts_and_attachments() {
+        let message = convert::message(MULTIPART_TWO_BODIES, "INBOX", "uid-1")
+            .expect("multipart message parses");
+        let text = message.text_body.as_deref().expect("text body present");
+        assert!(
+            text.contains("First body fragment") && text.contains("Second body fragment"),
+            "tree walk must collect every body part, got: {text}"
+        );
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].filename, "report.pdf");
+        assert!(message.attachments[0]
+            .content_type
+            .starts_with("application/pdf"));
     }
 }

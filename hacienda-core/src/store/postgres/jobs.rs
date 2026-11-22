@@ -23,6 +23,7 @@ impl PostgresJobStore {
     }
 }
 
+#[derive(sqlx::FromRow)]
 struct JobRow {
     id: String,
     tenant_id: String,
@@ -151,11 +152,14 @@ impl JobStore for PostgresJobStore {
     ) -> Result<Job, JobError> {
         let now = Utc::now();
 
-        let row: JobRowWithProgress = sqlx::query_as(
+        // Restrict to `running` so a late progress tick cannot overwrite a
+        // terminal job's `updated_at` (its retention timestamp). The CAS-style
+        // status predicate avoids a read-then-write race with `finish`/`fail`.
+        let maybe_row: Option<JobRowWithProgress> = sqlx::query_as(
             r#"
             UPDATE jobs
             SET progress_json = $1, updated_at = $2
-            WHERE id = $3 AND tenant_id = $4
+            WHERE id = $3 AND tenant_id = $4 AND status = 'running'
             RETURNING id, tenant_id, status, owner, created_at, updated_at, result_json, error, progress_json
             "#,
         )
@@ -165,10 +169,18 @@ impl JobStore for PostgresJobStore {
         .bind(tenant.as_str())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| JobError::Internal(e.to_string()))?
-        .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
+        .map_err(|e| JobError::Internal(e.to_string()))?;
 
-        Ok(row_to_job_with_progress(row))
+        match maybe_row {
+            Some(row) => Ok(row_to_job_with_progress(row)),
+            None => {
+                // No row means either "not running" (ignore the tick, return
+                // the current job) or "no such job" (still NotFound).
+                self.get(tenant, id)
+                    .await?
+                    .ok_or_else(|| JobError::NotFound(id.to_owned()))
+            }
+        }
     }
 
     async fn transition(
@@ -180,14 +192,12 @@ impl JobStore for PostgresJobStore {
     ) -> Result<Job, JobError> {
         let now = Utc::now();
 
-        // Matching on id, tenant, and status together means a cross-tenant id falls into
-        // the same not-found-shaped path a status mismatch does — see this method's
-        // pre-existing (not new) limitation: the `RETURNING`-based compare-and-swap
-        // cannot distinguish "no such id"/"wrong tenant" from "wrong status" without a
-        // second query, so both report `StatusMismatch` with a best-effort `actual`. This
-        // predates tenant scoping; the `AND tenant_id = $n` predicate here only closes the
-        // isolation gap, it does not change that pre-existing imprecision.
-        let row = sqlx::query_as!(
+        // The compare-and-swap stays one atomic statement. When it matches no row,
+        // a cheap follow-up read distinguishes "wrong status" from "missing id /
+        // wrong tenant" so a cross-tenant id cannot be reported as a
+        // `StatusMismatch` (which would confirm the id exists elsewhere). The
+        // follow-up read never changes state, so it does not weaken the CAS.
+        let maybe_row = sqlx::query_as!(
             JobRow,
             r#"
             UPDATE jobs
@@ -203,12 +213,35 @@ impl JobStore for PostgresJobStore {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| JobError::Internal(e.to_string()))?
-        .ok_or_else(|| JobError::StatusMismatch {
-            id: id.to_owned(),
-            expected: from,
-            actual: JobStatus::Queued, // We don't know actual from the query
-        })?;
+        .map_err(|e| JobError::Internal(e.to_string()))?;
+
+        let Some(row) = maybe_row else {
+            // Observe the real current status instead of fabricating one. This
+            // read is a best-effort snapshot *after* the losing CAS, so the
+            // status may already have moved on; it is still the value actually
+            // seen, not a guessed `Queued`. An unrecognised stored value is an
+            // internal error rather than a made-up status.
+            let observed: Option<String> =
+                sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1 AND tenant_id = $2")
+                    .bind(id)
+                    .bind(tenant.as_str())
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| JobError::Internal(e.to_string()))?;
+            return Err(match observed {
+                None => JobError::NotFound(id.to_owned()),
+                Some(raw) => match raw.parse::<JobStatus>() {
+                    Ok(actual) => JobError::StatusMismatch {
+                        id: id.to_owned(),
+                        expected: from,
+                        actual,
+                    },
+                    Err(_) => {
+                        JobError::Internal(format!("job {id}: unrecognised stored status '{raw}'"))
+                    }
+                },
+            });
+        };
 
         Ok(row_to_job(row))
     }
@@ -221,20 +254,23 @@ impl JobStore for PostgresJobStore {
     ) -> Result<Job, JobError> {
         let now = Utc::now();
 
-        let row = sqlx::query_as!(
-            JobRow,
+        // Runtime query: the terminal-state predicate is new and regenerating
+        // the committed `.sqlx/` cache needs a live database, which CI does not
+        // assume. The predicate makes a duplicate finish a no-op so the
+        // terminal `updated_at` (retention clock) is never refreshed.
+        let maybe_row: Option<JobRow> = sqlx::query_as(
             r#"
             UPDATE jobs
             SET status = $1, result_json = $2, updated_at = $3
-            WHERE id = $4 AND tenant_id = $5
+            WHERE id = $4 AND tenant_id = $5 AND status NOT IN ('succeeded','failed')
             RETURNING id, tenant_id, status, owner, created_at, updated_at, result_json, error
             "#,
-            JobStatus::Succeeded.to_string(),
-            result_json,
-            now,
-            id,
-            tenant.as_str()
         )
+        .bind(JobStatus::Succeeded.to_string())
+        .bind(result_json)
+        .bind(now)
+        .bind(id)
+        .bind(tenant.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| {
@@ -242,29 +278,33 @@ impl JobStore for PostgresJobStore {
                 "finish: job {id} (tenant {tenant}): {e}",
                 tenant = tenant.as_str()
             ))
-        })?
-        .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
+        })?;
 
-        Ok(row_to_job(row))
+        match maybe_row {
+            Some(row) => Ok(row_to_job(row)),
+            None => self
+                .get(tenant, id)
+                .await?
+                .ok_or_else(|| JobError::NotFound(id.to_owned())),
+        }
     }
 
     async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError> {
         let now = Utc::now();
 
-        let row = sqlx::query_as!(
-            JobRow,
+        let maybe_row: Option<JobRow> = sqlx::query_as(
             r#"
             UPDATE jobs
             SET status = $1, error = $2, updated_at = $3
-            WHERE id = $4 AND tenant_id = $5
+            WHERE id = $4 AND tenant_id = $5 AND status NOT IN ('succeeded','failed')
             RETURNING id, tenant_id, status, owner, created_at, updated_at, result_json, error
             "#,
-            JobStatus::Failed.to_string(),
-            error,
-            now,
-            id,
-            tenant.as_str()
         )
+        .bind(JobStatus::Failed.to_string())
+        .bind(error)
+        .bind(now)
+        .bind(id)
+        .bind(tenant.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| {
@@ -272,10 +312,15 @@ impl JobStore for PostgresJobStore {
                 "fail: job {id} (tenant {tenant}): {e}",
                 tenant = tenant.as_str()
             ))
-        })?
-        .ok_or_else(|| JobError::NotFound(id.to_owned()))?;
+        })?;
 
-        Ok(row_to_job(row))
+        match maybe_row {
+            Some(row) => Ok(row_to_job(row)),
+            None => self
+                .get(tenant, id)
+                .await?
+                .ok_or_else(|| JobError::NotFound(id.to_owned())),
+        }
     }
 
     async fn list(
@@ -318,6 +363,20 @@ impl JobStore for PostgresJobStore {
         .map_err(|e| JobError::Internal(e.to_string()))?;
 
         Ok(rows.into_iter().map(row_to_job).collect())
+    }
+
+    async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, JobError> {
+        // Runtime query, like `get`/`update_progress`: no new compile-time
+        // `.sqlx/` cache entry is needed for this one statement. The tenant
+        // predicate makes a cross-tenant delete a silent no-op.
+        let rows = sqlx::query("DELETE FROM jobs WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| JobError::Internal(e.to_string()))?
+            .rows_affected();
+        Ok(rows > 0)
     }
 }
 
@@ -408,6 +467,148 @@ mod tests {
                 .expect("get failed")
                 .expect("job must exist");
             assert_eq!(final_job.status, JobStatus::Running);
+        });
+    }
+
+    fn t2() -> TenantId {
+        TenantId::new("pg-jobs-test-tenant-2")
+    }
+
+    /// Durability / reopen: a fresh store instance over the same pool sees the
+    /// job written by an earlier instance. This is the Postgres equivalent of
+    /// restarting the API process — the state lives in the repository, not the
+    /// `Arc` that happened to hold the store.
+    #[test]
+    #[ignore]
+    fn should_reopen_jobs_written_by_a_previous_store_instance() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
+            test_support::ensure_tenant(&pool, &t()).await;
+
+            let id = {
+                let first = PostgresJobStore::new(pool.clone());
+                first
+                    .create(&t(), Some("alice".to_owned()))
+                    .await
+                    .expect("create failed")
+                    .id
+            };
+
+            let second = PostgresJobStore::new(pool);
+            let reopened = second
+                .get(&t(), &id)
+                .await
+                .expect("get failed")
+                .expect("job must survive a store reopen");
+            assert_eq!(reopened.status, JobStatus::Queued);
+            assert_eq!(reopened.owner.as_deref(), Some("alice"));
+            assert_eq!(reopened.tenant_id, t().as_str());
+        });
+    }
+
+    /// A cross-tenant id must not be distinguishable from a missing one: the
+    /// CAS reports `NotFound`, never a status-shaped error.
+    #[test]
+    #[ignore]
+    fn cross_tenant_transition_reports_not_found() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
+            test_support::ensure_tenant(&pool, &t()).await;
+            test_support::ensure_tenant(&pool, &t2()).await;
+            let store = PostgresJobStore::new(pool);
+            let job = store.create(&t(), None).await.expect("create failed");
+
+            let err = store
+                .transition(&t2(), &job.id, JobStatus::Queued, JobStatus::Running)
+                .await
+                .expect_err("cross-tenant claim must fail");
+            assert!(matches!(err, JobError::NotFound(id) if id == job.id));
+
+            let untouched = store
+                .get(&t(), &job.id)
+                .await
+                .expect("get failed")
+                .expect("job must exist");
+            assert_eq!(untouched.status, JobStatus::Queued);
+        });
+    }
+
+    /// Retention's delete seam is tenant-scoped even at the repository layer.
+    #[test]
+    #[ignore]
+    fn delete_is_tenant_scoped() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
+            test_support::ensure_tenant(&pool, &t()).await;
+            test_support::ensure_tenant(&pool, &t2()).await;
+            let store = PostgresJobStore::new(pool);
+            let job = store.create(&t(), None).await.expect("create failed");
+
+            assert!(!store.delete(&t2(), &job.id).await.expect("delete failed"));
+            assert!(store
+                .get(&t(), &job.id)
+                .await
+                .expect("get failed")
+                .is_some());
+            assert!(store.delete(&t(), &job.id).await.expect("delete failed"));
+            assert!(store
+                .get(&t(), &job.id)
+                .await
+                .expect("get failed")
+                .is_none());
+        });
+    }
+
+    /// A tick racing `finish` must not move the terminal timestamp used by
+    /// retention, and must not turn a late tick into an error.
+    #[test]
+    #[ignore]
+    fn late_progress_after_finish_is_ignored() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
+            test_support::ensure_tenant(&pool, &t()).await;
+            let store = PostgresJobStore::new(pool);
+            let job = store.create(&t(), None).await.expect("create failed");
+            store
+                .transition(&t(), &job.id, JobStatus::Queued, JobStatus::Running)
+                .await
+                .expect("claim failed");
+            let finished = store
+                .finish(&t(), &job.id, "{}".to_owned())
+                .await
+                .expect("finish failed");
+            let terminal_time = finished.updated_at.clone();
+
+            let after = store
+                .update_progress(&t(), &job.id, r#"{"late":true}"#.to_owned())
+                .await
+                .expect("a late tick must not fail");
+            assert_eq!(after.status, JobStatus::Succeeded);
+            assert_eq!(after.updated_at, terminal_time);
+            assert_eq!(after.progress_json, finished.progress_json);
+        });
+    }
+
+    /// The terminal-state predicate makes a repeated finish a no-op in the
+    /// repository too, not just in the API decorator.
+    #[test]
+    #[ignore]
+    fn duplicate_finish_does_not_refresh_terminal_time() {
+        test_support::block_on_shared(async {
+            let pool = test_support::shared().await.pool();
+            test_support::ensure_tenant(&pool, &t()).await;
+            let store = PostgresJobStore::new(pool);
+            let job = store.create(&t(), None).await.expect("create failed");
+            let first = store
+                .finish(&t(), &job.id, r#"{"first":true}"#.to_owned())
+                .await
+                .expect("finish failed");
+            let again = store
+                .finish(&t(), &job.id, r#"{"second":true}"#.to_owned())
+                .await
+                .expect("duplicate finish must not fail");
+            assert_eq!(again.updated_at, first.updated_at);
+            assert_eq!(again.result_json, first.result_json);
         });
     }
 }

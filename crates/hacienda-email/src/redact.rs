@@ -476,7 +476,25 @@ mod tests {
         assert!(rfc822.contains("Subject: [EMAIL.SUBJECT:"));
         assert!(rfc822.contains("From: \"[EMAIL.NAME:"));
         assert!(rfc822.contains("To: \"[EMAIL.NAME:"));
-        assert!(rfc822.contains("Cc: [EMAIL.ADDRESS:"));
+        // Addresses are syntactically valid synthetic addr-specs under the
+        // reserved `.invalid` domain; the plain correlation token stays in the
+        // RAG projection, not in a mail header. Cc has no display name, so its
+        // header value is the bare addr-spec.
+        let cc_line = rfc822
+            .lines()
+            .find(|line| line.starts_with("Cc: "))
+            .expect("Cc header must be present");
+        let cc_address = cc_line.strip_prefix("Cc: ").expect("Cc header value");
+        let (cc_local, cc_domain) = cc_address.split_once('@').expect("one @ separator");
+        assert_eq!(cc_domain, "hacienda.invalid", "{cc_address}");
+        assert!(cc_local.contains("EMAIL_ADDRESS"), "{cc_address}");
+        assert!(
+            cc_local
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "synthetic local part must use only RFC 5322 atext: {cc_address}"
+        );
+        assert!(!rfc822.contains("Cc: [EMAIL.ADDRESS:"));
         assert!(!rfc822.contains("<html"));
         assert!(message.attachments[0]
             .filename

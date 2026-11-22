@@ -9,7 +9,7 @@ use crate::compliance::{ComplianceGenerator, ComplianceReport};
 use crate::config::HaciendaConfig;
 use crate::error::HaciendaError;
 use crate::glossary::{EntityGlossary, GlossaryEntry};
-use crate::pii::ner::NerDetector;
+use crate::pii::ner::{NerDetector, NerRuntimeState};
 use crate::pii::pipeline::build_detector;
 use crate::pii::{
     MergedEntity, PiiCategory, PiiError, PiiPipeline, PipelineMetrics, PipelineResult,
@@ -475,6 +475,17 @@ impl HaciendaFacade {
         let mut cache = lock(pipelines);
         let pipeline = Arc::clone(cache.entry(tenant.clone()).or_insert(pipeline));
         Ok(pipeline)
+    }
+
+    /// Runtime identity of the NER detector this facade actually uses.
+    ///
+    /// Capability surfaces read this from their own facade so a report never
+    /// claims a model another surface happened to load in the same process.
+    pub fn ner_runtime_state(&self) -> NerRuntimeState {
+        self.shared_detector
+            .as_ref()
+            .map(NerDetector::runtime_state)
+            .unwrap_or_else(NerRuntimeState::unavailable)
     }
 
     /// Resolve `tenant`'s pseudonymisation key material via `resolver`, honouring

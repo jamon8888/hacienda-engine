@@ -412,6 +412,7 @@ impl HaciendaMcp {
             false,
             hacienda_core::capabilities::cached_onnx_runtime_status(),
             false,
+            self.facade.ner_runtime_state(),
         );
         json_tool_result(&report)
     }

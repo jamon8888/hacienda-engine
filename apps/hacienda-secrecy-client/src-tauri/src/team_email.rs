@@ -190,7 +190,10 @@ impl TeamViewerCapabilityRequest {
             .attachment_ref
             .as_deref()
             .is_some_and(|value| !safe_ref(value))
-            || self.purpose.as_deref().is_some_and(|value| !safe_ref(value))
+            || self
+                .purpose
+                .as_deref()
+                .is_some_and(|value| !safe_ref(value))
         {
             return Err(TeamEmailError::InvalidRequest);
         }
@@ -450,7 +453,9 @@ fn project_progress(value: Option<serde_json::Value>) -> Option<TeamProgressDto>
 }
 
 fn project_result(value: Option<serde_json::Value>) -> Option<TeamOperationResultDto> {
-    serde_json::from_value::<WireOperationResult>(value?).ok().map(Into::into)
+    serde_json::from_value::<WireOperationResult>(value?)
+        .ok()
+        .map(Into::into)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -587,7 +592,9 @@ impl TeamEmailClient {
     }
 
     fn url(&self, path: &str) -> Result<Url> {
-        self.base.join(path).map_err(|_| TeamEmailError::InvalidRequest)
+        self.base
+            .join(path)
+            .map_err(|_| TeamEmailError::InvalidRequest)
     }
 
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
@@ -609,7 +616,10 @@ impl TeamEmailClient {
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T> {
         let request = self.http.get(self.url(path)?);
         let response = self.send(request).await?;
-        response.json::<T>().await.map_err(|_| TeamEmailError::InvalidResponse)
+        response
+            .json::<T>()
+            .await
+            .map_err(|_| TeamEmailError::InvalidResponse)
     }
 
     async fn post_json<B: Serialize, T: for<'de> Deserialize<'de>>(
@@ -619,7 +629,10 @@ impl TeamEmailClient {
     ) -> Result<T> {
         let request = self.http.post(self.url(path)?).json(body);
         let response = self.send(request).await?;
-        response.json::<T>().await.map_err(|_| TeamEmailError::InvalidResponse)
+        response
+            .json::<T>()
+            .await
+            .map_err(|_| TeamEmailError::InvalidResponse)
     }
 
     pub async fn sources(&self) -> Result<TeamSourcesResponse> {
@@ -647,7 +660,9 @@ impl TeamEmailClient {
         if !safe_ref(&wire.job_id) {
             return Err(TeamEmailError::InvalidResponse);
         }
-        Ok(TeamAcceptedJob { job_id: wire.job_id })
+        Ok(TeamAcceptedJob {
+            job_id: wire.job_id,
+        })
     }
 
     pub async fn job(&self, job_id: &str) -> Result<TeamJobStatusDto> {
@@ -779,7 +794,9 @@ impl TeamEmailClient {
     }
 
     pub async fn audit(&self) -> Result<TeamAuditResponse> {
-        let wire = self.get_json::<WireAuditResponse>("/v1/team/viewer/audit").await?;
+        let wire = self
+            .get_json::<WireAuditResponse>("/v1/team/viewer/audit")
+            .await?;
         Ok(TeamAuditResponse {
             events: wire
                 .events
@@ -821,12 +838,18 @@ mod tests {
         let base = r#"{"source_ref":"default","mailbox_ref":"inbox","operation":{"operation":"index_for_rag"}}"#;
         assert!(serde_json::from_str::<TeamIngestRequest>(base).is_ok());
         for (field, body) in [
-            ("backend", base.replace('}', r#","backend":{"path":"/etc"}}"#)),
+            (
+                "backend",
+                base.replace('}', r#","backend":{"path":"/etc"}}"#),
+            ),
             ("path", base.replace('}', r#","path":"/etc"}"#)),
             ("token", base.replace('}', r#","token":"oauth-secret"}"#)),
             ("password", base.replace('}', r#","password":"hunter2"}"#)),
             ("server", base.replace('}', r#","server":"evil.example"}"#)),
-            ("token_command", base.replace('}', r#","token_command":["sh"]}"#)),
+            (
+                "token_command",
+                base.replace('}', r#","token_command":["sh"]}"#),
+            ),
             ("text", base.replace('}', r#","text":"raw message"}"#)),
             ("message", base.replace('}', r#","message":"raw message"}"#)),
         ] {
@@ -947,8 +970,16 @@ mod tests {
     #[test]
     fn job_id_is_validated_before_it_can_reach_a_path() {
         for job_id in ["../other-tenant", "a/b", "..", "", "/etc/passwd"] {
-            assert!(TeamJobRequest { job_id: job_id.into() }.validate().is_err());
+            assert!(TeamJobRequest {
+                job_id: job_id.into()
+            }
+            .validate()
+            .is_err());
         }
-        assert!(TeamJobRequest { job_id: "job-123".into() }.validate().is_ok());
+        assert!(TeamJobRequest {
+            job_id: "job-123".into()
+        }
+        .validate()
+        .is_ok());
     }
 }

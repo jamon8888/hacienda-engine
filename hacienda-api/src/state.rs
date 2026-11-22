@@ -10,6 +10,7 @@ use hacienda_rag::RagStore;
 use std::sync::{Arc, Mutex};
 
 use crate::handlers::claude_messages::ClaudeMessagesProvider;
+use crate::job_state::{GuardedJobStore, JobRetention, RetryPolicy};
 use crate::quota::InMemoryQuotaStore;
 
 /// Body / batch limits applied uniformly to every request.
@@ -49,8 +50,18 @@ impl Default for ApiLimits {
 pub struct ApiState {
     /// The business-logic facade. All document processing, scanning, and audit go here.
     pub(crate) facade: Arc<HaciendaFacade>,
-    /// Async job registry. In-memory only; dies with the process.
+    /// Async job registry, wrapped in [`GuardedJobStore`] so retention and the
+    /// retry-disabled policy apply to every producer. Durability is a property
+    /// of the injected backend only: a host that builds a migrated Postgres
+    /// pool can inject `PostgresJobStore`; the in-repo `hacienda serve` still
+    /// injects `InMemoryJobStore`, so those jobs are lost on restart.
     pub(crate) jobs: Arc<dyn JobStore>,
+    /// Unwrapped backend, kept so [`Self::with_job_retention`] can re-wrap the
+    /// policy without stacking a second guard on top of the first.
+    jobs_inner: Arc<dyn JobStore>,
+    /// Retention policy kept alongside the backend so builder order does not
+    /// matter: swapping the store later reuses the configured policy.
+    job_retention: JobRetention,
     /// Auth middleware configuration. Owns the token resolver and route requirements.
     pub(crate) auth: AuthState,
     /// Per-request resource limits.
@@ -101,15 +112,27 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    /// `jobs` is the repository-backed store chosen by the host. The API adds
+    /// retention and retry policy on top via [`GuardedJobStore`]; it never
+    /// persists a second copy of job state itself.
     pub fn new(
         facade: Arc<HaciendaFacade>,
         jobs: Arc<dyn JobStore>,
         auth: AuthState,
         limits: ApiLimits,
     ) -> Self {
+        let jobs_inner: Arc<dyn JobStore> = jobs;
+        let job_retention = JobRetention::default();
+        let jobs: Arc<dyn JobStore> = Arc::new(GuardedJobStore::with_policy(
+            Arc::clone(&jobs_inner),
+            job_retention,
+            RetryPolicy::Disabled,
+        ));
         Self {
             facade,
             jobs,
+            jobs_inner,
+            job_retention,
             auth,
             limits,
             rag_store: None,
@@ -124,6 +147,34 @@ impl ApiState {
             email_sources: Arc::new(crate::team_email::EmailSourceRegistry::from_env()),
             viewer_capabilities: Arc::new(crate::team_email::ViewerCapabilityStore::default()),
         }
+    }
+
+    /// Replace the injected job repository (e.g. swap an in-memory test store
+    /// for a durable `PostgresJobStore`) while keeping the API's retention and
+    /// retry policy in force. Builder-style so host setup stays composable.
+    #[must_use]
+    pub fn with_job_store(mut self, jobs: Arc<dyn JobStore>) -> Self {
+        self.jobs_inner = jobs;
+        self.jobs = Arc::new(GuardedJobStore::with_policy(
+            Arc::clone(&self.jobs_inner),
+            self.job_retention,
+            RetryPolicy::Disabled,
+        ));
+        self
+    }
+
+    /// Apply a non-default retention policy to the job store without stacking
+    /// a second guard. This is the public seam that makes the policy reachable
+    /// from a host instead of leaving it fixed at the constructor's default.
+    #[must_use]
+    pub fn with_job_retention(mut self, retention: JobRetention) -> Self {
+        self.job_retention = retention;
+        self.jobs = Arc::new(GuardedJobStore::with_policy(
+            Arc::clone(&self.jobs_inner),
+            retention,
+            RetryPolicy::Disabled,
+        ));
+        self
     }
 
     /// Override the server-provisioned email source registry (tests / host config).
@@ -219,5 +270,83 @@ impl ApiState {
     {
         self.rag_egress_allowlist = Some(destinations.into_iter().map(Into::into).collect());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hacienda_core::{
+        auth::{authn::DevTokenResolver, AuthState},
+        jobs::InMemoryJobStore,
+        tenancy::TenantId,
+        HaciendaConfig,
+    };
+
+    /// The retention builder must reach the store the handlers actually use,
+    /// not leave a policy object with no effect on job reads.
+    #[tokio::test]
+    async fn with_job_retention_applies_to_the_handlers_job_store() {
+        let repo: Arc<dyn JobStore> = Arc::new(InMemoryJobStore::new());
+        let state = ApiState::new(
+            Arc::new(HaciendaFacade::new(HaciendaConfig::default()).unwrap()),
+            Arc::clone(&repo),
+            AuthState::new(Arc::new(DevTokenResolver)),
+            ApiLimits::default(),
+        )
+        .with_job_retention(JobRetention::new(0, 10).with_prune_every(1));
+
+        let tenant = TenantId::new("acme");
+        let job = state.jobs.create(&tenant, None).await.unwrap();
+        state
+            .jobs
+            .finish(&tenant, &job.id, "{}".to_owned())
+            .await
+            .unwrap();
+        assert!(
+            state.jobs.get(&tenant, &job.id).await.unwrap().is_none(),
+            "a zero-TTL policy set via the builder must hide the terminal job"
+        );
+    }
+
+    fn state_with(repo: Arc<dyn JobStore>) -> ApiState {
+        ApiState::new(
+            Arc::new(HaciendaFacade::new(HaciendaConfig::default()).unwrap()),
+            repo,
+            AuthState::new(Arc::new(DevTokenResolver)),
+            ApiLimits::default(),
+        )
+    }
+
+    async fn assert_zero_ttl_applied(state: &ApiState) {
+        let tenant = TenantId::new("acme");
+        let job = state.jobs.create(&tenant, None).await.unwrap();
+        state
+            .jobs
+            .finish(&tenant, &job.id, "{}".to_owned())
+            .await
+            .unwrap();
+        assert!(
+            state.jobs.get(&tenant, &job.id).await.unwrap().is_none(),
+            "retention must apply regardless of builder call order"
+        );
+    }
+
+    /// LOW follow-up: `with_job_store` must not silently reset a previously
+    /// configured retention policy.
+    #[tokio::test]
+    async fn job_store_then_retention_builder_order() {
+        let state = state_with(Arc::new(InMemoryJobStore::new()))
+            .with_job_store(Arc::new(InMemoryJobStore::new()));
+        let state = state.with_job_retention(JobRetention::new(0, 10).with_prune_every(1));
+        assert_zero_ttl_applied(&state).await;
+    }
+
+    #[tokio::test]
+    async fn retention_then_job_store_builder_order() {
+        let state = state_with(Arc::new(InMemoryJobStore::new()))
+            .with_job_retention(JobRetention::new(0, 10).with_prune_every(1))
+            .with_job_store(Arc::new(InMemoryJobStore::new()));
+        assert_zero_ttl_applied(&state).await;
     }
 }

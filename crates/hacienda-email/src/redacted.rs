@@ -20,6 +20,46 @@ use crate::pii::PiiEngine;
 use chrono::{DateTime, Utc};
 use hacienda_core::auth::Caller;
 
+/// Special-use top-level domain reserved by RFC 2606 §2. A mailbox under
+/// `.invalid` is guaranteed not to be routable, so a syntactically valid
+/// addr-spec can be written to a redacted RFC822 header without naming a real
+/// mailbox or implying the address can receive mail.
+const SYNTHETIC_ADDRESS_DOMAIN: &str = "hacienda.invalid";
+
+/// Maximum local-part length in octets (RFC 5321 §4.5.3.1.1), commonly
+/// enforced by RFC 5322 addr-spec consumers.
+const SYNTHETIC_LOCAL_MAX: usize = 64;
+
+/// Render an opaque correlation token as a syntactically valid synthetic
+/// address for RFC822 headers.
+///
+/// `metadata_token` returns tenant-keyed tokens shaped `[label:key:base32]`.
+/// The brackets and colons are RFC 5322 `specials`, so writing the token
+/// verbatim into a `From:`/`To:` address (what `to_model` used to do) produces a
+/// malformed addr-spec. This maps the token deterministically into `atext`
+/// only, prefixes it for recognisability, caps it at the local-part limit and
+/// appends the fixed reserved `.invalid` domain. The **plain, unmodified token
+/// is preserved for RAG metadata** by [`RedactedEmailAddress::format`]; this
+/// rendering exists only for the RFC822 model.
+fn synthetic_address(token: &str) -> String {
+    let mut local = String::with_capacity(SYNTHETIC_LOCAL_MAX);
+    local.push_str("tok_");
+    for byte in token.bytes() {
+        if local.len() >= SYNTHETIC_LOCAL_MAX {
+            break;
+        }
+        // '_' is a legal RFC 5322 atext character. Every token byte that is
+        // not alphanumeric (`[`, `]`, `:`, `.`, ...) folds to it, so the output
+        // never contains specials and requires no quoting.
+        let ch = match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => byte as char,
+            _ => '_',
+        };
+        local.push(ch);
+    }
+    format!("{local}@{SYNTHETIC_ADDRESS_DOMAIN}")
+}
+
 /// Opaque, tenant-keyed token for one metadata value.
 ///
 /// The `domain` is folded into the pseudonym category label, so a subject token
@@ -64,7 +104,10 @@ impl RedactedEmailAddress {
     fn to_model(&self) -> EmailAddress {
         EmailAddress {
             name: self.name.clone(),
-            address: self.address.clone(),
+            // RFC822 headers need a syntactically valid addr-spec. The raw
+            // `[label:key:base32]` token is not one, so wrap it in a reserved
+            // `.invalid` domain; RAG keeps the plain token via `format`.
+            address: synthetic_address(&self.address),
         }
     }
 
@@ -231,5 +274,66 @@ mod tests {
             hacienda_core::tenancy::TenantId::default_tenant(),
             CapabilitySet::new([Capability::DocumentsProcess]),
         )
+    }
+
+    /// A raw metadata token is not a legal RFC 5322 addr-spec: `[`, `]` and
+    /// `:` are `specials`. The generated address must be syntax-valid and end
+    /// in the reserved `.invalid` domain, while staying deterministic so the
+    /// plain token still correlates with it.
+    #[test]
+    fn synthetic_address_is_syntactically_valid_and_reserved() {
+        let token = "[email.address:k1:JBSWY3DPEHPK3PXP]";
+        let address = synthetic_address(token);
+
+        let (local, domain) = address.split_once('@').expect("single @ separator");
+        assert_eq!(domain, SYNTHETIC_ADDRESS_DOMAIN);
+        assert!(domain.ends_with(".invalid"));
+        assert!(local.starts_with("tok_"));
+        assert!(local.len() <= SYNTHETIC_LOCAL_MAX);
+        assert!(
+            local
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "local part must contain only RFC 5322 atext: {local}"
+        );
+        assert!(!address.contains('['));
+        assert!(!address.contains(']'));
+        assert!(!address.contains(':'));
+
+        // Deterministic for the same token, distinct for a different one.
+        assert_eq!(address, synthetic_address(token));
+        assert_ne!(
+            address,
+            synthetic_address("[email.address:k1:AAAAAAAAAAAAAAAA]")
+        );
+    }
+
+    /// Long tokens must not overflow the 64-octet local-part limit.
+    #[test]
+    fn synthetic_address_local_part_is_bounded() {
+        let long = format!("[email.address:k1:{}]", "A".repeat(500));
+        let address = synthetic_address(&long);
+        let (local, domain) = address.split_once('@').expect("single @ separator");
+        assert_eq!(local.len(), SYNTHETIC_LOCAL_MAX);
+        assert_eq!(domain, SYNTHETIC_ADDRESS_DOMAIN);
+    }
+
+    /// RAG metadata keeps the plain correlation token; only the RFC822 model
+    /// receives a syntactically valid synthetic address.
+    #[test]
+    fn rag_keeps_plain_token_while_rfc822_model_uses_synthetic_address() {
+        let token = "[email.address:k1:JBSWY3DPEHPK3PXP]";
+        let address = RedactedEmailAddress {
+            name: None,
+            address: token.to_string(),
+        };
+
+        let rag_text = RedactedEmailAddress::format(std::slice::from_ref(&address));
+        assert_eq!(rag_text, token, "RAG must keep the plain correlation token");
+
+        let model = address.to_model();
+        assert_ne!(model.address, token);
+        assert!(model.address.ends_with("@hacienda.invalid"));
+        assert!(!model.address.contains(':'));
     }
 }

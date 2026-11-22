@@ -8,12 +8,6 @@ use futures::executor::block_on;
 use hacienda_backend::{
     Backend, BackendDocument, RedactedXbergDocument, TrustedEditorRevisionIssuer,
 };
-use hacienda_email::native::{
-    AccountProjection, EmailSearchHit, EmailSessionService, JobProjection, MailboxProjection,
-    MessageProjection, NativeEmailError, NativeMessageViewer, RegisterAccountRequest,
-    ViewerCapabilityProjection, ViewerOpenResponse,
-};
-use hacienda_email::pii::PiiEngine;
 use hacienda_core::{
     audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction},
     editor_projection::EditorEnvelope,
@@ -22,6 +16,12 @@ use hacienda_core::{
     tenancy::TenantId,
     HaciendaConfig,
 };
+use hacienda_email::native::{
+    AccountProjection, EmailSearchHit, EmailSessionService, JobProjection, MailboxProjection,
+    MessageProjection, NativeEmailError, NativeMessageViewer, RegisterAccountRequest,
+    ViewerCapabilityProjection, ViewerOpenResponse,
+};
+use hacienda_email::pii::PiiEngine;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -39,10 +39,9 @@ use zeroize::Zeroizing;
 mod team_email;
 use team_email::{
     TeamAcceptedJob, TeamAuditResponse, TeamEmailClient, TeamEmailError, TeamIngestRequest,
-    TeamJobRequest, TeamJobStatusDto, TeamSearchRequest, TeamSearchResponse,
-    TeamSourcesResponse, TeamViewerActionRequest,
-    TeamViewerCapabilityDto, TeamViewerCapabilityRequest, TeamViewerProjectionDto,
-    TeamViewerRevealResultDto,
+    TeamJobRequest, TeamJobStatusDto, TeamSearchRequest, TeamSearchResponse, TeamSourcesResponse,
+    TeamViewerActionRequest, TeamViewerCapabilityDto, TeamViewerCapabilityRequest,
+    TeamViewerProjectionDto, TeamViewerRevealResultDto,
 };
 
 use hacienda_client_core::{
@@ -180,10 +179,49 @@ const LOCAL_EMBEDDING_COLLECTION: &str = "documents-multilingual-v1";
 // `hacienda-model-assets`. Runtime validation deliberately does not trust a
 // model-provided manifest; it checks the pinned bytes and then the architecture.
 
+/// Why a local NER model could not be used. Detail stays inside the native
+/// process; every host surface maps this to a generic, content-free message.
 #[derive(Debug)]
 enum NerModelError {
+    /// No model directory could be resolved from configuration or app data.
     Unavailable,
+    /// The resolved model failed a manifest or architecture check.
     Invalid,
+    /// Pinned asset verification failed. Keep the originating error and the
+    /// model directory so diagnostics retain operation, path, source and
+    /// recovery guidance instead of collapsing to a bare `Invalid`.
+    VerificationFailed {
+        model_id: &'static str,
+        model_dir: PathBuf,
+        source: hacienda_model_assets::ModelAssetsError,
+    },
+}
+
+impl std::fmt::Display for NerModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("local NER model is unavailable"),
+            Self::Invalid => f.write_str("local NER model failed validation"),
+            Self::VerificationFailed {
+                model_id,
+                model_dir,
+                source,
+            } => write!(
+                f,
+                "verifying pinned model '{model_id}' at {}: {source}",
+                model_dir.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NerModelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::VerificationFailed { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 fn resolve_ner_model_dir(app_data_dir: Option<&Path>) -> Result<PathBuf, NerModelError> {
@@ -203,10 +241,14 @@ fn validate_ner_model_assets(model_dir: &Path) -> Result<(), NerModelError> {
         return Err(NerModelError::Unavailable);
     }
     validate_optional_manifest_identity(model_dir)?;
-    hacienda_model_assets::verify_dir(PINNED_NER_MODEL_ID, model_dir).map_err(|error| {
+    if let Err(error) = hacienda_model_assets::verify_dir(PINNED_NER_MODEL_ID, model_dir) {
         eprintln!("[ner] pinned model asset verification failed: {error}");
-        NerModelError::Invalid
-    })?;
+        return Err(NerModelError::VerificationFailed {
+            model_id: PINNED_NER_MODEL_ID,
+            model_dir: model_dir.to_owned(),
+            source: error,
+        });
+    }
     validate_ner_model_architecture(model_dir)
 }
 
@@ -223,8 +265,7 @@ fn validate_optional_manifest_identity(model_dir: &Path) -> Result<(), NerModelE
     )
     .map_err(|_| NerModelError::Invalid)?;
     if manifest.get("model_id").and_then(serde_json::Value::as_str) != Some(PINNED_NER_MODEL_ID)
-        || manifest.get("revision").and_then(serde_json::Value::as_str)
-            != Some(expected_revision)
+        || manifest.get("revision").and_then(serde_json::Value::as_str) != Some(expected_revision)
     {
         return Err(NerModelError::Invalid);
     }
@@ -499,7 +540,11 @@ struct LocalFullDocumentService {
 }
 
 impl LocalFullDocumentService {
-    async fn new(root: &Path, audit: Arc<dyn AuditStore>, parts: Arc<LocalRuntimeParts>) -> Result<Self, String> {
+    async fn new(
+        root: &Path,
+        audit: Arc<dyn AuditStore>,
+        parts: Arc<LocalRuntimeParts>,
+    ) -> Result<Self, String> {
         let facade = Arc::clone(&parts.facade);
         let issuer = Arc::clone(&parts.issuer);
         let backend = parts.backend.clone();
@@ -867,9 +912,7 @@ impl LocalFullDocumentState {
                 .map(Arc::clone)
                 .ok_or_else(|| "LocalFull audit store is unavailable".to_owned())?;
             let parts = self.runtime.parts().await?;
-            *service = Some(
-                LocalFullDocumentService::new(&self.root, audit, parts).await?,
-            );
+            *service = Some(LocalFullDocumentService::new(&self.root, audit, parts).await?);
         }
         Ok(service)
     }
@@ -927,12 +970,8 @@ impl LocalFullEmailState {
             // Coerce the shared concrete store to the trait object the email
             // service consumes; it is the SAME store instance documents use.
             let rag_store: Arc<dyn RagStore> = parts.store.clone();
-            let email = EmailSessionService::new(
-                pii,
-                rag_store,
-                audit,
-                Arc::new(NativeEmailMessageViewer),
-            );
+            let email =
+                EmailSessionService::new(pii, rag_store, audit, Arc::new(NativeEmailMessageViewer));
             // Accounts are provisioned by the host (env/config), never by the
             // renderer: no path, OAuth token or password crosses IPC.
             if let Ok(root) = env::var("HACIENDA_LOCAL_EMAIL_MAILDIR") {
@@ -2437,7 +2476,11 @@ async fn email_accounts(
         .service()
         .await
         .map_err(|_| NativeEmailError::Unavailable)?;
-    Ok(service.as_ref().ok_or(NativeEmailError::Unavailable)?.accounts().await)
+    Ok(service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .accounts()
+        .await)
 }
 
 #[tauri::command(rename = "email-mailboxes")]
@@ -3276,6 +3319,54 @@ mod tests {
             |_config, _pseudonymiser| panic!("detector loader must not run"),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn verification_failure_retains_model_dir_and_verifier_context() {
+        use std::error::Error as _;
+
+        let model_dir = test_model_dir("verification-context");
+        // The pinned fastino entry expects a 252-byte config.json with a fixed
+        // digest. Wrong bytes make `verify_dir` fail before any detector loads.
+        std::fs::write(model_dir.join("config.json"), b"tampered").expect("tampered config");
+
+        let err = validate_ner_model_assets(&model_dir)
+            .expect_err("a tampered pinned asset must fail validation");
+        let detail = err.to_string();
+        match &err {
+            NerModelError::VerificationFailed {
+                model_id,
+                model_dir: reported_dir,
+                source,
+            } => {
+                assert_eq!(*model_id, PINNED_NER_MODEL_ID);
+                assert_eq!(reported_dir, &model_dir);
+                assert!(detail.contains(PINNED_NER_MODEL_ID), "{detail}");
+                assert!(
+                    detail.contains(&model_dir.display().to_string()),
+                    "{detail}"
+                );
+                assert!(err.source().is_some(), "the verifier error stays reachable");
+                let source_detail = source.to_string();
+                assert!(source_detail.contains("config.json"), "{source_detail}");
+                assert!(source_detail.contains("re-download"), "{source_detail}");
+            }
+            other => panic!("expected a contextual verification error, got {other:?}"),
+        }
+
+        // Host callers still collapse this to the same generic, content-free
+        // rejection; the detail never reaches the UI.
+        let rejected = HaciendaLocalRedactor::from_key_store_with_runtime(
+            Arc::new(TestKeyStore::default()),
+            &model_dir,
+            validate_ner_model_assets,
+            |_config, _pseudonymiser| panic!("detector loader must not run"),
+        )
+        .err()
+        .expect("verification must fail closed");
+        assert!(!rejected.to_string().contains("config.json"));
+
+        let _ = std::fs::remove_dir_all(&model_dir);
     }
 
     #[test]

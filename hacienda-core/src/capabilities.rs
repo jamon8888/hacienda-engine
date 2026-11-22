@@ -1,5 +1,6 @@
 //! Shared, safe capability contract used by Hacienda's public surfaces.
 
+use crate::pii::ner::NerRuntimeState;
 use serde::Serialize;
 use std::sync::OnceLock;
 
@@ -34,11 +35,17 @@ pub struct CapabilityReport {
 }
 
 /// Compose the common capability report from surface-specific runtime checks.
+///
+/// `ner` must come from the detector the reporting surface actually uses. Passing
+/// `NerRuntimeState::unavailable()` is honest for a surface that never built a
+/// facade; reading a process-global model id here would let one surface's model
+/// leak into another surface's report.
 pub fn report(
     version: &'static str,
     embedding_compiled: bool,
     onnx_runtime: CapabilityStatus,
     service_ready: bool,
+    ner: NerRuntimeState,
 ) -> CapabilityReport {
     let embedding_migration = CapabilityStatus {
         name: "embedding_migration",
@@ -55,7 +62,7 @@ pub fn report(
         },
     };
 
-    let ner_model_id = crate::pii::ner::loaded_model_id().map(str::to_owned);
+    let ner_model_id = ner.model_id.as_ref().map(|id| id.to_string());
     let ner_model_compiled = cfg!(any(
         all(feature = "ner-candle", not(target_arch = "wasm32")),
         all(feature = "ner-candle-wasm", target_arch = "wasm32"),
@@ -63,11 +70,13 @@ pub fn report(
     let ner_model = CapabilityStatus {
         name: "ner_model",
         compiled: ner_model_compiled,
-        runtime_ready: ner_model_id.is_some(),
-        reason: if ner_model_id.is_some() {
+        // A privately fine-tuned/unpinned model has no id but is genuinely loaded,
+        // so readiness follows the detector state, not `model_id.is_some()`.
+        runtime_ready: ner.model_loaded,
+        reason: if ner.model_loaded {
             None
         } else if ner_model_compiled {
-            Some("regex-only: configure [pii.model] model_id and model_dir to load GLiNER2")
+            Some("regex-only: configure [pii.model] model_dir to load GLiNER2")
         } else {
             Some("rebuild with ner-candle (or ner-candle-wasm) to enable model-backed NER")
         },
@@ -205,6 +214,7 @@ mod tests {
                 reason: None,
             },
             false,
+            NerRuntimeState::unavailable(),
         );
 
         assert_eq!(report.embedding_mode, "real");
@@ -227,6 +237,7 @@ mod tests {
                 reason: None,
             },
             true,
+            NerRuntimeState::unavailable(),
         );
         let status = report
             .capabilities
@@ -234,9 +245,63 @@ mod tests {
             .find(|capability| capability.name == "ner_model")
             .expect("ner_model capability must be reported");
         assert_eq!(status.name, "ner_model");
-        // No model has been loaded in this test process: regex-only, reported
-        // honestly instead of echoing a configuration that may never have worked.
+        // This surface has no detector: regex-only, reported honestly instead of
+        // echoing a configuration that may never have worked.
         assert!(!status.runtime_ready);
         assert!(report.ner_model_id.is_none());
+    }
+
+    #[test]
+    fn report_marks_an_unpinned_loaded_detector_ready_without_an_id() {
+        let report = report(
+            "test",
+            false,
+            CapabilityStatus {
+                name: "onnx_runtime",
+                compiled: false,
+                runtime_ready: false,
+                reason: None,
+            },
+            true,
+            NerRuntimeState::loaded(None),
+        );
+
+        assert!(report.ner_model.runtime_ready);
+        assert!(report.ner_model_id.is_none());
+        assert!(report.ner_model.reason.is_none());
+    }
+
+    #[test]
+    fn report_uses_each_surfaces_own_loaded_model_identity() {
+        let first = report(
+            "test",
+            false,
+            CapabilityStatus {
+                name: "onnx_runtime",
+                compiled: false,
+                runtime_ready: false,
+                reason: None,
+            },
+            true,
+            NerRuntimeState::loaded(Some("org/first-model".into())),
+        );
+        // A second surface loading a different verified model must be reported
+        // with that model's identity, not the first one's.
+        let second = report(
+            "test",
+            false,
+            CapabilityStatus {
+                name: "onnx_runtime",
+                compiled: false,
+                runtime_ready: false,
+                reason: None,
+            },
+            true,
+            NerRuntimeState::loaded(Some("org/second-model".into())),
+        );
+
+        assert_eq!(first.ner_model_id.as_deref(), Some("org/first-model"));
+        assert_eq!(second.ner_model_id.as_deref(), Some("org/second-model"));
+        assert!(first.ner_model.runtime_ready && second.ner_model.runtime_ready);
     }
 }

@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod backend;
 pub mod config;
 pub mod error;
+pub mod mime;
 pub mod models;
 pub mod native;
 pub mod ner;
