@@ -1229,7 +1229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hash-chained audit log with blake3
 - JWT authentication for API
 
-### Security
+### Email and viewer security
 
 - **Email results no longer carry raw PII, filenames, envelope ids or backend
   diagnostics on the wire.** The synchronous `POST /v1/email/process` response
