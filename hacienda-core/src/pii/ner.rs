@@ -600,7 +600,7 @@ mod tests {
             },
         );
 
-        assert_eq!(result.unwrap_err(), "digest mismatch");
+        assert_eq!(result.err(), Some("digest mismatch"));
         assert_eq!(
             loads.load(Ordering::SeqCst),
             0,
@@ -635,6 +635,6 @@ mod tests {
 
         assert_eq!(verify_step, 0);
         assert_eq!(load_step, 1, "the uncached loader must run exactly once");
-        assert_eq!(backend.detect("Alice").await.unwrap().len(), 1);
+        assert_eq!(backend.detect("Alice", &[]).await.unwrap().len(), 1);
     }
 }
