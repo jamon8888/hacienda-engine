@@ -11,7 +11,12 @@
 /** @typedef {{ tokenized: TokenizedText, references: OpaqueTokenReference[] }} OpenLocalViewerRequest */
 /** @typedef {{ provider_send_enabled: boolean, detector: "local_model" | "regex_only" }} LocalPiiStatus */
 /** @typedef {{ schema_version: string, document_id: string, version_id: string, source: { mime_type: string, original_ref: string, viewer_ref: string, capability_ref: string }, metadata_token_only: Record<string, unknown>, editor: Record<string, unknown>, search_projection: Record<string, unknown>, provenance: Record<string, unknown> }} DocumentProjection */
-/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { query: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } } | { token: string } | { job_id: string } | { capability_ref: string }} InvokePayload */
+/** @typedef {{ source_ref: string, mailbox_ref: string, operation: { operation: string }, privacy_mode?: string, dossier_id?: string }} TeamIngestRequest */
+/** @typedef {{ job_id: string }} TeamJobRequest */
+/** @typedef {{ source_ref: string, mailbox_ref: string, query_text: string, top_k?: number, dossier_id?: string }} TeamSearchRequest */
+/** @typedef {{ document_ref: string, email_ref: string, token_ref: string, attachment_ref?: string, purpose?: string }} TeamViewerCapabilityRequest */
+/** @typedef {{ capability_ref: string }} TeamViewerActionRequest */
+/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { query: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } | TeamIngestRequest | TeamJobRequest | TeamSearchRequest | TeamViewerCapabilityRequest | TeamViewerActionRequest } | { token: string } | { job_id: string } | { capability_ref: string }} InvokePayload */
 /** @typedef {{ title_token_only: string, content_token_only: string, ordinal: number, score: number }} LocalSearchResult */
 /** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "install-local-rag-model" | "search-local-documents" | "load-document" | "save-document" | "team-email-sources" | "team-email-ingest" | "team-email-job" | "team-email-job-result" | "team-email-search" | "team-viewer-capability" | "team-viewer-reveal" | "team-viewer-open" | "team-viewer-audit", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
 /** @typedef {{ sequence: number, text: string, references: OpaqueTokenReference[] }} TokenizedChunk */
@@ -713,6 +718,7 @@ export function createRendererBridge(invoke) {
       assertTeamOpaqueRef(mailboxRef, "team email mailbox reference");
       if (!TEAM_INGEST_OPERATIONS.includes(operation)) throw new Error("Invalid team email operation");
       // Build the payload from an allowlist, never by forwarding the caller's object.
+      /** @type {TeamIngestRequest} */
       const request = {
         source_ref: sourceRef,
         mailbox_ref: mailboxRef,
@@ -743,6 +749,7 @@ export function createRendererBridge(invoke) {
           [...queryText].length > 16_000) {
         throw new Error("Invalid team email search query");
       }
+      /** @type {TeamSearchRequest} */
       const request = {
         source_ref: sourceRef,
         mailbox_ref: mailboxRef,
@@ -762,6 +769,7 @@ export function createRendererBridge(invoke) {
       assertTeamOpaqueRef(documentRef, "team document reference");
       assertTeamOpaqueRef(emailRef, "team email reference");
       assertTeamTokenRef(tokenRef, "team token reference");
+      /** @type {TeamViewerCapabilityRequest} */
       const request = {
         document_ref: documentRef,
         email_ref: emailRef,
