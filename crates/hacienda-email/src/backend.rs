@@ -129,16 +129,17 @@ mod convert {
 
     /// Parse raw RFC 5322 bytes into the plugin's simplified message model.
     pub(crate) fn message(raw: &[u8], mailbox: &str, id: &str) -> Result<EmailMessage> {
-        let parsed = mail_parser::MessageParser::default()
-            .parse(raw)
-            .ok_or_else(|| EmailError::Backend(crate::mime::MIME_PARSE_ERROR.to_string()))?;
+        // Shared MIME entrypoint: the resource-policy byte limit is enforced
+        // before the parser scans sender-controlled input, and every rejection
+        // carries a fixed operation, byte count, category and recovery guidance.
+        let parsed = crate::mime::parse_message(raw)?;
 
         // MIME-tree-aware extraction: walk the RFC 2045 part tree so nested
         // multiparts and message/rfc822 bodies are collected, and attachment
         // parts (disposition, filename or non-text media type) never end up in
         // the body. This replaces the flat `body_text(0)` / `body_html(0)`
         // heuristic that silently dropped every body part but the first.
-        let mime = crate::mime::parse_message_parts(&parsed);
+        let mime = crate::mime::parse_message_parts(&parsed)?;
         let text_body = mime.text_body;
         let html_body = mime.html_body;
         let attachments = mime.attachments;

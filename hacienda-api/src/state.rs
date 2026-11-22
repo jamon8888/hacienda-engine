@@ -168,6 +168,10 @@ impl ApiState {
     /// from a host instead of leaving it fixed at the constructor's default.
     #[must_use]
     pub fn with_job_retention(mut self, retention: JobRetention) -> Self {
+        // Clamp before storing as well as passing down: a struct literal can
+        // carry `prune_every: 0`, and the stored copy is reused by a later
+        // `with_job_store` call.
+        let retention = retention.clamped();
         self.job_retention = retention;
         self.jobs = Arc::new(GuardedJobStore::with_policy(
             Arc::clone(&self.jobs_inner),
@@ -347,6 +351,19 @@ mod tests {
         let state = state_with(Arc::new(InMemoryJobStore::new()))
             .with_job_retention(JobRetention::new(0, 10).with_prune_every(1))
             .with_job_store(Arc::new(InMemoryJobStore::new()));
+        assert_zero_ttl_applied(&state).await;
+    }
+
+    /// A struct literal bypasses the constructor's clamping; the builder must
+    /// normalise it so the guard cannot divide by zero on the first write.
+    #[tokio::test]
+    async fn struct_literal_retention_is_clamped_by_builder() {
+        let state =
+            state_with(Arc::new(InMemoryJobStore::new())).with_job_retention(JobRetention {
+                terminal_ttl_secs: 0,
+                max_terminal_per_tenant: 0,
+                prune_every: 0,
+            });
         assert_zero_ttl_applied(&state).await;
     }
 }

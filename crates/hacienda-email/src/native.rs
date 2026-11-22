@@ -670,10 +670,17 @@ impl EmailSessionService {
         let revealed = vec![(token.to_owned(), Zeroizing::new(plaintext))];
         let message = self.message(message_ref).await?;
         let path = message.original_path.clone();
-        self.viewer
-            .open_message(&path, &revealed)
+        // The native viewer call is blocking (it launches the OS viewer). Move
+        // it off the async runtime so a slow viewer cannot stall a worker or
+        // delay other email commands sharing this service. The viewer handle,
+        // path and revealed plaintext move into the task as owned values; the
+        // plaintext is dropped inside that task and never crosses back to the
+        // async caller, the renderer or any log surface.
+        let viewer = Arc::clone(&self.viewer);
+        tokio::task::spawn_blocking(move || viewer.open_message(&path, &revealed))
+            .await
+            .map_err(|_| NativeEmailError::Unavailable)?
             .map_err(|_| NativeEmailError::Unavailable)?;
-        drop(revealed);
         if let Some(capability) = self.capabilities.lock().await.get_mut(capability_ref) {
             capability.consumed = true;
         }

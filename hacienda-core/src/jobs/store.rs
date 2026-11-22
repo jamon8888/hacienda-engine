@@ -159,6 +159,21 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Build a context-rich error for a poisoned in-memory lock.
+///
+/// Carries the operation, the tenant/job identifiers, the root cause and the
+/// recovery step. Job payloads (`result_json`/`error`/`progress_json`) are
+/// deliberately absent — they can hold customer data and are never needed to
+/// diagnose a mutex poison.
+fn lock_poisoned(operation: &str, tenant: &TenantId, id: &str) -> JobError {
+    JobError::Internal(format!(
+        "{operation}: job {id} (tenant {tenant}): root cause: the jobs mutex was poisoned \
+         by a panic in a previous holder; next step: recreate the store (restart the \
+         process) because poisoned in-memory state cannot be reused safely",
+        tenant = tenant.as_str()
+    ))
+}
+
 #[async_trait]
 impl JobStore for InMemoryJobStore {
     async fn create(&self, tenant: &TenantId, owner: Option<String>) -> Result<Job, JobError> {
@@ -179,7 +194,7 @@ impl JobStore for InMemoryJobStore {
         let mut guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("create", tenant, &id))?;
         guard.insert(id, job.clone());
         Ok(job)
     }
@@ -188,7 +203,7 @@ impl JobStore for InMemoryJobStore {
         let guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("get", tenant, id))?;
         // Matching on id && tenant together, rather than looking up by id and checking
         // tenant after, means a cross-tenant id falls straight into the same `None` a
         // nonexistent id produces — the not-found-not-forbidden property (D-S1b-1) falls
@@ -209,7 +224,7 @@ impl JobStore for InMemoryJobStore {
         let mut guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("transition", tenant, id))?;
         let job = guard
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
@@ -235,7 +250,7 @@ impl JobStore for InMemoryJobStore {
         let mut guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("finish", tenant, id))?;
         let job = guard
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
@@ -255,7 +270,7 @@ impl JobStore for InMemoryJobStore {
         let mut guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("fail", tenant, id))?;
         let job = guard
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
@@ -278,7 +293,7 @@ impl JobStore for InMemoryJobStore {
         let mut guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("update_progress", tenant, id))?;
         let job = guard
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
@@ -298,10 +313,12 @@ impl JobStore for InMemoryJobStore {
         tenant: &TenantId,
         filter: Option<JobStatus>,
     ) -> Result<Vec<Job>, JobError> {
+        // `list` is tenant-wide, so there is no single job id to report; the
+        // sentinel keeps the error's job context explicit rather than blank.
         let guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("list", tenant, "<all>"))?;
         let mut jobs: Vec<Job> = guard
             .values()
             .filter(|j| {
@@ -326,7 +343,7 @@ impl JobStore for InMemoryJobStore {
         let mut guard = self
             .jobs
             .lock()
-            .map_err(|_| JobError::Internal("lock poisoned".into()))?;
+            .map_err(|_| lock_poisoned("delete", tenant, id))?;
         // Check tenant *before* removing: `HashMap::remove` would otherwise
         // delete another tenant's row before the filter could reject it. A
         // cross-tenant delete is a silent no-op, indistinguishable from a
@@ -664,5 +681,152 @@ mod tests {
             .unwrap();
         assert_eq!(cross.updated_at, first_fail.updated_at);
         assert_eq!(cross.status, JobStatus::Failed);
+    }
+
+    /// Both the first terminal write and a duplicate must return the progress
+    /// payload written while the job was `Running`, alongside the original
+    /// result/reason and status. A terminal response with `progress_json: None`
+    /// would hide the last progress tick from a poller reading the same job.
+    #[tokio::test]
+    async fn terminal_writes_keep_progress_json_and_result() {
+        let store = InMemoryJobStore::new();
+        let progress = r#"{"page":3,"chunks":9}"#.to_owned();
+
+        let succeeded = store.create(&t(), None).await.unwrap();
+        store
+            .transition(&t(), &succeeded.id, JobStatus::Queued, JobStatus::Running)
+            .await
+            .unwrap();
+        store
+            .update_progress(&t(), &succeeded.id, progress.clone())
+            .await
+            .unwrap();
+
+        let first = store
+            .finish(&t(), &succeeded.id, r#"{"ok":true}"#.to_owned())
+            .await
+            .unwrap();
+        assert_eq!(first.status, JobStatus::Succeeded);
+        assert_eq!(first.result_json.as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(first.progress_json.as_deref(), Some(progress.as_str()));
+
+        let again = store
+            .finish(&t(), &succeeded.id, r#"{"ok":false}"#.to_owned())
+            .await
+            .unwrap();
+        assert_eq!(again.status, JobStatus::Succeeded);
+        assert_eq!(again.result_json.as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(again.progress_json.as_deref(), Some(progress.as_str()));
+
+        let failed = store.create(&t(), None).await.unwrap();
+        store
+            .transition(&t(), &failed.id, JobStatus::Queued, JobStatus::Running)
+            .await
+            .unwrap();
+        store
+            .update_progress(&t(), &failed.id, progress.clone())
+            .await
+            .unwrap();
+
+        let first_fail = store
+            .fail(&t(), &failed.id, "first".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(first_fail.status, JobStatus::Failed);
+        assert_eq!(first_fail.error.as_deref(), Some("first"));
+        assert_eq!(first_fail.progress_json.as_deref(), Some(progress.as_str()));
+
+        let again = store
+            .fail(&t(), &failed.id, "second".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(again.status, JobStatus::Failed);
+        assert_eq!(again.error.as_deref(), Some("first"));
+        assert_eq!(again.progress_json.as_deref(), Some(progress.as_str()));
+    }
+
+    /// Every in-memory lock site must return a contextual error, not a bare
+    /// "lock poisoned" string. Poison the mutex once on a throwaway clone,
+    /// then assert operation/tenant/job/root-cause/recovery on all eight verbs.
+    #[tokio::test]
+    async fn all_lock_sites_report_contextual_poison_errors() {
+        let store = Arc::new(InMemoryJobStore::new());
+        let job = store.create(&t(), None).await.unwrap();
+        let id = job.id.clone();
+        // Give the job a distinctive payload; it must not appear in any error.
+        let secret = "CUSTOMER-PAYLOAD-MUST-NOT-LEAK";
+        store
+            .transition(&t(), &id, JobStatus::Queued, JobStatus::Running)
+            .await
+            .unwrap();
+        store
+            .update_progress(&t(), &id, secret.to_owned())
+            .await
+            .unwrap();
+
+        let poison_target = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target.jobs.lock().unwrap();
+            panic!("poison the jobs mutex on purpose");
+        })
+        .join();
+
+        // `create` and `list` are not addressed by a caller-supplied job id,
+        // so only the other six sites assert an echoed id.
+        let checks = [
+            ("create", store.create(&t(), None).await.err(), None),
+            ("get", store.get(&t(), &id).await.err(), Some(id.as_str())),
+            (
+                "transition",
+                store
+                    .transition(&t(), &id, JobStatus::Queued, JobStatus::Running)
+                    .await
+                    .err(),
+                Some(id.as_str()),
+            ),
+            (
+                "finish",
+                store.finish(&t(), &id, "{}".to_owned()).await.err(),
+                Some(id.as_str()),
+            ),
+            (
+                "fail",
+                store.fail(&t(), &id, "boom".to_owned()).await.err(),
+                Some(id.as_str()),
+            ),
+            (
+                "update_progress",
+                store
+                    .update_progress(&t(), &id, "{}".to_owned())
+                    .await
+                    .err(),
+                Some(id.as_str()),
+            ),
+            ("list", store.list(&t(), None).await.err(), None),
+            (
+                "delete",
+                store.delete(&t(), &id).await.err(),
+                Some(id.as_str()),
+            ),
+        ];
+
+        for (operation, err, job_id) in checks {
+            let err = err.expect("a poisoned store must reject every operation");
+            let message = err.to_string();
+            assert!(message.contains(operation), "operation missing: {message}");
+            assert!(message.contains(t().as_str()), "tenant missing: {message}");
+            if let Some(job_id) = job_id {
+                assert!(message.contains(job_id), "job id missing: {message}");
+            }
+            assert!(message.contains("panic"), "root cause missing: {message}");
+            assert!(
+                message.contains("restart"),
+                "recovery step missing: {message}"
+            );
+            assert!(
+                !message.contains(secret),
+                "payload leaked into error: {message}"
+            );
+        }
     }
 }

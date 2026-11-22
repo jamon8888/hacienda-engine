@@ -19,6 +19,21 @@
 //!   `source_ref` without them could duplicate RAG writes under a different
 //!   tenant/principal binding. Until that contract exists, a terminal job is
 //!   never re-queueable.
+//!
+//! # Backend contract: atomic first-terminal-write
+//!
+//! The guard reads a job before `finish`/`fail` so a duplicate terminal write
+//! returns the *original* row — in particular its original `updated_at`, which
+//! is the retention clock. That read is a fast path, **not** the guarantee:
+//! every injected [`JobStore`] backend MUST make the first terminal write win
+//! atomically. A second `finish`/`fail` — or a `transition` into a terminal
+//! state for an already-terminal row — must be a no-op that leaves the status,
+//! result/error and `updated_at` untouched. Only the backend can enforce this
+//! against concurrent callers (the in-repo backends do so under their store
+//! lock / row-level status predicate); a check-then-write at this layer cannot.
+//! Without it, two racing workers could both observe a non-terminal row and
+//! both refresh `updated_at`, extending retention indefinitely. Hosts swapping
+//! in a custom backend are responsible for upholding this contract.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -103,6 +118,22 @@ impl JobRetention {
         }
     }
 
+    /// Clamp invalid field values to their safe minimums.
+    ///
+    /// The fields are public so hosts can build a policy with a struct literal,
+    /// bypassing [`Self::new`] and [`Self::with_prune_every`]. The guard
+    /// re-clamps at the point of use so a `prune_every` of `0` can never reach
+    /// the modulo in `maybe_prune` (which would panic) and a zero cap can never
+    /// delete the job that was just finished.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            terminal_ttl_secs: self.terminal_ttl_secs.max(0),
+            max_terminal_per_tenant: self.max_terminal_per_tenant.max(1),
+            prune_every: self.prune_every.max(1),
+        }
+    }
+
     /// Override the amortisation interval. `0` is clamped to `1` (prune on
     /// every write), which is what the tests use to make reclamation immediate.
     #[must_use]
@@ -150,6 +181,11 @@ impl GuardedJobStore {
 
     /// Wrap a store with explicit policies (used by the tests below and by
     /// hosts that need a different retention window).
+    ///
+    /// `retention` is re-clamped here rather than trusted from the caller:
+    /// a struct literal can set `prune_every: 0`, which would otherwise divide
+    /// by zero in [`Self::maybe_prune`]. Backends must also uphold the atomic
+    /// first-terminal-write contract described in the module documentation.
     pub fn with_policy(
         inner: Arc<dyn JobStore>,
         retention: JobRetention,
@@ -157,7 +193,7 @@ impl GuardedJobStore {
     ) -> Self {
         Self {
             inner,
-            retention,
+            retention: retention.clamped(),
             retry,
             prune_writes: Mutex::new(HashMap::new()),
         }
@@ -215,11 +251,18 @@ impl GuardedJobStore {
             .map(|job| job.id.clone())
             .collect();
 
-        // `list` is oldest-first; counting from the newest end keeps exactly
-        // the most recent `max_terminal_per_tenant` terminal jobs.
+        // `list` is oldest-first by *creation* time; counting from the newest
+        // end keeps exactly the most recent `max_terminal_per_tenant` terminal
+        // jobs. Expired rows are already in `to_delete` and MUST NOT consume a
+        // cap slot: a long-running job can be created before an expired short
+        // one yet finish later, so letting the expired row count here would
+        // push that still-fresh job over the cap and delete it.
         let mut kept = 0usize;
         for job in jobs.iter().rev() {
             if !matches!(job.status, JobStatus::Succeeded | JobStatus::Failed) {
+                continue;
+            }
+            if self.retention.is_expired(job, now) {
                 continue;
             }
             kept += 1;
@@ -252,12 +295,12 @@ impl JobStore for GuardedJobStore {
     }
 
     async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Job>, JobError> {
+        let job = self.inner.get(tenant, id).await?;
+        // Sample after the backend call so a job that crosses the TTL boundary
+        // *while* a slow backend is reading it is correctly hidden. One sample
+        // for the whole (here single) result set keeps the boundary consistent.
         let now = Utc::now();
-        Ok(self
-            .inner
-            .get(tenant, id)
-            .await?
-            .filter(|job| !self.retention.is_expired(job, now)))
+        Ok(job.filter(|job| !self.retention.is_expired(job, now)))
     }
 
     async fn transition(
@@ -276,9 +319,31 @@ impl JobStore for GuardedJobStore {
         if self.retry == RetryPolicy::Disabled
             && matches!(from, JobStatus::Succeeded | JobStatus::Failed)
         {
-            return Err(JobError::RetryDisabled { id: id.to_owned() });
+            // The policy must not mask a broken CAS. Do a tenant-scoped,
+            // read-only lookup first so a missing id still reports NotFound and
+            // a wrong `from` still reports StatusMismatch — exactly what the
+            // backend would have returned. Only a genuine terminal CAS gets
+            // the policy error. No write is issued on this path.
+            match self.inner.get(tenant, id).await? {
+                None => return Err(JobError::NotFound(id.to_owned())),
+                Some(job) if job.status != from => {
+                    return Err(JobError::StatusMismatch {
+                        id: id.to_owned(),
+                        expected: from,
+                        actual: job.status,
+                    });
+                }
+                Some(_) => return Err(JobError::RetryDisabled { id: id.to_owned() }),
+            }
         }
-        self.inner.transition(tenant, id, from, to).await
+        let job = self.inner.transition(tenant, id, from, to).await?;
+        // Pruning is triggered only by a *successful* transition into a
+        // terminal state. A failed CAS changed nothing, and a non-terminal
+        // transition (e.g. Queued→Running) has no retention consequence.
+        if matches!(to, JobStatus::Succeeded | JobStatus::Failed) {
+            self.maybe_prune(tenant).await;
+        }
+        Ok(job)
     }
 
     async fn finish(
@@ -330,11 +395,11 @@ impl JobStore for GuardedJobStore {
         tenant: &TenantId,
         filter: Option<JobStatus>,
     ) -> Result<Vec<Job>, JobError> {
+        let jobs = self.inner.list(tenant, filter).await?;
+        // One sample for the whole returned set, taken only after the backend
+        // has finished listing — every job is judged against the same instant.
         let now = Utc::now();
-        Ok(self
-            .inner
-            .list(tenant, filter)
-            .await?
+        Ok(jobs
             .into_iter()
             .filter(|job| !self.retention.is_expired(job, now))
             .collect())
@@ -565,8 +630,8 @@ mod tests {
             "still visible just before the terminal TTL elapses"
         );
         assert!(
-            retention.is_expired(&job, now + chrono::Duration::seconds(60)),
-            "expires one terminal TTL after completion"
+            retention.is_expired(&job, now + chrono::Duration::seconds(50)),
+            "expires one terminal TTL after completion (now+50 == completion+60)"
         );
     }
 
@@ -703,6 +768,102 @@ mod tests {
         }
     }
 
+    /// Test-only backend that can (a) rewrite `created_at`/`updated_at` on
+    /// `list` results and (b) return a terminal job whose TTL elapses *during*
+    /// a slow `get`/`list`. Both let a test pin down timing/ordering behaviour
+    /// that the plain in-memory store cannot express.
+    struct TestStore {
+        inner: Arc<dyn JobStore>,
+        stamps: HashMap<String, (String, String)>,
+        expire_during_get: bool,
+        expire_during_list: bool,
+    }
+
+    impl TestStore {
+        fn plain(inner: Arc<dyn JobStore>) -> Self {
+            Self {
+                inner,
+                stamps: HashMap::new(),
+                expire_during_get: false,
+                expire_during_list: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl JobStore for TestStore {
+        async fn create(&self, tenant: &TenantId, owner: Option<String>) -> Result<Job, JobError> {
+            self.inner.create(tenant, owner).await
+        }
+        async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Job>, JobError> {
+            let job = self.inner.get(tenant, id).await?;
+            if !self.expire_during_get {
+                return Ok(job);
+            }
+            let Some(mut job) = job else {
+                return Ok(None);
+            };
+            // One second short of a two-second TTL at read time; the 1.3s
+            // sleep below pushes it past the boundary before it is returned.
+            job.status = JobStatus::Succeeded;
+            job.updated_at = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+            Ok(Some(job))
+        }
+        async fn transition(
+            &self,
+            tenant: &TenantId,
+            id: &str,
+            from: JobStatus,
+            to: JobStatus,
+        ) -> Result<Job, JobError> {
+            self.inner.transition(tenant, id, from, to).await
+        }
+        async fn finish(
+            &self,
+            tenant: &TenantId,
+            id: &str,
+            result_json: String,
+        ) -> Result<Job, JobError> {
+            self.inner.finish(tenant, id, result_json).await
+        }
+        async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError> {
+            self.inner.fail(tenant, id, error).await
+        }
+        async fn update_progress(
+            &self,
+            tenant: &TenantId,
+            id: &str,
+            progress_json: String,
+        ) -> Result<Job, JobError> {
+            self.inner.update_progress(tenant, id, progress_json).await
+        }
+        async fn list(
+            &self,
+            tenant: &TenantId,
+            filter: Option<JobStatus>,
+        ) -> Result<Vec<Job>, JobError> {
+            let mut jobs = self.inner.list(tenant, filter).await?;
+            for job in &mut jobs {
+                if let Some((created, updated)) = self.stamps.get(&job.id) {
+                    job.created_at = created.clone();
+                    job.updated_at = updated.clone();
+                }
+                if self.expire_during_list {
+                    job.status = JobStatus::Succeeded;
+                    job.updated_at = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+                }
+            }
+            if self.expire_during_list {
+                tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+            }
+            Ok(jobs)
+        }
+        async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, JobError> {
+            self.inner.delete(tenant, id).await
+        }
+    }
+
     #[tokio::test]
     async fn prune_accounting_is_per_tenant() {
         use std::sync::atomic::Ordering;
@@ -780,6 +941,288 @@ mod tests {
             list_calls.load(Ordering::Relaxed),
             2,
             "a tracked tenant's counter must survive the churn"
+        );
+    }
+
+    /// The cap must count only unexpired terminal jobs. A long-running job can
+    /// be created before an expired short job yet finish long after it; if the
+    /// expired row consumes a cap slot, the still-fresh job is wrongly deleted.
+    #[tokio::test]
+    async fn prune_cap_counts_only_unexpired_terminal_jobs() {
+        let now = Utc::now();
+        let repo = inner();
+        let fresh_long = repo.create(&t(), None).await.unwrap();
+        repo.finish(&t(), &fresh_long.id, "{}".to_owned())
+            .await
+            .unwrap();
+        let expired_short = repo.create(&t(), None).await.unwrap();
+        repo.finish(&t(), &expired_short.id, "{}".to_owned())
+            .await
+            .unwrap();
+
+        let stamps = HashMap::from([
+            (
+                fresh_long.id.clone(),
+                (
+                    (now - chrono::Duration::seconds(100)).to_rfc3339(),
+                    (now - chrono::Duration::seconds(5)).to_rfc3339(),
+                ),
+            ),
+            (
+                expired_short.id.clone(),
+                (
+                    (now - chrono::Duration::seconds(70)).to_rfc3339(),
+                    (now - chrono::Duration::seconds(70)).to_rfc3339(),
+                ),
+            ),
+        ]);
+        let guard = GuardedJobStore::with_policy(
+            Arc::new(TestStore {
+                stamps,
+                ..TestStore::plain(Arc::clone(&repo))
+            }),
+            JobRetention::new(60, 1).with_prune_every(1),
+            RetryPolicy::Disabled,
+        );
+
+        // The create itself triggers the physical prune (`prune_every = 1`).
+        guard.create(&t(), None).await.unwrap();
+
+        assert!(
+            repo.get(&t(), &fresh_long.id).await.unwrap().is_some(),
+            "the only unexpired terminal job must survive the cap"
+        );
+        assert!(
+            repo.get(&t(), &expired_short.id).await.unwrap().is_none(),
+            "the expired terminal job must be reclaimed"
+        );
+    }
+
+    /// Expiry is judged against a single `now` sampled *after* the backend
+    /// call. A job that crosses the TTL boundary during a slow `get` must be
+    /// hidden; sampling before the await would have exposed it.
+    #[tokio::test]
+    async fn get_samples_expiry_after_backend_read() {
+        let repo = inner();
+        let job = repo.create(&t(), None).await.unwrap();
+        let guard = GuardedJobStore::with_policy(
+            Arc::new(TestStore {
+                expire_during_get: true,
+                ..TestStore::plain(Arc::clone(&repo))
+            }),
+            JobRetention::new(2, 10),
+            RetryPolicy::Disabled,
+        );
+
+        assert!(
+            guard.get(&t(), &job.id).await.unwrap().is_none(),
+            "a job that reached its TTL during the read must be filtered out"
+        );
+    }
+
+    /// Same contract for `list`, with one timestamp shared by the whole set.
+    #[tokio::test]
+    async fn list_samples_expiry_after_backend_list() {
+        let repo = inner();
+        repo.create(&t(), None).await.unwrap();
+        let guard = GuardedJobStore::with_policy(
+            Arc::new(TestStore {
+                expire_during_list: true,
+                ..TestStore::plain(Arc::clone(&repo))
+            }),
+            JobRetention::new(2, 10),
+            RetryPolicy::Disabled,
+        );
+
+        assert!(
+            guard.list(&t(), None).await.unwrap().is_empty(),
+            "a job that reached its TTL during the list must be filtered out"
+        );
+    }
+
+    /// A terminal CAS reports the backend's precise outcome before the retry
+    /// policy is applied, and the lookup is scoped to the tenant with no write.
+    #[tokio::test]
+    async fn terminal_transition_preserves_not_found_and_status_mismatch() {
+        let repo = inner();
+        let guard = GuardedJobStore::new(Arc::clone(&repo));
+
+        assert!(matches!(
+            guard
+                .transition(&t(), "no-such-job", JobStatus::Failed, JobStatus::Running)
+                .await,
+            Err(JobError::NotFound(_))
+        ));
+
+        let running = repo.create(&t(), None).await.unwrap();
+        repo.transition(&t(), &running.id, JobStatus::Queued, JobStatus::Running)
+            .await
+            .unwrap();
+        assert!(matches!(
+            guard
+                .transition(&t(), &running.id, JobStatus::Failed, JobStatus::Running)
+                .await,
+            Err(JobError::StatusMismatch {
+                expected: JobStatus::Failed,
+                actual: JobStatus::Running,
+                ..
+            })
+        ));
+
+        // A terminal job in *another* tenant is not found through this tenant.
+        let other_tenant = repo.create(&t2(), None).await.unwrap();
+        repo.fail(&t2(), &other_tenant.id, "boom".to_owned())
+            .await
+            .unwrap();
+        assert!(matches!(
+            guard
+                .transition(
+                    &t(),
+                    &other_tenant.id,
+                    JobStatus::Failed,
+                    JobStatus::Running
+                )
+                .await,
+            Err(JobError::NotFound(_))
+        ));
+
+        // Only a genuine terminal CAS is refused by the policy, with no write.
+        let failed = repo.create(&t(), None).await.unwrap();
+        repo.fail(&t(), &failed.id, "boom".to_owned())
+            .await
+            .unwrap();
+        assert!(matches!(
+            guard
+                .transition(&t(), &failed.id, JobStatus::Failed, JobStatus::Running)
+                .await,
+            Err(JobError::RetryDisabled { .. })
+        ));
+        assert_eq!(
+            repo.get(&t(), &failed.id).await.unwrap().unwrap().status,
+            JobStatus::Failed
+        );
+    }
+
+    /// `transition` prunes only after a successful move into a terminal state.
+    #[tokio::test]
+    async fn transition_prunes_only_on_success_into_terminal() {
+        use std::sync::atomic::Ordering;
+        let list_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let repo: Arc<dyn JobStore> = Arc::new(CountingStore {
+            inner: inner(),
+            list_calls: Arc::clone(&list_calls),
+        });
+        let guard = GuardedJobStore::with_policy(
+            repo,
+            JobRetention::new(86_400, 100).with_prune_every(1),
+            RetryPolicy::Disabled,
+        );
+
+        let job = guard.create(&t(), None).await.unwrap();
+        assert_eq!(list_calls.load(Ordering::Relaxed), 1);
+        list_calls.store(0, Ordering::Relaxed);
+
+        guard
+            .transition(&t(), &job.id, JobStatus::Queued, JobStatus::Running)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_calls.load(Ordering::Relaxed),
+            0,
+            "non-terminal: no prune"
+        );
+
+        assert!(matches!(
+            guard
+                .transition(&t(), &job.id, JobStatus::Queued, JobStatus::Succeeded)
+                .await,
+            Err(JobError::StatusMismatch { .. })
+        ));
+        assert_eq!(
+            list_calls.load(Ordering::Relaxed),
+            0,
+            "failed CAS: no prune"
+        );
+
+        guard
+            .transition(&t(), &job.id, JobStatus::Running, JobStatus::Succeeded)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_calls.load(Ordering::Relaxed),
+            1,
+            "successful terminal transition: exactly one prune"
+        );
+    }
+
+    /// The deadline is inclusive: expiry lands exactly one TTL after the
+    /// terminal write, not a second later.
+    #[test]
+    fn expires_exactly_one_ttl_after_completion() {
+        let ttl = 60;
+        let retention = JobRetention::new(ttl, 10);
+        let completion = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let job = Job {
+            id: "job-boundary".to_owned(),
+            status: JobStatus::Succeeded,
+            created_at: (completion - chrono::Duration::seconds(500)).to_rfc3339(),
+            updated_at: completion.to_rfc3339(),
+            result_json: None,
+            error: None,
+            progress_json: None,
+            owner: None,
+            tenant_id: t().to_string(),
+        };
+        assert!(
+            !retention.is_expired(&job, completion + chrono::Duration::seconds(ttl - 1)),
+            "visible one second before the deadline"
+        );
+        assert!(
+            retention.is_expired(&job, completion + chrono::Duration::seconds(ttl)),
+            "expired at exactly one TTL after completion"
+        );
+    }
+
+    /// A public struct literal bypasses `new`/`with_prune_every`; `clamped`
+    /// normalises it before the guard uses it.
+    #[test]
+    fn clamped_normalizes_struct_literal_values() {
+        let retention = JobRetention {
+            terminal_ttl_secs: -5,
+            max_terminal_per_tenant: 0,
+            prune_every: 0,
+        }
+        .clamped();
+        assert_eq!(retention.terminal_ttl_secs, 0);
+        assert_eq!(retention.max_terminal_per_tenant, 1);
+        assert_eq!(retention.prune_every, 1);
+    }
+
+    /// `with_policy` must clamp even a struct-literal `prune_every: 0`, or the
+    /// modulo in `maybe_prune` panics on the first write.
+    #[tokio::test]
+    async fn struct_literal_prune_every_zero_is_clamped() {
+        use std::sync::atomic::Ordering;
+        let list_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let repo: Arc<dyn JobStore> = Arc::new(CountingStore {
+            inner: inner(),
+            list_calls: Arc::clone(&list_calls),
+        });
+        let guard = GuardedJobStore::with_policy(
+            repo,
+            JobRetention {
+                terminal_ttl_secs: 86_400,
+                max_terminal_per_tenant: 10,
+                prune_every: 0,
+            },
+            RetryPolicy::Disabled,
+        );
+
+        guard.create(&t(), None).await.unwrap();
+        assert_eq!(
+            list_calls.load(Ordering::Relaxed),
+            1,
+            "clamped to prune_every=1: the first write triggers exactly one prune"
         );
     }
 }

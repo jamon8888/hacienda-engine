@@ -98,12 +98,18 @@ impl AttachmentFailure {
         }
     }
 
+    /// Test-only inspection of the approved category. Production surfaces use
+    /// `safe_message`/`Display`, so this accessor would be dead code in a normal
+    /// build and is restricted to tests.
+    #[cfg(test)]
     pub(crate) fn category(&self) -> AttachmentFailureCategory {
         self.category
     }
 
-    /// Internal-only cause. Must never be logged or returned to a client: it is
-    /// untrusted extractor text that can echo the submitted filename.
+    /// Test-only inspection of the internal cause. Must never be logged or
+    /// returned to a client: it is untrusted extractor text that can echo the
+    /// submitted filename. Gated to tests to keep non-test builds warning-free.
+    #[cfg(test)]
     pub(crate) fn internal_cause(&self) -> &str {
         &self.cause
     }
@@ -125,6 +131,11 @@ impl std::fmt::Debug for AttachmentFailure {
             .field("category", &self.category)
             .field("operation", &self.category.operation())
             .field("suggestion", &self.category.suggestion())
+            // A byte count is content-free, so it may appear on this internal
+            // diagnostic surface. Reading it here also keeps the retained cause
+            // intentional in production builds (zero-warnings policy) without
+            // ever emitting the extractor text itself.
+            .field("cause_bytes", &self.cause.len())
             .finish_non_exhaustive()
     }
 }
@@ -407,9 +418,12 @@ mod tests {
         assert!(!display.contains("xberg"));
 
         // Debug must not become a back-channel for the raw extractor text.
+        // Only its content-free byte count is retained on this surface.
         let debug = format!("{failure:?}");
         assert!(!debug.contains(SENTINEL_FILENAME));
         assert!(!debug.contains("xberg"));
+        assert!(debug.contains("cause_bytes"));
+        assert!(debug.contains(&raw.len().to_string()));
 
         // Crossing the crate boundary keeps only the safe summary.
         let public = EmailError::from(failure);

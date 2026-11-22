@@ -42,13 +42,68 @@ use hacienda_core::auth::Caller;
 use mail_parser::{Message, MessageParser, MessagePart, MimeHeaders, PartType};
 use serde::Serialize;
 
-/// Constant, content-free parse errors (no bytes/filenames are ever echoed).
-const EMPTY_MESSAGE_ERROR: &str = "email message is empty";
-pub(crate) const MIME_PARSE_ERROR: &str = "failed to parse MIME message";
+/// Resource policy for untrusted RFC 5322 input.
+///
+/// Both the native processing parser and the viewer projection path share
+/// these fixed limits. They bound work and memory on sender-controlled input
+/// without inspecting or echoing any message byte. Keeping them here (rather
+/// than per caller) is what makes the limit identical on every parse path.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 25 * 1024 * 1024;
+pub(crate) const MAX_MIME_PARTS: usize = 2_048;
 
 /// Guard against pathological/degenerate part nesting. A well-formed message
 /// never approaches this; it only bounds work on hostile input.
 const MAX_MIME_DEPTH: usize = 32;
+
+/// Fixed operation label carried by every parse rejection.
+const PARSE_OPERATION: &str = "MIME message parsing";
+/// Approved recovery guidance, never derived from untrusted input.
+const PARSE_RECOVERY: &str =
+    "supply a nonempty, valid RFC 5322 message within the configured size and part limits";
+
+/// Fixed, content-free categories for a parse rejection. The category is
+/// chosen from the failure site, never from message bytes, so it can be
+/// emitted on any surface without re-opening the content leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseFailureCategory {
+    Empty,
+    Malformed,
+    Oversized,
+    DepthLimit,
+    PartLimit,
+}
+
+impl ParseFailureCategory {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Empty => "empty input",
+            Self::Malformed => "malformed message",
+            Self::Oversized => "message size limit exceeded",
+            Self::DepthLimit => "MIME nesting limit exceeded",
+            Self::PartLimit => "MIME part limit exceeded",
+        }
+    }
+}
+
+/// Build a content-free parse rejection with the mandated context: a fixed
+/// operation, an input byte count, a fixed category and recovery guidance.
+/// No raw message byte, header or filename is ever included.
+fn parse_failure(category: ParseFailureCategory, byte_count: usize) -> EmailError {
+    EmailError::Backend(format!(
+        "{PARSE_OPERATION} failed ({}, {byte_count} bytes); {PARSE_RECOVERY}",
+        category.label()
+    ))
+}
+
+/// Reject input before handing it to `mail_parser`: its parse state stack is
+/// not depth-bounded, so an oversized sender-controlled buffer would otherwise
+/// be scanned in full before our own walk can cap the work.
+fn enforce_byte_limit(byte_count: usize) -> Result<()> {
+    if byte_count > MAX_MESSAGE_BYTES {
+        return Err(parse_failure(ParseFailureCategory::Oversized, byte_count));
+    }
+    Ok(())
+}
 
 /// Which decoded MIME part supplied the viewer body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -193,18 +248,33 @@ fn is_attachment_part(part: &MessagePart<'_>) -> bool {
     })
 }
 
+/// Walk-level resource-limit violation. `collect` maps this to the content-free
+/// parse failure that carries the input byte count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkLimit {
+    Depth,
+    Parts,
+}
+
 /// Recursively walk one MIME part, collecting body text and attachments.
+///
+/// Exceeding a resource limit is a hard error, never a silent truncation: a
+/// truncated tree would otherwise yield a plausible-but-incomplete body on
+/// both the native and viewer paths (CodeRabbit finding on depth overflow).
 fn walk(
     message: &Message<'_>,
     part: &MessagePart<'_>,
     depth: usize,
     out: &mut Collector,
     capture: AttachmentCapture,
-) {
+) -> std::result::Result<(), WalkLimit> {
     if depth > MAX_MIME_DEPTH {
-        return;
+        return Err(WalkLimit::Depth);
     }
     out.section_count += 1;
+    if out.section_count > MAX_MIME_PARTS {
+        return Err(WalkLimit::Parts);
+    }
 
     match &part.body {
         PartType::Multipart(children) => {
@@ -219,7 +289,7 @@ fn walk(
             } else {
                 for id in children {
                     if let Some(child) = message.parts.get(*id as usize) {
-                        walk(message, child, depth + 1, out, capture);
+                        walk(message, child, depth + 1, out, capture)?;
                     }
                 }
             }
@@ -236,7 +306,7 @@ fn walk(
                 // An inline forwarded message has no attachment marker: walk
                 // the encapsulated message's own tree. Its headers are not
                 // body text; only its body parts are collected.
-                walk(nested, nested.root_part(), depth + 1, out, capture);
+                walk(nested, nested.root_part(), depth + 1, out, capture)?;
             }
         }
         PartType::Text(text) => {
@@ -257,44 +327,68 @@ fn walk(
             out.push_attachment(part, Some(bytes), capture);
         }
     }
+    Ok(())
 }
 
 /// Walk an already-parsed message's MIME tree into owned processing parts.
 ///
 /// Used by the backend adapter so a message is parsed once: headers come from
 /// the `mail_parser::Message` and body/attachments come from this tree walk.
-pub(crate) fn parse_message_parts(message: &Message<'_>) -> MimeParts {
+/// The byte limit is re-checked against the parsed message so the adapter path,
+/// which parses raw bytes itself, is bounded by the same resource policy.
+pub(crate) fn parse_message_parts(message: &Message<'_>) -> Result<MimeParts> {
     collect(message, AttachmentCapture::Bytes)
 }
 
-fn collect(message: &Message<'_>, capture: AttachmentCapture) -> MimeParts {
+fn collect(message: &Message<'_>, capture: AttachmentCapture) -> Result<MimeParts> {
+    let byte_count = message.raw_message().len();
+    enforce_byte_limit(byte_count)?;
     let mut collector = Collector::default();
-    walk(message, message.root_part(), 0, &mut collector, capture);
-    collector.finish()
+    walk(message, message.root_part(), 0, &mut collector, capture).map_err(|limit| {
+        parse_failure(
+            match limit {
+                WalkLimit::Depth => ParseFailureCategory::DepthLimit,
+                WalkLimit::Parts => ParseFailureCategory::PartLimit,
+            },
+            byte_count,
+        )
+    })?;
+    Ok(collector.finish())
 }
 
 /// Parse raw RFC 5322 bytes into native processing parts (bytes captured).
-pub(crate) fn parse(raw: &[u8]) -> Result<MimeParts> {
+///
+/// Test-only convenience wrapper: production conversion uses
+/// `parse_message_parts`, the viewer uses `parse_viewer_parts`, so this wrapper
+/// would otherwise be dead code in a non-test build (zero-warnings policy).
+#[cfg(test)]
+fn parse(raw: &[u8]) -> Result<MimeParts> {
     let message = parse_message(raw)?;
-    Ok(parse_message_parts(&message))
+    parse_message_parts(&message)
 }
 
 /// Parse only what the viewer needs: body text, counts and section metadata.
 /// Attachment payload bytes are never decoded into an owned copy or retained.
 fn parse_viewer_parts(raw: &[u8]) -> Result<MimeParts> {
     let message = parse_message(raw)?;
-    Ok(collect(&message, AttachmentCapture::CountOnly))
+    collect(&message, AttachmentCapture::CountOnly)
 }
 
-fn parse_message(raw: &[u8]) -> Result<Message<'_>> {
+/// Parse raw bytes into a `mail_parser::Message`, enforcing the resource-policy
+/// byte limit *before* the parser scans sender-controlled input.
+///
+/// Shared by the backend adapter, the processing path and the viewer path so
+/// every entrypoint gets identical content-free errors and limits.
+pub(crate) fn parse_message(raw: &[u8]) -> Result<Message<'_>> {
     if raw.is_empty() {
-        return Err(EmailError::Backend(EMPTY_MESSAGE_ERROR.to_owned()));
+        return Err(parse_failure(ParseFailureCategory::Empty, 0));
     }
+    enforce_byte_limit(raw.len())?;
     let message = MessageParser::default()
         .parse(raw)
-        .ok_or_else(|| EmailError::Backend(MIME_PARSE_ERROR.to_owned()))?;
+        .ok_or_else(|| parse_failure(ParseFailureCategory::Malformed, raw.len()))?;
     if message.parts.is_empty() {
-        return Err(EmailError::Backend(MIME_PARSE_ERROR.to_owned()));
+        return Err(parse_failure(ParseFailureCategory::Malformed, raw.len()));
     }
     Ok(message)
 }
@@ -736,5 +830,112 @@ mod tests {
         assert_no_clear_fixtures(&projection.body_token_only);
         // Serialized projection is the IPC boundary: it must carry no fixture.
         assert_no_clear_fixtures(&projection_json(&projection));
+    }
+
+    /// Build `depth` nested multipart containers with a clear-PII leaf body.
+    fn nested_message(depth: usize) -> Vec<u8> {
+        let mut raw = String::from(
+            "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b0\"\r\n\r\n",
+        );
+        for level in 0..depth {
+            raw.push_str(&format!("--b{level}\r\n"));
+            if level + 1 < depth {
+                raw.push_str(&format!(
+                    "Content-Type: multipart/mixed; boundary=\"b{}\"\r\n\r\n",
+                    level + 1
+                ));
+            } else {
+                raw.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");
+                raw.push_str("Deep body jane.doe@acme.example 123-45-6789\r\n");
+            }
+        }
+        for level in (0..depth).rev() {
+            raw.push_str(&format!("--b{level}--\r\n"));
+        }
+        raw.into_bytes()
+    }
+
+    /// Every parse rejection must carry the mandated content-free context:
+    /// operation, byte count, fixed category and recovery guidance.
+    fn assert_content_free_parse_error(text: &str, category: &str, byte_count: usize) {
+        assert!(text.contains(PARSE_OPERATION), "missing operation: {text}");
+        assert!(text.contains(category), "missing category: {text}");
+        assert!(
+            text.contains(&byte_count.to_string()),
+            "missing byte count: {text}"
+        );
+        assert!(text.contains(PARSE_RECOVERY), "missing recovery: {text}");
+        assert_no_clear_fixtures(text);
+    }
+
+    #[test]
+    fn parse_rejections_carry_operation_count_category_and_recovery() {
+        let error = parse(&[]).expect_err("empty input must be rejected");
+        assert_content_free_parse_error(&error.to_string(), ParseFailureCategory::Empty.label(), 0);
+    }
+
+    #[test]
+    fn mime_depth_overflow_fails_instead_of_silently_truncating() {
+        let raw = nested_message(MAX_MIME_DEPTH + 8);
+        let error = parse(&raw).expect_err("over-deep message must fail, not return partial body");
+        assert_content_free_parse_error(
+            &error.to_string(),
+            ParseFailureCategory::DepthLimit.label(),
+            raw.len(),
+        );
+    }
+
+    #[test]
+    fn mime_depth_within_limit_still_parses() {
+        let raw = nested_message(MAX_MIME_DEPTH - 8);
+        let parts = parse(&raw).expect("supported nesting depth still parses");
+        assert!(parts
+            .text_body
+            .as_deref()
+            .is_some_and(|text| text.contains("Deep body")));
+    }
+
+    #[tokio::test]
+    async fn viewer_path_rejects_over_deep_message_with_content_free_error() {
+        let raw = nested_message(MAX_MIME_DEPTH + 8);
+        let error = project_viewer(&pii(), Caller::Principal(&caller()), "msg-deep", &raw)
+            .await
+            .expect_err("viewer must fail closed on over-deep input");
+        assert_content_free_parse_error(
+            &error.to_string(),
+            ParseFailureCategory::DepthLimit.label(),
+            raw.len(),
+        );
+    }
+
+    #[test]
+    fn part_count_limit_fails_instead_of_silently_truncating() {
+        let mut raw = String::from(
+            "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"many\"\r\n\r\n",
+        );
+        for _ in 0..=MAX_MIME_PARTS {
+            raw.push_str("--many\r\nContent-Type: text/plain\r\n\r\nx\r\n");
+        }
+        raw.push_str("--many--\r\n");
+        let raw = raw.into_bytes();
+        let error = parse(&raw).expect_err("over-large part count must fail, not truncate");
+        assert_content_free_parse_error(
+            &error.to_string(),
+            ParseFailureCategory::PartLimit.label(),
+            raw.len(),
+        );
+    }
+
+    #[test]
+    fn oversized_message_is_rejected_before_parsing() {
+        let mut raw = Vec::with_capacity(MAX_MESSAGE_BYTES + 1);
+        raw.extend_from_slice(b"From: jane.doe@acme.example\r\n\r\nbody\r\n");
+        raw.resize(MAX_MESSAGE_BYTES + 1, b'x');
+        let error = parse(&raw).expect_err("oversized sender-controlled input must be rejected");
+        assert_content_free_parse_error(
+            &error.to_string(),
+            ParseFailureCategory::Oversized.label(),
+            raw.len(),
+        );
     }
 }
