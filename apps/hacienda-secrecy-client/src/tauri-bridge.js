@@ -11,10 +11,34 @@
 /** @typedef {{ tokenized: TokenizedText, references: OpaqueTokenReference[] }} OpenLocalViewerRequest */
 /** @typedef {{ provider_send_enabled: boolean, detector: "local_model" | "regex_only" }} LocalPiiStatus */
 /** @typedef {{ schema_version: string, document_id: string, version_id: string, source: { mime_type: string, original_ref: string, viewer_ref: string, capability_ref: string }, metadata_token_only: Record<string, unknown>, editor: Record<string, unknown>, search_projection: Record<string, unknown>, provenance: Record<string, unknown> }} DocumentProjection */
-/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { query: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } } | { token: string }} InvokePayload */
+/** @typedef {{ request: ProviderRequest | OpenOriginalRequest | OpenLocalViewerRequest | { category: string, value: string } | { query: string } | { document_ref: string, version_ref: string } | { document_ref: string, version_ref: string, editor: Record<string, unknown> } } | { token: string } | { job_id: string } | { capability_ref: string }} InvokePayload */
 /** @typedef {{ title_token_only: string, content_token_only: string, ordinal: number, score: number }} LocalSearchResult */
-/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "install-local-rag-model" | "search-local-documents" | "load-document" | "save-document", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
+/** @typedef {(command: "stream-claude" | "stream-codex" | "open-original" | "open-local-viewer" | "local-viewer-content" | "reveal-local-token" | "pseudonymize-selection" | "local-pii-status" | "pick-document" | "install-local-rag-model" | "search-local-documents" | "load-document" | "save-document" | "team-email-sources" | "team-email-ingest" | "team-email-job" | "team-email-job-result" | "team-email-search" | "team-viewer-capability" | "team-viewer-reveal" | "team-viewer-open" | "team-viewer-audit", payload?: InvokePayload) => Promise<unknown>} RendererInvoke */
 /** @typedef {{ sequence: number, text: string, references: OpaqueTokenReference[] }} TokenizedChunk */
+/** @typedef {{ source_ref: string, mailbox_refs: string[] }} TeamEmailSource */
+/** @typedef {{ sources: TeamEmailSource[] }} TeamEmailSourcesResponse */
+/** @typedef {{ job_id: string }} TeamAcceptedJob */
+/** @typedef {{ job_id: string, status: string, failed: boolean, progress: Record<string, unknown> | null, result: Record<string, unknown> | null }} TeamJobStatus */
+/** @typedef {{ document_ref: string, external_ref: string, source_kind: string, mime: string | null, dossier_id: string | null, version_ref: string | null, ordinal: number, score: number, projection: string, viewer_policy: string }} TeamEmailSearchHit */
+/** @typedef {{ hits: TeamEmailSearchHit[] }} TeamEmailSearchResponse */
+/** @typedef {{ capability_ref: string, expires_at: string, document_ref: string, email_ref: string, attachment_ref: string | null, delivery: string }} TeamViewerCapability */
+/** @typedef {{ capability_ref: string, revealed: boolean, document_ref: string, email_ref: string }} TeamViewerRevealResult */
+/** @typedef {{ name: string, token_only: string }} TeamViewerHeader */
+/** @typedef {{ capability_ref: string, document_ref: string, email_ref: string, headers: TeamViewerHeader[], body_token_only: string, attachment_refs: string[], projection_kind: string }} TeamViewerProjection */
+/** @typedef {{ sequence: number, timestamp: string, action: string, tenant: string, principal: string, document_ref: string, email_ref: string, attachment_ref: string | null, capability_ref: string, outcome: string }} TeamAuditEvent */
+/** @typedef {{ events: TeamAuditEvent[] }} TeamAuditResponse */
+
+const TEAM_INGEST_OPERATIONS = Object.freeze(["index_for_rag", "extract_ner", "redact", "pipeline"]);
+// TeamOnPremise has no safe multi-tenant token/reveal contract; only `redact`
+// is allowed. `pseudonymize` is rejected here and by the server.
+const TEAM_PRIVACY_MODES = Object.freeze(["redact"]);
+// A renderer response DTO must not carry a content/path/credential carrier. The
+// word may still appear inside a redacted `projection`, so only *keys* are checked.
+const FORBIDDEN_TEAM_DTO_KEYS = Object.freeze([
+  "path", "backend", "server", "password", "token", "oauth", "token_command",
+  "plaintext", "raw", "raw_text", "message", "body", "subject", "from", "to",
+  "attachment_data", "value", "content", "credentials",
+]);
 
 const PROVIDER_COMMANDS = Object.freeze({
   claude: "stream-claude",
@@ -269,6 +293,160 @@ function readLocalSearchResults(response) {
   });
 }
 
+/**
+ * TeamOnPremise IPC is a strict allowlist: extra keys are rejected rather than
+ * ignored, so a caller cannot smuggle `backend`, `path`, `token`, `password`,
+ * `server`, `token_command`, or raw message text into a Tauri command.
+ * @param {unknown} value @param {readonly string[]} allowed @param {string} label
+ */
+function assertTeamRequest(value, allowed, label) {
+  if (!isRecord(value)) throw new Error(`Invalid ${label}`);
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) throw new Error(`Invalid ${label}`);
+  }
+}
+
+/** @param {unknown} value @param {string} label */
+function assertTeamOpaqueRef(value, label) {
+  if (
+    typeof value !== "string" || value.length === 0 || value.length > 256 ||
+    !/^[A-Za-z0-9:_-]+$/.test(value) || value.startsWith(".")
+  ) {
+    throw new Error(`Invalid ${label}`);
+  }
+}
+
+/**
+ * Pseudonym tokens are opaque but carry brackets in their canonical form.
+ * Plaintext addresses (@, whitespace) and paths are rejected here.
+ * @param {unknown} value @param {string} label
+ */
+function assertTeamTokenRef(value, label) {
+  if (
+    typeof value !== "string" || value.length === 0 || value.length > 256 ||
+    !/^[A-Za-z0-9:_[\]-]+$/.test(value)
+  ) {
+    throw new Error(`Invalid ${label}`);
+  }
+}
+
+/** @param {unknown} value @param {string} label */
+function assertTeamContentFree(value, label) {
+  if (Array.isArray(value)) {
+    for (const item of value) assertTeamContentFree(item, label);
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, child] of Object.entries(value)) {
+    if (FORBIDDEN_TEAM_DTO_KEYS.includes(key)) throw new Error(`Invalid ${label}`);
+    assertTeamContentFree(child, label);
+  }
+}
+
+/** @param {unknown} response @returns {TeamEmailSourcesResponse} */
+function readTeamSources(response) {
+  assertTeamContentFree(response, "team email sources response");
+  if (!isRecord(response) || !Array.isArray(response.sources) ||
+      !response.sources.every((source) => isRecord(source) &&
+        typeof source.source_ref === "string" &&
+        Array.isArray(source.mailbox_refs) &&
+        source.mailbox_refs.every((ref) => typeof ref === "string" && ref.length > 0))) {
+    throw new Error("Invalid team email sources response");
+  }
+  return /** @type {TeamEmailSourcesResponse} */ (response);
+}
+
+/** @param {unknown} response @returns {TeamAcceptedJob} */
+function readTeamAcceptedJob(response) {
+  assertTeamContentFree(response, "team email job response");
+  if (!isRecord(response) || typeof response.job_id !== "string" || response.job_id.length === 0) {
+    throw new Error("Invalid team email job response");
+  }
+  return /** @type {TeamAcceptedJob} */ (response);
+}
+
+/** @param {unknown} response @returns {TeamJobStatus} */
+function readTeamJobStatus(response) {
+  assertTeamContentFree(response, "team email job status");
+  if (!isRecord(response) || typeof response.job_id !== "string" ||
+      typeof response.status !== "string" || typeof response.failed !== "boolean" ||
+      (response.progress !== null && !isRecord(response.progress)) ||
+      (response.result !== null && !isRecord(response.result))) {
+    throw new Error("Invalid team email job status");
+  }
+  return /** @type {TeamJobStatus} */ (response);
+}
+
+/** @param {unknown} response @returns {TeamEmailSearchResponse} */
+function readTeamSearchResponse(response) {
+  assertTeamContentFree(response, "team email search response");
+  if (!isRecord(response) || !Array.isArray(response.hits) ||
+      !response.hits.every((hit) => isRecord(hit) &&
+        typeof hit.document_ref === "string" &&
+        typeof hit.external_ref === "string" &&
+        typeof hit.source_kind === "string" &&
+        typeof hit.ordinal === "number" && Number.isInteger(hit.ordinal) &&
+        typeof hit.score === "number" && Number.isFinite(hit.score) &&
+        typeof hit.projection === "string" &&
+        typeof hit.viewer_policy === "string")) {
+    throw new Error("Invalid team email search response");
+  }
+  return /** @type {TeamEmailSearchResponse} */ (response);
+}
+
+/** @param {unknown} response @returns {TeamViewerCapability} */
+function readTeamCapability(response) {
+  assertTeamContentFree(response, "team viewer capability");
+  if (!isRecord(response) || typeof response.capability_ref !== "string" ||
+      typeof response.expires_at !== "string" ||
+      typeof response.document_ref !== "string" ||
+      typeof response.email_ref !== "string" ||
+      typeof response.delivery !== "string") {
+    throw new Error("Invalid team viewer capability");
+  }
+  return /** @type {TeamViewerCapability} */ (response);
+}
+
+/** @param {unknown} response @returns {TeamViewerRevealResult} */
+function readTeamReveal(response) {
+  assertTeamContentFree(response, "team viewer reveal result");
+  if (!isRecord(response) || typeof response.capability_ref !== "string" ||
+      typeof response.revealed !== "boolean" ||
+      typeof response.document_ref !== "string" || typeof response.email_ref !== "string") {
+    throw new Error("Invalid team viewer reveal result");
+  }
+  return /** @type {TeamViewerRevealResult} */ (response);
+}
+
+/** @param {unknown} response @returns {TeamViewerProjection} */
+function readTeamOpen(response) {
+  assertTeamContentFree(response, "team viewer open projection");
+  if (!isRecord(response) || typeof response.capability_ref !== "string" ||
+      typeof response.document_ref !== "string" || typeof response.email_ref !== "string" ||
+      typeof response.body_token_only !== "string" ||
+      typeof response.projection_kind !== "string" ||
+      !Array.isArray(response.headers) ||
+      !response.headers.every((header) => isRecord(header) &&
+        typeof header.name === "string" && typeof header.token_only === "string") ||
+      !Array.isArray(response.attachment_refs) ||
+      !response.attachment_refs.every((ref) => typeof ref === "string")) {
+    throw new Error("Invalid team viewer open projection");
+  }
+  return /** @type {TeamViewerProjection} */ (response);
+}
+
+/** @param {unknown} response @returns {TeamAuditResponse} */
+function readTeamAudit(response) {
+  assertTeamContentFree(response, "team viewer audit response");
+  if (!isRecord(response) || !Array.isArray(response.events) ||
+      !response.events.every((event) => isRecord(event) &&
+        typeof event.sequence === "number" && typeof event.action === "string" &&
+        typeof event.outcome === "string" && typeof event.capability_ref === "string")) {
+    throw new Error("Invalid team viewer audit response");
+  }
+  return /** @type {TeamAuditResponse} */ (response);
+}
+
 /** Provider egress follows the backend's explicit capability flag. @param {LocalPiiStatus | null | undefined} status */
 export function canSendToProvider(status) {
   return status?.provider_send_enabled === true;
@@ -355,7 +533,16 @@ export function tokenizedTextToDocument(tokenizedText) {
  *   searchLocalDocuments: (query: string) => Promise<LocalSearchResult[]>,
  *   loadDocument: (request: { documentRef: string, versionRef: string }) => Promise<DocumentProjection>,
  *   saveDocument: (request: { documentRef: string, versionRef: string, editor: Record<string, unknown> }) => Promise<{ document_id: string, version_id: string, parent_version_id: string, idempotent: boolean }>,
- * }}
+ *   teamEmailSources: () => Promise<TeamEmailSourcesResponse>,
+   *   teamEmailIngest: (request: { sourceRef: string, mailboxRef: string, operation: string, privacyMode?: string, dossierId?: string }) => Promise<TeamAcceptedJob>,
+   *   teamEmailJob: (request: { jobId: string }) => Promise<TeamJobStatus>,
+   *   teamEmailJobResult: (request: { jobId: string }) => Promise<TeamJobStatus>,
+   *   teamEmailSearch: (request: { sourceRef: string, mailboxRef: string, queryText: string, topK?: number, dossierId?: string }) => Promise<TeamEmailSearchResponse>,
+   *   teamViewerCapability: (request: { documentRef: string, emailRef: string, tokenRef: string, attachmentRef?: string, purpose?: string }) => Promise<TeamViewerCapability>,
+   *   teamViewerReveal: (request: { capabilityRef: string }) => Promise<TeamViewerRevealResult>,
+   *   teamViewerOpen: (request: { capabilityRef: string }) => Promise<TeamViewerProjection>,
+   *   teamViewerAudit: () => Promise<TeamAuditResponse>,
+   * }}
  */
 export function createRendererBridge(invoke) {
   if (typeof invoke !== "function") {
@@ -395,6 +582,33 @@ export function createRendererBridge(invoke) {
       },
       saveDocument: async () => {
         throw new Error("Local document saving is unavailable");
+      },
+      teamEmailSources: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamEmailIngest: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamEmailJob: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamEmailJobResult: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamEmailSearch: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamViewerCapability: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamViewerReveal: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamViewerOpen: async () => {
+        throw new Error("Team email service is unavailable");
+      },
+      teamViewerAudit: async () => {
+        throw new Error("Team email service is unavailable");
       },
     };
   }
@@ -490,6 +704,93 @@ export function createRendererBridge(invoke) {
         throw new Error("Invalid document save response");
       }
       return /** @type {{ document_id: string, version_id: string, parent_version_id: string, idempotent: boolean }} */ (/** @type {unknown} */ (response));
+    },
+    async teamEmailSources() {
+      return readTeamSources(await invoke("team-email-sources"));
+    },
+    async teamEmailIngest({ sourceRef, mailboxRef, operation, privacyMode, dossierId }) {
+      assertTeamOpaqueRef(sourceRef, "team email source reference");
+      assertTeamOpaqueRef(mailboxRef, "team email mailbox reference");
+      if (!TEAM_INGEST_OPERATIONS.includes(operation)) throw new Error("Invalid team email operation");
+      // Build the payload from an allowlist, never by forwarding the caller's object.
+      const request = {
+        source_ref: sourceRef,
+        mailbox_ref: mailboxRef,
+        operation: { operation },
+      };
+      if (privacyMode !== undefined) {
+        if (!TEAM_PRIVACY_MODES.includes(privacyMode)) throw new Error("Invalid team privacy mode");
+        request.privacy_mode = privacyMode;
+      }
+      if (dossierId !== undefined) {
+        assertTeamOpaqueRef(dossierId, "team email dossier reference");
+        request.dossier_id = dossierId;
+      }
+      return readTeamAcceptedJob(await invoke("team-email-ingest", { request }));
+    },
+    async teamEmailJob({ jobId }) {
+      assertTeamOpaqueRef(jobId, "team email job reference");
+      return readTeamJobStatus(await invoke("team-email-job", { request: { job_id: jobId } }));
+    },
+    async teamEmailJobResult({ jobId }) {
+      assertTeamOpaqueRef(jobId, "team email job reference");
+      return readTeamJobStatus(await invoke("team-email-job-result", { request: { job_id: jobId } }));
+    },
+    async teamEmailSearch({ sourceRef, mailboxRef, queryText, topK, dossierId }) {
+      assertTeamOpaqueRef(sourceRef, "team email source reference");
+      assertTeamOpaqueRef(mailboxRef, "team email mailbox reference");
+      if (typeof queryText !== "string" || queryText.trim().length === 0 ||
+          [...queryText].length > 16_000) {
+        throw new Error("Invalid team email search query");
+      }
+      const request = {
+        source_ref: sourceRef,
+        mailbox_ref: mailboxRef,
+        query_text: queryText,
+      };
+      if (topK !== undefined) {
+        if (!Number.isInteger(topK) || topK < 1 || topK > 50) throw new Error("Invalid team email search limit");
+        request.top_k = topK;
+      }
+      if (dossierId !== undefined) {
+        assertTeamOpaqueRef(dossierId, "team email dossier reference");
+        request.dossier_id = dossierId;
+      }
+      return readTeamSearchResponse(await invoke("team-email-search", { request }));
+    },
+    async teamViewerCapability({ documentRef, emailRef, tokenRef, attachmentRef, purpose }) {
+      assertTeamOpaqueRef(documentRef, "team document reference");
+      assertTeamOpaqueRef(emailRef, "team email reference");
+      assertTeamTokenRef(tokenRef, "team token reference");
+      const request = {
+        document_ref: documentRef,
+        email_ref: emailRef,
+        token_ref: tokenRef,
+      };
+      if (attachmentRef !== undefined) {
+        assertTeamOpaqueRef(attachmentRef, "team attachment reference");
+        request.attachment_ref = attachmentRef;
+      }
+      if (purpose !== undefined) {
+        assertTeamOpaqueRef(purpose, "team viewer purpose");
+        request.purpose = purpose;
+      }
+      return readTeamCapability(await invoke("team-viewer-capability", { request }));
+    },
+    async teamViewerReveal({ capabilityRef }) {
+      assertTeamOpaqueRef(capabilityRef, "team viewer capability");
+      return readTeamReveal(await invoke("team-viewer-reveal", {
+        request: { capability_ref: capabilityRef },
+      }));
+    },
+    async teamViewerOpen({ capabilityRef }) {
+      assertTeamOpaqueRef(capabilityRef, "team viewer capability");
+      return readTeamOpen(await invoke("team-viewer-open", {
+        request: { capability_ref: capabilityRef },
+      }));
+    },
+    async teamViewerAudit() {
+      return readTeamAudit(await invoke("team-viewer-audit"));
     },
   };
 }

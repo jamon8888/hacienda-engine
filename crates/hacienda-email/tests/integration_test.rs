@@ -5,8 +5,23 @@
 //! local client (no network), and the operation tests verify the serde shape
 //! that the CLI / HTTP / MCP surfaces will depend on.
 
-use hacienda_email::{EmailConfig, EmailDestination, EmailOperation, EmailRequest, EmailSource};
+use hacienda_core::auth::{AuthContext, Caller, Capability, CapabilitySet};
+use hacienda_email::{
+    pii::PiiEngine, EmailConfig, EmailDestination, EmailOperation, EmailRequest, EmailSource,
+};
 use tempfile::tempdir;
+
+fn test_pii() -> PiiEngine {
+    PiiEngine::for_local_testing()
+}
+
+fn test_ctx() -> AuthContext {
+    AuthContext::with_tenant(
+        "test",
+        hacienda_core::tenancy::TenantId::default_tenant(),
+        CapabilitySet::new([Capability::DocumentsProcess]),
+    )
+}
 
 /// In-memory fixture implementing the backend trait so the real redaction path
 /// can run offline and its on-disk RFC822 output can be inspected.
@@ -99,7 +114,7 @@ async fn processor_builds_with_maildir_backend() {
         ..Default::default()
     };
     // Construction roots a local Maildir client; no I/O happens yet.
-    let processor = hacienda_email::EmailProcessor::new(config).await;
+    let processor = hacienda_email::EmailProcessor::new(config, test_pii()).await;
     assert!(processor.is_ok(), "Maildir processor should build");
 }
 
@@ -348,7 +363,9 @@ async fn rag_ingestion_never_persists_clear_subject_or_display_names() {
     };
     let client = FixtureClient { envelope, message };
     let config = EmailConfig::default();
-    let pii = hacienda_email::pii::PiiEngine::new(hacienda_email::PrivacyMode::Redact).unwrap();
+    let pii = test_pii();
+    let ctx = test_ctx();
+    let caller = Caller::Principal(&ctx);
 
     let store = InMemoryVectorStore::new("email-rag-e2e");
     let collection = "email-corpus";
@@ -378,9 +395,10 @@ async fn rag_ingestion_never_persists_clear_subject_or_display_names() {
         chunk_size: Some(512),
     };
 
-    let response = hacienda_email::rag::index_for_rag(&client, &pii, op, &config, Some(rag))
-        .await
-        .unwrap();
+    let response =
+        hacienda_email::rag::index_for_rag(&client, &pii, caller, op, &config, Some(rag))
+            .await
+            .unwrap();
     assert!(response.success, "errors: {:?}", response.errors);
 
     let (summaries, _) = store.list_documents(collection, 10, 0).await.unwrap();
@@ -456,7 +474,9 @@ async fn redact_operation_writes_content_free_rfc822() {
     };
     let client = FixtureClient { envelope, message };
     let config = EmailConfig::default();
-    let pii = hacienda_email::pii::PiiEngine::new(hacienda_email::PrivacyMode::Redact).unwrap();
+    let pii = test_pii();
+    let ctx = test_ctx();
+    let caller = Caller::Principal(&ctx);
     let op = EmailOperation::Redact {
         source: EmailSource::Account {
             name: "test".to_string(),
@@ -468,7 +488,7 @@ async fn redact_operation_writes_content_free_rfc822() {
         rules: None,
     };
 
-    let response = hacienda_email::redact::redact(&client, &pii, op, &config)
+    let response = hacienda_email::redact::redact(&client, &pii, caller, op, &config)
         .await
         .unwrap();
     assert!(response.success, "errors: {:?}", response.errors);

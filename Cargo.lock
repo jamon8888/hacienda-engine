@@ -3887,6 +3887,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "blake3",
  "chrono",
  "futures",
  "gethostname",
@@ -3906,7 +3907,9 @@ dependencies = [
  "tokio-test",
  "toml 0.8.23",
  "url",
+ "uuid",
  "xberg",
+ "zeroize",
 ]
 
 [[package]]

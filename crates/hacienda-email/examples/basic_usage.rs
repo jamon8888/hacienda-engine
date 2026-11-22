@@ -5,10 +5,12 @@
 //! example runs without a live mail server (point `path` at a real Maildir to
 //! process actual messages).
 
+use hacienda_core::{auth::Caller, redaction::EnvKeyResolver};
 use hacienda_email::{
-    EmailConfig, EmailDestination, EmailOperation, EmailProcessor, EmailRequest, EmailSource,
-    PipelineStep,
+    pii::PiiEngine, EmailConfig, EmailDestination, EmailOperation, EmailProcessor, EmailRequest,
+    EmailSource, PipelineStep,
 };
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,7 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let processor = EmailProcessor::new(config).await?;
+    // In-process example: the host supplies the key resolver; no local hash.
+    let pii = PiiEngine::for_local_use(PiiEngine::local_config(), Arc::new(EnvKeyResolver::new()))?;
+    let processor = EmailProcessor::new(config, pii).await?;
     println!("EmailProcessor initialized");
 
     // Example 1: Archive emails from the INBOX into a local Maildir.
@@ -43,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = processor.process(archive_request).await?;
+    let response = processor.process(archive_request, Caller::Trusted).await?;
     println!("Archived {} emails", response.processed_count);
     for err in &response.errors {
         eprintln!("Error: {err}");
@@ -62,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = processor.process(ner_request).await?;
+    let response = processor.process(ner_request, Caller::Trusted).await?;
     println!("Extracted {} entities", response.processed_count);
     if let Some(entities) = response.entities {
         for entity in entities.iter().take(5) {
@@ -86,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = processor.process(rag_request).await?;
+    let response = processor.process(rag_request, Caller::Trusted).await?;
     println!("Created {} chunks", response.processed_count);
     if let Some(stats) = response.rag_stats {
         println!(
@@ -110,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = processor.process(redact_request).await?;
+    let response = processor.process(redact_request, Caller::Trusted).await?;
     println!("Redacted {} emails", response.processed_count);
     if let Some(stats) = response.redaction_stats {
         println!("Total redactions: {}", stats.total_redactions);
@@ -140,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_overrides: None,
     };
 
-    let response = processor.process(pipeline_request).await?;
+    let response = processor.process(pipeline_request, Caller::Trusted).await?;
     println!(
         "Pipeline completed: {} emails processed",
         response.processed_count

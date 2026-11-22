@@ -2,6 +2,7 @@
 //! and `POST /v1/pii/reveal`.
 
 use axum::{extract::State, http::request::Parts, Json};
+use hacienda_core::auth::Capability;
 use hacienda_core::SpanText;
 use std::time::Instant;
 
@@ -207,12 +208,17 @@ pub async fn reveal_token(
 
 /// `POST /v1/pii/token`
 ///
-/// Mints the pseudonym token for a caller-supplied `(category, value)` pair, without
-/// revealing anything. Requires `documents:process` only — not `pii:reveal` — because
-/// computing the token for a value the caller already supplies discloses nothing new
-/// (`facade.mint_pseudonym_token_with_auth`'s own doc comment, P3b §2). This is what
-/// makes a GDPR right of access or erasure practicable against redacted storage: compute
-/// the token for a named value, then search the corpus for *that token*.
+/// Mints the pseudonym token for a caller-supplied `(category, value)` pair.
+///
+/// SECURITY (spec review): the token is deterministic for a tenant key. A caller
+/// holding only `documents:process` can read redacted projections, guess a
+/// candidate value and compare its token — an offline oracle that deanonymizes
+/// without the audit trail of `pii:reveal`. This route therefore requires
+/// `pii:reveal` (the least privilege that already authorizes plaintext reveal),
+/// enforced both by the route table and here (defense in depth).
+///
+/// This is an HTTP-boundary decision only: the facade method and the LocalFull
+/// / email-engine paths that mint tenant-keyed tokens are unchanged.
 #[utoipa::path(
     post,
     path = "/v1/pii/token",
@@ -224,7 +230,7 @@ pub async fn reveal_token(
         (status = 200, description = "The pseudonym token for the requested value", body = MintTokenResponse),
         (status = 400, description = "Unsupported category name, or no key resolvable for the caller's tenant"),
         (status = 401, description = "Missing or invalid credentials"),
-        (status = 403, description = "Caller lacks documents:process")
+        (status = 403, description = "Caller lacks pii:reveal")
     )
 )]
 pub async fn mint_token(
@@ -233,6 +239,12 @@ pub async fn mint_token(
     SafeJson(body): SafeJson<MintTokenRequest>,
 ) -> Result<Json<MintTokenResponse>, ApiError> {
     let ctx = extract_auth_context(&parts);
+    match &ctx {
+        Some(context) => context
+            .require_capability(Capability::PiiReveal)
+            .map_err(|_| ApiError::forbidden())?,
+        None => return Err(ApiError::unauthenticated()),
+    }
     let caller = caller_from_arc(&ctx);
 
     let token = state

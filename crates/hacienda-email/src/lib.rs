@@ -9,6 +9,7 @@ pub mod backend;
 pub mod config;
 pub mod error;
 pub mod models;
+pub mod native;
 pub mod ner;
 pub mod pii;
 pub mod pipeline;
@@ -17,6 +18,7 @@ pub mod redact;
 pub mod redacted;
 
 use crate::backend::EmailClient;
+use hacienda_core::auth::Caller;
 use std::sync::Arc;
 
 // Public API re-exports. A `pub use` also brings the name into this module's
@@ -27,11 +29,17 @@ pub use crate::models::{
     EmailDestination, EmailOperation, EmailRequest, EmailResponse, EmailSource, PipelineStep,
 };
 
-/// The hacienda email processor
+/// The hacienda email processor.
+///
+/// P0.4: the PII authority is injected by the host. The HTTP API passes the
+/// `ApiState` facade (wrapped in [`crate::pii::PiiEngine`]) and the request's
+/// [`Caller`] to every operation, so tenant, key and audit are never inferred
+/// from a locally built facade or from `Caller::Trusted`.
 pub struct EmailProcessor {
     client: Arc<dyn EmailClient>,
     config: EmailConfig,
-    /// The real hacienda PII engine, shared by redaction and NER operations.
+    /// The host's tenant-scoped PII engine, shared by redaction, NER and
+    /// metadata projection. Never constructed here.
     pii: crate::pii::PiiEngine,
     /// Optional RAG store — the same `hacienda_rag::RagStore` document ingestion
     /// uses. When present, redacted email chunks are persisted and become
@@ -42,10 +50,13 @@ pub struct EmailProcessor {
 }
 
 impl EmailProcessor {
-    /// Create a new email processor
-    pub async fn new(config: EmailConfig) -> Result<Self> {
+    /// Create a processor using the PII authority supplied by the host.
+    ///
+    /// `pii` must be built from the host facade (`PiiEngine::from_facade`);
+    /// there is deliberately no constructor that builds a facade from a
+    /// privacy-mode enum here.
+    pub async fn new(config: EmailConfig, pii: crate::pii::PiiEngine) -> Result<Self> {
         let client = crate::backend::build_client(&config).await?;
-        let pii = crate::pii::PiiEngine::new(config.redaction.mode)?;
         Ok(Self {
             client,
             config,
@@ -68,9 +79,9 @@ impl EmailProcessor {
         self
     }
 
-    /// Process an email request
-    pub async fn process(&self, input: EmailRequest) -> Result<EmailResponse> {
-        self.process_inner(input, None).await
+    /// Process an email request as the authenticated `caller`.
+    pub async fn process(&self, input: EmailRequest, caller: Caller<'_>) -> Result<EmailResponse> {
+        self.process_inner(input, None, caller).await
     }
 
     /// Process an email request with a per-page progress callback (used by the
@@ -81,27 +92,23 @@ impl EmailProcessor {
         &self,
         input: EmailRequest,
         on_page: &(dyn Fn(u32, usize, usize, usize) + Send + Sync),
+        caller: Caller<'_>,
     ) -> Result<EmailResponse> {
-        self.process_inner(input, Some(on_page)).await
+        self.process_inner(input, Some(on_page), caller).await
     }
 
     async fn process_inner(
         &self,
         input: EmailRequest,
         on_page: Option<&(dyn Fn(u32, usize, usize, usize) + Send + Sync)>,
+        caller: Caller<'_>,
     ) -> Result<EmailResponse> {
         let config = input.config_overrides.as_ref().unwrap_or(&self.config);
 
-        // Per-tenant privacy mode (design D1): if an override selects a different
-        // mode than the one this processor was built with, build a matching engine
-        // for this request. The default path reuses the shared engine.
-        let override_engine;
-        let pii: &crate::pii::PiiEngine = if config.redaction.mode == self.config.redaction.mode {
-            &self.pii
-        } else {
-            override_engine = crate::pii::PiiEngine::new(config.redaction.mode)?;
-            &override_engine
-        };
+        // The host facade is authoritative for privacy mode, pseudonym keys and
+        // audit. A request-level override can no longer rebuild a detached
+        // engine (the old `PiiEngine::new` / `EnvKeyResolver` path).
+        let pii = &self.pii;
 
         // Same RAG store as document ingestion, scoped to this request's tenant
         // account and dossier. Built per call, never shared as a trusted global.
@@ -125,14 +132,18 @@ impl EmailProcessor {
         match input.operation {
             EmailOperation::Archive { .. } => self.archive(input.operation, config).await,
             EmailOperation::ExtractNER { .. } => {
-                self.extract_ner(pii, input.operation, config).await
+                self.extract_ner(pii, caller, input.operation, config).await
             }
             EmailOperation::IndexForRag { .. } => {
-                self.index_for_rag(pii, input.operation, config, rag).await
+                self.index_for_rag(pii, caller, input.operation, config, rag)
+                    .await
             }
-            EmailOperation::Redact { .. } => self.redact(pii, input.operation, config).await,
+            EmailOperation::Redact { .. } => {
+                self.redact(pii, caller, input.operation, config).await
+            }
             EmailOperation::Pipeline { .. } => {
-                self.pipeline(pii, input.operation, config, rag).await
+                self.pipeline(pii, caller, input.operation, config, rag)
+                    .await
             }
         }
     }
@@ -146,41 +157,45 @@ impl EmailProcessor {
     async fn extract_ner(
         &self,
         pii: &crate::pii::PiiEngine,
+        caller: Caller<'_>,
         op: EmailOperation,
         config: &EmailConfig,
     ) -> Result<EmailResponse> {
-        crate::ner::extract_ner(self.client.as_ref(), pii, op, config).await
+        crate::ner::extract_ner(self.client.as_ref(), pii, caller, op, config).await
     }
 
     /// Index for RAG
     async fn index_for_rag(
         &self,
         pii: &crate::pii::PiiEngine,
+        caller: Caller<'_>,
         op: EmailOperation,
         config: &EmailConfig,
         rag: Option<crate::rag::RagIngestion<'_>>,
     ) -> Result<EmailResponse> {
-        crate::rag::index_for_rag(self.client.as_ref(), pii, op, config, rag).await
+        crate::rag::index_for_rag(self.client.as_ref(), pii, caller, op, config, rag).await
     }
 
     /// Redact PII
     async fn redact(
         &self,
         pii: &crate::pii::PiiEngine,
+        caller: Caller<'_>,
         op: EmailOperation,
         config: &EmailConfig,
     ) -> Result<EmailResponse> {
-        crate::redact::redact(self.client.as_ref(), pii, op, config).await
+        crate::redact::redact(self.client.as_ref(), pii, caller, op, config).await
     }
 
     /// Full pipeline
     async fn pipeline(
         &self,
         pii: &crate::pii::PiiEngine,
+        caller: Caller<'_>,
         op: EmailOperation,
         config: &EmailConfig,
         rag: Option<crate::rag::RagIngestion<'_>>,
     ) -> Result<EmailResponse> {
-        crate::pipeline::run_pipeline(self.client.as_ref(), pii, op, config, rag).await
+        crate::pipeline::run_pipeline(self.client.as_ref(), pii, caller, op, config, rag).await
     }
 }

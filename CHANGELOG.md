@@ -1229,6 +1229,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hash-chained audit log with blake3
 - JWT authentication for API
 
+### Security
+
+- **Email results no longer carry raw PII, filenames, envelope ids or backend
+  diagnostics on the wire.** The synchronous `POST /v1/email/process` response
+  and the asynchronous job result persisted in `Job.result_json` (polled via
+  `/v1/jobs/{id}` and `/v1/jobs/{id}/result`) previously exposed the domain
+  `EmailResponse`'s raw NER mention text, output path and `errors: Vec<String>`
+  diagnostics — sender-controlled values that could leak a tenant's PII or
+  filesystem details to a renderer or job poller. `EmailOperationResultDto` is
+  now the single content-free projection for both paths: entity detail is
+  dropped in favour of an `entities_found` count and raw error strings are
+  replaced by an `error_count` only; job status DTOs additionally expose
+  content-free `progress` counters. **Wire contract change:** `errors` was
+  replaced by `error_count`, so `EmailOperationResultDto::SCHEMA_VERSION` was
+  bumped 1 → 2 — clients must branch on `schema_version` before parsing a v2
+  payload as v1.
+
 ## [0.1.0] - 2026-07-28
 
 ### Added

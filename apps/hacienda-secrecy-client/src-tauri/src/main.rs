@@ -8,6 +8,12 @@ use futures::executor::block_on;
 use hacienda_backend::{
     Backend, BackendDocument, RedactedXbergDocument, TrustedEditorRevisionIssuer,
 };
+use hacienda_email::native::{
+    AccountProjection, EmailSearchHit, EmailSessionService, JobProjection, MailboxProjection,
+    MessageProjection, NativeEmailError, NativeMessageViewer, RegisterAccountRequest,
+    ViewerCapabilityProjection, ViewerOpenResponse,
+};
+use hacienda_email::pii::PiiEngine;
 use hacienda_core::{
     audit::{AuditEntryInput, AuditStore, EntitySource, RedactionAction},
     editor_projection::EditorEnvelope,
@@ -29,6 +35,15 @@ use tauri::Manager;
 use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
+
+mod team_email;
+use team_email::{
+    TeamAcceptedJob, TeamAuditResponse, TeamEmailClient, TeamEmailError, TeamIngestRequest,
+    TeamJobRequest, TeamJobStatusDto, TeamSearchRequest, TeamSearchResponse,
+    TeamSourcesResponse, TeamViewerActionRequest,
+    TeamViewerCapabilityDto, TeamViewerCapabilityRequest, TeamViewerProjectionDto,
+    TeamViewerRevealResultDto,
+};
 
 use hacienda_client_core::{
     ClaudeDesktopRequest, ClaudeDesktopResponse, ClientError, CodexRequest, CodexResponse,
@@ -410,6 +425,61 @@ fn configured_document_runtime(
     Err("LocalFull document ingestion requires the real NER model feature".to_owned())
 }
 
+/// The single LocalFull native runtime. Document ingestion, the local viewer
+/// and the email session service all consume the SAME facade (built with the
+/// OS-keychain `LocalKeyResolver`), the same RAG store and the same audit
+/// store. There is no second key and no second PII authority (P0.5).
+struct LocalRuntimeParts {
+    facade: Arc<hacienda_core::HaciendaFacade>,
+    issuer: Arc<TrustedEditorRevisionIssuer>,
+    backend: Backend,
+    store: Arc<LanceDbStore>,
+}
+
+#[derive(Clone)]
+struct LocalFullRuntime {
+    root: PathBuf,
+    parts: Arc<tokio::sync::OnceCell<Arc<LocalRuntimeParts>>>,
+}
+
+impl LocalFullRuntime {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            parts: Arc::new(tokio::sync::OnceCell::const_new()),
+        }
+    }
+
+    async fn parts(&self) -> Result<Arc<LocalRuntimeParts>, String> {
+        let root = self.root.clone();
+        let parts = self
+            .parts
+            .get_or_try_init(|| async move {
+                let runtime_root = root.clone();
+                let (facade, issuer) = tokio::task::spawn_blocking(move || {
+                    let key = OsCredentialKeyStore
+                        .load_or_create()
+                        .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
+                    configured_document_runtime(&key, &runtime_root)
+                })
+                .await
+                .map_err(|_| "LocalFull document runtime initialization failed".to_owned())??;
+                let profile = local_full_profile(&root.join("lancedb"));
+                let (backend, store) = Backend::connect_configured_lancedb(profile)
+                    .await
+                    .map_err(|_| "LocalFull LanceDB is unavailable".to_owned())?;
+                Ok::<Arc<LocalRuntimeParts>, String>(Arc::new(LocalRuntimeParts {
+                    facade: Arc::new(facade),
+                    issuer: Arc::new(issuer),
+                    backend,
+                    store: Arc::new(store),
+                }))
+            })
+            .await?;
+        Ok(Arc::clone(parts))
+    }
+}
+
 struct StoredLocalDocument {
     backend_document: BackendDocument,
     binding: OriginalBinding,
@@ -423,26 +493,17 @@ struct LocalFullDocumentService {
     embedder: XbergTokenEmbedder,
     embedding_ready: bool,
     audit: Arc<dyn AuditStore>,
-    facade: hacienda_core::HaciendaFacade,
-    issuer: TrustedEditorRevisionIssuer,
+    facade: Arc<hacienda_core::HaciendaFacade>,
+    issuer: Arc<TrustedEditorRevisionIssuer>,
     documents: HashMap<String, StoredLocalDocument>,
 }
 
 impl LocalFullDocumentService {
-    async fn new(root: &Path, audit: Arc<dyn AuditStore>) -> Result<Self, String> {
-        let runtime_root = root.to_path_buf();
-        let (facade, issuer) = tokio::task::spawn_blocking(move || {
-            let key = OsCredentialKeyStore
-                .load_or_create()
-                .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
-            configured_document_runtime(&key, &runtime_root)
-        })
-        .await
-        .map_err(|_| "LocalFull document runtime initialization failed".to_owned())??;
-        let profile = local_full_profile(&root.join("lancedb"));
-        let (backend, store) = Backend::connect_configured_lancedb(profile)
-            .await
-            .map_err(|_| "LocalFull LanceDB is unavailable".to_owned())?;
+    async fn new(root: &Path, audit: Arc<dyn AuditStore>, parts: Arc<LocalRuntimeParts>) -> Result<Self, String> {
+        let facade = Arc::clone(&parts.facade);
+        let issuer = Arc::clone(&parts.issuer);
+        let backend = parts.backend.clone();
+        let store = Arc::clone(&parts.store);
         let embedding_cache = root.join("models/xberg-embeddings");
         tokio::fs::create_dir_all(&embedding_cache)
             .await
@@ -467,7 +528,7 @@ impl LocalFullDocumentService {
                 .map_err(|_| "LocalFull embedding model configuration is unavailable".to_owned())?;
         Ok(Self {
             backend,
-            store: Arc::new(store),
+            store,
             embedding_config,
             embedder,
             embedding_ready: false,
@@ -781,12 +842,14 @@ fn document_projection(
 struct LocalFullDocumentState {
     root: PathBuf,
     audit: Option<Arc<dyn AuditStore>>,
+    runtime: LocalFullRuntime,
     service: tokio::sync::Mutex<Option<LocalFullDocumentService>>,
 }
 
 impl LocalFullDocumentState {
     fn new(root: PathBuf, audit: Option<Arc<dyn AuditStore>>) -> Self {
         Self {
+            runtime: LocalFullRuntime::new(root.clone()),
             root,
             audit,
             service: tokio::sync::Mutex::const_new(None),
@@ -803,9 +866,134 @@ impl LocalFullDocumentState {
                 .as_ref()
                 .map(Arc::clone)
                 .ok_or_else(|| "LocalFull audit store is unavailable".to_owned())?;
-            *service = Some(LocalFullDocumentService::new(&self.root, audit).await?);
+            let parts = self.runtime.parts().await?;
+            *service = Some(
+                LocalFullDocumentService::new(&self.root, audit, parts).await?,
+            );
         }
         Ok(service)
+    }
+}
+
+/// Native destination for an authorized email reveal: the plaintext is used
+/// only here to open the original RFC822 in the system viewer. It is never
+/// serialized back to the renderer, never logged and dropped immediately.
+struct NativeEmailMessageViewer;
+
+impl NativeMessageViewer for NativeEmailMessageViewer {
+    fn open_message(
+        &self,
+        path: &Path,
+        revealed: &[(String, Zeroizing<String>)],
+    ) -> std::result::Result<(), ()> {
+        // `revealed` lives only in native memory; it is never serialized to the
+        // renderer or logged, and the Zeroizing values wipe on drop.
+        let _ = revealed;
+        DesktopOpener::open(&SystemDesktopOpener, path)
+    }
+}
+
+/// Tauri-owned state for the LocalFull email session service. It shares the
+/// document facade / OS keychain resolver / RAG store through `LocalFullRuntime`.
+struct LocalFullEmailState {
+    audit: Option<Arc<dyn AuditStore>>,
+    runtime: LocalFullRuntime,
+    service: tokio::sync::Mutex<Option<EmailSessionService>>,
+}
+
+impl LocalFullEmailState {
+    fn new(root: PathBuf, audit: Option<Arc<dyn AuditStore>>) -> Self {
+        Self {
+            audit,
+            runtime: LocalFullRuntime::new(root),
+            service: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    async fn service(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<EmailSessionService>>, String> {
+        let mut service = self.service.lock().await;
+        if service.is_none() {
+            let audit = self
+                .audit
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or_else(|| "LocalFull audit store is unavailable".to_owned())?;
+            let parts = self.runtime.parts().await?;
+            // The EXACT facade used by document PII and the viewer. No new key,
+            // no new facade and no duplicate PII authority for email.
+            let pii = PiiEngine::from_facade(Arc::clone(&parts.facade));
+            // Coerce the shared concrete store to the trait object the email
+            // service consumes; it is the SAME store instance documents use.
+            let rag_store: Arc<dyn RagStore> = parts.store.clone();
+            let email = EmailSessionService::new(
+                pii,
+                rag_store,
+                audit,
+                Arc::new(NativeEmailMessageViewer),
+            );
+            // Accounts are provisioned by the host (env/config), never by the
+            // renderer: no path, OAuth token or password crosses IPC.
+            if let Ok(root) = env::var("HACIENDA_LOCAL_EMAIL_MAILDIR") {
+                let path = PathBuf::from(root);
+                if path.is_dir() {
+                    email
+                        .register_account(RegisterAccountRequest {
+                            tenant: env::var("HACIENDA_LOCAL_EMAIL_TENANT")
+                                .unwrap_or_else(|_| "local_full".to_owned()),
+                            principal: env::var("HACIENDA_LOCAL_EMAIL_PRINCIPAL")
+                                .unwrap_or_else(|_| "local".to_owned()),
+                            maildir_root: path,
+                            label: env::var("HACIENDA_LOCAL_EMAIL_LABEL")
+                                .unwrap_or_else(|_| "local mailbox".to_owned()),
+                        })
+                        .await
+                        .map_err(|_| "LocalFull email account provisioning failed".to_owned())?;
+                }
+            }
+            *service = Some(email);
+        }
+        Ok(service)
+    }
+}
+
+/// Tauri-owned state for the TeamOnPremise HTTP client. The gateway endpoint and
+/// bearer credential are resolved from the host installation config at startup;
+/// no command argument can change, replace, or disclose either one.
+struct TeamEmailState {
+    client: Option<TeamEmailClient>,
+}
+
+impl TeamEmailState {
+    fn new(client: Option<TeamEmailClient>) -> Self {
+        Self { client }
+    }
+
+    fn client(&self) -> Result<&TeamEmailClient, TeamEmailError> {
+        self.client.as_ref().ok_or(TeamEmailError::Unavailable)
+    }
+}
+
+/// Build the TeamOnPremise client from host-owned configuration only. LocalFull
+/// installations never get one, so a renderer cannot turn a local session into a
+/// gateway session by calling a team command.
+fn team_email_client_from_environment() -> Option<TeamEmailClient> {
+    let installation = installation_config_from_environment().ok()?;
+    if !matches!(installation, InstallationConfig::TeamOnPremise(_)) {
+        return None;
+    }
+    let gateway = provider_gateway_for_installation(&installation).ok()?;
+    let credential = gateway_credential(&gateway.authentication).ok()?;
+    TeamEmailClient::new(gateway.endpoint, credential).ok()
+}
+
+fn require_viewer_window(window: &WebviewWindow) -> Result<(), String> {
+    let label = window.label();
+    if label.starts_with("local-viewer-") || label.starts_with("email-viewer-") {
+        Ok(())
+    } else {
+        Err("Native viewer access is required".to_owned())
     }
 }
 
@@ -2206,6 +2394,271 @@ async fn save_document(
     Ok(saved)
 }
 
+// ── LocalFull email commands ────────────────────────────────────────────────
+// Every argument below is an opaque ref or a token-only projection. Absolute
+// paths, credentials and raw message/attachment text never enter this layer.
+
+#[derive(Debug, Deserialize)]
+struct EmailRefRequest {
+    account_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailMailboxRequest {
+    account_ref: String,
+    mailbox_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailSearchRequest {
+    account_ref: String,
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailMessageRequest {
+    message_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailOpenRequest {
+    capability_ref: String,
+    message_ref: String,
+    token: String,
+}
+
+#[tauri::command(rename = "email-accounts")]
+async fn email_accounts(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+) -> std::result::Result<Vec<AccountProjection>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    Ok(service.as_ref().ok_or(NativeEmailError::Unavailable)?.accounts().await)
+}
+
+#[tauri::command(rename = "email-mailboxes")]
+async fn email_mailboxes(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailRefRequest,
+) -> std::result::Result<Vec<MailboxProjection>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .list_mailboxes(&request.account_ref)
+        .await
+}
+
+#[tauri::command(rename = "email-messages")]
+async fn email_messages(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailMailboxRequest,
+) -> std::result::Result<Vec<MessageProjection>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .list_messages(&request.account_ref, &request.mailbox_ref)
+        .await
+}
+
+#[tauri::command(rename = "email-ingest")]
+async fn email_ingest(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailMailboxRequest,
+) -> std::result::Result<JobProjection, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .ingest(&request.account_ref, &request.mailbox_ref)
+        .await
+}
+
+#[tauri::command(rename = "email-search")]
+async fn email_search(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailSearchRequest,
+) -> std::result::Result<Vec<EmailSearchHit>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .search(&request.account_ref, &request.query)
+        .await
+}
+
+/// A capability is minted for the calling window; the renderer cannot mint one
+/// for another window or message.
+#[tauri::command(rename = "email-authorize-message")]
+async fn email_authorize_message(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailMessageRequest,
+) -> std::result::Result<ViewerCapabilityProjection, NativeEmailError> {
+    if window.label() != MAIN_WINDOW_LABEL && !window.label().starts_with("local-viewer-") {
+        return Err(NativeEmailError::Unauthorized);
+    }
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    // Bind to the calling window itself, never to a renderer-supplied label.
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .authorize_message_view(&request.message_ref, window.label())
+        .await
+}
+
+/// Reveal + open may only be invoked from a native viewer window. The returned
+/// value contains no plaintext, no path and no message text.
+#[tauri::command(rename = "email-open-original")]
+async fn email_open_original(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailOpenRequest,
+) -> std::result::Result<ViewerOpenResponse, NativeEmailError> {
+    require_viewer_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .reveal_and_open(
+            &request.capability_ref,
+            &request.message_ref,
+            window.label(),
+            &request.token,
+        )
+        .await
+}
+
+// ── TeamOnPremise email commands ────────────────────────────────────────────
+// Every argument is a typed, opaque-ref DTO. The renderer never supplies a
+// base URL, a token, a filesystem path, a broker command or raw message text.
+
+#[tauri::command(rename = "team-email-sources")]
+async fn team_email_sources(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+) -> std::result::Result<TeamSourcesResponse, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.sources().await
+}
+
+#[tauri::command(rename = "team-email-ingest")]
+async fn team_email_ingest(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamIngestRequest,
+) -> std::result::Result<TeamAcceptedJob, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.ingest_async(&request).await
+}
+
+#[tauri::command(rename = "team-email-job")]
+async fn team_email_job(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamJobRequest,
+) -> std::result::Result<TeamJobStatusDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    request.validate()?;
+    let job_id = request.job_id.clone();
+    state.client()?.job(&job_id).await
+}
+
+#[tauri::command(rename = "team-email-job-result")]
+async fn team_email_job_result(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamJobRequest,
+) -> std::result::Result<TeamJobStatusDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    request.validate()?;
+    let job_id = request.job_id.clone();
+    state
+        .client()?
+        .wait_for_job(&job_id, 60, Duration::from_millis(500))
+        .await
+}
+
+#[tauri::command(rename = "team-email-search")]
+async fn team_email_search(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamSearchRequest,
+) -> std::result::Result<TeamSearchResponse, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.search(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-capability")]
+async fn team_viewer_capability(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamViewerCapabilityRequest,
+) -> std::result::Result<TeamViewerCapabilityDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.issue_capability(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-reveal")]
+async fn team_viewer_reveal(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamViewerActionRequest,
+) -> std::result::Result<TeamViewerRevealResultDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.reveal(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-open")]
+async fn team_viewer_open(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamViewerActionRequest,
+) -> std::result::Result<TeamViewerProjectionDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.open(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-audit")]
+async fn team_viewer_audit(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+) -> std::result::Result<TeamAuditResponse, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.audit().await
+}
+
 #[cfg(all(
     not(test),
     any(
@@ -2287,9 +2740,18 @@ fn main() {
             };
             app.manage(viewer_state);
             app.manage(LocalFullDocumentState::new(
+                app_data_dir.clone(),
+                audit_store.as_ref().map(Arc::clone),
+            ));
+            // Email shares the document runtime's facade, resolver, RAG store
+            // and audit store; it is not a second PII authority (P0.5).
+            app.manage(LocalFullEmailState::new(
                 app_data_dir,
                 audit_store.as_ref().map(Arc::clone),
             ));
+            // The TeamOnPremise client is built once, from host config only. It is
+            // absent (commands fail closed) unless this is a TeamOnPremise install.
+            app.manage(TeamEmailState::new(team_email_client_from_environment()));
             if let Some(store) = audit_store {
                 app.manage(OriginalViewerCommandState::native(store));
             } else {
@@ -2310,7 +2772,23 @@ fn main() {
             install_local_rag_model,
             search_local_documents,
             load_document,
-            save_document
+            save_document,
+            email_accounts,
+            email_mailboxes,
+            email_messages,
+            email_ingest,
+            email_search,
+            email_authorize_message,
+            email_open_original,
+            team_email_sources,
+            team_email_ingest,
+            team_email_job,
+            team_email_job_result,
+            team_email_search,
+            team_viewer_capability,
+            team_viewer_reveal,
+            team_viewer_open,
+            team_viewer_audit
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Hacienda Secrecy Client");

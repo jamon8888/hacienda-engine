@@ -349,6 +349,12 @@ pub struct AsyncJobResponse {
 /// field at all — only a content-free `entities_found` count. Entity detail, if
 /// ever needed by a UI, must come from a separate short-lived, audited viewer
 /// capability, never from a job payload.
+///
+/// SECURITY (spec review): the domain `errors: Vec<String>` entries are raw
+/// backend/IO diagnostics that can quote sender-controlled envelope ids,
+/// filenames and paths. They are projected to a single `error_count` here; no
+/// raw entry — nor any derived category string — is serialized. Both the sync
+/// response and the async `Job.result_json` use this one projection.
 #[derive(Debug, Serialize)]
 pub struct EmailOperationResultDto {
     /// Wire schema version; bumped on any shape change.
@@ -361,12 +367,16 @@ pub struct EmailOperationResultDto {
     pub rag_stats: Option<hacienda_email::models::RagIndexStats>,
     /// Number of NER entities detected. A count only — no text, offsets, ids or labels.
     pub entities_found: usize,
-    pub errors: Vec<String>,
+    /// Number of per-message errors. A content-free count only: no raw diagnostic
+    /// string, envelope id, filename, path or PII ever reaches the wire.
+    pub error_count: usize,
     pub processing_time_ms: u64,
 }
 
 impl EmailOperationResultDto {
-    pub const SCHEMA_VERSION: u32 = 1;
+    /// v2: the `errors: Vec<String>` field was replaced by the content-free
+    /// `error_count`, so a v1 client must not parse a v2 payload as v1.
+    pub const SCHEMA_VERSION: u32 = 2;
 
     /// Project a domain email response onto the single transport representation.
     ///
@@ -387,7 +397,8 @@ impl EmailOperationResultDto {
             // Content-free projection: the raw mentions in `response.entities`
             // are deliberately dropped here and never enter the job/HTTP result.
             entities_found: response.entities.as_ref().map_or(0, Vec::len),
-            errors: response.errors.clone(),
+            // Content-free: drop the raw `errors` strings entirely, keep only a count.
+            error_count: response.errors.len(),
             processing_time_ms,
         }
     }
@@ -404,6 +415,10 @@ pub struct JobResponse {
     /// Populated when status is `succeeded`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+    /// Populated while the job is running with content-free progress counters
+    /// (page, pages_done, messages, chunks). Never contains message text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<serde_json::Value>,
     /// Populated when status is `failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -415,12 +430,17 @@ impl From<hacienda_core::jobs::Job> for JobResponse {
             .result_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
+        let progress = job
+            .progress_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         Self {
             id: job.id,
             status: job.status,
             created_at: job.created_at,
             updated_at: job.updated_at,
             result,
+            progress,
             // Do not forward internal error strings to the client verbatim;
             // a short failure reason is acceptable but must not contain document content.
             // The store records what the pipeline returned. We take it as-is here because
@@ -469,6 +489,9 @@ pub struct JobResultResponse {
     pub status: hacienda_core::jobs::JobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+    /// Content-free progress counters, when the job is still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

@@ -27,13 +27,17 @@
 //! [`JobStore`]: hacienda_core::jobs::JobStore
 //! [`Router`]: axum::Router
 
-mod dto;
+pub mod dto;
 mod error;
 mod extract;
 mod handlers;
 mod quota;
 mod routes;
 mod state;
+/// TeamOnPremise email integration: source_ref/mailbox_ref ingestion, job/RAG polling and
+/// tenant/document/email-bound viewer capabilities. See the module docs for the transport
+/// boundary: no path, credential or raw message text is accepted from a renderer.
+pub mod team_email;
 
 pub use error::{ApiError, ApiErrorCode};
 pub use hacienda_client_core::ProviderSseEvent;

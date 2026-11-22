@@ -5,6 +5,7 @@ use crate::models::{EmailOperation, EmailSource, Envelope, RagIndexStats};
 use crate::pii::PiiEngine;
 use crate::redacted::RedactedEmailEnvelope;
 use futures::stream::{FuturesUnordered, StreamExt};
+use hacienda_core::auth::Caller;
 use hacienda_rag::{ChunkRecord, CollectionSpec, DocumentRecord, RagStore};
 use std::collections::HashSet;
 
@@ -224,6 +225,8 @@ async fn ensure_collection(rag: &RagIngestion<'_>, collection: &str) -> Result<(
 #[allow(dead_code)]
 async fn upsert_email(
     rag: &RagIngestion<'_>,
+    pii: &PiiEngine,
+    caller: Caller<'_>,
     collection: &str,
     envelope: &Envelope,
     redacted_text: &str,
@@ -231,8 +234,8 @@ async fn upsert_email(
 ) -> Result<usize> {
     ensure_collection(rag, collection).await?;
     // Tokenize before any record is built: the clear envelope never reaches
-    // `build_email_records`.
-    let redacted = RedactedEmailEnvelope::from_envelope(envelope);
+    // `build_email_records`. Tokens come from the host's tenant-keyed authority.
+    let redacted = RedactedEmailEnvelope::from_envelope(pii, caller, envelope).await?;
     let (document, records) = build_email_records(rag, &redacted, redacted_text, chunks);
     let count = records.len();
     rag.store
@@ -253,6 +256,7 @@ async fn upsert_email(
 pub async fn index_for_rag(
     client: &dyn EmailClient,
     pii: &PiiEngine,
+    caller: Caller<'_>,
     op: EmailOperation,
     config: &EmailConfig,
     rag: Option<RagIngestion<'_>>,
@@ -355,16 +359,35 @@ pub async fn index_for_rag(
                             )
                         }
                     };
-                    // P0.1: tokenize envelope metadata *before* it can reach the
-                    // text that is redacted/chunked and the records that are
-                    // persisted. This covers subjects and display names that the
-                    // structured PII detector cannot reliably recognize.
-                    let redacted_meta = RedactedEmailEnvelope::from_envelope(&envelope);
+                    // P0.1/P0.5: tokenize envelope metadata through the host's
+                    // tenant-keyed authority *before* it can reach the text that
+                    // is redacted/chunked and the records that are persisted.
+                    // This covers subjects and display names that the structured
+                    // PII detector cannot reliably recognize. A projection error
+                    // (e.g. no key for this tenant) fails closed.
+                    let redacted_meta = match RedactedEmailEnvelope::from_envelope(
+                        pii, caller, &envelope,
+                    )
+                    .await
+                    {
+                        Ok(meta) => meta,
+                        Err(e) => {
+                            return (
+                                envelope.id.clone(),
+                                None,
+                                Some(format!(
+                                    "Metadata projection failed for {} — refusing to index (fail-closed): {e}",
+                                    envelope.id
+                                )),
+                            )
+                        }
+                    };
                     let text = extract_text_for_rag(&message, &redacted_meta);
                     // D2 (ingestion guard): redact BEFORE chunking. Fail closed — if
                     // the PII engine errors, this message is never indexed.
                     match pii
                         .redact(
+                            caller,
                             &text,
                             &config.redaction.rules,
                             &config.redaction.replacement,
@@ -644,7 +667,21 @@ fn chunk(text: &str, chunk_size: usize, overlap: usize) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use crate::models::EmailAddress;
+    use hacienda_core::auth::{AuthContext, Capability, CapabilitySet};
+    use hacienda_core::tenancy::TenantId;
     use hacienda_rag::InMemoryVectorStore;
+
+    fn test_pii() -> PiiEngine {
+        PiiEngine::for_local_testing()
+    }
+
+    fn test_ctx() -> AuthContext {
+        AuthContext::with_tenant(
+            "test",
+            TenantId::default_tenant(),
+            CapabilitySet::new([Capability::DocumentsProcess]),
+        )
+    }
 
     fn envelope() -> Envelope {
         Envelope {
@@ -682,9 +719,18 @@ mod tests {
             on_page: None,
         };
         let chunks = vec!["chunk one".to_string(), "chunk two".to_string()];
-        let count = upsert_email(&rag, collection, &envelope(), "[REDACTED] body", &chunks)
-            .await
-            .unwrap();
+        let ctx = test_ctx();
+        let count = upsert_email(
+            &rag,
+            &test_pii(),
+            Caller::Principal(&ctx),
+            collection,
+            &envelope(),
+            "[REDACTED] body",
+            &chunks,
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 2);
 
         let (docs, _) = store.list_documents(collection, 10, 0).await.unwrap();
@@ -707,9 +753,17 @@ mod tests {
             .all(|c| c.dossier_id.as_deref() == Some("dossier-42")));
 
         // Re-ingesting the same UID is idempotent (stable external_id).
-        upsert_email(&rag, collection, &envelope(), "[REDACTED] body", &chunks)
-            .await
-            .unwrap();
+        upsert_email(
+            &rag,
+            &test_pii(),
+            Caller::Principal(&ctx),
+            collection,
+            &envelope(),
+            "[REDACTED] body",
+            &chunks,
+        )
+        .await
+        .unwrap();
         let (docs_again, _) = store.list_documents(collection, 10, 0).await.unwrap();
         assert_eq!(docs_again.len(), 1);
     }
@@ -758,8 +812,12 @@ mod tests {
             "[REDACTED] chunk one".to_string(),
             "[REDACTED] chunk two".to_string(),
         ];
+        let ctx = test_ctx();
+        let pii = test_pii();
         upsert_email(
             &rag,
+            &pii,
+            Caller::Principal(&ctx),
             collection,
             &clear_envelope,
             "[REDACTED] body",
@@ -793,7 +851,11 @@ mod tests {
 
         // The persisted title/metadata/full-text are built from the token-only
         // projection, which is stable for the same clear input.
-        let expected_subject = RedactedEmailEnvelope::from_envelope(&clear_envelope).subject;
+        let expected_subject =
+            RedactedEmailEnvelope::from_envelope(&pii, Caller::Principal(&ctx), &clear_envelope)
+                .await
+                .unwrap()
+                .subject;
         assert_eq!(record.title.as_deref(), Some(expected_subject.as_str()));
         assert_eq!(
             record.metadata["subject"].as_str(),
@@ -802,12 +864,15 @@ mod tests {
         // This helper receives already-redacted text, so its full_text is
         // exactly that body; the metadata text path is covered by the
         // integration test through the real `index_for_rag` operation.
-        let projection = RedactedEmailEnvelope::from_envelope(&clear_envelope);
-        assert!(projection.subject.starts_with("subject-"));
+        let projection =
+            RedactedEmailEnvelope::from_envelope(&pii, Caller::Principal(&ctx), &clear_envelope)
+                .await
+                .unwrap();
+        assert!(projection.subject.starts_with("[EMAIL.SUBJECT:"));
         assert!(projection.from[0]
             .name
             .as_deref()
-            .is_some_and(|n| n.starts_with("name-")));
+            .is_some_and(|n| n.starts_with("[EMAIL.NAME:")));
         assert_eq!(record.full_text, "[REDACTED] body");
     }
 

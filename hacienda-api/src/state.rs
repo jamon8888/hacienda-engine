@@ -92,6 +92,12 @@ pub struct ApiState {
     /// Server-owned destinations permitted for RAG answer synthesis.
     /// `None` is fail-closed: the request cannot choose an LLM destination.
     pub(crate) rag_egress_allowlist: Option<Vec<String>>,
+    /// TeamOnPremise allowlist of email sources. Clients select an opaque `source_ref`;
+    /// this registry is the only place that maps it to a tenant-confined Maildir path.
+    pub(crate) email_sources: Arc<crate::team_email::EmailSourceRegistry>,
+    /// Short-lived, tenant/principal/document/email-bound viewer capabilities and their
+    /// content-free audit trail. Never serialized into a job or a renderer DTO.
+    pub(crate) viewer_capabilities: Arc<crate::team_email::ViewerCapabilityStore>,
 }
 
 impl ApiState {
@@ -115,7 +121,29 @@ impl ApiState {
             probe_state: Arc::new(Mutex::new(ProbeState::Idle)),
             claude_messages_provider: None,
             rag_egress_allowlist: None,
+            email_sources: Arc::new(crate::team_email::EmailSourceRegistry::from_env()),
+            viewer_capabilities: Arc::new(crate::team_email::ViewerCapabilityStore::default()),
         }
+    }
+
+    /// Override the server-provisioned email source registry (tests / host config).
+    #[must_use]
+    pub fn with_email_source_registry(
+        mut self,
+        registry: crate::team_email::EmailSourceRegistry,
+    ) -> Self {
+        self.email_sources = Arc::new(registry);
+        self
+    }
+
+    /// Override the viewer capability store (tests / host config).
+    #[must_use]
+    pub fn with_viewer_capability_store(
+        mut self,
+        store: crate::team_email::ViewerCapabilityStore,
+    ) -> Self {
+        self.viewer_capabilities = Arc::new(store);
+        self
     }
 
     /// Enable `/v1/rag/*` by attaching a store. Builder-style so existing call sites

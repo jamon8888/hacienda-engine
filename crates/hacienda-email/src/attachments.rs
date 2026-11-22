@@ -10,14 +10,17 @@ use crate::error::{EmailError, Result};
 use crate::models::{EmailAttachment, ExtractedAttachment};
 use std::path::Path;
 
-/// Content-free diagnostic label for a sender-controlled attachment name.
+/// Content-free diagnostic label for a sender-controlled attachment.
 ///
 /// Filenames arrive from the wire and can embed PII (a person's name, an SSN,
-/// ...). Hashing through the crate's domain-separated metadata token keeps
-/// diagnostics correlatable without ever echoing the clear name into stderr or
-/// an `EmailResponse.errors` entry served by HTTP sync/job polling.
-pub(crate) fn attachment_diagnostic_token(filename: &str) -> String {
-    crate::redacted::metadata_token("attachment", filename)
+/// ...). They must never be echoed into stderr or an `EmailResponse.errors`
+/// entry served by HTTP sync/job polling. This label is deliberately constant:
+/// the old local FNV hash was an unkeyed pseudo-token, and the correlatable
+/// opaque token is now minted by the tenant-keyed authority in `redacted.rs`
+/// for persisted/output metadata. Diagnostics carry no correlation value at
+/// all, so they cannot leak or be cross-tenant linked.
+pub(crate) fn attachment_diagnostic_token(_filename: &str) -> &'static str {
+    "attachment"
 }
 
 /// Fixed, content-free category for an attachment failure.
@@ -212,8 +215,8 @@ mod tests {
             );
         }
         assert!(
-            surface.contains(&attachment_diagnostic_token(SENTINEL_FILENAME)),
-            "{label} lost its correlation token: {surface}"
+            surface.contains(attachment_diagnostic_token(SENTINEL_FILENAME)),
+            "{label} lost its content-free diagnostic label: {surface}"
         );
     }
 
@@ -238,13 +241,15 @@ mod tests {
         assert_content_free(&error_entry, "EmailResponse.errors entry");
     }
 
-    /// Tokens must stay correlatable but never derivable from the clear name.
+    /// Diagnostics carry no derivation of the clear name: no local hash, no
+    /// local secret, and no value that could link two tenants' filenames.
     #[test]
-    fn diagnostic_tokens_are_stable_and_content_free() {
+    fn diagnostic_tokens_are_constant_and_content_free() {
         let first = attachment_diagnostic_token(SENTINEL_FILENAME);
         assert_eq!(first, attachment_diagnostic_token(SENTINEL_FILENAME));
-        assert_ne!(first, attachment_diagnostic_token("other.pdf"));
+        assert_eq!(first, attachment_diagnostic_token("other.pdf"));
         assert!(!first.contains("Jane"));
         assert!(!first.contains("123-45-6789"));
+        assert!(!first.contains("pdf"));
     }
 }

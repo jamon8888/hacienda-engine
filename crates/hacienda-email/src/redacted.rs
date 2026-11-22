@@ -1,44 +1,38 @@
 //! Content-free projections of email metadata.
 //!
-//! P0.1 and P0.3 both require that no clear subject, display name, address or
+//! P0.1 and P0.3 require that no clear subject, display name, address or
 //! attachment name survives into a RAG row or a "redacted" RFC822 file. The PII
 //! engine removes *detectable* structured PII from body text, but arbitrary
-//! names in `From:`/`Subject:` are not reliably detected. This module is the
-//! single place that replaces those metadata fields with deterministic,
-//! domain-separated opaque tokens **before** any record or output is built.
+//! names in `From:`/`Subject:` are not reliably detected. This module replaces
+//! those metadata fields with opaque tokens **before** any record or output is
+//! built.
 //!
-//! Tokens are correlation handles, not encryption: the same input always
-//! yields the same token (so re-ingestion stays idempotent), but the clear
-//! value cannot be read back from a persisted row or file. Revealing the
-//! original remains a separate, audited viewer capability; cross-component
-//! key/reveal interoperability is out of scope for this crate (brief P0.5).
+//! P0.5: tokens are no longer produced by a local, non-keyed FNV-1a hash. They
+//! are minted by the host's tenant-keyed pseudonymiser
+//! (`HaciendaFacade::mint_pseudonym_token_with_auth`) through [`PiiEngine`],
+//! using the request's [`Caller`]. The same facade and key resolver can reveal
+//! them under the owning tenant, but a different tenant's key cannot — and no
+//! new secret or ad-hoc hash is introduced here.
 
+use crate::error::Result;
 use crate::models::{EmailAddress, EmailMessage, Envelope};
+use crate::pii::PiiEngine;
 use chrono::{DateTime, Utc};
+use hacienda_core::auth::Caller;
 
-/// Stable, domain-separated, content-free token for one metadata value.
+/// Opaque, tenant-keyed token for one metadata value.
 ///
-/// FNV-1a 64-bit: no dependency, no key material on disk, stable across runs.
-/// The domain separator prevents a subject token from colliding with an
-/// address token for the same string.
-pub fn metadata_token(domain: &str, value: &str) -> String {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut hash = OFFSET_BASIS;
-    // Feed the domain, a NUL separator, then the value. The trailing NUL keeps
-    // ("ab", "c") and ("a", "bc") from hashing identically.
-    for byte in domain
-        .as_bytes()
-        .iter()
-        .copied()
-        .chain(std::iter::once(0))
-        .chain(value.as_bytes().iter().copied())
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    format!("{domain}-{hash:016x}")
+/// The `domain` is folded into the pseudonym category label, so a subject token
+/// can never collide with an address token for the same string. The value is
+/// never echoed: the token's cleartext is recoverable only by an authorised
+/// reveal through the same host facade and tenant key.
+pub async fn metadata_token(
+    pii: &PiiEngine,
+    caller: Caller<'_>,
+    domain: &str,
+    value: &str,
+) -> Result<String> {
+    pii.project_metadata(caller, domain, value).await
 }
 
 /// Opaque address pair. Display name and mailbox are tokenized separately so
@@ -52,15 +46,19 @@ pub struct RedactedEmailAddress {
 }
 
 impl RedactedEmailAddress {
-    fn from_address(address: &EmailAddress) -> Self {
-        Self {
-            name: address
-                .name
-                .as_deref()
-                .filter(|name| !name.is_empty())
-                .map(|name| metadata_token("name", name)),
-            address: metadata_token("address", &address.address),
-        }
+    async fn from_address(
+        pii: &PiiEngine,
+        caller: Caller<'_>,
+        address: &EmailAddress,
+    ) -> Result<Self> {
+        let name = match address.name.as_deref().filter(|n| !n.is_empty()) {
+            Some(name) => Some(metadata_token(pii, caller, "name", name).await?),
+            None => None,
+        };
+        Ok(Self {
+            name,
+            address: metadata_token(pii, caller, "address", &address.address).await?,
+        })
     }
 
     fn to_model(&self) -> EmailAddress {
@@ -104,63 +102,71 @@ pub struct RedactedEmailEnvelope {
 
 impl RedactedEmailEnvelope {
     /// Tokenize an envelope before it feeds RAG record construction.
-    pub fn from_envelope(envelope: &Envelope) -> Self {
-        Self {
+    pub async fn from_envelope(
+        pii: &PiiEngine,
+        caller: Caller<'_>,
+        envelope: &Envelope,
+    ) -> Result<Self> {
+        let mut from = Vec::with_capacity(envelope.from.len());
+        for address in &envelope.from {
+            from.push(RedactedEmailAddress::from_address(pii, caller, address).await?);
+        }
+        let mut to = Vec::with_capacity(envelope.to.len());
+        for address in &envelope.to {
+            to.push(RedactedEmailAddress::from_address(pii, caller, address).await?);
+        }
+        Ok(Self {
             id: envelope.id.clone(),
             mailbox: envelope.mailbox.clone(),
-            subject: metadata_token("subject", &envelope.subject),
-            from: envelope
-                .from
-                .iter()
-                .map(RedactedEmailAddress::from_address)
-                .collect(),
-            to: envelope
-                .to
-                .iter()
-                .map(RedactedEmailAddress::from_address)
-                .collect(),
+            subject: metadata_token(pii, caller, "subject", &envelope.subject).await?,
+            from,
+            to,
             cc: Vec::new(),
             bcc: Vec::new(),
             date: envelope.date.clone(),
             has_attachments: envelope.has_attachments,
-        }
+        })
     }
 
     /// Tokenize a full message before writing a redacted RFC822 file.
-    pub fn from_message(message: &EmailMessage) -> Self {
-        Self {
+    pub async fn from_message(
+        pii: &PiiEngine,
+        caller: Caller<'_>,
+        message: &EmailMessage,
+    ) -> Result<Self> {
+        async fn addresses(
+            pii: &PiiEngine,
+            caller: Caller<'_>,
+            input: &[EmailAddress],
+        ) -> Result<Vec<RedactedEmailAddress>> {
+            let mut out = Vec::with_capacity(input.len());
+            for address in input {
+                out.push(RedactedEmailAddress::from_address(pii, caller, address).await?);
+            }
+            Ok(out)
+        }
+        Ok(Self {
             id: message.id.clone(),
             mailbox: message.mailbox.clone(),
-            subject: metadata_token("subject", &message.subject),
-            from: message
-                .from
-                .iter()
-                .map(RedactedEmailAddress::from_address)
-                .collect(),
-            to: message
-                .to
-                .iter()
-                .map(RedactedEmailAddress::from_address)
-                .collect(),
-            cc: message
-                .cc
-                .iter()
-                .map(RedactedEmailAddress::from_address)
-                .collect(),
-            bcc: message
-                .bcc
-                .iter()
-                .map(RedactedEmailAddress::from_address)
-                .collect(),
+            subject: metadata_token(pii, caller, "subject", &message.subject).await?,
+            from: addresses(pii, caller, &message.from).await?,
+            to: addresses(pii, caller, &message.to).await?,
+            cc: addresses(pii, caller, &message.cc).await?,
+            bcc: addresses(pii, caller, &message.bcc).await?,
             date: message.date.clone(),
             has_attachments: !message.attachments.is_empty(),
-        }
+        })
     }
 
     /// Overwrite every PII-bearing header (including attachment filenames)
     /// with the tokenized projection. Body text is handled separately by the
     /// PII engine; this intentionally touches only metadata.
-    pub fn apply_to_message(&self, message: &mut EmailMessage) {
+    pub async fn apply_to_message(
+        &self,
+        pii: &PiiEngine,
+        caller: Caller<'_>,
+        message: &mut EmailMessage,
+    ) -> Result<()> {
         message.subject = self.subject.clone();
         message.from = self
             .from
@@ -175,8 +181,10 @@ impl RedactedEmailEnvelope {
             .map(RedactedEmailAddress::to_model)
             .collect();
         for attachment in &mut message.attachments {
-            attachment.filename = metadata_token("attachment", &attachment.filename);
+            attachment.filename =
+                metadata_token(pii, caller, "attachment", &attachment.filename).await?;
         }
+        Ok(())
     }
 }
 
@@ -184,18 +192,44 @@ impl RedactedEmailEnvelope {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tokens_are_stable_domain_separated_and_content_free() {
-        let subject = metadata_token("subject", "jane.doe@acme.example");
-        assert_eq!(subject, metadata_token("subject", "jane.doe@acme.example"));
-        assert_ne!(subject, metadata_token("address", "jane.doe@acme.example"));
-        assert_ne!(subject, metadata_token("subject", "john.doe@acme.example"));
+    #[tokio::test]
+    async fn metadata_tokens_are_domain_separated_and_content_free() {
+        let pii = test_pii();
+        let ctx = test_caller();
+        let caller = Caller::Principal(&ctx);
+
+        let subject = metadata_token(&pii, caller, "subject", "jane.doe@acme.example")
+            .await
+            .unwrap();
+        let same = metadata_token(&pii, caller, "subject", "jane.doe@acme.example")
+            .await
+            .unwrap();
+        let other_domain = metadata_token(&pii, caller, "address", "jane.doe@acme.example")
+            .await
+            .unwrap();
+        let other_value = metadata_token(&pii, caller, "subject", "john.doe@acme.example")
+            .await
+            .unwrap();
+
+        assert_eq!(subject, same, "tokens must be stable for re-ingestion");
+        assert_ne!(subject, other_domain, "domains must not collide");
+        assert_ne!(subject, other_value, "values must not collide");
         assert!(!subject.contains("jane.doe@acme.example"));
         assert!(!subject.contains("acme"));
     }
 
-    #[test]
-    fn distinct_domains_do_not_collide_on_the_same_value() {
-        assert_ne!(metadata_token("a", "bc"), metadata_token("ab", "c"));
+    /// The test-only helper wires a deterministic default-tenant key resolver.
+    /// See `tests/tenant_pii.rs` for the full two-tenant matrix.
+    fn test_pii() -> PiiEngine {
+        PiiEngine::for_local_testing()
+    }
+
+    fn test_caller() -> hacienda_core::auth::AuthContext {
+        use hacienda_core::auth::{Capability, CapabilitySet};
+        hacienda_core::auth::AuthContext::with_tenant(
+            "test",
+            hacienda_core::tenancy::TenantId::default_tenant(),
+            CapabilitySet::new([Capability::DocumentsProcess]),
+        )
     }
 }

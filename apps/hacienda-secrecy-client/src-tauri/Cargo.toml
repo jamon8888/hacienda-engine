@@ -23,6 +23,13 @@ async-trait = "0.1"
 blake3 = "1"
 hacienda-core = { path = "../../../hacienda-core" }
 hacienda-client-core = { path = "../../../crates/hacienda-client-core" }
+# LocalFull email runs in-process and shares the document facade, key resolver,
+# OS keychain and RAG store. No HTTP/MCP email client is compiled into the host.
+hacienda-email = { path = "../../../crates/hacienda-email", default-features = false, features = [
+    "maildir",
+    "rag",
+    "redact",
+] }
 # Shared pinned NER model identity (same registry Studio imports). The Tauri
 # host still owns download/cache; this crate verifies the resolved directory.
 hacienda-model-assets = { path = "../../../crates/hacienda-model-assets" }
@@ -31,11 +38,15 @@ hacienda-rag = { path = "../../../crates/hacienda-rag", features = ["lancedb"] }
 futures = "0.3"
 getrandom = "0.3"
 rfd = "0.15"
+# TeamOnPremise calls the authenticated Hacienda API with rustls only — no
+# native TLS stack, no credentials on the wire from the renderer. Version and
+# features match the workspace pin so the lockfile resolves one reqwest.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = [] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "507fca3d3cc5b8e71f0e416af4a8aec15e18d2cd", default-features = false, features = [
     "tokio-runtime",
     "embeddings",

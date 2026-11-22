@@ -43,6 +43,14 @@ use crate::state::ApiState;
         crate::handlers::claude_messages::messages,
         crate::handlers::email::process_email,
         crate::handlers::email::process_email_async,
+        crate::team_email::list_email_sources,
+        crate::team_email::ingest_email,
+        crate::team_email::ingest_email_async,
+        crate::team_email::search_email,
+        crate::team_email::issue_viewer_capability,
+        crate::team_email::reveal_viewer_content,
+        crate::team_email::open_viewer_content,
+        crate::team_email::viewer_audit,
         crate::handlers::pii::scan_text,
         crate::handlers::pii::redact_text,
         crate::handlers::pii::pii_config,
@@ -123,6 +131,28 @@ use crate::state::ApiState;
         crate::dto::DocumentResult,
         crate::dto::ProcessDocumentsResponse,
         crate::dto::AsyncJobResponse,
+        // TeamOnPremise email contracts: generated SDKs now see the same opaque-ref
+        // request/response shapes the Tauri client is validated against.
+        crate::team_email::EmailIngestRequest,
+        crate::team_email::EmailIngestOperationDto,
+        crate::team_email::EmailPrivacyDto,
+        crate::team_email::EmailSourceDto,
+        crate::team_email::EmailSourcesResponse,
+        crate::team_email::EmailSearchRequest,
+        crate::team_email::EmailSearchHitDto,
+        crate::team_email::EmailSearchResponse,
+        crate::team_email::EmailSourceKindDto,
+        crate::team_email::ViewerPolicyDto,
+        crate::team_email::ViewerCapabilityRequest,
+        crate::team_email::ViewerCapabilityDto,
+        crate::team_email::ViewerDeliveryDto,
+        crate::team_email::ViewerActionRequest,
+        crate::team_email::ViewerRevealResultDto,
+        crate::team_email::ViewerHeaderDto,
+        crate::team_email::ViewerProjectionDto,
+        crate::team_email::ViewerProjectionKindDto,
+        crate::team_email::ViewerAuditEventDto,
+        crate::team_email::ViewerAuditResponse,
         crate::dto::JobResponse,
         crate::dto::JobListQuery,
         crate::dto::JobListResponse,
@@ -244,7 +274,7 @@ pub fn build_openapi() -> Result<Value, crate::error::ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::ROUTE_TABLE;
+    use crate::routes::{Access, ROUTE_TABLE};
 
     /// The path set in the OpenAPI document must equal the path set in the route
     /// table, with the sole deliberate exception of `/openapi.json` itself (see this
@@ -274,6 +304,94 @@ mod tests {
              a route was added without a matching #[utoipa::path] handler annotation, \
              or vice versa"
         );
+
+        // A bare set equality would still pass if a shipped team route were documented
+        // as an empty stub. Pin each of the eight `/v1/team/*` endpoints to the auth,
+        // request/response DTOs and capability semantics the route table grants it, so
+        // this test stays contractual as the surface grows.
+        //
+        // (path, method, capability, request DTO or "", success status, response DTO or "")
+        const TEAM_ENDPOINT_CONTRACTS: &[(&str, &str, &str, &str, &str, &str)] = &[
+            ("/v1/team/email/sources", "get", "documents:process", "", "200", "EmailSourcesResponse"),
+            ("/v1/team/email/ingest", "post", "documents:process", "EmailIngestRequest", "200", ""),
+            (
+                "/v1/team/email/ingest/async",
+                "post",
+                "documents:process",
+                "EmailIngestRequest",
+                "202",
+                "AsyncJobResponse",
+            ),
+            ("/v1/team/email/search", "post", "documents:process", "EmailSearchRequest", "200", "EmailSearchResponse"),
+            (
+                "/v1/team/viewer/capability",
+                "post",
+                "pii:reveal",
+                "ViewerCapabilityRequest",
+                "200",
+                "ViewerCapabilityDto",
+            ),
+            (
+                "/v1/team/viewer/reveal",
+                "post",
+                "pii:reveal",
+                "ViewerActionRequest",
+                "200",
+                "ViewerRevealResultDto",
+            ),
+            (
+                "/v1/team/viewer/open",
+                "post",
+                "pii:reveal",
+                "ViewerActionRequest",
+                "200",
+                "ViewerProjectionDto",
+            ),
+            ("/v1/team/viewer/audit", "get", "audit:read", "", "200", "ViewerAuditResponse"),
+        ];
+
+        for &(path, method, capability, request_dto, status, response_dto) in TEAM_ENDPOINT_CONTRACTS {
+            // The route table remains the authority for each path's access decision.
+            let spec = ROUTE_TABLE
+                .iter()
+                .find(|s| s.path == path)
+                .unwrap_or_else(|| panic!("team path {path} dropped from ROUTE_TABLE"));
+            assert!(
+                matches!(spec.access, Access::Capability(_)),
+                "team path {path} must be capability-guarded in ROUTE_TABLE"
+            );
+
+            let operation = &doc["paths"][path][method];
+            assert!(
+                operation.is_object(),
+                "team endpoint {method} {path} missing from the OpenAPI document"
+            );
+            assert_eq!(
+                operation["description"],
+                format!("Requires {capability}"),
+                "{method} {path} must declare its capability in the operation description"
+            );
+            assert!(
+                operation["security"].as_array().is_some_and(|schemes| {
+                    schemes.iter().any(|scheme| scheme.get("bearerAuth").is_some())
+                }),
+                "{method} {path} must require bearerAuth"
+            );
+            if !request_dto.is_empty() {
+                assert_eq!(
+                    operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+                    format!("#/components/schemas/{request_dto}"),
+                    "{method} {path} must declare its opaque-ref request DTO"
+                );
+            }
+            if !response_dto.is_empty() {
+                assert_eq!(
+                    operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                    format!("#/components/schemas/{response_dto}"),
+                    "{method} {path} must declare its {status} response DTO"
+                );
+            }
+        }
     }
 
     /// Every path in the document must have at least one HTTP method with a described
@@ -345,6 +463,26 @@ mod tests {
         "DocumentResult",
         "ProcessDocumentsResponse",
         "AsyncJobResponse",
+        "EmailIngestRequest",
+        "EmailIngestOperationDto",
+        "EmailPrivacyDto",
+        "EmailSourceDto",
+        "EmailSourcesResponse",
+        "EmailSearchRequest",
+        "EmailSearchHitDto",
+        "EmailSearchResponse",
+        "EmailSourceKindDto",
+        "ViewerPolicyDto",
+        "ViewerCapabilityRequest",
+        "ViewerCapabilityDto",
+        "ViewerDeliveryDto",
+        "ViewerActionRequest",
+        "ViewerRevealResultDto",
+        "ViewerHeaderDto",
+        "ViewerProjectionDto",
+        "ViewerProjectionKindDto",
+        "ViewerAuditEventDto",
+        "ViewerAuditResponse",
         "JobResponse",
         "JobListQuery",
         "JobListResponse",

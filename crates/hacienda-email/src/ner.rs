@@ -3,12 +3,14 @@ use crate::config::EmailConfig;
 use crate::error::{EmailError, Result};
 use crate::models::{EmailOperation, EmailSource, ExtractedEntity};
 use crate::pii::PiiEngine;
+use hacienda_core::auth::Caller;
 use std::path::Path;
 
-/// Extract named entities from emails
+/// Extract named entities from emails as the authenticated `caller`'s tenant.
 pub async fn extract_ner(
     client: &dyn EmailClient,
     pii: &PiiEngine,
+    caller: Caller<'_>,
     op: EmailOperation,
     config: &EmailConfig,
 ) -> Result<crate::models::EmailResponse> {
@@ -37,7 +39,7 @@ pub async fn extract_ner(
             match client.get_message("INBOX", &envelope.id).await {
                 Ok(message) => {
                     let text = extract_text(&message);
-                    match extract_entities(&text, pii).await {
+                    match extract_entities(&text, pii, caller).await {
                         Ok(entities) => {
                             for entity in entities {
                                 all_entities.push(ExtractedEntity {
@@ -159,8 +161,12 @@ struct NerEntity {
 }
 
 /// Extract entities via hacienda-core's real detection pipeline.
-async fn extract_entities(text: &str, pii: &PiiEngine) -> Result<Vec<NerEntity>> {
-    let found = pii.scan_entities(text).await?;
+async fn extract_entities(
+    text: &str,
+    pii: &PiiEngine,
+    caller: Caller<'_>,
+) -> Result<Vec<NerEntity>> {
+    let found = pii.scan_entities(caller, text).await?;
     Ok(found
         .into_iter()
         .map(|(label, mention, confidence, span)| NerEntity {

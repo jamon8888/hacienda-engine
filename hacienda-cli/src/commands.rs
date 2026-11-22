@@ -1783,7 +1783,8 @@ fn build_email_config(path: Option<&std::path::Path>) -> Result<hacienda_email::
 pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
     use crate::cli::{EmailCommand, EmailPrivacyMode};
     use hacienda_email::{
-        EmailDestination, EmailOperation, EmailProcessor, EmailRequest, EmailSource, PipelineStep,
+        pii::PiiEngine, EmailDestination, EmailOperation, EmailProcessor, EmailRequest,
+        EmailSource, PipelineStep,
     };
 
     let config = build_email_config(args.email_config.as_deref())?;
@@ -1797,7 +1798,12 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
         EmailPrivacyMode::Pseudonymize => hacienda_email::PrivacyMode::Pseudonymize,
     };
 
-    let processor = EmailProcessor::new(config)
+    // In-process caller: the host facade owns the key resolver and audit store.
+    // Metadata projection needs a resolvable tenant key in both privacy modes
+    // (P0.5); there is no local hash fallback.
+    let pii = PiiEngine::for_local_use(PiiEngine::local_config(), Arc::new(EnvKeyResolver::new()))
+        .context("initialising shared PII authority for email")?;
+    let processor = EmailProcessor::new(config, pii)
         .await
         .context("initialising email processor")?;
 
@@ -1858,10 +1864,13 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
     };
 
     let response = processor
-        .process(EmailRequest {
-            operation,
-            config_overrides: None,
-        })
+        .process(
+            EmailRequest {
+                operation,
+                config_overrides: None,
+            },
+            Caller::Trusted,
+        )
         .await
         .context("processing emails")?;
 

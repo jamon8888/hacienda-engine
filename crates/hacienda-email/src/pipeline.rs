@@ -3,11 +3,13 @@ use crate::config::EmailConfig;
 use crate::error::{EmailError, Result};
 use crate::models::{EmailDestination, EmailOperation, EmailSource, PipelineStep};
 use crate::pii::PiiEngine;
+use hacienda_core::auth::Caller;
 
-/// Run full email processing pipeline
+/// Run full email processing pipeline as the authenticated `caller`'s tenant.
 pub async fn run_pipeline(
     client: &dyn EmailClient,
     pii: &PiiEngine,
+    caller: Caller<'_>,
     op: EmailOperation,
     config: &EmailConfig,
     rag: Option<crate::rag::RagIngestion<'_>>,
@@ -60,7 +62,8 @@ pub async fn run_pipeline(
                 // Extract attachments via xberg and redact the extracted text before
                 // it is persisted (professional-secrecy requirement).
                 let extracted =
-                    extract_attachments_from_source(client, &current_source, pii, config).await?;
+                    extract_attachments_from_source(client, &current_source, pii, caller, config)
+                        .await?;
                 all_errors.extend(extracted.errors);
                 total_processed += extracted.count;
             }
@@ -71,7 +74,7 @@ pub async fn run_pipeline(
                     output: format!("{}/entities.json", destination_path(&destination)),
                     model: None,
                 };
-                let response = crate::ner::extract_ner(client, pii, op, config).await?;
+                let response = crate::ner::extract_ner(client, pii, caller, op, config).await?;
                 all_entities.extend(response.entities.unwrap_or_default());
                 all_errors.extend(response.errors);
                 total_processed = response.processed_count;
@@ -83,7 +86,8 @@ pub async fn run_pipeline(
                     index_name: None,
                     chunk_size: None,
                 };
-                let response = crate::rag::index_for_rag(client, pii, op, config, rag).await?;
+                let response =
+                    crate::rag::index_for_rag(client, pii, caller, op, config, rag).await?;
                 if let Some(stats) = response.rag_stats {
                     total_chunks = stats.chunks_created;
                     total_indexed = stats.vectors_indexed;
@@ -98,7 +102,7 @@ pub async fn run_pipeline(
                     destination: destination.clone(),
                     rules: None,
                 };
-                let response = crate::redact::redact(client, pii, op, config).await?;
+                let response = crate::redact::redact(client, pii, caller, op, config).await?;
                 if let Some(stats) = response.redaction_stats {
                     total_redactions = stats.total_redactions;
                 }
@@ -143,6 +147,7 @@ async fn extract_attachments_from_source(
     client: &dyn EmailClient,
     source: &EmailSource,
     pii: &crate::pii::PiiEngine,
+    caller: Caller<'_>,
     config: &EmailConfig,
 ) -> Result<AttachmentResult> {
     let envelopes = match source {
@@ -184,6 +189,7 @@ async fn extract_attachments_from_source(
                     // Redact the xberg-extracted text before persisting (fail-closed).
                     match pii
                         .redact(
+                            caller,
                             &item.content,
                             &config.redaction.rules,
                             &config.redaction.replacement,

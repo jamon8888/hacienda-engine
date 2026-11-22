@@ -3,12 +3,14 @@ use crate::config::{EmailConfig, RedactionRule};
 use crate::error::{EmailError, Result};
 use crate::models::{EmailDestination, EmailMessage, EmailOperation, EmailSource, RedactionStats};
 use crate::pii::PiiEngine;
+use hacienda_core::auth::Caller;
 use std::collections::HashMap;
 
-/// Redact PII from emails using hacienda-core's real detection pipeline.
+/// Redact PII from emails using the host's tenant-scoped PII authority.
 pub async fn redact(
     client: &dyn EmailClient,
     pii: &PiiEngine,
+    caller: Caller<'_>,
     op: EmailOperation,
     config: &EmailConfig,
 ) -> Result<crate::models::EmailResponse> {
@@ -41,15 +43,23 @@ pub async fn redact(
                 // names, so names, addresses, subject and attachment names are
                 // tokenized rather than merely regex-redacted.
                 let redacted_envelope =
-                    crate::redacted::RedactedEmailEnvelope::from_message(&message);
+                    crate::redacted::RedactedEmailEnvelope::from_message(pii, caller, &message)
+                        .await?;
                 // Fail closed: a body whose redaction errored still holds clear
                 // content, so it must never reach a file named "redacted".
                 let mut bodies_safe = true;
 
                 // Redact the text body (real PII engine).
                 if let Some(text) = &message.text_body {
-                    match redact_body(text, &redaction_rules, replacement, preserve_format, pii)
-                        .await
+                    match redact_body(
+                        text,
+                        &redaction_rules,
+                        replacement,
+                        preserve_format,
+                        pii,
+                        caller,
+                    )
+                    .await
                     {
                         Ok((redacted, stats)) => {
                             message.text_body = Some(redacted);
@@ -73,6 +83,7 @@ pub async fn redact(
                         replacement,
                         preserve_format,
                         pii,
+                        caller,
                     )
                     .await
                     {
@@ -96,7 +107,9 @@ pub async fn redact(
                 // Replace every PII-bearing header with its token. This covers
                 // From/To/Cc/Bcc display names AND addresses, Subject, and
                 // attachment filenames — none can survive in clear text.
-                redacted_envelope.apply_to_message(&mut message);
+                redacted_envelope
+                    .apply_to_message(pii, caller, &mut message)
+                    .await?;
 
                 // Save redacted message.
                 if let Err(e) = save_redacted(&destination, &message).await {
@@ -160,8 +173,10 @@ async fn redact_body(
     replacement: &str,
     preserve_format: bool,
     pii: &PiiEngine,
+    caller: Caller<'_>,
 ) -> Result<(String, HashMap<String, usize>)> {
-    pii.redact(text, rules, replacement, preserve_format).await
+    pii.redact(caller, text, rules, replacement, preserve_format)
+        .await
 }
 
 /// Redact an HTML body by rebuilding a new, safe HTML fragment from the
@@ -176,10 +191,11 @@ async fn redact_html_body(
     replacement: &str,
     preserve_format: bool,
     pii: &PiiEngine,
+    caller: Caller<'_>,
 ) -> Result<(String, HashMap<String, usize>)> {
     let visible = crate::ner::html_to_text(html);
     let (redacted, stats) = pii
-        .redact(&visible, rules, replacement, preserve_format)
+        .redact(caller, &visible, rules, replacement, preserve_format)
         .await?;
     Ok((safe_html_from_redacted_text(&redacted), stats))
 }
@@ -336,6 +352,15 @@ mod tests {
     use super::*;
     use crate::models::{EmailAddress, EmailAttachment};
     use crate::redacted::RedactedEmailEnvelope;
+    use hacienda_core::auth::{AuthContext, Capability, CapabilitySet};
+
+    fn test_ctx() -> AuthContext {
+        AuthContext::with_tenant(
+            "test",
+            hacienda_core::tenancy::TenantId::default_tenant(),
+            CapabilitySet::new([Capability::DocumentsProcess]),
+        )
+    }
 
     const CLEAR_FIXTURES: &[&str] = &[
         "Jane Doe",
@@ -401,7 +426,8 @@ mod tests {
     /// the original markup — tags, attributes and comments can all hide PII.
     #[tokio::test]
     async fn html_redaction_discards_original_markup_and_pii() {
-        let pii = PiiEngine::new(crate::config::PrivacyMode::Redact).unwrap();
+        let pii = PiiEngine::for_local_testing();
+        let ctx = test_ctx();
         let config = EmailConfig::default();
         let message = fixture_message();
         let html = message.html_body.as_ref().unwrap();
@@ -412,6 +438,7 @@ mod tests {
             &config.redaction.replacement,
             config.redaction.preserve_format,
             &pii,
+            Caller::Principal(&ctx),
         )
         .await
         .unwrap();
@@ -425,24 +452,34 @@ mod tests {
 
     /// P0.3: RFC822 output built from the token projection must expose neither
     /// display names/addresses nor the subject or attachment filename in clear.
-    #[test]
-    fn tokenized_message_never_leaks_clear_metadata_in_rfc822() {
+    #[tokio::test]
+    async fn tokenized_message_never_leaks_clear_metadata_in_rfc822() {
+        let pii = PiiEngine::for_local_testing();
+        let ctx = test_ctx();
+        let caller = Caller::Principal(&ctx);
         let mut message = fixture_message();
-        let projection = RedactedEmailEnvelope::from_message(&message);
+        let projection = RedactedEmailEnvelope::from_message(&pii, caller, &message)
+            .await
+            .unwrap();
 
         // Body redaction belongs to the PII engine; emulate its safe result so
         // this test isolates the metadata/RFC822 contract.
         message.text_body = Some("[REDACTED] body".to_string());
         message.html_body = Some(safe_html_from_redacted_text("[REDACTED] body"));
-        projection.apply_to_message(&mut message);
+        projection
+            .apply_to_message(&pii, caller, &mut message)
+            .await
+            .unwrap();
 
         let rfc822 = message_to_rfc822(&message);
         assert_no_clear_fixtures(&rfc822);
-        assert!(rfc822.contains("Subject: subject-"));
-        assert!(rfc822.contains("From: \"name-"));
-        assert!(rfc822.contains("To: \"name-"));
-        assert!(rfc822.contains("Cc: address-"));
+        assert!(rfc822.contains("Subject: [EMAIL.SUBJECT:"));
+        assert!(rfc822.contains("From: \"[EMAIL.NAME:"));
+        assert!(rfc822.contains("To: \"[EMAIL.NAME:"));
+        assert!(rfc822.contains("Cc: [EMAIL.ADDRESS:"));
         assert!(!rfc822.contains("<html"));
-        assert!(message.attachments[0].filename.starts_with("attachment-"));
+        assert!(message.attachments[0]
+            .filename
+            .starts_with("[EMAIL.ATTACHMENT:"));
     }
 }
