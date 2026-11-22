@@ -197,7 +197,7 @@ impl NerDetector {
                 hacienda_model_assets::verify_dir(model_id, model_dir).map_err(|source| {
                     PiiError::ModelIntegrity {
                         model_id: model_id.to_owned(),
-                        source,
+                        source: Box::new(source),
                     }
                 })
             },

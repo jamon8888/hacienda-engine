@@ -166,7 +166,7 @@ impl RedactedEmailEnvelope {
             to,
             cc: Vec::new(),
             bcc: Vec::new(),
-            date: envelope.date.clone(),
+            date: envelope.date,
             has_attachments: envelope.has_attachments,
         })
     }
@@ -196,7 +196,7 @@ impl RedactedEmailEnvelope {
             to: addresses(pii, caller, &message.to).await?,
             cc: addresses(pii, caller, &message.cc).await?,
             bcc: addresses(pii, caller, &message.bcc).await?,
-            date: message.date.clone(),
+            date: message.date,
             has_attachments: !message.attachments.is_empty(),
         })
     }

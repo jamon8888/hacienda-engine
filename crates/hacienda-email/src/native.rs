@@ -94,11 +94,7 @@ pub trait NativeMessageViewer: Send + Sync {
     /// `revealed` contains `(token, plaintext)` pairs that the message-bound
     /// capability authorized for this one reveal. It is `Zeroizing` so the
     /// plaintext is wiped when the viewer drops it.
-    fn open_message(
-        &self,
-        path: &Path,
-        revealed: &[(String, Zeroizing<String>)],
-    ) -> std::result::Result<(), ()>;
+    fn open_message(&self, path: &Path, revealed: &[(String, Zeroizing<String>)]) -> Result<()>;
 }
 
 /// Host-supplied registration data. Never sent by the renderer: `maildir_root`
@@ -679,8 +675,7 @@ impl EmailSessionService {
         let viewer = Arc::clone(&self.viewer);
         tokio::task::spawn_blocking(move || viewer.open_message(&path, &revealed))
             .await
-            .map_err(|_| NativeEmailError::Unavailable)?
-            .map_err(|_| NativeEmailError::Unavailable)?;
+            .map_err(|_| NativeEmailError::Unavailable)??;
         if let Some(capability) = self.capabilities.lock().await.get_mut(capability_ref) {
             capability.consumed = true;
         }

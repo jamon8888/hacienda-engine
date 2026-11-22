@@ -69,11 +69,17 @@ impl NativeMessageViewer for RecordingViewer {
         &self,
         path: &Path,
         revealed: &[(String, Zeroizing<String>)],
-    ) -> std::result::Result<(), ()> {
-        self.opened.lock().map_err(|_| ())?.push((
-            path.to_path_buf(),
-            revealed.iter().map(|(_, value)| value.to_string()).collect(),
-        ));
+    ) -> std::result::Result<(), NativeEmailError> {
+        self.opened
+            .lock()
+            .map_err(|_| NativeEmailError::Unavailable)?
+            .push((
+                path.to_path_buf(),
+                revealed
+                    .iter()
+                    .map(|(_, value)| value.to_string())
+                    .collect(),
+            ));
         Ok(())
     }
 }
@@ -187,22 +193,26 @@ async fn maildir_ingest_retrieve_and_message_bound_reveal() {
         .unwrap();
     assert!(opened.opened);
 
-    let captured = viewer.opened.lock().unwrap();
-    assert_eq!(captured.len(), 1);
-    let (opened_path, revealed) = &captured[0];
-    assert!(
-        opened_path.starts_with(fixture_root().join("cur"))
-            || opened_path.starts_with(fixture_root().join("new")),
-        "the opened original must live inside the provisioned Maildir"
-    );
-    assert!(opened_path.is_file(), "the ORIGINAL RFC822 must be opened");
-    let original = std::fs::read_to_string(opened_path).unwrap();
-    assert!(original.contains(CLEAR_SUBJECT), "fixture is the clear original");
-    // Reversible pseudonyms normalize case (NFKC + lowercase) before encryption,
-    // so the revealed value is the normalized cleartext.
-    assert_eq!(revealed.len(), 1);
-    assert_eq!(revealed[0].to_lowercase(), CLEAR_SUBJECT.to_lowercase());
-    drop(captured);
+    {
+        let captured = viewer.opened.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let (opened_path, revealed) = &captured[0];
+        assert!(
+            opened_path.starts_with(fixture_root().join("cur"))
+                || opened_path.starts_with(fixture_root().join("new")),
+            "the opened original must live inside the provisioned Maildir"
+        );
+        assert!(opened_path.is_file(), "the ORIGINAL RFC822 must be opened");
+        let original = std::fs::read_to_string(opened_path).unwrap();
+        assert!(
+            original.contains(CLEAR_SUBJECT),
+            "fixture is the clear original"
+        );
+        // Reversible pseudonyms normalize case (NFKC + lowercase) before encryption,
+        // so the revealed value is the normalized cleartext.
+        assert_eq!(revealed.len(), 1);
+        assert_eq!(revealed[0].to_lowercase(), CLEAR_SUBJECT.to_lowercase());
+    }
 
     // A replayed capability cannot reveal again.
     assert_eq!(

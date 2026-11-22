@@ -928,11 +928,12 @@ impl NativeMessageViewer for NativeEmailMessageViewer {
         &self,
         path: &Path,
         revealed: &[(String, Zeroizing<String>)],
-    ) -> std::result::Result<(), ()> {
+    ) -> std::result::Result<(), NativeEmailError> {
         // `revealed` lives only in native memory; it is never serialized to the
         // renderer or logged, and the Zeroizing values wipe on drop.
         let _ = revealed;
         DesktopOpener::open(&SystemDesktopOpener, path)
+            .map_err(|_| NativeEmailError::Unavailable)
     }
 }
 

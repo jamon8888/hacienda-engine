@@ -63,8 +63,10 @@ pub enum PiiError {
     #[error("model asset integrity check failed for '{model_id}'")]
     ModelIntegrity {
         model_id: String,
+        // Boxed so `PiiError` (and therefore `HaciendaError`) stays small enough
+        // for the `result_large_err` lint.
         #[source]
-        source: hacienda_model_assets::ModelAssetsError,
+        source: Box<hacienda_model_assets::ModelAssetsError>,
     },
 
     #[error("reading configuration from {path}")]

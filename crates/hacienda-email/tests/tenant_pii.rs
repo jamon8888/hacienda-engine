@@ -171,7 +171,7 @@ fn fixture() -> FixtureClient {
         to: Vec::new(),
         cc: Vec::new(),
         bcc: Vec::new(),
-        date: envelope.date.clone(),
+        date: envelope.date,
         text_body: Some(format!("Contact {CLEAR_EMAIL} for the review")),
         html_body: None,
         attachments: vec![EmailAttachment {

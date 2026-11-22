@@ -69,15 +69,10 @@ const MAX_TRACKED_TENANTS: usize = 4_096;
 /// `Enabled` is intentionally not a variant: adding it would imply a safe
 /// re-ingest path (opaque source ref + tenant/principal binding + idempotency
 /// key) that does not exist. See the module doc for the reasoning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RetryPolicy {
+    #[default]
     Disabled,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        RetryPolicy::Disabled
-    }
 }
 
 /// Retention applied to terminal (`Succeeded` / `Failed`) jobs only. Running or
@@ -228,7 +223,7 @@ impl GuardedJobStore {
                 }
             }
         }; // guard dropped before any .await
-        if writes.map_or(true, |n| n % self.retention.prune_every == 0) {
+        if writes.is_none_or(|n| n % self.retention.prune_every == 0) {
             self.prune(tenant).await;
         }
     }
