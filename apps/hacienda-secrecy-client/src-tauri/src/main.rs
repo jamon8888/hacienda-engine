@@ -193,7 +193,8 @@ enum NerModelError {
     VerificationFailed {
         model_id: &'static str,
         model_dir: PathBuf,
-        source: hacienda_model_assets::ModelAssetsError,
+        // Boxed so `NerModelError` stays below clippy's `result_large_err` threshold.
+        source: Box<hacienda_model_assets::ModelAssetsError>,
     },
 }
 
@@ -218,7 +219,7 @@ impl std::fmt::Display for NerModelError {
 impl std::error::Error for NerModelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::VerificationFailed { source, .. } => Some(source),
+            Self::VerificationFailed { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
@@ -246,7 +247,7 @@ fn validate_ner_model_assets(model_dir: &Path) -> Result<(), NerModelError> {
         return Err(NerModelError::VerificationFailed {
             model_id: PINNED_NER_MODEL_ID,
             model_dir: model_dir.to_owned(),
-            source: error,
+            source: Box::new(error),
         });
     }
     validate_ner_model_architecture(model_dir)
@@ -932,8 +933,7 @@ impl NativeMessageViewer for NativeEmailMessageViewer {
         // `revealed` lives only in native memory; it is never serialized to the
         // renderer or logged, and the Zeroizing values wipe on drop.
         let _ = revealed;
-        DesktopOpener::open(&SystemDesktopOpener, path)
-            .map_err(|_| NativeEmailError::Unavailable)
+        DesktopOpener::open(&SystemDesktopOpener, path).map_err(|_| NativeEmailError::Unavailable)
     }
 }
 

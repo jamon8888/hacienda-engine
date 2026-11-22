@@ -704,11 +704,11 @@ impl TeamEmailClient {
         for _ in 0..max_attempts.max(1) {
             let status = self.job(job_id).await?;
             if matches!(status.status.as_str(), "succeeded" | "failed") {
-                return Ok(self.job_result(job_id).await?);
+                return self.job_result(job_id).await;
             }
             tokio::time::sleep(delay).await;
         }
-        Ok(self.job_result(job_id).await?)
+        self.job_result(job_id).await
     }
 
     pub async fn search(&self, request: &TeamSearchRequest) -> Result<TeamSearchResponse> {
