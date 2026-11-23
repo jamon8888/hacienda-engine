@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   argument; a supplied digest is verified against the exact bytes handed to Candle.
   Existing calls pass `None` (native local loads) or `None` after the byte arguments
   (wasm byte loads); pinned deployments should pass the model's blake3 digest.
+  A digest plus `lora_adapter_dir` is rejected: merged adapter bytes cannot be bound
+  to the base-weight digest, so such a load fails closed instead of running unverified
+  weights. Adapter users can load unpinned via `from_candle_local(model_dir, adapter, None)`.
 
 ### Fixed
 

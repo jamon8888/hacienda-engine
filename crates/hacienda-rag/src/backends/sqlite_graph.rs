@@ -151,7 +151,16 @@ fn relation_payloads_on(
                 .iter()
                 .map(|id| rusqlite::types::Value::Text(id.0.clone())),
         );
-        binds.push(rusqlite::types::Value::Real(min_confidence as f64));
+        // JSON stores the shortest decimal form (e.g. 0.99). Widening the f32
+        // directly gives 0.9900000095367432, which would exclude an edge whose
+        // stored confidence is exactly 0.99. Bind the nearest f64 to that same
+        // decimal text so SQLite and the in-memory f32 comparison agree.
+        let confidence_decimal: f64 = min_confidence.to_string().parse().map_err(|error| {
+            RagError::Backend(Box::new(std::io::Error::other(format!(
+                "invalid min_confidence {min_confidence}: {error}"
+            ))))
+        })?;
+        binds.push(rusqlite::types::Value::Real(confidence_decimal));
         let remaining = max_rows - payloads.len();
         binds.push(rusqlite::types::Value::Integer(remaining as i64));
         let mut statement = connection.prepare(&sql).map_err(backend)?;
@@ -270,6 +279,9 @@ impl SqliteGraphStore {
         min_confidence: f32,
     ) -> RagResult<InMemoryGraphStore> {
         let connection = self.lock()?;
+        // Seed entities and incident edges must come from one snapshot: another
+        // process can open the same file and delete between two autocommit reads.
+        let transaction = connection.unchecked_transaction().map_err(backend)?;
         let mut entities: HashMap<EntityKey, GraphEntity> = HashMap::new();
         let mut relation_payloads: HashSet<String> = HashSet::new();
         let mut visited: HashSet<EntityId> = HashSet::new();
@@ -283,7 +295,7 @@ impl SqliteGraphStore {
             if ids.is_empty() {
                 break;
             }
-            for payload in entity_payloads_on(&connection, collection, tenant, Some(&ids))? {
+            for payload in entity_payloads_on(&transaction, collection, tenant, Some(&ids))? {
                 let entity: GraphEntity = serde_json::from_str(&payload)
                     .map_err(|error| RagError::Backend(Box::new(error)))?;
                 InMemoryGraphStore::validate_entity(&entity).map_err(|error| {
@@ -303,7 +315,7 @@ impl SqliteGraphStore {
                 (MAX_EXPANSION_RELATIONS - relation_payloads.len()).min(limit.saturating_mul(10));
             let mut next = Vec::new();
             for payload in relation_payloads_on(
-                &connection,
+                &transaction,
                 collection,
                 tenant,
                 &ids,
@@ -347,6 +359,8 @@ impl SqliteGraphStore {
             }
             memory.insert_relations(collection, std::slice::from_ref(&relation))?;
         }
+        // Read-only snapshot: release it without committing a write.
+        drop(transaction);
         Ok(memory)
     }
 
@@ -887,6 +901,71 @@ mod tests {
         // The default tenant has no rows even though acme does.
         let health = store.health(DEFAULT_TENANT).await.unwrap();
         assert_eq!(health.entity_count, 0);
+    }
+
+    /// An edge whose f32 confidence equals a decimal threshold (0.99) must be
+    /// returned by both backends; the next-lower f32 must be excluded by both.
+    #[tokio::test]
+    async fn confidence_threshold_parity_between_sqlite_and_memory() {
+        let threshold = 0.99_f32;
+        let lower = f32::from_bits(threshold.to_bits() - 1);
+        let mut at_threshold = relation("a", "b", "at-threshold");
+        at_threshold.confidence = threshold;
+        let mut below = relation("a", "b", "below-threshold");
+        below.confidence = lower;
+
+        let store = SqliteGraphStore::open(":memory:").unwrap();
+        let a = entity("a");
+        let b = entity("b");
+        store
+            .upsert_entities("contracts", "acme", &[a.clone(), b.clone()])
+            .await
+            .unwrap();
+        store
+            .upsert_relations("contracts", "acme", &[at_threshold.clone(), below.clone()])
+            .await
+            .unwrap();
+        let sqlite = store
+            .neighborhood(
+                "contracts",
+                "acme",
+                &[EntityId("a".to_owned())],
+                1,
+                10,
+                threshold,
+            )
+            .await
+            .unwrap();
+
+        let memory = InMemoryGraphStore::default();
+        memory
+            .upsert_entities("contracts", "acme", &[a, b])
+            .await
+            .unwrap();
+        memory
+            .upsert_relations("contracts", "acme", &[at_threshold, below])
+            .await
+            .unwrap();
+        let in_memory = memory
+            .neighborhood(
+                "contracts",
+                "acme",
+                &[EntityId("a".to_owned())],
+                1,
+                10,
+                threshold,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sqlite.relations.len(),
+            1,
+            "SQLite dropped the boundary edge"
+        );
+        assert_eq!(sqlite.relations[0].confidence, threshold);
+        assert_eq!(in_memory.relations.len(), 1);
+        assert_eq!(in_memory.relations[0].confidence, threshold);
     }
 
     #[test]

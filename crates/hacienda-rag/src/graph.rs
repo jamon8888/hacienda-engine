@@ -18,23 +18,33 @@ use std::sync::RwLock;
 /// backend-neutral query, and both store implementations — enforces the same
 /// cap before any full-collection load or BFS traversal.
 pub const MAX_ENTITY_IDS: usize = 100;
-/// Bounds and wire defaults shared by the graph contract and every API DTO.
-/// Keeping them here prevents the streaming and retrieval endpoints from
-/// drifting into accepting different requests.
+/// Shared graph request bounds and wire defaults. Keeping them in the contract
+/// prevents the streaming and retrieval endpoints from accepting different
+/// requests. All numeric ranges below are inclusive.
+/// Smallest accepted number of graph traversal hops.
 pub const MIN_HOPS: u8 = 1;
+/// Largest accepted number of graph traversal hops.
 pub const MAX_HOPS: u8 = 2;
+/// Smallest accepted neighborhood relation limit.
 pub const MIN_GRAPH_LIMIT: usize = 1;
+/// Largest accepted neighborhood relation limit.
 pub const MAX_GRAPH_LIMIT: usize = 500;
+/// Default hop count when a request omits it (a default, not a limit).
 pub const DEFAULT_HOPS: u8 = 1;
+/// Default relation limit when a request omits it (a default, not a limit).
 pub const DEFAULT_GRAPH_LIMIT: usize = 50;
+/// Default minimum confidence when a request omits it (a default, not a limit).
 pub const DEFAULT_GRAPH_MIN_CONFIDENCE: f32 = 0.9;
 
 /// A rejected graph request bound, with enough context to tell the caller
 /// which field was wrong and what it accepts (never the entity values).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphBoundsError {
+    /// Name of the rejected request field (e.g. `hops`), never its values.
     pub field: &'static str,
+    /// The rejected count/value, rendered without any entity content.
     pub rejected: String,
+    /// Human-readable accepted range or condition for that field.
     pub accepted: String,
 }
 
@@ -42,8 +52,8 @@ impl std::fmt::Display for GraphBoundsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "invalid graph bound '{}': {} (expected {}, got {})",
-            self.field, self.accepted, self.field, self.rejected
+            "invalid graph bound '{}': expected {}, got {}",
+            self.field, self.accepted, self.rejected
         )
     }
 }
@@ -605,12 +615,11 @@ impl GraphStore for InMemoryGraphStore {
             if !seen.insert(current.clone()) || depth >= hops {
                 continue;
             }
-            let incident: Vec<RelationKey> = graph
-                .adjacency
-                .get(&current)
-                .map(|keys| keys.iter().cloned().collect())
-                .unwrap_or_default();
-            for key in &incident {
+            // Borrow the index: cloning the whole incident set for every seed
+            // would defeat the point of having it. Only selected keys are
+            // cloned into `relation_keys` below.
+            let incident = graph.adjacency.get(&current);
+            for key in incident.into_iter().flatten() {
                 let Some(relation) = graph.relations.get(key) else {
                     continue;
                 };
