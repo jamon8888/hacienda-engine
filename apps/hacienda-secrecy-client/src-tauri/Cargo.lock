@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "abnf-core"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "512117e495e0f6e9b5f0511b344d8e98b0bb77347a2f25ee65e59eacf5f83a9d"
+dependencies = [
+ "nom 7.1.3",
+]
+
+[[package]]
 name = "accessory"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1117,6 +1126,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounded-static"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0beb903daa49b43bcafb5d5eebe633f9ad638d8b16cd08f95fb05ee7bd099321"
+
+[[package]]
+name = "bounded-static-derive"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0af050e27e5d57aa14975f97fe47a134c46a390f91819f23a625319a7111bfa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "brotli"
 version = "9.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1563,6 +1589,17 @@ checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
 dependencies = [
  "chrono",
  "phf 0.12.1",
+]
+
+[[package]]
+name = "chumsky"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0d2bfadce76f963d776feff99db6dc33783829539258314776383b33e2a00f8"
+dependencies = [
+ "hashbrown 0.15.5",
+ "unicode-ident",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -4013,6 +4050,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gethostname"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
+dependencies = [
+ "rustix",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "getopts"
 version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4294,6 +4341,7 @@ dependencies = [
 name = "hacienda-client-core"
 version = "0.1.0"
 dependencies = [
+ "hacienda-installation",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
@@ -4311,6 +4359,8 @@ dependencies = [
  "blake3",
  "chrono",
  "data-encoding",
+ "hacienda-installation",
+ "hacienda-model-assets",
  "indexed_db_futures",
  "rand 0.8.8",
  "regex",
@@ -4327,6 +4377,55 @@ dependencies = [
  "web-time",
  "xberg",
  "zeroize",
+]
+
+[[package]]
+name = "hacienda-email"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "chrono",
+ "futures",
+ "gethostname",
+ "hacienda-core",
+ "hacienda-rag",
+ "io-email",
+ "mail-parser 0.11.9",
+ "mime_guess",
+ "pimalaya-stream",
+ "regex",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.2",
+ "url",
+ "uuid",
+ "xberg",
+ "zeroize",
+]
+
+[[package]]
+name = "hacienda-installation"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
+name = "hacienda-model-assets"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -4358,8 +4457,11 @@ dependencies = [
  "hacienda-backend",
  "hacienda-client-core",
  "hacienda-core",
+ "hacienda-email",
+ "hacienda-model-assets",
  "hacienda-rag",
  "keyring",
+ "reqwest 0.13.5",
  "rfd",
  "serde",
  "serde_json",
@@ -4445,6 +4547,18 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashify"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd1246c0e5493286aeb2dde35b1f4eb9c4ce00e628641210a5e553fc001a1f26"
+dependencies = [
+ "indexmap 2.14.2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -4996,6 +5110,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "imap-codec"
+version = "2.0.0-alpha.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46448c53bb742528ca2ad03786bb11fe0327433ebeb978f208e6b9303513558c"
+dependencies = [
+ "abnf-core",
+ "base64 0.23.1",
+ "chrono",
+ "imap-types",
+ "log",
+ "nom 7.1.3",
+]
+
+[[package]]
+name = "imap-types"
+version = "2.0.0-alpha.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e481cf9ab998eeea7b4c6b0b638ca21751402340fbaa3932fca5576b4b95a819"
+dependencies = [
+ "base64 0.23.1",
+ "bounded-static",
+ "bounded-static-derive",
+ "chrono",
+ "rand 0.10.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "imgref"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5110,6 +5252,94 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "io-email"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14d8602a9427bbeec3c2b37ad6c84789c2abc74d5a5ef21ef6b596f6bb3270b0"
+dependencies = [
+ "chrono",
+ "gethostname",
+ "io-imap",
+ "io-jmap",
+ "io-maildir",
+ "io-smtp",
+ "log",
+ "mail-parser 0.11.9",
+ "pimalaya-stream",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "io-http"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2381facba37467735d2eba5136f98dbc923e6c5e85d24ceba08a7c4a465a0391"
+dependencies = [
+ "base64 0.22.1",
+ "httparse",
+ "log",
+ "memchr",
+ "secrecy",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "io-imap"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3abdd895505c9e96145abec34f7a3ef106e70bff71b04b0f116362c379d27e7"
+dependencies = [
+ "base64 0.22.1",
+ "imap-codec",
+ "log",
+ "secrecy",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "io-jmap"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4084b2d045dd22c09b1bddb97bc120203c470faf5f1dd0a003f9b3c8a7180282"
+dependencies = [
+ "io-http",
+ "log",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "io-maildir"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "478b84ec70aaca1691013579b1fd401084bc260536116e103155c68c691ecc31"
+dependencies = [
+ "gethostname",
+ "log",
+ "mail-parser 0.11.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "io-smtp"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85841fd5774b4ee2bd22e1c406bbd8a4a52f67098048362383d8af57d98b7208"
+dependencies = [
+ "base64 0.22.1",
+ "bounded-static",
+ "bounded-static-derive",
+ "chumsky",
+ "log",
+ "secrecy",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6633,13 +6863,22 @@ dependencies = [
 
 [[package]]
 name = "mail-parser"
+version = "0.11.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec00bda90c6e645a54506c630c2820cd6b1890cfd2b0a169b50f74b2b8c7c86"
+dependencies = [
+ "hashify 0.2.9",
+]
+
+[[package]]
+name = "mail-parser"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d4ea9311ef3ca6189aa85c5f984bd47b2f12079bcabae28917d900ab26c9ecc"
 dependencies = [
  "encodify",
  "encoding_rs",
- "hashify",
+ "hashify 0.3.2",
  "memchr",
  "simdutf8",
 ]
@@ -7825,6 +8064,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "pimalaya-stream"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6ad74860e4b47171dc19433a6115a993043583e8808384d0e32284f1b38526b"
+dependencies = [
+ "anyhow",
+ "log",
+ "secrecy",
+ "serde",
+ "uds_windows",
+ "url",
 ]
 
 [[package]]
@@ -9167,6 +9420,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "serde",
+ "zeroize",
 ]
 
 [[package]]
@@ -12452,7 +12715,7 @@ dependencies = [
  "lopdf 0.45.0",
  "lopdf 0.47.0",
  "lru 0.19.0",
- "mail-parser",
+ "mail-parser 1.0.1",
  "mathemascii",
  "memchr",
  "memmap2",

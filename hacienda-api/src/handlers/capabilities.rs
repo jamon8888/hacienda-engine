@@ -25,6 +25,7 @@ pub async fn capabilities(State(state): State<ApiState>) -> Json<CapabilitiesRes
         cfg!(feature = "rag-embeddings"),
         onnx_runtime,
         state.rag_store.is_some(),
+        state.facade.ner_runtime_state(),
     );
     Json(report.into())
 }

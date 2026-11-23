@@ -1,0 +1,15 @@
+[package]
+name = "hacienda-model-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pinned model digests and asset verification shared by native hosts"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

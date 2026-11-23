@@ -308,6 +308,166 @@ test("empty or malformed token references are rejected at the bridge boundary", 
   }
 });
 
+test("TeamOnPremise ingest forwards only opaque refs and never a path, token or raw text", async () => {
+  const calls = [];
+  const bridge = createRendererBridge(async (...args) => {
+    calls.push(args);
+    return { job_id: "job-opaque-1" };
+  });
+
+  const accepted = await bridge.teamEmailIngest({
+    sourceRef: "default",
+    mailboxRef: "inbox",
+    operation: "index_for_rag",
+    privacyMode: "redact",
+    // Extra attacker-controlled keys must be dropped by the allowlist payload.
+    backend: { path: "/etc" },
+    token: "oauth-secret",
+    password: "hunter2",
+    token_command: ["sh"],
+    message: "jean.dupont@example.com",
+  });
+  assert.deepEqual(accepted, { job_id: "job-opaque-1" });
+  assert.deepEqual(calls, [["team-email-ingest", {
+    request: {
+      source_ref: "default",
+      mailbox_ref: "inbox",
+      operation: { operation: "index_for_rag" },
+      privacy_mode: "redact",
+    },
+  }]]);
+  assert.ok(!JSON.stringify(calls).includes("/etc"));
+  assert.ok(!JSON.stringify(calls).includes("oauth-secret"));
+  assert.ok(!JSON.stringify(calls).includes("jean.dupont@example.com"));
+
+  for (const request of [
+    { sourceRef: "/etc", mailboxRef: "inbox", operation: "index_for_rag" },
+    { sourceRef: "default", mailboxRef: "../victim", operation: "index_for_rag" },
+    { sourceRef: "default", mailboxRef: "inbox", operation: "delete_everything" },
+    { sourceRef: "default", mailboxRef: "inbox", operation: "redact", privacyMode: "plaintext" },
+    // Deterministic tokens are a PII oracle on the team surface.
+    { sourceRef: "default", mailboxRef: "inbox", operation: "redact", privacyMode: "pseudonymize" },
+  ]) {
+    await assert.rejects(bridge.teamEmailIngest(request), /Invalid team/);
+  }
+});
+
+test("TeamOnPremise viewer sends only the capability reference", async () => {
+  const calls = [];
+  const bridge = createRendererBridge(async (...args) => {
+    calls.push(args);
+    if (args[0] === "team-viewer-capability") {
+      return {
+        capability_ref: "vcap_opaque",
+        expires_at: "2026-11-21T12:05:00Z",
+        document_ref: "ref_doc",
+        email_ref: "ref_email",
+        attachment_ref: null,
+        delivery: "server_side",
+      };
+    }
+    if (args[0] === "team-viewer-reveal") {
+      return { capability_ref: "vcap_opaque", revealed: true, document_ref: "ref_doc", email_ref: "ref_email" };
+    }
+    return { events: [] };
+  });
+
+  await bridge.teamViewerCapability({
+    documentRef: "ref_doc",
+    emailRef: "ref_email",
+    tokenRef: "[EMAIL:k1:ABC]",
+    value: "jean.dupont@example.com",
+    path: "/srv/mail",
+  });
+  assert.deepEqual(calls[0], ["team-viewer-capability", {
+    request: { document_ref: "ref_doc", email_ref: "ref_email", token_ref: "[EMAIL:k1:ABC]" },
+  }]);
+
+  await bridge.teamViewerReveal({
+    capabilityRef: "vcap_opaque",
+    plaintext: "jean.dupont@example.com",
+    path: "/srv/mail/inbox",
+  });
+  assert.deepEqual(calls[1], ["team-viewer-reveal", { request: { capability_ref: "vcap_opaque" } }]);
+  assert.ok(!JSON.stringify(calls).includes("jean.dupont@example.com"));
+  assert.deepEqual(await bridge.teamViewerAudit(), { events: [] });
+});
+
+test("TeamOnPremise viewer open returns a typed, content-safe projection", async () => {
+  const projection = {
+    capability_ref: "vcap_opaque",
+    document_ref: "ref_doc",
+    email_ref: "ref_email",
+    headers: [
+      { name: "subject", token_only: "[REDACTED] [EMAIL:k1:ABC]" },
+      { name: "from", token_only: "[REDACTED]" },
+    ],
+    body_token_only: "Bonjour [PERSON:k1:DEF]",
+    attachment_refs: ["ref_attach"],
+    projection_kind: "redacted_token_only",
+  };
+  const calls = [];
+  const bridge = createRendererBridge(async (...args) => {
+    calls.push(args);
+    return projection;
+  });
+
+  assert.deepEqual(
+    await bridge.teamViewerOpen({ capabilityRef: "vcap_opaque", plaintext: "jean.dupont@example.com" }),
+    projection,
+  );
+  assert.deepEqual(calls, [["team-viewer-open", { request: { capability_ref: "vcap_opaque" } }]]);
+  assert.ok(!JSON.stringify(calls).includes("jean.dupont@example.com"));
+
+  // A boolean-only `opened:true` stub is no longer a valid projection.
+  const legacy = createRendererBridge(async () => ({ opened: true }));
+  await assert.rejects(legacy.teamViewerOpen({ capabilityRef: "vcap_opaque" }), /Invalid team viewer open projection/);
+});
+
+test("TeamOnPremise renderer rejects DTOs carrying a content or path carrier", async () => {
+  const badSources = createRendererBridge(async () => ({
+    sources: [{ source_ref: "default", mailbox_refs: ["inbox"], path: "/srv/mail" }],
+  }));
+  await assert.rejects(badSources.teamEmailSources(), /Invalid team email sources response/);
+
+  const badJob = createRendererBridge(async () => ({
+    job_id: "job-opaque", status: "succeeded", failed: false,
+    result: { plaintext: "jean.dupont@example.com" }, progress: null,
+  }));
+  await assert.rejects(badJob.teamEmailJob({ jobId: "job-opaque" }), /Invalid team email job status/);
+
+  const badReveal = createRendererBridge(async () => ({
+    capability_ref: "vcap", revealed: true, document_ref: "d", email_ref: "e",
+    value: "jean.dupont@example.com",
+  }));
+  await assert.rejects(
+    badReveal.teamViewerReveal({ capabilityRef: "vcap" }),
+    /Invalid team viewer reveal result/,
+  );
+});
+
+test("TeamOnPremise async job results are projected identically for polling", async () => {
+  const result = {
+    schema_version: 1, success: true, processed_count: 2, entities_found: 1,
+    error_count: 0, processing_time_ms: 12,
+    redaction_count: 3, redaction_by_type: { email: 3 },
+    chunks_created: 4, vectors_indexed: 4,
+  };
+  const calls = [];
+  const bridge = createRendererBridge(async (...args) => {
+    calls.push(args);
+    return {
+      job_id: "job-opaque", status: "succeeded", failed: false,
+      progress: null, result,
+    };
+  });
+  const viaJob = await bridge.teamEmailJob({ jobId: "job-opaque" });
+  const viaResult = await bridge.teamEmailJobResult({ jobId: "job-opaque" });
+  assert.deepEqual(viaJob.result, result);
+  assert.deepEqual(viaResult.result, result);
+  assert.deepEqual(calls.map((call) => call[0]), ["team-email-job", "team-email-job-result"]);
+});
+
 test("PII category names from the Rust DTO retain meaningful classes", () => {
   assert.equal(normalizePiiClass("PhoneNumber"), "phone");
   assert.equal(normalizePiiClass("FullName"), "person");

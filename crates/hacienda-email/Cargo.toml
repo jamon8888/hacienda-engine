@@ -62,6 +62,11 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 futures = { workspace = true, features = ["std"] }
 anyhow = { workspace = true }
+# Native (LocalFull) session service: opaque refs, content-free digests and
+# zeroizing the plaintext handed to the native viewer.
+blake3 = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 url = { version = "2", features = ["serde"] }
 secrecy = { workspace = true }

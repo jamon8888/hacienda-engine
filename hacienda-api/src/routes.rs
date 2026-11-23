@@ -29,6 +29,7 @@ use crate::{
     },
     quota::quota_middleware,
     state::ApiState,
+    team_email,
 };
 
 /// How a route is accessed.
@@ -123,6 +124,47 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || post(email::process_email_async),
     },
+    // ── TeamOnPremise email (opaque refs only; no paths or credentials on the wire) ─────
+    RouteSpec {
+        path: "/v1/team/email/sources",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(team_email::list_email_sources),
+    },
+    RouteSpec {
+        path: "/v1/team/email/ingest",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(team_email::ingest_email),
+    },
+    RouteSpec {
+        path: "/v1/team/email/ingest/async",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(team_email::ingest_email_async),
+    },
+    RouteSpec {
+        path: "/v1/team/email/search",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(team_email::search_email),
+    },
+    RouteSpec {
+        path: "/v1/team/viewer/capability",
+        access: Access::Capability(Capability::PiiReveal),
+        make_router: || post(team_email::issue_viewer_capability),
+    },
+    RouteSpec {
+        path: "/v1/team/viewer/reveal",
+        access: Access::Capability(Capability::PiiReveal),
+        make_router: || post(team_email::reveal_viewer_content),
+    },
+    RouteSpec {
+        path: "/v1/team/viewer/open",
+        access: Access::Capability(Capability::PiiReveal),
+        make_router: || post(team_email::open_viewer_content),
+    },
+    RouteSpec {
+        path: "/v1/team/viewer/audit",
+        access: Access::Capability(Capability::AuditRead),
+        make_router: || get(team_email::viewer_audit),
+    },
     RouteSpec {
         path: "/v1/pii/scan",
         access: Access::Capability(Capability::DocumentsProcess),
@@ -138,11 +180,15 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         access: Access::Capability(Capability::PiiReveal),
         make_router: || post(pii::reveal_token),
     },
-    // `token` needs only `documents:process` (D-P3-1, P3b §2) — minting a token for a
-    // caller-supplied value discloses nothing new, unlike `reveal` above.
+    // SPEC REVIEW: `/v1/pii/token` mints a *deterministic* token for a caller-chosen
+    // value. A `documents:process` caller can read redacted projections (RAG search,
+    // team email), guess a candidate value and compare tokens — an offline PII
+    // oracle that bypasses `pii:reveal`. Gate it under `pii:reveal`, the least
+    // privilege that already authorizes plaintext reveal. The facade-level mint
+    // used by LocalFull / the email engine is unchanged.
     RouteSpec {
         path: "/v1/pii/token",
-        access: Access::Capability(Capability::DocumentsProcess),
+        access: Access::Capability(Capability::PiiReveal),
         make_router: || post(pii::mint_token),
     },
     RouteSpec {
@@ -1175,10 +1221,10 @@ pub(crate) mod tests {
         assert_eq!(response.status().as_u16(), 400);
     }
 
-    /// P3b: `POST /v1/pii/token` requires only `documents:process`, not `pii:reveal`
-    /// — the opposite gating from `/v1/pii/reveal` (D-P3-1).
+    /// SPEC REVIEW: a deterministic mint is an offline PII oracle, so
+    /// `documents:process` alone must be refused.
     #[tokio::test]
-    async fn token_route_works_with_only_documents_process() {
+    async fn token_route_requires_pii_reveal_not_just_documents_process() {
         let app = build_router(state_with_pii());
 
         let response = app
@@ -1198,10 +1244,44 @@ pub(crate) mod tests {
 
         assert_eq!(
             response.status().as_u16(),
-            200,
-            "token minting must work with documents:process alone"
+            403,
+            "a deterministic token oracle must not be reachable with documents:process alone"
         );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(
+            !text.contains("bob@example.com"),
+            "error echoed candidate PII"
+        );
+    }
 
+    /// With `pii:reveal` the mint still works and stays deterministic/tenant-keyed
+    /// (the GDPR-access path, now behind the same privilege as reveal).
+    #[tokio::test]
+    async fn token_route_works_with_pii_reveal_and_is_tenant_keyed() {
+        let app = build_router(state_with_pii());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pii/token")
+                    .header(
+                        "authorization",
+                        "Bearer hcd_documents:process,pii:reveal_testsuffix",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"category":"email","value":"bob@example.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .unwrap();
@@ -1209,7 +1289,8 @@ pub(crate) mod tests {
         assert!(json["token"].as_str().unwrap().starts_with("[EMAIL:"));
     }
 
-    /// P3b: minting the same value twice returns the same token.
+    /// Minting the same value twice returns the same token (tenant-keyed
+    /// determinism is preserved for authorized callers / LocalFull).
     #[tokio::test]
     async fn token_route_same_value_same_token() {
         let app = build_router(state_with_pii());
@@ -1218,7 +1299,10 @@ pub(crate) mod tests {
             Request::builder()
                 .method("POST")
                 .uri("/v1/pii/token")
-                .header("authorization", "Bearer hcd_documents:process_testsuffix")
+                .header(
+                    "authorization",
+                    "Bearer hcd_documents:process,pii:reveal_testsuffix",
+                )
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"category":"email","value":"bob@example.com"}"#,

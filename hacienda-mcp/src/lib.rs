@@ -187,8 +187,8 @@ impl HaciendaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         use hacienda_email::config::EmailBackend;
         use hacienda_email::{
-            EmailConfig, EmailDestination, EmailOperation, EmailProcessor, EmailRequest,
-            EmailSource,
+            pii::PiiEngine, EmailConfig, EmailDestination, EmailOperation, EmailProcessor,
+            EmailRequest, EmailSource,
         };
 
         let config = EmailConfig {
@@ -198,22 +198,28 @@ impl HaciendaMcp {
             account: "mcp".to_string(),
             ..Default::default()
         };
-        let processor = EmailProcessor::new(config)
+        // In-process MCP surface: use the server's own facade, never a new one,
+        // so the shared audit chain and tenant keys are preserved.
+        let pii = PiiEngine::from_facade(self.facade.clone());
+        let processor = EmailProcessor::new(config, pii)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(format!("email processor: {e}"), None))?;
         let response = processor
-            .process(EmailRequest {
-                operation: EmailOperation::Redact {
-                    source: EmailSource::Maildir {
-                        path: params.source,
+            .process(
+                EmailRequest {
+                    operation: EmailOperation::Redact {
+                        source: EmailSource::Maildir {
+                            path: params.source,
+                        },
+                        destination: EmailDestination::Maildir {
+                            path: params.output,
+                        },
+                        rules: None,
                     },
-                    destination: EmailDestination::Maildir {
-                        path: params.output,
-                    },
-                    rules: None,
+                    config_overrides: None,
                 },
-                config_overrides: None,
-            })
+                Caller::Trusted,
+            )
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(format!("email redaction: {e}"), None))?;
         json_tool_result(&response)
@@ -406,6 +412,7 @@ impl HaciendaMcp {
             false,
             hacienda_core::capabilities::cached_onnx_runtime_status(),
             false,
+            self.facade.ner_runtime_state(),
         );
         json_tool_result(&report)
     }

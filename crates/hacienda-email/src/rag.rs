@@ -3,7 +3,9 @@ use crate::config::EmailConfig;
 use crate::error::{EmailError, Result};
 use crate::models::{EmailOperation, EmailSource, Envelope, RagIndexStats};
 use crate::pii::PiiEngine;
+use crate::redacted::RedactedEmailEnvelope;
 use futures::stream::{FuturesUnordered, StreamExt};
+use hacienda_core::auth::Caller;
 use hacienda_rag::{ChunkRecord, CollectionSpec, DocumentRecord, RagStore};
 use std::collections::HashSet;
 
@@ -43,23 +45,28 @@ pub struct RagIngestion<'a> {
 /// Deliberately mirrors the document ingestion path: chunks carry BYOV (empty)
 /// embeddings and the `external_id` makes re-ingestion idempotent. Only
 /// already-redacted text is ever written (design D2).
+///
+/// P0.1: the `Envelope` is never read here. Every PII-bearing field of the
+/// record (title, metadata subject, and the metadata text fed to chunking)
+/// comes from the token-only `RedactedEmailEnvelope`, so a clear subject or
+/// display name cannot leak into a persisted row.
 fn build_email_records(
     rag: &RagIngestion<'_>,
-    envelope: &Envelope,
+    redacted: &RedactedEmailEnvelope,
     redacted_text: &str,
     chunks: &[String],
 ) -> (DocumentRecord, Vec<ChunkRecord>) {
-    let mailbox = if envelope.mailbox.is_empty() {
+    let mailbox = if redacted.mailbox.is_empty() {
         "INBOX"
     } else {
-        &envelope.mailbox
+        &redacted.mailbox
     };
-    let external_id = format!("email:{}:{}:{}", rag.account, mailbox, envelope.id);
+    let external_id = format!("email:{}:{}:{}", rag.account, mailbox, redacted.id);
     let document = DocumentRecord {
         external_id: Some(external_id.clone()),
-        title: Some(envelope.subject.clone()),
+        title: Some(redacted.subject.clone()),
         mime: Some("message/rfc822".to_string()),
-        source_uri: Some(format!("imap://{}/{}", rag.account, envelope.id)),
+        source_uri: Some(format!("imap://{}/{}", rag.account, redacted.id)),
         full_text: redacted_text.to_string(),
         keywords: Vec::new(),
         entities: serde_json::Value::Null,
@@ -67,7 +74,7 @@ fn build_email_records(
         metadata: serde_json::json!({
             "account": rag.account,
             "mailbox": mailbox,
-            "subject": envelope.subject,
+            "subject": redacted.subject,
             "privacy": "redacted",
         }),
         dossier_id: rag.dossier_id.map(str::to_string),
@@ -218,13 +225,18 @@ async fn ensure_collection(rag: &RagIngestion<'_>, collection: &str) -> Result<(
 #[allow(dead_code)]
 async fn upsert_email(
     rag: &RagIngestion<'_>,
+    pii: &PiiEngine,
+    caller: Caller<'_>,
     collection: &str,
     envelope: &Envelope,
     redacted_text: &str,
     chunks: &[String],
 ) -> Result<usize> {
     ensure_collection(rag, collection).await?;
-    let (document, records) = build_email_records(rag, envelope, redacted_text, chunks);
+    // Tokenize before any record is built: the clear envelope never reaches
+    // `build_email_records`. Tokens come from the host's tenant-keyed authority.
+    let redacted = RedactedEmailEnvelope::from_envelope(pii, caller, envelope).await?;
+    let (document, records) = build_email_records(rag, &redacted, redacted_text, chunks);
     let count = records.len();
     rag.store
         .upsert_document(collection, &document, &records)
@@ -244,6 +256,7 @@ async fn upsert_email(
 pub async fn index_for_rag(
     client: &dyn EmailClient,
     pii: &PiiEngine,
+    caller: Caller<'_>,
     op: EmailOperation,
     config: &EmailConfig,
     rag: Option<RagIngestion<'_>>,
@@ -346,11 +359,35 @@ pub async fn index_for_rag(
                             )
                         }
                     };
-                    let text = extract_text_for_rag(&message, &envelope);
+                    // P0.1/P0.5: tokenize envelope metadata through the host's
+                    // tenant-keyed authority *before* it can reach the text that
+                    // is redacted/chunked and the records that are persisted.
+                    // This covers subjects and display names that the structured
+                    // PII detector cannot reliably recognize. A projection error
+                    // (e.g. no key for this tenant) fails closed.
+                    let redacted_meta = match RedactedEmailEnvelope::from_envelope(
+                        pii, caller, &envelope,
+                    )
+                    .await
+                    {
+                        Ok(meta) => meta,
+                        Err(e) => {
+                            return (
+                                envelope.id.clone(),
+                                None,
+                                Some(format!(
+                                    "Metadata projection failed for {} — refusing to index (fail-closed): {e}",
+                                    envelope.id
+                                )),
+                            )
+                        }
+                    };
+                    let text = extract_text_for_rag(&message, &redacted_meta);
                     // D2 (ingestion guard): redact BEFORE chunking. Fail closed — if
                     // the PII engine errors, this message is never indexed.
                     match pii
                         .redact(
+                            caller,
                             &text,
                             &config.redaction.rules,
                             &config.redaction.replacement,
@@ -358,12 +395,12 @@ pub async fn index_for_rag(
                         )
                         .await
                     {
-                        Ok((redacted, _)) => {
+                        Ok((redacted_body, _)) => {
                             // Chunking is CPU-bound and may be slow on a large
                             // message; move it off the async executor onto a
                             // blocking worker instead of stalling other tasks.
                             let overlap = config.rag.chunk_overlap;
-                            let text = redacted.clone();
+                            let text = redacted_body.clone();
                             let chunks = tokio::task::spawn_blocking(move || {
                                 chunk(&text, chunk_sz, overlap)
                             })
@@ -372,7 +409,7 @@ pub async fn index_for_rag(
                             .and_then(|r| r);
                             (
                                 envelope.id.clone(),
-                                Some((envelope, redacted, chunks)),
+                                Some((envelope, redacted_meta, redacted_body, chunks)),
                                 None,
                             )
                         }
@@ -399,10 +436,12 @@ pub async fn index_for_rag(
             while let Some((id, payload, error)) = queue.next().await {
                 if let Some(err) = error {
                     errors.push(err);
-                } else if let Some((envelope, redacted, chunks)) = payload {
+                } else if let Some((envelope, redacted_meta, redacted_body, chunks)) = payload {
                     match chunks {
                         Ok(chunks) if chunks.is_empty() => {}
-                        Ok(chunks) => outputs.push((envelope, redacted, chunks)),
+                        Ok(chunks) => {
+                            outputs.push((envelope, redacted_meta, redacted_body, chunks))
+                        }
                         Err(e) => errors.push(format!("Chunking failed for {}: {}", id, e)),
                     }
                 }
@@ -417,7 +456,7 @@ pub async fn index_for_rag(
             // UIDs of messages in this batch; only promoted to the checkpoint
             // if the whole batch upsert succeeds.
             let mut batch_uids: Vec<u64> = Vec::with_capacity(outputs.len());
-            for (envelope, redacted, chunks) in outputs {
+            for (envelope, redacted_meta, redacted_body, chunks) in outputs {
                 total_messages += 1;
                 total_chunks += chunks.len();
                 if let Some(uid) = envelope_uid(&envelope) {
@@ -425,7 +464,7 @@ pub async fn index_for_rag(
                 }
                 if let Some(rag) = &rag {
                     let (document, records) =
-                        build_email_records(rag, &envelope, &redacted, &chunks);
+                        build_email_records(rag, &redacted_meta, &redacted_body, &chunks);
                     prepared.push((document, records));
                 }
             }
@@ -542,18 +581,30 @@ async fn fetch_envelopes(
 }
 
 /// Extract text for RAG with email metadata.
+///
+/// P0.1: the metadata lines come from the token-only projection, not from the
+/// raw envelope. Body content is still passed through the PII engine by the
+/// caller before it is indexed.
 fn extract_text_for_rag(
     message: &crate::models::EmailMessage,
-    envelope: &crate::models::Envelope,
+    redacted: &RedactedEmailEnvelope,
 ) -> String {
+    use crate::redacted::RedactedEmailAddress;
+
     let mut parts = Vec::new();
-    parts.push(format!("Email ID: {}", envelope.id));
-    parts.push(format!("Subject: {}", envelope.subject));
-    parts.push(format!("From: {}", format_addresses(&envelope.from)));
-    parts.push(format!("To: {}", format_addresses(&envelope.to)));
+    parts.push(format!("Email ID: {}", redacted.id));
+    parts.push(format!("Subject: {}", redacted.subject));
+    parts.push(format!(
+        "From: {}",
+        RedactedEmailAddress::format(&redacted.from)
+    ));
+    parts.push(format!(
+        "To: {}",
+        RedactedEmailAddress::format(&redacted.to)
+    ));
     parts.push(format!(
         "Date: {}",
-        envelope.date.format("%Y-%m-%d %H:%M:%S UTC")
+        redacted.date.format("%Y-%m-%d %H:%M:%S UTC")
     ));
 
     if let Some(text) = &message.text_body {
@@ -563,18 +614,6 @@ fn extract_text_for_rag(
     }
 
     parts.join("\n\n")
-}
-
-/// Format addresses
-fn format_addresses(addresses: &[crate::models::EmailAddress]) -> String {
-    addresses
-        .iter()
-        .map(|a| match &a.name {
-            Some(name) => format!("{name} <{}>", a.address),
-            None => a.address.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Chunk text through hacienda-rag's real chunker when the `rag` feature is on,
@@ -627,7 +666,22 @@ fn chunk(text: &str, chunk_size: usize, overlap: usize) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::EmailAddress;
+    use hacienda_core::auth::{AuthContext, Capability, CapabilitySet};
+    use hacienda_core::tenancy::TenantId;
     use hacienda_rag::InMemoryVectorStore;
+
+    fn test_pii() -> PiiEngine {
+        PiiEngine::for_local_testing()
+    }
+
+    fn test_ctx() -> AuthContext {
+        AuthContext::with_tenant(
+            "test",
+            TenantId::default_tenant(),
+            CapabilitySet::new([Capability::DocumentsProcess]),
+        )
+    }
 
     fn envelope() -> Envelope {
         Envelope {
@@ -665,9 +719,18 @@ mod tests {
             on_page: None,
         };
         let chunks = vec!["chunk one".to_string(), "chunk two".to_string()];
-        let count = upsert_email(&rag, collection, &envelope(), "[REDACTED] body", &chunks)
-            .await
-            .unwrap();
+        let ctx = test_ctx();
+        let count = upsert_email(
+            &rag,
+            &test_pii(),
+            Caller::Principal(&ctx),
+            collection,
+            &envelope(),
+            "[REDACTED] body",
+            &chunks,
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 2);
 
         let (docs, _) = store.list_documents(collection, 10, 0).await.unwrap();
@@ -690,11 +753,127 @@ mod tests {
             .all(|c| c.dossier_id.as_deref() == Some("dossier-42")));
 
         // Re-ingesting the same UID is idempotent (stable external_id).
-        upsert_email(&rag, collection, &envelope(), "[REDACTED] body", &chunks)
-            .await
-            .unwrap();
+        upsert_email(
+            &rag,
+            &test_pii(),
+            Caller::Principal(&ctx),
+            collection,
+            &envelope(),
+            "[REDACTED] body",
+            &chunks,
+        )
+        .await
+        .unwrap();
         let (docs_again, _) = store.list_documents(collection, 10, 0).await.unwrap();
         assert_eq!(docs_again.len(), 1);
+    }
+
+    /// P0.1 non-egress test: every clear fixture from the envelope must be
+    /// absent from documents, chunks, metadata and a full store snapshot.
+    /// FTS/lance indexes are built from these same strings, so absence here
+    /// also rules out a clear token in the full-text index.
+    #[tokio::test]
+    async fn rag_records_never_contain_clear_subject_or_addresses() {
+        use crate::redacted::RedactedEmailEnvelope;
+
+        let store = InMemoryVectorStore::new("email-no-leak");
+        let collection = "email-corpus";
+        store
+            .ensure_collection(&CollectionSpec::new(collection, 0))
+            .await
+            .unwrap();
+
+        let rag = RagIngestion {
+            store: &store,
+            dossier_id: Some("dossier-42"),
+            account: "work",
+            tenant_id: Some("work"),
+            page_size: 500,
+            max_pages: 0,
+            concurrency: 2,
+            incremental: false,
+            optimize_after_run: false,
+            persist_watermark: false,
+            on_page: None,
+        };
+
+        let mut clear_envelope = envelope();
+        clear_envelope.subject = "Jane Doe SSN 123-45-6789 private review".to_string();
+        clear_envelope.from = vec![EmailAddress {
+            name: Some("Jane Doe".to_string()),
+            address: "jane.doe@acme.example".to_string(),
+        }];
+        clear_envelope.to = vec![EmailAddress {
+            name: Some("Richard Roe".to_string()),
+            address: "richard.roe@acme.example".to_string(),
+        }];
+
+        let chunks = vec![
+            "[REDACTED] chunk one".to_string(),
+            "[REDACTED] chunk two".to_string(),
+        ];
+        let ctx = test_ctx();
+        let pii = test_pii();
+        upsert_email(
+            &rag,
+            &pii,
+            Caller::Principal(&ctx),
+            collection,
+            &clear_envelope,
+            "[REDACTED] body",
+            &chunks,
+        )
+        .await
+        .unwrap();
+
+        let (summaries, _) = store.list_documents(collection, 10, 0).await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        let (record, stored_chunks) = store
+            .get_document_chunks(collection, &summaries[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let snapshot = serde_json::to_string(&(&summaries, &record, &stored_chunks)).unwrap();
+        for fixture in [
+            "Jane Doe",
+            "Richard Roe",
+            "jane.doe@acme.example",
+            "richard.roe@acme.example",
+            "123-45-6789",
+            "private review",
+        ] {
+            assert!(
+                !snapshot.contains(fixture),
+                "clear fixture leaked into RAG store: {fixture}"
+            );
+        }
+
+        // The persisted title/metadata/full-text are built from the token-only
+        // projection, which is stable for the same clear input.
+        let expected_subject =
+            RedactedEmailEnvelope::from_envelope(&pii, Caller::Principal(&ctx), &clear_envelope)
+                .await
+                .unwrap()
+                .subject;
+        assert_eq!(record.title.as_deref(), Some(expected_subject.as_str()));
+        assert_eq!(
+            record.metadata["subject"].as_str(),
+            Some(expected_subject.as_str())
+        );
+        // This helper receives already-redacted text, so its full_text is
+        // exactly that body; the metadata text path is covered by the
+        // integration test through the real `index_for_rag` operation.
+        let projection =
+            RedactedEmailEnvelope::from_envelope(&pii, Caller::Principal(&ctx), &clear_envelope)
+                .await
+                .unwrap();
+        assert!(projection.subject.starts_with("[EMAIL.SUBJECT:"));
+        assert!(projection.from[0]
+            .name
+            .as_deref()
+            .is_some_and(|n| n.starts_with("[EMAIL.NAME:")));
+        assert_eq!(record.full_text, "[REDACTED] body");
     }
 
     #[tokio::test]

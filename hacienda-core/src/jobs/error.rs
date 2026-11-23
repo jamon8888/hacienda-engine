@@ -23,6 +23,19 @@ pub enum JobError {
         actual: JobStatus,
     },
 
+    /// A transition that would re-queue a terminal job was refused by the API's
+    /// conservative retry policy. Retry is intentionally disabled: re-ingest would
+    /// need the original source reference plus tenant/principal binding and an
+    /// idempotency key, none of which the job record is allowed to persist.
+    #[error("job {id}: re-queue refused by retry policy")]
+    RetryDisabled { id: String },
+
+    /// The backend does not implement the optional [`super::store::JobStore::delete`]
+    /// seam, so a retention policy cannot reclaim its expired rows. Callers may
+    /// treat this as a warning; it never makes the job itself unreadable.
+    #[error("job store backend does not support deletion: {0}")]
+    DeleteUnsupported(String),
+
     /// An internal store error (e.g. lock poisoning) that cannot be recovered by the
     /// caller. Should not occur under normal operation.
     #[error("job store internal error: {0}")]

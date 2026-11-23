@@ -2210,7 +2210,7 @@ mod tests {
             ),
             Err(TransportError::Failed)
         );
-        assert!(delivered.is_empty());
+        assert_eq!(delivered, Vec::new());
     }
 
     #[derive(Clone)]

@@ -114,6 +114,29 @@ async fn post_documents(body: &str) -> u16 {
         .as_u16()
 }
 
+/// P0.2 regression guard: the async email handler must never serialize the
+/// domain `EmailResponse` directly into `Job.result_json`, because that type
+/// carries raw `ExtractedEntity.text` (the clear-text mention). Both email
+/// routes must project through the shared `EmailOperationResultDto` instead.
+#[test]
+fn email_job_result_uses_transport_safe_dto() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handlers/email.rs");
+    let content = std::fs::read_to_string(&src).unwrap();
+
+    assert!(
+        !content.contains("serde_json::to_string(&response)"),
+        "raw EmailResponse must never be serialized into Job.result_json (P0.2)"
+    );
+    assert!(
+        content.contains("serialize_job_result(&response"),
+        "the async email job must write the transport-safe DTO via serialize_job_result"
+    );
+    assert!(
+        content.contains("EmailOperationResultDto::from_response"),
+        "sync and async email routes must share EmailOperationResultDto"
+    );
+}
+
 fn walk_rust_files(dir: &std::path::Path) -> impl Iterator<Item = std::path::PathBuf> {
     walkdir(dir)
 }

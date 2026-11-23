@@ -16,13 +16,16 @@ use hacienda_core::{
     tenancy::TenantId,
     HaciendaConfig,
 };
+use hacienda_email::native::{
+    AccountProjection, EmailSearchHit, EmailSessionService, JobProjection, MailboxProjection,
+    MessageProjection, NativeEmailError, NativeMessageViewer, NativeViewerOutcome,
+    RegisterAccountRequest, ViewerCapabilityProjection, ViewerOpenResponse,
+};
+use hacienda_email::pii::PiiEngine;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     env,
-    fs::File,
-    io::{BufReader, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -32,6 +35,14 @@ use tauri::Manager;
 use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
+
+mod team_email;
+use team_email::{
+    TeamAcceptedJob, TeamAuditResponse, TeamEmailClient, TeamEmailError, TeamIngestRequest,
+    TeamJobRequest, TeamJobStatusDto, TeamSearchRequest, TeamSearchResponse, TeamSourcesResponse,
+    TeamViewerActionRequest, TeamViewerCapabilityDto, TeamViewerCapabilityRequest,
+    TeamViewerProjectionDto, TeamViewerRevealResultDto,
+};
 
 use hacienda_client_core::{
     ClaudeDesktopRequest, ClaudeDesktopResponse, ClientError, CodexRequest, CodexResponse,
@@ -140,7 +151,6 @@ const LOCAL_KEYRING_USER: &str = "local-full-pseudonym-key-v1";
 const NER_MODEL_DIR_ENV: &str = "HACIENDA_NER_MODEL_DIR";
 const NER_MODEL_APP_DATA_RELATIVE_DIR: &str = "models/gliner2-pii";
 const PINNED_NER_MODEL_ID: &str = "fastino/gliner2-privacy-filter-PII-multi";
-const PINNED_NER_MODEL_REVISION: &str = "1cb4166094dc58fa8d836429f060d6c95f62b495";
 const LOCAL_EMBEDDING_PRESET: &str = "multilingual";
 const LOCAL_EMBEDDING_VERSION: u32 = 1;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -164,47 +174,55 @@ const ONNXRUNTIME_LIBRARY_FILE: &str = "libonnxruntime.so.1.23.2";
 const ONNXRUNTIME_LIBRARY_FILE: &str = "onnxruntime.dll";
 const LOCAL_EMBEDDING_COLLECTION: &str = "documents-multilingual-v1";
 
-#[derive(Clone, Copy)]
-struct PinnedModelAsset {
-    relative_path: &'static str,
-    size: u64,
-    sha256: &'static str,
-}
+// The asset allowlist now lives in `model-assets/registry.json`, shared with
+// Studio's `model-digests.ts` and `hacienda-core`'s native loader through
+// `hacienda-model-assets`. Runtime validation deliberately does not trust a
+// model-provided manifest; it checks the pinned bytes and then the architecture.
 
-// Keep this allowlist in sync with models/gliner2-pii/manifest.json. Runtime
-// validation deliberately does not trust a model-provided manifest.
-const PINNED_NER_MODEL_ASSETS: &[PinnedModelAsset] = &[
-    PinnedModelAsset {
-        relative_path: "config.json",
-        size: 252,
-        sha256: "164f17362bcf9d114067d3465e7374bfdd79ce6b605acb745de5a49dabb9595c",
-    },
-    PinnedModelAsset {
-        relative_path: "encoder_config/config.json",
-        size: 895,
-        sha256: "f27dd63cc43a248d2566f0b6ad7a115db353676ce0561dcbca45bac766464c1a",
-    },
-    PinnedModelAsset {
-        relative_path: "model.safetensors",
-        size: 1_228_421_964,
-        sha256: "0280f6f39f6012da50b6640bad438d9b7e763a1b0102094115d1b710c4dd79b6",
-    },
-    PinnedModelAsset {
-        relative_path: "tokenizer.json",
-        size: 16_020_604,
-        sha256: "f6df10ec83bea993035b2dd7c39345a3d4fcf23421c2adb6cb4ffc1e6d1bc4b5",
-    },
-    PinnedModelAsset {
-        relative_path: "tokenizer_config.json",
-        size: 711,
-        sha256: "233beed1f1095cccfc7907cde31a8d90a0c6aa4fdfaf6493f8e55fd162e81ae6",
-    },
-];
-
+/// Why a local NER model could not be used. Detail stays inside the native
+/// process; every host surface maps this to a generic, content-free message.
 #[derive(Debug)]
 enum NerModelError {
+    /// No model directory could be resolved from configuration or app data.
     Unavailable,
+    /// The resolved model failed a manifest or architecture check.
     Invalid,
+    /// Pinned asset verification failed. Keep the originating error and the
+    /// model directory so diagnostics retain operation, path, source and
+    /// recovery guidance instead of collapsing to a bare `Invalid`.
+    VerificationFailed {
+        model_id: &'static str,
+        model_dir: PathBuf,
+        // Boxed so `NerModelError` stays below clippy's `result_large_err` threshold.
+        source: Box<hacienda_model_assets::ModelAssetsError>,
+    },
+}
+
+impl std::fmt::Display for NerModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("local NER model is unavailable"),
+            Self::Invalid => f.write_str("local NER model failed validation"),
+            Self::VerificationFailed {
+                model_id,
+                model_dir,
+                source,
+            } => write!(
+                f,
+                "verifying pinned model '{model_id}' at {}: {source}",
+                model_dir.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NerModelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::VerificationFailed { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 fn resolve_ner_model_dir(app_data_dir: Option<&Path>) -> Result<PathBuf, NerModelError> {
@@ -224,34 +242,21 @@ fn validate_ner_model_assets(model_dir: &Path) -> Result<(), NerModelError> {
         return Err(NerModelError::Unavailable);
     }
     validate_optional_manifest_identity(model_dir)?;
-    for asset in PINNED_NER_MODEL_ASSETS {
-        let path = model_dir.join(asset.relative_path);
-        let metadata = path.metadata().map_err(|_| NerModelError::Invalid)?;
-        if !metadata.is_file() || metadata.len() != asset.size {
-            return Err(NerModelError::Invalid);
-        }
-        let file = File::open(path).map_err(|_| NerModelError::Invalid)?;
-        let mut reader = BufReader::new(file);
-        let mut digest = Sha256::new();
-        let mut buffer = [0_u8; 1024 * 1024];
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|_| NerModelError::Invalid)?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
-        if format!("{:x}", digest.finalize()) != asset.sha256 {
-            return Err(NerModelError::Invalid);
-        }
+    if let Err(error) = hacienda_model_assets::verify_dir(PINNED_NER_MODEL_ID, model_dir) {
+        eprintln!("[ner] pinned model asset verification failed: {error}");
+        return Err(NerModelError::VerificationFailed {
+            model_id: PINNED_NER_MODEL_ID,
+            model_dir: model_dir.to_owned(),
+            source: Box::new(error),
+        });
     }
-
     validate_ner_model_architecture(model_dir)
 }
 
 fn validate_optional_manifest_identity(model_dir: &Path) -> Result<(), NerModelError> {
+    let expected_revision = hacienda_model_assets::model_entry(PINNED_NER_MODEL_ID)
+        .and_then(|entry| entry.revision.as_deref())
+        .ok_or(NerModelError::Invalid)?;
     let path = model_dir.join("manifest.json");
     if !path.is_file() {
         return Ok(());
@@ -261,8 +266,7 @@ fn validate_optional_manifest_identity(model_dir: &Path) -> Result<(), NerModelE
     )
     .map_err(|_| NerModelError::Invalid)?;
     if manifest.get("model_id").and_then(serde_json::Value::as_str) != Some(PINNED_NER_MODEL_ID)
-        || manifest.get("revision").and_then(serde_json::Value::as_str)
-            != Some(PINNED_NER_MODEL_REVISION)
+        || manifest.get("revision").and_then(serde_json::Value::as_str) != Some(expected_revision)
     {
         return Err(NerModelError::Invalid);
     }
@@ -463,6 +467,61 @@ fn configured_document_runtime(
     Err("LocalFull document ingestion requires the real NER model feature".to_owned())
 }
 
+/// The single LocalFull native runtime. Document ingestion, the local viewer
+/// and the email session service all consume the SAME facade (built with the
+/// OS-keychain `LocalKeyResolver`), the same RAG store and the same audit
+/// store. There is no second key and no second PII authority (P0.5).
+struct LocalRuntimeParts {
+    facade: Arc<hacienda_core::HaciendaFacade>,
+    issuer: Arc<TrustedEditorRevisionIssuer>,
+    backend: Backend,
+    store: Arc<LanceDbStore>,
+}
+
+#[derive(Clone)]
+struct LocalFullRuntime {
+    root: PathBuf,
+    parts: Arc<tokio::sync::OnceCell<Arc<LocalRuntimeParts>>>,
+}
+
+impl LocalFullRuntime {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            parts: Arc::new(tokio::sync::OnceCell::const_new()),
+        }
+    }
+
+    async fn parts(&self) -> Result<Arc<LocalRuntimeParts>, String> {
+        let root = self.root.clone();
+        let parts = self
+            .parts
+            .get_or_try_init(|| async move {
+                let runtime_root = root.clone();
+                let (facade, issuer) = tokio::task::spawn_blocking(move || {
+                    let key = OsCredentialKeyStore
+                        .load_or_create()
+                        .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
+                    configured_document_runtime(&key, &runtime_root)
+                })
+                .await
+                .map_err(|_| "LocalFull document runtime initialization failed".to_owned())??;
+                let profile = local_full_profile(&root.join("lancedb"));
+                let (backend, store) = Backend::connect_configured_lancedb(profile)
+                    .await
+                    .map_err(|_| "LocalFull LanceDB is unavailable".to_owned())?;
+                Ok::<Arc<LocalRuntimeParts>, String>(Arc::new(LocalRuntimeParts {
+                    facade: Arc::new(facade),
+                    issuer: Arc::new(issuer),
+                    backend,
+                    store: Arc::new(store),
+                }))
+            })
+            .await?;
+        Ok(Arc::clone(parts))
+    }
+}
+
 struct StoredLocalDocument {
     backend_document: BackendDocument,
     binding: OriginalBinding,
@@ -476,26 +535,21 @@ struct LocalFullDocumentService {
     embedder: XbergTokenEmbedder,
     embedding_ready: bool,
     audit: Arc<dyn AuditStore>,
-    facade: hacienda_core::HaciendaFacade,
-    issuer: TrustedEditorRevisionIssuer,
+    facade: Arc<hacienda_core::HaciendaFacade>,
+    issuer: Arc<TrustedEditorRevisionIssuer>,
     documents: HashMap<String, StoredLocalDocument>,
 }
 
 impl LocalFullDocumentService {
-    async fn new(root: &Path, audit: Arc<dyn AuditStore>) -> Result<Self, String> {
-        let runtime_root = root.to_path_buf();
-        let (facade, issuer) = tokio::task::spawn_blocking(move || {
-            let key = OsCredentialKeyStore
-                .load_or_create()
-                .map_err(|_| "LocalFull pseudonym vault is unavailable".to_owned())?;
-            configured_document_runtime(&key, &runtime_root)
-        })
-        .await
-        .map_err(|_| "LocalFull document runtime initialization failed".to_owned())??;
-        let profile = local_full_profile(&root.join("lancedb"));
-        let (backend, store) = Backend::connect_configured_lancedb(profile)
-            .await
-            .map_err(|_| "LocalFull LanceDB is unavailable".to_owned())?;
+    async fn new(
+        root: &Path,
+        audit: Arc<dyn AuditStore>,
+        parts: Arc<LocalRuntimeParts>,
+    ) -> Result<Self, String> {
+        let facade = Arc::clone(&parts.facade);
+        let issuer = Arc::clone(&parts.issuer);
+        let backend = parts.backend.clone();
+        let store = Arc::clone(&parts.store);
         let embedding_cache = root.join("models/xberg-embeddings");
         tokio::fs::create_dir_all(&embedding_cache)
             .await
@@ -520,7 +574,7 @@ impl LocalFullDocumentService {
                 .map_err(|_| "LocalFull embedding model configuration is unavailable".to_owned())?;
         Ok(Self {
             backend,
-            store: Arc::new(store),
+            store,
             embedding_config,
             embedder,
             embedding_ready: false,
@@ -834,12 +888,14 @@ fn document_projection(
 struct LocalFullDocumentState {
     root: PathBuf,
     audit: Option<Arc<dyn AuditStore>>,
+    runtime: LocalFullRuntime,
     service: tokio::sync::Mutex<Option<LocalFullDocumentService>>,
 }
 
 impl LocalFullDocumentState {
     fn new(root: PathBuf, audit: Option<Arc<dyn AuditStore>>) -> Self {
         Self {
+            runtime: LocalFullRuntime::new(root.clone()),
             root,
             audit,
             service: tokio::sync::Mutex::const_new(None),
@@ -856,9 +912,133 @@ impl LocalFullDocumentState {
                 .as_ref()
                 .map(Arc::clone)
                 .ok_or_else(|| "LocalFull audit store is unavailable".to_owned())?;
-            *service = Some(LocalFullDocumentService::new(&self.root, audit).await?);
+            let parts = self.runtime.parts().await?;
+            *service = Some(LocalFullDocumentService::new(&self.root, audit, parts).await?);
         }
         Ok(service)
+    }
+}
+
+/// Native destination for an authorized email reveal: the plaintext is used
+/// only here to open the original RFC822 in the system viewer. It is never
+/// serialized back to the renderer, never logged and dropped immediately.
+struct NativeEmailMessageViewer;
+
+impl NativeMessageViewer for NativeEmailMessageViewer {
+    fn open_message(
+        &self,
+        path: &Path,
+        revealed: &[(String, Zeroizing<String>)],
+    ) -> NativeViewerOutcome {
+        // `revealed` lives only in native memory; it is never serialized to the
+        // renderer or logged, and the Zeroizing values wipe on drop.
+        let _ = revealed;
+        // A failed launch means the original was not opened, so the one-shot
+        // capability may be released. A successful launch keeps it consumed.
+        match DesktopOpener::open(&SystemDesktopOpener, path) {
+            Ok(()) => NativeViewerOutcome::Opened,
+            Err(_) => NativeViewerOutcome::FailedBeforeOpen(NativeEmailError::Unavailable),
+        }
+    }
+}
+
+/// Tauri-owned state for the LocalFull email session service. It shares the
+/// document facade / OS keychain resolver / RAG store through `LocalFullRuntime`.
+struct LocalFullEmailState {
+    audit: Option<Arc<dyn AuditStore>>,
+    runtime: LocalFullRuntime,
+    service: tokio::sync::Mutex<Option<EmailSessionService>>,
+}
+
+impl LocalFullEmailState {
+    fn new(root: PathBuf, audit: Option<Arc<dyn AuditStore>>) -> Self {
+        Self {
+            audit,
+            runtime: LocalFullRuntime::new(root),
+            service: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    async fn service(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<EmailSessionService>>, String> {
+        let mut service = self.service.lock().await;
+        if service.is_none() {
+            let audit = self
+                .audit
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or_else(|| "LocalFull audit store is unavailable".to_owned())?;
+            let parts = self.runtime.parts().await?;
+            // The EXACT facade used by document PII and the viewer. No new key,
+            // no new facade and no duplicate PII authority for email.
+            let pii = PiiEngine::from_facade(Arc::clone(&parts.facade));
+            // Coerce the shared concrete store to the trait object the email
+            // service consumes; it is the SAME store instance documents use.
+            let rag_store: Arc<dyn RagStore> = parts.store.clone();
+            let email =
+                EmailSessionService::new(pii, rag_store, audit, Arc::new(NativeEmailMessageViewer));
+            // Accounts are provisioned by the host (env/config), never by the
+            // renderer: no path, OAuth token or password crosses IPC.
+            if let Ok(root) = env::var("HACIENDA_LOCAL_EMAIL_MAILDIR") {
+                let path = PathBuf::from(root);
+                if path.is_dir() {
+                    email
+                        .register_account(RegisterAccountRequest {
+                            tenant: env::var("HACIENDA_LOCAL_EMAIL_TENANT")
+                                .unwrap_or_else(|_| "local_full".to_owned()),
+                            principal: env::var("HACIENDA_LOCAL_EMAIL_PRINCIPAL")
+                                .unwrap_or_else(|_| "local".to_owned()),
+                            maildir_root: path,
+                            label: env::var("HACIENDA_LOCAL_EMAIL_LABEL")
+                                .unwrap_or_else(|_| "local mailbox".to_owned()),
+                        })
+                        .await
+                        .map_err(|_| "LocalFull email account provisioning failed".to_owned())?;
+                }
+            }
+            *service = Some(email);
+        }
+        Ok(service)
+    }
+}
+
+/// Tauri-owned state for the TeamOnPremise HTTP client. The gateway endpoint and
+/// bearer credential are resolved from the host installation config at startup;
+/// no command argument can change, replace, or disclose either one.
+struct TeamEmailState {
+    client: Option<TeamEmailClient>,
+}
+
+impl TeamEmailState {
+    fn new(client: Option<TeamEmailClient>) -> Self {
+        Self { client }
+    }
+
+    fn client(&self) -> Result<&TeamEmailClient, TeamEmailError> {
+        self.client.as_ref().ok_or(TeamEmailError::Unavailable)
+    }
+}
+
+/// Build the TeamOnPremise client from host-owned configuration only. LocalFull
+/// installations never get one, so a renderer cannot turn a local session into a
+/// gateway session by calling a team command.
+fn team_email_client_from_environment() -> Option<TeamEmailClient> {
+    let installation = installation_config_from_environment().ok()?;
+    if !matches!(installation, InstallationConfig::TeamOnPremise(_)) {
+        return None;
+    }
+    let gateway = provider_gateway_for_installation(&installation).ok()?;
+    let credential = gateway_credential(&gateway.authentication).ok()?;
+    TeamEmailClient::new(gateway.endpoint, credential).ok()
+}
+
+fn require_viewer_window(window: &WebviewWindow) -> Result<(), String> {
+    let label = window.label();
+    if label.starts_with("local-viewer-") || label.starts_with("email-viewer-") {
+        Ok(())
+    } else {
+        Err("Native viewer access is required".to_owned())
     }
 }
 
@@ -2259,6 +2439,275 @@ async fn save_document(
     Ok(saved)
 }
 
+// ── LocalFull email commands ────────────────────────────────────────────────
+// Every argument below is an opaque ref or a token-only projection. Absolute
+// paths, credentials and raw message/attachment text never enter this layer.
+
+#[derive(Debug, Deserialize)]
+struct EmailRefRequest {
+    account_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailMailboxRequest {
+    account_ref: String,
+    mailbox_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailSearchRequest {
+    account_ref: String,
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailMessageRequest {
+    message_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailOpenRequest {
+    capability_ref: String,
+    message_ref: String,
+    token: String,
+}
+
+#[tauri::command(rename = "email-accounts")]
+async fn email_accounts(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+) -> std::result::Result<Vec<AccountProjection>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    Ok(service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .accounts()
+        .await)
+}
+
+#[tauri::command(rename = "email-mailboxes")]
+async fn email_mailboxes(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailRefRequest,
+) -> std::result::Result<Vec<MailboxProjection>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .list_mailboxes(&request.account_ref)
+        .await
+}
+
+#[tauri::command(rename = "email-messages")]
+async fn email_messages(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailMailboxRequest,
+) -> std::result::Result<Vec<MessageProjection>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .list_messages(&request.account_ref, &request.mailbox_ref)
+        .await
+}
+
+#[tauri::command(rename = "email-ingest")]
+async fn email_ingest(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailMailboxRequest,
+) -> std::result::Result<JobProjection, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .ingest(&request.account_ref, &request.mailbox_ref)
+        .await
+}
+
+#[tauri::command(rename = "email-search")]
+async fn email_search(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailSearchRequest,
+) -> std::result::Result<Vec<EmailSearchHit>, NativeEmailError> {
+    require_main_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .search(&request.account_ref, &request.query)
+        .await
+}
+
+/// A capability is minted for the calling window; the renderer cannot mint one
+/// for another window or message.
+#[tauri::command(rename = "email-authorize-message")]
+async fn email_authorize_message(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailMessageRequest,
+) -> std::result::Result<ViewerCapabilityProjection, NativeEmailError> {
+    if window.label() != MAIN_WINDOW_LABEL && !window.label().starts_with("local-viewer-") {
+        return Err(NativeEmailError::Unauthorized);
+    }
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    // Bind to the calling window itself, never to a renderer-supplied label.
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .authorize_message_view(&request.message_ref, window.label())
+        .await
+}
+
+/// Reveal + open may only be invoked from a native viewer window. The returned
+/// value contains no plaintext, no path and no message text.
+#[tauri::command(rename = "email-open-original")]
+async fn email_open_original(
+    window: WebviewWindow,
+    state: tauri::State<'_, LocalFullEmailState>,
+    request: EmailOpenRequest,
+) -> std::result::Result<ViewerOpenResponse, NativeEmailError> {
+    require_viewer_window(&window).map_err(|_| NativeEmailError::Unauthorized)?;
+    let service = state
+        .service()
+        .await
+        .map_err(|_| NativeEmailError::Unavailable)?;
+    service
+        .as_ref()
+        .ok_or(NativeEmailError::Unavailable)?
+        .reveal_and_open(
+            &request.capability_ref,
+            &request.message_ref,
+            window.label(),
+            &request.token,
+        )
+        .await
+}
+
+// ── TeamOnPremise email commands ────────────────────────────────────────────
+// Every argument is a typed, opaque-ref DTO. The renderer never supplies a
+// base URL, a token, a filesystem path, a broker command or raw message text.
+
+#[tauri::command(rename = "team-email-sources")]
+async fn team_email_sources(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+) -> std::result::Result<TeamSourcesResponse, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.sources().await
+}
+
+#[tauri::command(rename = "team-email-ingest")]
+async fn team_email_ingest(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamIngestRequest,
+) -> std::result::Result<TeamAcceptedJob, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.ingest_async(&request).await
+}
+
+#[tauri::command(rename = "team-email-job")]
+async fn team_email_job(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamJobRequest,
+) -> std::result::Result<TeamJobStatusDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    request.validate()?;
+    let job_id = request.job_id.clone();
+    state.client()?.job(&job_id).await
+}
+
+#[tauri::command(rename = "team-email-job-result")]
+async fn team_email_job_result(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamJobRequest,
+) -> std::result::Result<TeamJobStatusDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    request.validate()?;
+    let job_id = request.job_id.clone();
+    state
+        .client()?
+        .wait_for_job(&job_id, 60, Duration::from_millis(500))
+        .await
+}
+
+#[tauri::command(rename = "team-email-search")]
+async fn team_email_search(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamSearchRequest,
+) -> std::result::Result<TeamSearchResponse, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.search(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-capability")]
+async fn team_viewer_capability(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamViewerCapabilityRequest,
+) -> std::result::Result<TeamViewerCapabilityDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.issue_capability(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-reveal")]
+async fn team_viewer_reveal(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamViewerActionRequest,
+) -> std::result::Result<TeamViewerRevealResultDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.reveal(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-open")]
+async fn team_viewer_open(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+    request: TeamViewerActionRequest,
+) -> std::result::Result<TeamViewerProjectionDto, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.open(&request).await
+}
+
+#[tauri::command(rename = "team-viewer-audit")]
+async fn team_viewer_audit(
+    window: WebviewWindow,
+    state: tauri::State<'_, TeamEmailState>,
+) -> std::result::Result<TeamAuditResponse, TeamEmailError> {
+    require_main_window(&window).map_err(|_| TeamEmailError::Forbidden)?;
+    state.client()?.audit().await
+}
+
 #[cfg(all(
     not(test),
     any(
@@ -2340,9 +2789,18 @@ fn main() {
             };
             app.manage(viewer_state);
             app.manage(LocalFullDocumentState::new(
+                app_data_dir.clone(),
+                audit_store.as_ref().map(Arc::clone),
+            ));
+            // Email shares the document runtime's facade, resolver, RAG store
+            // and audit store; it is not a second PII authority (P0.5).
+            app.manage(LocalFullEmailState::new(
                 app_data_dir,
                 audit_store.as_ref().map(Arc::clone),
             ));
+            // The TeamOnPremise client is built once, from host config only. It is
+            // absent (commands fail closed) unless this is a TeamOnPremise install.
+            app.manage(TeamEmailState::new(team_email_client_from_environment()));
             if let Some(store) = audit_store {
                 app.manage(OriginalViewerCommandState::native(store));
             } else {
@@ -2363,7 +2821,23 @@ fn main() {
             install_local_rag_model,
             search_local_documents,
             load_document,
-            save_document
+            save_document,
+            email_accounts,
+            email_mailboxes,
+            email_messages,
+            email_ingest,
+            email_search,
+            email_authorize_message,
+            email_open_original,
+            team_email_sources,
+            team_email_ingest,
+            team_email_job,
+            team_email_job_result,
+            team_email_search,
+            team_viewer_capability,
+            team_viewer_reveal,
+            team_viewer_open,
+            team_viewer_audit
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Hacienda Secrecy Client");
@@ -2854,6 +3328,54 @@ mod tests {
     }
 
     #[test]
+    fn verification_failure_retains_model_dir_and_verifier_context() {
+        use std::error::Error as _;
+
+        let model_dir = test_model_dir("verification-context");
+        // The pinned fastino entry expects a 252-byte config.json with a fixed
+        // digest. Wrong bytes make `verify_dir` fail before any detector loads.
+        std::fs::write(model_dir.join("config.json"), b"tampered").expect("tampered config");
+
+        let err = validate_ner_model_assets(&model_dir)
+            .expect_err("a tampered pinned asset must fail validation");
+        let detail = err.to_string();
+        match &err {
+            NerModelError::VerificationFailed {
+                model_id,
+                model_dir: reported_dir,
+                source,
+            } => {
+                assert_eq!(*model_id, PINNED_NER_MODEL_ID);
+                assert_eq!(reported_dir, &model_dir);
+                assert!(detail.contains(PINNED_NER_MODEL_ID), "{detail}");
+                assert!(
+                    detail.contains(&model_dir.display().to_string()),
+                    "{detail}"
+                );
+                assert!(err.source().is_some(), "the verifier error stays reachable");
+                let source_detail = source.to_string();
+                assert!(source_detail.contains("config.json"), "{source_detail}");
+                assert!(source_detail.contains("re-download"), "{source_detail}");
+            }
+            other => panic!("expected a contextual verification error, got {other:?}"),
+        }
+
+        // Host callers still collapse this to the same generic, content-free
+        // rejection; the detail never reaches the UI.
+        let rejected = HaciendaLocalRedactor::from_key_store_with_runtime(
+            Arc::new(TestKeyStore::default()),
+            &model_dir,
+            validate_ner_model_assets,
+            |_config, _pseudonymiser| panic!("detector loader must not run"),
+        )
+        .err()
+        .expect("verification must fail closed");
+        assert!(!rejected.to_string().contains("config.json"));
+
+        let _ = std::fs::remove_dir_all(&model_dir);
+    }
+
+    #[test]
     fn incompatible_boundary_model_fails_closed() {
         let model_dir = test_model_dir("boundary");
         std::fs::write(
@@ -3037,7 +3559,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let path =
                 std::env::temp_dir().join(format!("hacienda-size-{}.bin", uuid::Uuid::new_v4()));
-            let file = File::create(&path).expect("fixture");
+            let file = std::fs::File::create(&path).expect("fixture");
             file.set_len(xberg::SecurityLimits::default().max_archive_size as u64 + 1)
                 .expect("sparse file");
             drop(file);

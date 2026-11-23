@@ -364,6 +364,9 @@ pub fn run_capabilities(args: CapabilitiesArgs) -> Result<()> {
         cfg!(feature = "rag-embeddings"),
         hacienda_core::capabilities::cached_onnx_runtime_status(),
         false,
+        // This preflight deliberately builds no facade, so it has no detector to
+        // report; it must not claim another surface's model is loaded here.
+        hacienda_core::pii::NerRuntimeState::unavailable(),
     );
 
     match args.format {
@@ -1717,11 +1720,22 @@ pub async fn run_serve(
     let rag_egress = read_optional_env(RAG_LLM_BASE_URL_ENV)?;
 
     let facade = Arc::new(build_facade(config).context("building the facade")?);
+    // RUNTIME LIMITATION: this is the only in-repo ApiState constructor and it
+    // has no Postgres pool or migration step, so job state is in-memory only and
+    // every queued/running job is lost on restart. `PostgresJobStore` exists but
+    // cannot be wired here without adding DB configuration; do not describe this
+    // server's job tracking as durable. Embedders that build and migrate a pool
+    // can inject it with `ApiState::with_job_store` instead.
     let jobs = InMemoryJobStore::new().into_arc();
     // In-memory by default, same precedent as `jobs` above: durable is a caller
     // decision (embed a `PgVectorStore` instead), not this command's to make.
     let rag_store: Arc<dyn hacienda_rag::RagStore> = Arc::new(InMemoryVectorStore::new("default"));
-    let state = ApiState::new(facade, jobs, auth, ApiLimits::default()).with_rag_store(rag_store);
+    // The builder is the host's job-store injection seam. Here it receives the
+    // in-memory store above; a host with a migrated Postgres pool would pass a
+    // `PostgresJobStore` instead and get the same retention/retry policy.
+    let state = ApiState::new(facade, Arc::clone(&jobs), auth, ApiLimits::default())
+        .with_job_store(jobs)
+        .with_rag_store(rag_store);
     let state = match rag_egress {
         Some(endpoint) => state.with_rag_egress_allowlist([endpoint]),
         None => state,
@@ -1747,6 +1761,9 @@ pub async fn run_serve(
             "DISABLED — every caller is trusted (loopback only)"
         }
     );
+    // Operator-visible statement of the limitation above: a restart clears the
+    // job registry, so polling a previously accepted job id returns 404.
+    eprintln!("  job state: in-memory (NOT durable — queued jobs are lost on restart)");
 
     axum::serve(listener, hacienda_api::router(state))
         .await
@@ -1783,7 +1800,8 @@ fn build_email_config(path: Option<&std::path::Path>) -> Result<hacienda_email::
 pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
     use crate::cli::{EmailCommand, EmailPrivacyMode};
     use hacienda_email::{
-        EmailDestination, EmailOperation, EmailProcessor, EmailRequest, EmailSource, PipelineStep,
+        pii::PiiEngine, EmailDestination, EmailOperation, EmailProcessor, EmailRequest,
+        EmailSource, PipelineStep,
     };
 
     let config = build_email_config(args.email_config.as_deref())?;
@@ -1797,7 +1815,12 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
         EmailPrivacyMode::Pseudonymize => hacienda_email::PrivacyMode::Pseudonymize,
     };
 
-    let processor = EmailProcessor::new(config)
+    // In-process caller: the host facade owns the key resolver and audit store.
+    // Metadata projection needs a resolvable tenant key in both privacy modes
+    // (P0.5); there is no local hash fallback.
+    let pii = PiiEngine::for_local_use(PiiEngine::local_config(), Arc::new(EnvKeyResolver::new()))
+        .context("initialising shared PII authority for email")?;
+    let processor = EmailProcessor::new(config, pii)
         .await
         .context("initialising email processor")?;
 
@@ -1858,10 +1881,13 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
     };
 
     let response = processor
-        .process(EmailRequest {
-            operation,
-            config_overrides: None,
-        })
+        .process(
+            EmailRequest {
+                operation,
+                config_overrides: None,
+            },
+            Caller::Trusted,
+        )
         .await
         .context("processing emails")?;
 
