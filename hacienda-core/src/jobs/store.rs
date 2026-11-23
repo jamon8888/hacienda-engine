@@ -78,6 +78,15 @@ pub trait JobStore: Send + Sync {
     ) -> Result<Job, JobError>;
 
     /// Mark a job as `Succeeded` and record its serialised result payload.
+    ///
+    /// Backends MUST make the first terminal write win **atomically**: apply the
+    /// update only when the stored status is neither `Succeeded` nor `Failed`,
+    /// and otherwise return the stored job unchanged (status, result and
+    /// `updated_at` all preserved). A read-then-write check is not enough — two
+    /// workers can both observe a non-terminal row before either writes. The
+    /// in-repo stores enforce this under their lock / row-level status
+    /// predicate. `updated_at` is the retention clock for terminal jobs, so a
+    /// duplicate write that refreshes it would extend retention indefinitely.
     async fn finish(
         &self,
         tenant: &TenantId,
@@ -86,6 +95,12 @@ pub trait JobStore: Send + Sync {
     ) -> Result<Job, JobError>;
 
     /// Mark a job as `Failed` and record the reason.
+    ///
+    /// The same atomic first-terminal-write rule as [`Self::finish`] applies:
+    /// write only if the stored status is not already `Succeeded` or `Failed`,
+    /// otherwise return the stored job unchanged. This includes preserving the
+    /// original reason and `updated_at` on a duplicate `fail` or on a `fail`
+    /// racing a `finish`.
     async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError>;
 
     /// Overwrite a running job's progress payload.

@@ -159,6 +159,11 @@ impl JobRetention {
 
 /// A `JobStore` decorator that enforces the API's retention and retry policy
 /// without owning any storage of its own.
+///
+/// The atomic first-terminal-write rule is the injected backend's
+/// responsibility (see the module documentation and the `JobStore::finish` /
+/// `JobStore::fail` contract); the pre-read in `finish`/`fail` is only a fast
+/// path that returns the original row to a duplicate caller.
 pub struct GuardedJobStore {
     inner: Arc<dyn JobStore>,
     retention: JobRetention,

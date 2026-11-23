@@ -18,8 +18,8 @@ use hacienda_core::{
 };
 use hacienda_email::native::{
     AccountProjection, EmailSearchHit, EmailSessionService, JobProjection, MailboxProjection,
-    MessageProjection, NativeEmailError, NativeMessageViewer, RegisterAccountRequest,
-    ViewerCapabilityProjection, ViewerOpenResponse,
+    MessageProjection, NativeEmailError, NativeMessageViewer, NativeViewerOutcome,
+    RegisterAccountRequest, ViewerCapabilityProjection, ViewerOpenResponse,
 };
 use hacienda_email::pii::PiiEngine;
 use serde::{Deserialize, Serialize};
@@ -929,11 +929,16 @@ impl NativeMessageViewer for NativeEmailMessageViewer {
         &self,
         path: &Path,
         revealed: &[(String, Zeroizing<String>)],
-    ) -> std::result::Result<(), NativeEmailError> {
+    ) -> NativeViewerOutcome {
         // `revealed` lives only in native memory; it is never serialized to the
         // renderer or logged, and the Zeroizing values wipe on drop.
         let _ = revealed;
-        DesktopOpener::open(&SystemDesktopOpener, path).map_err(|_| NativeEmailError::Unavailable)
+        // A failed launch means the original was not opened, so the one-shot
+        // capability may be released. A successful launch keeps it consumed.
+        match DesktopOpener::open(&SystemDesktopOpener, path) {
+            Ok(()) => NativeViewerOutcome::Opened,
+            Err(_) => NativeViewerOutcome::FailedBeforeOpen(NativeEmailError::Unavailable),
+        }
     }
 }
 

@@ -85,6 +85,22 @@ impl std::error::Error for NativeEmailError {}
 
 type Result<T> = std::result::Result<T, NativeEmailError>;
 
+/// Outcome of a native viewer dispatch.
+///
+/// The distinction matters for one-shot capabilities: a reservation may only
+/// be released when the viewer proves it failed **before** it could open the
+/// original. A successful dispatch, a panic in the blocking task, or a join
+/// error must all keep the capability consumed — otherwise a replay could open
+/// the same original a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeViewerOutcome {
+    /// The original was handed to the viewer (or may have been opened).
+    Opened,
+    /// Confirmed failure before the original could be opened. Only this
+    /// outcome allows the service to release the capability reservation.
+    FailedBeforeOpen(NativeEmailError),
+}
+
 /// The trusted sink for a revealed original. The Tauri implementation opens
 /// the RFC822 file in the native viewer and never serializes `revealed` to the
 /// renderer; tests use a recording implementation to assert what was disclosed.
@@ -94,7 +110,15 @@ pub trait NativeMessageViewer: Send + Sync {
     /// `revealed` contains `(token, plaintext)` pairs that the message-bound
     /// capability authorized for this one reveal. It is `Zeroizing` so the
     /// plaintext is wiped when the viewer drops it.
-    fn open_message(&self, path: &Path, revealed: &[(String, Zeroizing<String>)]) -> Result<()>;
+    ///
+    /// Return [`NativeViewerOutcome::FailedBeforeOpen`] only when the original
+    /// was definitely not opened. Once opening was attempted, return
+    /// [`NativeViewerOutcome::Opened`] so the capability stays consumed.
+    fn open_message(
+        &self,
+        path: &Path,
+        revealed: &[(String, Zeroizing<String>)],
+    ) -> NativeViewerOutcome;
 }
 
 /// Host-supplied registration data. Never sent by the renderer: `maildir_root`
@@ -162,7 +186,12 @@ pub struct ViewerOpenResponse {
     pub opened: bool,
 }
 
-/// A minted, unexpired, unconsumed reveal/open authority. Never serialized.
+/// A minted reveal/open authority. Never serialized.
+///
+/// `consumed` is set while the capability is being checked out (reserved)
+/// and stays set once the viewer may have opened the original. It is cleared
+/// only for a confirmed pre-open failure, so a cancelled caller or a racing
+/// second caller can never make the same authority open the file twice.
 #[derive(Debug)]
 struct MessageBoundViewerCapability {
     message_ref: String,
@@ -216,7 +245,9 @@ pub struct EmailSessionService {
     accounts: Mutex<HashMap<String, AccountSession>>,
     mailboxes: Mutex<HashMap<String, String>>,
     messages: Mutex<HashMap<String, MessageSlot>>,
-    capabilities: Mutex<HashMap<String, MessageBoundViewerCapability>>,
+    /// Shared with the service-owned reveal task so the reservation can be
+    /// released on a confirmed pre-open failure even if the caller cancels.
+    capabilities: Arc<Mutex<HashMap<String, MessageBoundViewerCapability>>>,
     jobs: Mutex<HashMap<String, JobProjection>>,
 }
 
@@ -235,7 +266,7 @@ impl EmailSessionService {
             accounts: Mutex::new(HashMap::new()),
             mailboxes: Mutex::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
-            capabilities: Mutex::new(HashMap::new()),
+            capabilities: Arc::new(Mutex::new(HashMap::new())),
             jobs: Mutex::new(HashMap::new()),
         }
     }
@@ -609,8 +640,13 @@ impl EmailSessionService {
         )
         .to_hex()
         .to_string();
-        self.append_audit(&message.tenant, "email_message_view", digest)
-            .await?;
+        append_audit(
+            self.audit.as_ref(),
+            &message.tenant,
+            "email_message_view",
+            digest,
+        )
+        .await?;
         Ok(ViewerCapabilityProjection {
             capability_ref,
             message_ref: message_ref.to_owned(),
@@ -622,6 +658,13 @@ impl EmailSessionService {
     /// Reveal the authorized tokens **inside the native viewer** and open the
     /// original. The plaintext is passed only to [`NativeMessageViewer`]; it is
     /// never returned to the renderer or to the caller of this method.
+    ///
+    /// The capability is reserved under its lock *before* anything is
+    /// dispatched, so concurrent callers and a cancelled caller's replay are
+    /// both rejected. The reveal, the viewer dispatch, the reservation update
+    /// and the audit run in service-owned work: dropping this future cannot
+    /// stop an already-dispatched viewer, and cannot leave the authority
+    /// available for a second open.
     pub async fn reveal_and_open(
         &self,
         capability_ref: &str,
@@ -629,7 +672,37 @@ impl EmailSessionService {
         viewer_label: &str,
         token: &str,
     ) -> Result<ViewerOpenResponse> {
-        let (domain, tenant) = {
+        // Collect every input *before* reserving, so no `.await` sits between
+        // the reservation and the spawn below: a cancellation before dispatch
+        // cannot strand a reservation without a service-owned viewer task.
+        let message = self.message(message_ref).await?;
+        let tenant = message.tenant.clone();
+        let domain = message
+            .token_domains
+            .get(token)
+            .ok_or(NativeEmailError::TokenNotBound)?
+            .clone();
+        // The token's category carries the tenant-qualified domain as AAD;
+        // a token minted for another tenant cannot pass this check even if
+        // the shared OS key would technically decrypt it.
+        if !token_starts_with_domain(token, &domain) {
+            return Err(NativeEmailError::CrossTenant);
+        }
+        let caller_ctx = self
+            .accounts
+            .lock()
+            .await
+            .values()
+            .find(|account| account.tenant == tenant)
+            .map(|account| account.caller_ctx.clone())
+            .ok_or(NativeEmailError::UnknownReference)?;
+        let path = message.original_path.clone();
+
+        // Reserve while the lock is held. From here on every other caller sees
+        // `Replayed` until the service-owned task either confirms a pre-open
+        // failure (releasing the reservation) or keeps it consumed because the
+        // original may have been opened.
+        {
             let mut capabilities = self.capabilities.lock().await;
             let capability = capabilities
                 .get_mut(capability_ref)
@@ -644,62 +717,66 @@ impl EmailSessionService {
             if capability.viewer_label != viewer_label || capability.message_ref != message_ref {
                 return Err(NativeEmailError::Unauthorized);
             }
-            let message = self.message(message_ref).await?;
-            if message.tenant != capability.tenant {
+            if capability.tenant != tenant {
                 return Err(NativeEmailError::CrossTenant);
             }
-            if capability.tenant != message.tenant {
-                return Err(NativeEmailError::CrossTenant);
-            }
-            let domain = message
-                .token_domains
-                .get(token)
-                .ok_or(NativeEmailError::TokenNotBound)?
-                .clone();
-            // The token's category carries the tenant-qualified domain as AAD;
-            // a token minted for another tenant cannot pass this check even if
-            // the shared OS key would technically decrypt it.
-            if !token_starts_with_domain(token, &domain) {
-                return Err(NativeEmailError::CrossTenant);
-            }
-            (domain, message.tenant.clone())
-        };
-        let caller_ctx = self
-            .accounts
-            .lock()
-            .await
-            .values()
-            .find(|account| account.tenant == tenant)
-            .map(|account| account.caller_ctx.clone())
-            .ok_or(NativeEmailError::UnknownReference)?;
-        let plaintext = self
-            .pii
-            .facade()
-            .reveal_token_with_auth(Caller::Principal(&caller_ctx), token)
-            .await
-            .map_err(|_| NativeEmailError::Unauthorized)?;
-        let revealed = vec![(token.to_owned(), Zeroizing::new(plaintext))];
-        let message = self.message(message_ref).await?;
-        let path = message.original_path.clone();
-        // The native viewer call is blocking (it launches the OS viewer). Move
-        // it off the async runtime so a slow viewer cannot stall a worker or
-        // delay other email commands sharing this service. The viewer handle,
-        // path and revealed plaintext move into the task as owned values; the
-        // plaintext is dropped inside that task and never crosses back to the
-        // async caller, the renderer or any log surface.
-        let viewer = Arc::clone(&self.viewer);
-        tokio::task::spawn_blocking(move || viewer.open_message(&path, &revealed))
-            .await
-            .map_err(|_| NativeEmailError::Unavailable)??;
-        if let Some(capability) = self.capabilities.lock().await.get_mut(capability_ref) {
             capability.consumed = true;
         }
-        let digest = blake3::hash(format!("{capability_ref}:{message_ref}:{domain}").as_bytes())
-            .to_hex()
-            .to_string();
-        self.append_audit(&tenant, "email_message_reveal", digest)
-            .await?;
-        Ok(ViewerOpenResponse { opened: true })
+
+        let capability_ref = capability_ref.to_owned();
+        let message_ref = message_ref.to_owned();
+        let token = token.to_owned();
+        let capabilities = Arc::clone(&self.capabilities);
+        let audit = Arc::clone(&self.audit);
+        let pii = self.pii.clone();
+        let viewer = Arc::clone(&self.viewer);
+        let task = tokio::spawn(async move {
+            // Reveal in service-owned work too: a caller that cancels during
+            // decryption cannot replay the capability afterwards.
+            let plaintext = pii
+                .facade()
+                .reveal_token_with_auth(Caller::Principal(&caller_ctx), &token)
+                .await
+                .map_err(|_| NativeEmailError::Unauthorized);
+            let reveal_result = match plaintext {
+                Err(error) => Err(error),
+                Ok(plaintext) => {
+                    let revealed = vec![(token, Zeroizing::new(plaintext))];
+                    // The native viewer call is blocking (it launches the OS
+                    // viewer). Move it off the async runtime so a slow viewer
+                    // cannot stall a worker or delay other email commands
+                    // sharing this service. The viewer handle, path and
+                    // plaintext move into that task as owned values; the
+                    // plaintext is dropped there and never crosses back to the
+                    // renderer, the caller's future or any log surface.
+                    match tokio::task::spawn_blocking(move || viewer.open_message(&path, &revealed))
+                        .await
+                    {
+                        Ok(NativeViewerOutcome::Opened) => Ok(()),
+                        Ok(NativeViewerOutcome::FailedBeforeOpen(error)) => Err(error),
+                        // A panic or a cancelled blocking worker is treated as
+                        // "may have opened": keep the capability consumed.
+                        Err(_) => Ok(()),
+                    }
+                }
+            };
+            if let Err(error) = reveal_result {
+                let mut capabilities = capabilities.lock().await;
+                if let Some(capability) = capabilities.get_mut(&capability_ref) {
+                    if capability.consumed {
+                        capability.consumed = false;
+                    }
+                }
+                return Err(error);
+            }
+            let digest =
+                blake3::hash(format!("{capability_ref}:{message_ref}:{domain}").as_bytes())
+                    .to_hex()
+                    .to_string();
+            append_audit(audit.as_ref(), &tenant, "email_message_reveal", digest).await?;
+            Ok(ViewerOpenResponse { opened: true })
+        });
+        task.await.map_err(|_| NativeEmailError::Unavailable)?
     }
 
     async fn mint(
@@ -741,30 +818,6 @@ impl EmailSessionService {
         Ok(out)
     }
 
-    async fn append_audit(&self, tenant: &TenantId, category: &str, digest: String) -> Result<()> {
-        self.audit
-            .append(
-                tenant,
-                vec![AuditEntryInput {
-                    id: opaque_ref("audit"),
-                    category: category.to_owned(),
-                    action: RedactionAction::Reveal,
-                    span_hash: digest,
-                    span_length: 0,
-                    confidence: None,
-                    source: EntitySource::Manual,
-                    pipeline_version: "hacienda-email-native-v1".to_owned(),
-                    config_hash: AUDIT_CONFIG_HASH.to_owned(),
-                    principal: None,
-                    vertical: None,
-                    model: None,
-                }],
-            )
-            .await
-            .map_err(|_| NativeEmailError::AuditFailed)?;
-        Ok(())
-    }
-
     async fn account(&self, account_ref: &str) -> Result<AccountSession> {
         self.accounts
             .lock()
@@ -782,6 +835,38 @@ impl EmailSessionService {
             .cloned()
             .ok_or(NativeEmailError::UnknownReference)
     }
+}
+
+/// Append a content-free audit entry. Free function so the service-owned
+/// reveal task can audit with a cloned store handle after the caller's future
+/// has been dropped.
+async fn append_audit(
+    audit: &dyn AuditStore,
+    tenant: &TenantId,
+    category: &str,
+    digest: String,
+) -> Result<()> {
+    audit
+        .append(
+            tenant,
+            vec![AuditEntryInput {
+                id: opaque_ref("audit"),
+                category: category.to_owned(),
+                action: RedactionAction::Reveal,
+                span_hash: digest,
+                span_length: 0,
+                confidence: None,
+                source: EntitySource::Manual,
+                pipeline_version: "hacienda-email-native-v1".to_owned(),
+                config_hash: AUDIT_CONFIG_HASH.to_owned(),
+                principal: None,
+                vertical: None,
+                model: None,
+            }],
+        )
+        .await
+        .map_err(|_| NativeEmailError::AuditFailed)?;
+    Ok(())
 }
 
 /// Normalize a tenant id for use in a pseudonym category label. The OS key
