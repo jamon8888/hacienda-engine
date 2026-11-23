@@ -84,6 +84,17 @@ impl NerDetector {
     ///
     /// Entities without a confidence score are kept: a backend that does not report
     /// confidence should not be silently filtered to nothing.
+    ///
+    /// # Candle GLiNER threshold floor
+    ///
+    /// `xberg::text::ner::candle::CandleBackend::detect` hard-codes an internal
+    /// threshold of `0.5` before `NerDetector`'s own filter runs. Consequently
+    /// `with_threshold` can only ever *raise* the effective threshold above `0.5`;
+    /// it can never lower it. Entities the Candle backend scores below `0.5` are
+    /// invisible at any configured threshold, so every recall figure measured
+    /// through this detector is *truncated recall at 0.5*, not recall. This is an
+    /// upstream xberg limitation, not something this crate can work around without
+    /// patching `CandleBackend::detect`.
     pub fn with_threshold(mut self, threshold: f32) -> Self {
         self.threshold = threshold;
         self
@@ -100,14 +111,43 @@ impl NerDetector {
     /// Backends are cached process-wide by `(model_dir, lora_adapter_dir)`, so the
     /// model-load and adapter-merge cost is paid once per pair rather than per document.
     ///
+    /// If `expected_weights_hash` is `Some`, the blake3 digest of
+    /// `model_dir/model.safetensors` is computed and compared before loading; a
+    /// mismatch aborts with [`PiiError::Ner`] so a tampered or corrupted model can
+    /// never be executed.
+    ///
     /// # Errors
     ///
-    /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded.
+    /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded, or if
+    /// `expected_weights_hash` is set and the weights digest does not match.
     #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
     pub fn from_candle_local(
         model_dir: &std::path::Path,
         lora_adapter_dir: Option<&std::path::Path>,
+        expected_weights_hash: Option<&str>,
     ) -> Result<Self, PiiError> {
+        if let Some(expected) = expected_weights_hash {
+            let weights_path = model_dir.join("model.safetensors");
+            let weights = std::fs::read(&weights_path).map_err(|source| PiiError::Ner {
+                message: format!(
+                    "reading model weights from {}",
+                    weights_path.display()
+                ),
+                source: Box::new(xberg::XbergError::Io(source)),
+            })?;
+            let digest = blake3::hash(&weights).to_hex().to_string();
+            if digest != expected {
+                return Err(PiiError::Ner {
+                    message: format!(
+                        "model weights integrity check failed: expected {}, got {}",
+                        expected, digest
+                    ),
+                    source: Box::new(xberg::XbergError::Io(std::io::Error::other(
+                        "weights hash mismatch",
+                    ))),
+                });
+            }
+        }
         let backend =
             xberg::text::ner::candle::CandleBackend::get_or_init(model_dir, lora_adapter_dir)
                 .map_err(|source| PiiError::Ner {
@@ -125,13 +165,29 @@ impl NerDetector {
     ///
     /// # Errors
     ///
-    /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded.
+    /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded, or if
+    /// `expected_weights_hash` is set and the weights digest does not match.
     #[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
     pub fn from_candle_bytes(
         weights: &[u8],
         tokenizer_json: &[u8],
         encoder_config_json: &[u8],
+        expected_weights_hash: Option<&str>,
     ) -> Result<Self, PiiError> {
+        if let Some(expected) = expected_weights_hash {
+            let digest = blake3::hash(weights).to_hex().to_string();
+            if digest != expected {
+                return Err(PiiError::Ner {
+                    message: format!(
+                        "model weights integrity check failed: expected {}, got {}",
+                        expected, digest
+                    ),
+                    source: Box::new(xberg::XbergError::Io(std::io::Error::other(
+                        "weights hash mismatch",
+                    ))),
+                });
+            }
+        }
         let backend = xberg::text::ner::candle::CandleBackend::from_bytes(
             weights,
             tokenizer_json,
@@ -233,7 +289,7 @@ pub fn to_pii_category(category: &EntityCategory) -> PiiCategory {
             "password" => PiiCategory::Password,
             "secret" => PiiCategory::SecretToken,
             "api_key" => PiiCategory::ApiKey,
-            "access_token" => PiiCategory::SecretToken,
+            "access_token" | "recovery_code" => PiiCategory::SecretToken,
             "url" => PiiCategory::Url,
             _ => PiiCategory::Custom(label.clone()),
         },

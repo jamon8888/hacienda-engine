@@ -379,15 +379,26 @@ fn load_detector(config: &PipelineConfig) -> Result<NerDetector, PiiError> {
     let model_dir = config.model.model_dir.as_deref().ok_or_else(|| {
         PiiError::ModelUnavailable("model.enabled is true but no model_dir is set".into())
     })?;
-    let mut detector =
-        NerDetector::from_candle_local(model_dir, config.model.lora_adapter_dir.as_deref())?
-            .with_threshold(config.model_threshold_default);
-    if let Some(vertical) = &config.vertical {
-        // Extend, not replace: a finance vertical must still find people. See
-        // `ner::categories_with_vertical`.
-        detector =
-            detector.with_categories(crate::pii::ner::categories_with_vertical(Some(vertical)));
-    }
+    // A pinned label profile replaces the generic category set: the checkpoint
+    // only knows its own labels, and the base `phone` label is not the model's
+    // `phone_number`. Validate the local install before xberg touches weights —
+    // fail closed with the missing asset names, never a silent downgrade.
+    let categories = match &config.model.label_profile {
+        Some(profile) => {
+            let model = profile.model_profile();
+            model.validate_model_dir(model_dir)?;
+            model.categories()
+        }
+        None => crate::pii::ner::categories_with_vertical(config.vertical.as_ref()),
+    };
+    let detector =
+        NerDetector::from_candle_local(
+            model_dir,
+            config.model.lora_adapter_dir.as_deref(),
+            None,
+        )?
+            .with_threshold(config.model_threshold_default)
+            .with_categories(categories);
     Ok(detector)
 }
 
@@ -982,5 +993,85 @@ mod tests {
             pipeline.merge_config.priority,
             MergePriority::HigherConfidence
         );
+    }
+
+    /// Backend-only real-weight smoke: loads the pinned GLiNER2 Guardrails PII
+    /// checkpoint through the new `label_profile` and runs the complete regex +
+    /// NER + merge + redaction path on representative French and English text.
+    /// No Tauri/Studio code, no mock, no network access from the Rust side.
+    #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "loads the pinned GLiNER2 checkpoint; set HACIENDA_NER_MODEL_DIR"]
+    async fn pinned_gliner2_guardrails_pii_multi_redacts_fr_en_pii() {
+        use crate::pii::{LabelProfile, ModelConfig, GLINER2_GUARDRAILS_PII_MULTI};
+        use std::path::PathBuf;
+
+        let dir = std::env::var("HACIENDA_NER_MODEL_DIR")
+            .expect("HACIENDA_NER_MODEL_DIR must point to the pinned checkpoint");
+        let model_dir = PathBuf::from(&dir);
+        GLINER2_GUARDRAILS_PII_MULTI
+            .validate_model_dir(&model_dir)
+            .expect("pinned checkpoint assets must be present");
+
+        let profile = LabelProfile::Gliner2GuardrailsPiiMulti;
+        let config = PipelineConfig {
+            model: ModelConfig {
+                enabled: true,
+                model_dir: Some(model_dir),
+                label_profile: Some(profile),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pipeline = PiiPipeline::new(config).expect("real Candle model must load");
+        assert_eq!(
+            pipeline.config().model.label_profile,
+            Some(LabelProfile::Gliner2GuardrailsPiiMulti)
+        );
+
+        let cases = [
+            ("fr", "Maître Élodie Martin habite à Paris ; contact elodie.martin@example.fr ou +33 6 12 34 56 78. Son IBAN est FR7630006000011234567890189."),
+            ("en", "Dr Alice Smith can be reached at alice.smith@example.com or +1 415 555 0199. Her SSN is 078-05-1120 and card 4111111111111111."),
+        ];
+        for (lang, text) in cases {
+            let started = std::time::Instant::now();
+            let result = pipeline
+                .process(text)
+                .await
+                .expect("real inference must succeed");
+            println!(
+                "[{lang}] elapsed={:?} metrics={:?}",
+                started.elapsed(),
+                result.metrics
+            );
+            for entity in &result.entities {
+                println!(
+                    "[{lang}] span {:?} '{}' [{}, {}) conf={:.3} source={:?}",
+                    entity.category,
+                    entity.text,
+                    entity.start,
+                    entity.end,
+                    entity.confidence,
+                    entity.source
+                );
+            }
+            println!("[{lang}] redacted: {}", result.redacted_text);
+            assert!(
+                !result.redacted_text.contains("example.fr")
+                    && !result.redacted_text.contains("example.com"),
+                "[{lang}] raw email leaked: {}",
+                result.redacted_text
+            );
+            assert!(
+                !result.redacted_text.contains("4111111111111111")
+                    && !result.redacted_text.contains("FR7630006000011234567890189"),
+                "[{lang}] raw payment/IBAN leaked: {}",
+                result.redacted_text
+            );
+            assert!(
+                result.metrics.entities_detected > 0,
+                "[{lang}] no spans detected at all"
+            );
+        }
     }
 }

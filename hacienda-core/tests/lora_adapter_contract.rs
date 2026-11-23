@@ -12,7 +12,7 @@ use hacienda_core::pii::NerDetector;
 fn should_return_err_not_panic_for_a_nonexistent_model_dir() {
     let model_dir = std::path::Path::new("/nonexistent/hacienda-lora-contract-test-model-dir");
 
-    let result = NerDetector::from_candle_local(model_dir, None);
+    let result = NerDetector::from_candle_local(model_dir, None, None);
 
     assert!(
         result.is_err(),
@@ -28,7 +28,7 @@ fn should_return_err_not_panic_for_a_nonexistent_adapter_dir() {
     let model_dir = std::path::Path::new("/nonexistent/hacienda-lora-contract-test-model-dir");
     let adapter_dir = std::path::Path::new("/nonexistent/hacienda-lora-contract-test-adapter-dir");
 
-    let result = NerDetector::from_candle_local(model_dir, Some(adapter_dir));
+    let result = NerDetector::from_candle_local(model_dir, Some(adapter_dir), None);
 
     assert!(
         result.is_err(),
@@ -42,7 +42,7 @@ fn should_return_err_for_an_empty_model_dir() {
     // distinguishes "path doesn't exist" from "path exists but isn't a model".
     let dir = tempfile::tempdir().expect("create temp dir");
 
-    let result = NerDetector::from_candle_local(dir.path(), None);
+    let result = NerDetector::from_candle_local(dir.path(), None, None);
 
     assert!(
         result.is_err(),
