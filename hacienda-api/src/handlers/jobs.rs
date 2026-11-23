@@ -202,9 +202,14 @@ pub async fn get_job_result(
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
 
+    let progress = job
+        .progress_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
     Ok(Json(JobResultResponse {
         status: job.status,
         result,
+        progress,
         error: job.error,
     }))
 }

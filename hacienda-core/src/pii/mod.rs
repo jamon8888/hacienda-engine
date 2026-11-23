@@ -19,7 +19,7 @@ pub mod validators;
 pub use config::{CliOverrides, ModelConfig, PipelineConfig, VerticalConfig};
 pub use engine::RegexEngine;
 pub use merge::{merge_entities, MergedEntity};
-pub use ner::NerDetector;
+pub use ner::{NerDetector, NerRuntimeState};
 pub use patterns::builtin_patterns;
 pub use pipeline::{PiiPipeline, PipelineMetrics, PipelineResult};
 pub use types::{
@@ -57,6 +57,17 @@ pub enum PiiError {
     /// PII without saying so is the worst possible failure mode here.
     #[error("model backend unavailable: {0}")]
     ModelUnavailable(String),
+
+    /// A pinned model was selected but its local files do not match the
+    /// registry's SHA-256 digests. Refused before any bytes reach the backend.
+    #[error("model asset integrity check failed for '{model_id}'")]
+    ModelIntegrity {
+        model_id: String,
+        // Boxed so `PiiError` (and therefore `HaciendaError`) stays small enough
+        // for the `result_large_err` lint.
+        #[source]
+        source: Box<hacienda_model_assets::ModelAssetsError>,
+    },
 
     #[error("reading configuration from {path}")]
     ConfigIo {

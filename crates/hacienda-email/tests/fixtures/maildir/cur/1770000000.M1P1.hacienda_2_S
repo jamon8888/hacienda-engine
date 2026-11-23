@@ -1,0 +1,10 @@
+From: Jane Doe <jane.doe@acme.example>
+To: Richard Roe <richard.roe@acme.example>
+Subject: Jane Doe SSN 123-45-6789 quarterly review
+Date: Mon, 2 Feb 2026 10:00:00 +0000
+Message-ID: <uid-native-1@acme.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Contact jane.doe@acme.example about the 123-45-6789 review.
+This original must only be revealed inside the native viewer.

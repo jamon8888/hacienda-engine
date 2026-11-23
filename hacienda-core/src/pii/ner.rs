@@ -23,6 +23,42 @@ pub(crate) const DEFAULT_CATEGORIES: &[EntityCategory] = &[
     EntityCategory::Phone,
 ];
 
+/// Runtime identity of the NER backend a detector actually holds.
+///
+/// This lives on the detector, not in a process-global cell: two surfaces in one
+/// process can load two different verified models, and a single global would
+/// silently report whichever loaded first. It also separates "a model is loaded"
+/// from "that model has a pinned registry id" — an unpinned/private model from
+/// `from_candle_local` is still model-backed even though it has no id to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NerRuntimeState {
+    /// A real model backend is loaded (native Candle or wasm Candle), whether or
+    /// not it carries a pinned registry id.
+    pub model_loaded: bool,
+    /// Pinned id from a verified load; `None` for unpinned/private models and for
+    /// regex-only surfaces that never built a detector.
+    pub model_id: Option<Arc<str>>,
+}
+
+impl NerRuntimeState {
+    /// No model backend in use: regex-only, or a reporting surface that never
+    /// constructed a facade (e.g. `hacienda capabilities`).
+    pub fn unavailable() -> Self {
+        Self {
+            model_loaded: false,
+            model_id: None,
+        }
+    }
+
+    #[cfg(any(test, feature = "ner-candle", feature = "ner-candle-wasm"))]
+    pub(crate) fn loaded(model_id: Option<Arc<str>>) -> Self {
+        Self {
+            model_loaded: true,
+            model_id,
+        }
+    }
+}
+
 /// [`DEFAULT_CATEGORIES`], extended with `vertical`'s labels as `EntityCategory::Custom`
 /// entries when one is configured.
 ///
@@ -62,16 +98,33 @@ pub struct NerDetector {
     backend: Arc<dyn NerBackend>,
     categories: Vec<EntityCategory>,
     threshold: f32,
+    /// Identity of the backend this detector holds. Reporting surfaces read it
+    /// from the detector they actually use instead of a process-global guess.
+    runtime: NerRuntimeState,
 }
 
 impl NerDetector {
-    /// Wrap any xberg NER backend.
+    /// Wrap any xberg NER backend without claiming a loaded model.
+    ///
+    /// Model-loading constructors below override this via [`Self::with_runtime`].
+    /// Callers supplying their own backend (e.g. test stubs) are regex-only from
+    /// the capability report's point of view until they state otherwise.
     pub fn new(backend: Arc<dyn NerBackend>) -> Self {
+        Self::with_runtime(backend, NerRuntimeState::unavailable())
+    }
+
+    fn with_runtime(backend: Arc<dyn NerBackend>, runtime: NerRuntimeState) -> Self {
         Self {
             backend,
             categories: DEFAULT_CATEGORIES.to_vec(),
             threshold: 0.0,
+            runtime,
         }
+    }
+
+    /// Runtime identity of the backend this detector actually holds.
+    pub fn runtime_state(&self) -> NerRuntimeState {
+        self.runtime.clone()
     }
 
     /// Restrict detection to `categories`. An empty slice means "whatever the backend finds".
@@ -100,6 +153,10 @@ impl NerDetector {
     /// Backends are cached process-wide by `(model_dir, lora_adapter_dir)`, so the
     /// model-load and adapter-merge cost is paid once per pair rather than per document.
     ///
+    /// The resulting detector reports `runtime_ready = true` with no model id: a
+    /// privately fine-tuned/unpinned model is still model-backed even though there
+    /// is no registry identity to report.
+    ///
     /// # Errors
     ///
     /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded.
@@ -114,7 +171,55 @@ impl NerDetector {
                     message: format!("loading Candle GLiNER2 from {}", model_dir.display()),
                     source: Box::new(source),
                 })?;
-        Ok(Self::new(backend))
+        Ok(Self::with_runtime(backend, NerRuntimeState::loaded(None)))
+    }
+
+    /// Load a pinned GLiNER2 model, verifying the local directory against the
+    /// shared registry before any bytes reach Candle.
+    ///
+    /// The host still owns download and caching; this guard only enforces the
+    /// integrity contract at the seam. Unpinned/private models should use
+    /// [`from_candle_local`](Self::from_candle_local) directly.
+    ///
+    /// The load deliberately bypasses xberg's path-keyed backend cache: that cache
+    /// can hold a backend built from earlier bytes at the same directory, so reusing
+    /// it after verification would verify one set of weights and run another. A
+    /// verified load always builds a fresh backend from the directory just verified,
+    /// never from that cache.
+    #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+    pub fn from_candle_local_verified(
+        model_dir: &std::path::Path,
+        lora_adapter_dir: Option<&std::path::Path>,
+        model_id: &str,
+    ) -> Result<Self, PiiError> {
+        let backend = verified_load(
+            || {
+                hacienda_model_assets::verify_dir(model_id, model_dir).map_err(|source| {
+                    PiiError::ModelIntegrity {
+                        model_id: model_id.to_owned(),
+                        source: Box::new(source),
+                    }
+                })
+            },
+            || {
+                let backend = xberg::text::ner::candle::CandleBackend::from_local(
+                    model_dir,
+                    lora_adapter_dir,
+                )
+                .map_err(|source| PiiError::Ner {
+                    message: format!(
+                        "loading verified Candle GLiNER2 from {}",
+                        model_dir.display()
+                    ),
+                    source: Box::new(source),
+                })?;
+                Ok(Arc::new(backend) as Arc<dyn NerBackend>)
+            },
+        )?;
+        Ok(Self::with_runtime(
+            backend,
+            NerRuntimeState::loaded(Some(Arc::from(model_id))),
+        ))
     }
 
     /// [`from_candle_local`](Self::from_candle_local)'s wasm32 sibling: loads the same
@@ -141,7 +246,10 @@ impl NerDetector {
             message: "loading Candle GLiNER2 from in-memory bytes".into(),
             source: Box::new(source),
         })?;
-        Ok(Self::new(Arc::new(backend)))
+        Ok(Self::with_runtime(
+            Arc::new(backend),
+            NerRuntimeState::loaded(None),
+        ))
     }
 
     /// Detect entities in `text`.
@@ -169,6 +277,20 @@ impl NerDetector {
             .map(to_model_entity)
             .collect())
     }
+}
+
+/// Verify, then load — in that order, with no path-keyed cache in between.
+///
+/// Kept as a small generic helper so the "verification binds the load" rule is
+/// testable without real model weights: a failing verification must never reach
+/// the loader, and the loader passed here is the uncached `from_local` path.
+#[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+fn verified_load<E>(
+    verify: impl FnOnce() -> Result<(), E>,
+    load: impl FnOnce() -> Result<Arc<dyn NerBackend>, E>,
+) -> Result<Arc<dyn NerBackend>, E> {
+    verify()?;
+    load()
 }
 
 fn to_model_entity(entity: Entity) -> ModelEntity {
@@ -419,5 +541,100 @@ mod tests {
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].category, PiiCategory::Iban);
         assert_ne!(detected[0].category, PiiCategory::Custom("iban".into()));
+    }
+
+    #[test]
+    fn runtime_state_tracks_the_detector_not_the_process() {
+        let first = NerDetector::with_runtime(
+            Arc::new(StubBackend(Vec::new())),
+            NerRuntimeState::loaded(Some(Arc::from("org/first-model"))),
+        );
+        let second = NerDetector::with_runtime(
+            Arc::new(StubBackend(Vec::new())),
+            NerRuntimeState::loaded(Some(Arc::from("org/second-model"))),
+        );
+
+        // A second verified model must not be silently ignored in favour of the
+        // first one loaded in this process.
+        assert_eq!(
+            first.runtime_state().model_id.as_deref(),
+            Some("org/first-model")
+        );
+        assert_eq!(
+            second.runtime_state().model_id.as_deref(),
+            Some("org/second-model")
+        );
+        assert_ne!(first.runtime_state(), second.runtime_state());
+    }
+
+    #[test]
+    fn unpinned_loaded_backend_is_model_backed_without_an_id() {
+        let state = NerDetector::with_runtime(
+            Arc::new(StubBackend(Vec::new())),
+            NerRuntimeState::loaded(None),
+        )
+        .runtime_state();
+
+        assert!(state.model_loaded, "private/unpinned model is still loaded");
+        assert!(state.model_id.is_none());
+    }
+
+    #[test]
+    fn a_plain_stub_backend_is_not_reported_as_model_loaded() {
+        let state = detector(Vec::new()).runtime_state();
+        assert!(!state.model_loaded);
+        assert!(state.model_id.is_none());
+    }
+
+    #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+    #[test]
+    fn verified_load_never_reaches_the_loader_when_verification_fails() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let loads = AtomicUsize::new(0);
+        let result: Result<Arc<dyn NerBackend>, &'static str> = verified_load(
+            || Err("digest mismatch"),
+            || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(StubBackend(Vec::new())) as Arc<dyn NerBackend>)
+            },
+        );
+
+        assert_eq!(result.err(), Some("digest mismatch"));
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            0,
+            "a failed verification must not load any backend"
+        );
+    }
+
+    #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn verified_load_builds_a_fresh_backend_after_verification() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let steps = AtomicUsize::new(0);
+        let mut verify_step = 0;
+        let mut load_step = 0;
+        let backend: Arc<dyn NerBackend> = verified_load(
+            || {
+                verify_step = steps.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), &'static str>(())
+            },
+            || {
+                load_step = steps.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(StubBackend(vec![entity(
+                    EntityCategory::Person,
+                    "Alice",
+                    0,
+                    Some(0.9),
+                )])) as Arc<dyn NerBackend>)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(verify_step, 0);
+        assert_eq!(load_step, 1, "the uncached loader must run exactly once");
+        assert_eq!(backend.detect("Alice", &[]).await.unwrap().len(), 1);
     }
 }

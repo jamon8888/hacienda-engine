@@ -43,6 +43,9 @@ data-encoding = { workspace = true }
 # crate rather than a dependency on the client because the client pulls in an HTTP
 # transport this server config path must not inherit — see that crate's module doc.
 hacienda-installation = { path = "../crates/hacienda-installation" }
+# Pinned NER model identities + local asset verification. The host downloads and
+# caches bytes; this leaf crate only checks them against the shared registry.
+hacienda-model-assets = { path = "../crates/hacienda-model-assets" }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
