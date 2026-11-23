@@ -12,8 +12,8 @@
 
 use crate::error::{RagError, RagResult};
 use crate::graph::{
-    entity_key, validate_graph_bounds, validate_neighborhood_bounds, EntityId, EntityKey,
-    GraphContext, GraphEntity, GraphHealth, GraphRelation, GraphStore, InMemoryGraphStore,
+    entity_key, validate_neighborhood_bounds, EntityId, EntityKey, GraphContext, GraphEntity,
+    GraphHealth, GraphRelation, GraphStore, InMemoryGraphStore,
 };
 use crate::types::DocumentId;
 use async_trait::async_trait;
@@ -297,7 +297,10 @@ impl SqliteGraphStore {
             if depth == hops || relation_payloads.len() >= MAX_EXPANSION_RELATIONS {
                 break;
             }
-            let remaining = MAX_EXPANSION_RELATIONS - relation_payloads.len();
+            // Bound the candidate set relative to the requested result size:
+            // a caller asking for one relation never expands 20,000 edges.
+            let remaining =
+                (MAX_EXPANSION_RELATIONS - relation_payloads.len()).min(limit.saturating_mul(10));
             let mut next = Vec::new();
             for payload in relation_payloads_on(
                 &connection,
@@ -602,7 +605,7 @@ impl GraphStore for SqliteGraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{EntityLabel, EvidenceSpan, RelationType};
+    use crate::graph::{validate_graph_bounds, EntityLabel, EvidenceSpan, RelationType};
     use crate::types::DEFAULT_TENANT;
 
     fn entity(id: &str) -> GraphEntity {

@@ -335,7 +335,8 @@ impl RagStore for PgVectorStore {
             "DROP INDEX IF EXISTS {}",
             quote_ident(&index_name(collection))
         );
-        sqlx::query(&drop_index_sql)
+        // `quote_ident` escapes the caller-derived index name; the rest is static SQL.
+        sqlx::query(sqlx::AssertSqlSafe(drop_index_sql.as_str()))
             .execute(&self.pool)
             .await
             .map_err(pg_err)?;
@@ -820,7 +821,9 @@ impl PgVectorStore {
             spec.embedding_dim,
             quote_literal(&spec.name),
         );
-        sqlx::query(&sql)
+        // Identifiers/literals are escaped with quote_ident/quote_literal; all
+        // remaining dynamic data is supplied through QueryBuilder bind params.
+        sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&self.pool)
             .await
             .map_err(pg_err)?;
@@ -1037,10 +1040,7 @@ impl PgVectorStore {
     }
 }
 
-fn push_optional_filter(
-    qb: &mut QueryBuilder<'_, Postgres>,
-    query: &RetrieveQuery,
-) -> RagResult<()> {
+fn push_optional_filter(qb: &mut QueryBuilder<Postgres>, query: &RetrieveQuery) -> RagResult<()> {
     if let Some(filter) = &query.filter {
         qb.push(" AND (");
         push_filter_sql(qb, filter)?;
@@ -1054,7 +1054,7 @@ fn push_optional_filter(
 /// every set boundary are excluded, whatever mode, filter, or top_k. A
 /// malformed document id (not a UUID) matches nothing rather than erroring,
 /// mirroring `get_document_chunks`'s tolerance for foreign ids.
-fn push_scope_filter(qb: &mut QueryBuilder<'_, Postgres>, query: &RetrieveQuery) -> RagResult<()> {
+fn push_scope_filter(qb: &mut QueryBuilder<Postgres>, query: &RetrieveQuery) -> RagResult<()> {
     if let Some(document_id) = &query.document_id {
         if let Ok(doc_uuid) = Uuid::parse_str(&document_id.0) {
             qb.push(" AND c.document_id = ");
@@ -1367,7 +1367,7 @@ impl FusedEntry {
 // the one caller-controlled piece and are always passed as a bound `TEXT[]`
 // parameter to `#>`/`#>>`, never interpolated into SQL text.
 
-fn push_filter_sql(qb: &mut QueryBuilder<'_, Postgres>, filter: &Filter) -> RagResult<()> {
+fn push_filter_sql(qb: &mut QueryBuilder<Postgres>, filter: &Filter) -> RagResult<()> {
     match filter {
         Filter::Eq { field, value } => {
             let parsed = field.parse()?;
@@ -1487,7 +1487,7 @@ fn escape_like(s: &str) -> String {
 
 /// Push a SQL expression yielding `jsonb`, for structural equality/range/
 /// containment comparisons (mirrors `resolve_field` in `backends/memory.rs`).
-fn push_field_jsonb_expr(qb: &mut QueryBuilder<'_, Postgres>, parsed: &ParsedField) {
+fn push_field_jsonb_expr(qb: &mut QueryBuilder<Postgres>, parsed: &ParsedField) {
     match parsed.namespace {
         FilterNamespace::Doc => match parsed.path.as_str() {
             "full_text" => qb.push("to_jsonb(d.full_text)"),
@@ -1523,7 +1523,7 @@ fn push_field_jsonb_expr(qb: &mut QueryBuilder<'_, Postgres>, parsed: &ParsedFie
 }
 
 /// Push a SQL expression yielding `text`, for `ILIKE` substring matching.
-fn push_field_text_expr(qb: &mut QueryBuilder<'_, Postgres>, parsed: &ParsedField) {
+fn push_field_text_expr(qb: &mut QueryBuilder<Postgres>, parsed: &ParsedField) {
     match parsed.namespace {
         FilterNamespace::Doc => match parsed.path.as_str() {
             "full_text" => qb.push("d.full_text"),
