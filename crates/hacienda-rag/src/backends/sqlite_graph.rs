@@ -339,11 +339,9 @@ impl SqliteGraphStore {
             let relation: GraphRelation = serde_json::from_str(payload)
                 .map_err(|error| RagError::Backend(Box::new(error)))?;
             let tenant_key = crate::graph::effective_tenant(relation.tenant_id.as_deref());
-            let stale = [&relation.subject, &relation.object].iter().any(|id| {
-                entities
-                    .get(&(tenant_key.to_owned(), (*id).clone()))
-                    .is_none()
-            });
+            let stale = [&relation.subject, &relation.object]
+                .iter()
+                .any(|id| !entities.contains_key(&(tenant_key.to_owned(), (*id).clone())));
             if stale {
                 continue;
             }
@@ -739,23 +737,24 @@ mod tests {
         let mut malformed = entity("broken");
         malformed.end = malformed.start;
         let payload = serde_json::to_string(&malformed).unwrap();
-        let connection = store.lock().unwrap();
-        connection
-            .execute(
-                "INSERT INTO graph_entities
-                 (collection, tenant_key, entity_id, document_id, tenant_id, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    "contracts",
-                    "acme",
-                    "broken",
-                    "doc-1",
-                    Some("acme"),
-                    payload
-                ],
-            )
-            .unwrap();
-        drop(connection);
+        {
+            let connection = store.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO graph_entities
+                     (collection, tenant_key, entity_id, document_id, tenant_id, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        "contracts",
+                        "acme",
+                        "broken",
+                        "doc-1",
+                        Some("acme"),
+                        payload
+                    ],
+                )
+                .unwrap();
+        }
 
         let error = store
             .neighborhood(
