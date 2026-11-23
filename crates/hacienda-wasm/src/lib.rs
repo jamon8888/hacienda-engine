@@ -136,9 +136,8 @@ mod ner_model {
         tokenizer: Vec<u8>,
         encoder_config: Vec<u8>,
     ) -> Result<(), JsValue> {
-        let detector =
-            NerDetector::from_candle_bytes(&weights, &tokenizer, &encoder_config, None)
-                .map_err(to_js_err)?;
+        let detector = NerDetector::from_candle_bytes(&weights, &tokenizer, &encoder_config, None)
+            .map_err(to_js_err)?;
         DETECTOR.with(|d| *d.borrow_mut() = Some(detector));
         Ok(())
     }

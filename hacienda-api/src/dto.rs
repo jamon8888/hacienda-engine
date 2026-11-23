@@ -1302,6 +1302,10 @@ pub struct MigrateStatusResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AnswerRequest {
+    /// Optional GraphRAG expansion over the authorized retrieval result. Bound
+    /// checked before any graph store access; absent means vector-only answers.
+    #[serde(default)]
+    pub graph: Option<AnswerGraphRequest>,
     /// The question sent to the LLM. Redacted for PII before it leaves this
     /// process — see `handlers::rag_stream::answer`'s module doc.
     pub prompt: String,
@@ -1317,6 +1321,41 @@ pub struct AnswerRequest {
     /// `hacienda_rag::LlmAnswerConfig::system_prompt`.
     #[serde(default)]
     pub system_prompt: Option<String>,
+}
+
+/// Bounded graph expansion requested alongside a streaming answer.
+///
+/// Entity ids are caller-supplied seeds; the handler always scopes them to the
+/// authenticated tenant before touching a graph store. All four bounds are
+/// validated before the store is consulted so a large request cannot force an
+/// unbounded traversal.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerGraphRequest {
+    #[schema(value_type = Vec<String>)]
+    pub entity_ids: Vec<hacienda_rag::EntityId>,
+    pub hops: u8,
+    pub limit: usize,
+    pub min_confidence: f32,
+}
+
+impl AnswerGraphRequest {
+    /// Validate graph bounds with the same limits the graph store enforces.
+    pub fn validate(&self) -> Result<(), crate::error::ApiError> {
+        if self.entity_ids.is_empty()
+            || self.entity_ids.len() > hacienda_rag::MAX_ENTITY_IDS
+            || !(1..=2).contains(&self.hops)
+            || self.limit == 0
+            || self.limit > 500
+            || !self.min_confidence.is_finite()
+            || !(0.0..=1.0).contains(&self.min_confidence)
+        {
+            return Err(crate::error::ApiError::invalid_request(
+                "invalid graph neighborhood bounds",
+            ));
+        }
+        Ok(())
+    }
 }
 
 // ── Presets (`/v1/presets/*`) ────────────────────────────────────────────────

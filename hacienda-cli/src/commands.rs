@@ -29,7 +29,7 @@ use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::{EnvKeyResolver, RedactionMode};
-use hacienda_rag::InMemoryVectorStore;
+use hacienda_rag::{InMemoryGraphStore, InMemoryVectorStore};
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -1730,12 +1730,17 @@ pub async fn run_serve(
     // In-memory by default, same precedent as `jobs` above: durable is a caller
     // decision (embed a `PgVectorStore` instead), not this command's to make.
     let rag_store: Arc<dyn hacienda_rag::RagStore> = Arc::new(InMemoryVectorStore::new("default"));
+    // GraphRAG is enabled together with the vector store: this CLI has no graph
+    // configuration/pool, so the graph is ephemeral like `jobs`/the vector
+    // store. An embedding host can attach a durable `SqliteGraphStore` instead.
+    let graph_store: Arc<dyn hacienda_rag::GraphStore> = Arc::new(InMemoryGraphStore::default());
     // The builder is the host's job-store injection seam. Here it receives the
     // in-memory store above; a host with a migrated Postgres pool would pass a
     // `PostgresJobStore` instead and get the same retention/retry policy.
     let state = ApiState::new(facade, Arc::clone(&jobs), auth, ApiLimits::default())
         .with_job_store(jobs)
-        .with_rag_store(rag_store);
+        .with_rag_store(rag_store)
+        .with_graph_store(graph_store);
     let state = match rag_egress {
         Some(endpoint) => state.with_rag_egress_allowlist([endpoint]),
         None => state,

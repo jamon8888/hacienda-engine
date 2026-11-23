@@ -16,9 +16,8 @@ use crate::{
         caller_from_arc, extract_auth_context,
         graph::redact_graph_context,
         rag::{
-            enforce_post_retrieval_tenant, merge_with_tenant_filter, redact_retrieval_output,
-            require_store, scope_collection_name, tenant_authorization_filter,
-            validate_collection_name,
+            enforce_post_retrieval_tenant, redact_retrieval_output, require_store,
+            scope_collection_name, validate_collection_name,
         },
     },
     state::ApiState,
@@ -62,6 +61,16 @@ impl From<GraphRetrieveRequest> for GraphRagQuery {
     }
 }
 
+/// Stamp the authenticated tenant into the backend-neutral query. The tenant
+/// boundary stays in `tenant_id` (owner-or-ACL) — deliberately *not* in the
+/// field filter, which is evaluated as a required conjunct and would remove
+/// documents another tenant shared with us via its ACL.
+fn build_graph_query(tenant: &str, body: GraphRetrieveRequest) -> GraphRagQuery {
+    let mut query: GraphRagQuery = body.into();
+    query.retrieval.tenant_id = Some(tenant.to_owned());
+    query
+}
+
 #[utoipa::path(
     post,
     path = "/v1/rag/collections/{name}/graph/retrieve",
@@ -93,12 +102,7 @@ pub async fn retrieve(
         .as_ref()
         .ok_or_else(|| ApiError::invalid_request("GraphRAG is not enabled"))?;
 
-    let mut query: GraphRagQuery = body.into();
-    query.retrieval.tenant_id = Some(tenant.tenant.as_str().to_owned());
-    query.retrieval.filter = merge_with_tenant_filter(
-        tenant_authorization_filter(&tenant),
-        query.retrieval.filter.take(),
-    );
+    let query = build_graph_query(tenant.tenant.as_str(), body);
     let mut output = retrieve_with_graph(
         rag.as_ref(),
         graph.as_ref(),
@@ -114,4 +118,73 @@ pub async fn retrieve(
     redact_graph_context(&state.facade, caller, &mut output.graph).await?;
 
     Ok(Json(output))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hacienda_rag::{
+        ChunkRecord, CollectionSpec, DocumentRecord, Filter, FilterField, InMemoryVectorStore,
+        RagStore, RetrieveQuery,
+    };
+
+    #[tokio::test]
+    async fn acl_shared_document_survives_graph_retrieval_tenant_boundary() {
+        let store = InMemoryVectorStore::new("test");
+        store
+            .ensure_collection(&CollectionSpec::new("contracts", 2))
+            .await
+            .unwrap();
+        let document = DocumentRecord {
+            full_text: "shared contract".to_owned(),
+            tenant_id: Some("globex".to_owned()),
+            acl: Some(serde_json::json!({"tenants": ["acme"]})),
+            ..DocumentRecord::default()
+        };
+        let chunk = ChunkRecord {
+            external_id: None,
+            ordinal: 0,
+            content: "shared contract".to_owned(),
+            embedding: vec![1.0, 0.0],
+            sparse_embedding: None,
+            multi_vector: None,
+            chunk_metadata: serde_json::Value::Null,
+            dossier_id: None,
+            version_ref: None,
+            tenant_id: Some("globex".to_owned()),
+            acl: Some(serde_json::json!({"tenants": ["acme"]})),
+        };
+        store
+            .upsert_document("contracts", &document, &[chunk])
+            .await
+            .unwrap();
+
+        let mut retrieval = RetrieveQuery::vector(5);
+        retrieval.query_vector = Some(vec![1.0, 0.0]);
+        // A caller-supplied filter must be preserved, but no owner-only
+        // equality is injected on top of the tenant boundary.
+        retrieval.filter = Some(Filter::Eq {
+            field: FilterField("doc.full_text".to_owned()),
+            value: serde_json::json!("shared contract"),
+        });
+        let query = build_graph_query(
+            "acme",
+            GraphRetrieveRequest {
+                retrieval,
+                entity_ids: vec![EntityId("e".to_owned())],
+                hops: 1,
+                graph_limit: 10,
+                graph_min_confidence: 0.9,
+            },
+        );
+        assert_eq!(query.retrieval.tenant_id.as_deref(), Some("acme"));
+        assert!(query.retrieval.filter.is_some());
+
+        let output = store.retrieve("contracts", &query.retrieval).await.unwrap();
+        assert_eq!(
+            output.chunks.len(),
+            1,
+            "an ACL-granted row must remain eligible for graph retrieval"
+        );
+    }
 }

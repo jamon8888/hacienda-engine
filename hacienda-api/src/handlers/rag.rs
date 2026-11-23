@@ -161,7 +161,7 @@ pub(crate) fn enforce_post_retrieval_tenant(ctx: &TenantCtx, chunks: &mut Vec<Re
 /// backend persisted a tokenized projection. The API therefore treats every returned text
 /// surface as untrusted and routes it through Hacienda. A missing or failing PII pipeline is
 /// an error, never a reason to return the store's value unchanged.
-async fn redact_retrieval_text(
+pub(crate) async fn redact_retrieval_text(
     facade: &HaciendaFacade,
     caller: Caller<'_>,
     text: &str,
@@ -190,7 +190,7 @@ fn json_contains_text(value: &Value) -> bool {
 /// plane shaped and a future backend must not be able to smuggle a raw value through a key
 /// while only sanitizing values. Hacienda's replacement tokens are JSON-safe, and a parse
 /// failure is deliberately fail-closed.
-async fn redact_retrieval_json(
+pub(crate) async fn redact_retrieval_json(
     facade: &HaciendaFacade,
     caller: Caller<'_>,
     value: &mut Value,
@@ -234,7 +234,7 @@ async fn redact_document_summary(
     Ok(())
 }
 
-async fn redact_retrieval_output(
+pub(crate) async fn redact_retrieval_output(
     facade: &HaciendaFacade,
     caller: Caller<'_>,
     mut output: RetrieveOutput,

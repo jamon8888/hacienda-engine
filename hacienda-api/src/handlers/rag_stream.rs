@@ -219,9 +219,7 @@ pub async fn answer(
     // Answer synthesis has nothing to ground on without chunk text, regardless
     // of what the caller sent.
     if let Some(graph_request) = body.graph.as_ref() {
-        graph_request
-            .validate()
-            .map_err(ApiError::invalid_request)?;
+        graph_request.validate()?;
     }
     body.retrieve.include_content = true;
     body.retrieve.tenant_id = Some(tenant_ctx.tenant.as_str().to_owned());
@@ -327,6 +325,11 @@ fn attach_evidence_backed_graph(chunks: &mut [RetrievedChunk], graph: GraphConte
             if let (Some(subject), Some(object)) = (subject, object) {
                 if subject.document_id == chunk.document_id
                     && object.document_id == chunk.document_id
+                    // Evidence must ground both endpoints in *this* chunk. An
+                    // endpoint from an unretrieved sibling chunk would otherwise
+                    // be presented as grounded in this source's header.
+                    && subject.chunk_id.as_ref().is_none_or(|id| id == &chunk.id)
+                    && object.chunk_id.as_ref().is_none_or(|id| id == &chunk.id)
                 {
                     facts.push(format!(
                         "relation: {} {:?} {}",
@@ -594,6 +597,44 @@ mod tests {
         assert!(
             !content.contains("relation:"),
             "relation with mismatched evidence must not attach: {content}"
+        );
+    }
+
+    /// Relation evidence in the current chunk does not make an endpoint from a
+    /// different chunk grounded: the object's value must not be shown here.
+    #[test]
+    fn attach_evidence_backed_graph_requires_both_endpoints_in_chunk() {
+        let mut chunks = vec![chunk("doc-1", "c0")];
+        let relation = hacienda_rag::GraphRelation {
+            subject: EntityId("e0".to_owned()),
+            predicate: hacienda_rag::RelationType::References,
+            object: EntityId("e1".to_owned()),
+            evidence: hacienda_rag::EvidenceSpan {
+                document_id: hacienda_rag::DocumentId("doc-1".to_owned()),
+                chunk_id: Some(hacienda_rag::ChunkId("c0".to_owned())),
+                start: 0,
+                end: 4,
+                text_hash: "hash".to_owned(),
+            },
+            confidence: 0.95,
+            ontology_version: "test-v1".to_owned(),
+            tenant_id: None,
+        };
+        let graph = GraphContext {
+            entities: vec![
+                entity("e0", "doc-1", Some("c0")),
+                entity("e1", "doc-1", Some("c1")),
+            ],
+            relations: vec![relation],
+        };
+
+        attach_evidence_backed_graph(&mut chunks, graph);
+
+        let content = chunks[0].content.as_deref().unwrap();
+        assert!(content.contains("entity-e0"));
+        assert!(
+            !content.contains("relation:"),
+            "an endpoint in c1 must not be shown as c0 evidence: {content}"
         );
     }
 

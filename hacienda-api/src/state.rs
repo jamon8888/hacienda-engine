@@ -6,7 +6,7 @@ use hacienda_core::store::postgres::presets::PresetStore;
 use hacienda_core::store::postgres::usage::UsageStore;
 use hacienda_core::store::postgres::versions::DocumentVersionStore;
 use hacienda_core::{auth::AuthState, HaciendaFacade};
-use hacienda_rag::RagStore;
+use hacienda_rag::{GraphStore, RagStore};
 use std::sync::{Arc, Mutex};
 
 use crate::handlers::claude_messages::ClaudeMessagesProvider;
@@ -71,6 +71,10 @@ pub struct ApiState {
     /// `/v1/pii/*`'s pipeline-dependent behaviour) — RAG is opt-in, not every embedder
     /// wants the dependency or a live collection store.
     pub(crate) rag_store: Option<Arc<dyn RagStore>>,
+    /// GraphRAG store backing `/v1/rag/**/graph/*`. `None` disables those routes
+    /// (`ApiError::invalid_request`), mirroring `rag_store`: graph support is
+    /// opt-in and the host decides whether it is ephemeral or durable.
+    pub(crate) graph_store: Option<Arc<dyn GraphStore>>,
     /// Preset store backing `/v1/presets/*`. `None` means those routes are disabled
     /// (`ApiError::invalid_request`) — unlike `RagStore`/`JobStore`, `PresetStore`
     /// has no in-memory implementation (Postgres is its only backend), so this is
@@ -136,6 +140,7 @@ impl ApiState {
             auth,
             limits,
             rag_store: None,
+            graph_store: None,
             preset_store: None,
             version_store: None,
             object_store: None,
@@ -206,6 +211,15 @@ impl ApiState {
     #[must_use]
     pub fn with_rag_store(mut self, rag_store: Arc<dyn RagStore>) -> Self {
         self.rag_store = Some(rag_store);
+        self
+    }
+
+    /// Enable the GraphRAG routes by attaching a graph store. A host wanting
+    /// durable graphs can attach a `SqliteGraphStore` (behind hacienda-rag's
+    /// `sqlite-graph` feature); the CLI's `serve` uses the in-memory backend.
+    #[must_use]
+    pub fn with_graph_store(mut self, graph_store: Arc<dyn GraphStore>) -> Self {
+        self.graph_store = Some(graph_store);
         self
     }
 
