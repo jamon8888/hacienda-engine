@@ -241,12 +241,18 @@ impl NerDetector {
             std::path::Path::new("config.json").into()
         };
         let encoder_config = read(&config_path)?;
-        let backend =
-            xberg::text::ner::candle::CandleBackend::from_bytes(&weights, &tokenizer, &encoder_config)
-                .map_err(|source| PiiError::Ner {
-                    message: format!("loading verified Candle GLiNER2 from {}", model_dir.display()),
-                    source: Box::new(source),
-                })?;
+        let backend = xberg::text::ner::candle::CandleBackend::from_bytes(
+            &weights,
+            &tokenizer,
+            &encoder_config,
+        )
+        .map_err(|source| PiiError::Ner {
+            message: format!(
+                "loading verified Candle GLiNER2 from {}",
+                model_dir.display()
+            ),
+            source: Box::new(source),
+        })?;
         Ok(Arc::new(backend) as Arc<dyn NerBackend>)
     }
 

@@ -1026,10 +1026,7 @@ mod tests {
             ..Default::default()
         };
         let pipeline = PiiPipeline::new(config).expect("real Candle model must load");
-        assert_eq!(
-            pipeline.config().model.model_id.as_deref(),
-            Some(MODEL_ID)
-        );
+        assert_eq!(pipeline.config().model.model_id.as_deref(), Some(MODEL_ID));
 
         let cases = [
             ("fr", "Maître Élodie Martin habite à Paris ; contact elodie.martin@example.fr ou +33 6 12 34 56 78. Son IBAN est FR7630006000011234567890189."),
