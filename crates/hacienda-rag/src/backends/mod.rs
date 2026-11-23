@@ -17,3 +17,6 @@ pub mod pgvector;
 
 #[cfg(feature = "lancedb")]
 pub mod lancedb;
+
+#[cfg(feature = "sqlite-graph")]
+pub mod sqlite_graph;

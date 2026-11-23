@@ -30,6 +30,10 @@ embeddings = ["xberg/embeddings"]
 # P6 egress audit (issue #148); `tokio` (rt only) spawns that audit off the streaming
 # hot path.
 streaming = ["dep:liter-llm", "dep:futures", "dep:blake3", "dep:tokio"]
+# Durable embedded GraphRAG store. `tokio` moves the complete SQLite operation
+# (mutex + transaction) off the async runtime; `bundled` avoids a host SQLite
+# version dependency on CI and guarantees JSON1 for the evidence predicate.
+sqlite-graph = ["dep:rusqlite", "dep:tokio"]
 # Embedded LanceDB backend.  The adapter is deliberately opt-in because the
 # Lance/Arrow dependency tree is substantial and is not needed by callers that
 # use the in-memory or Postgres stores.
@@ -66,6 +70,9 @@ futures = { workspace = true, optional = true }
 # never raw content. Gated behind `streaming` with the rest of `stream.rs`.
 blake3 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
+# Embedded SQLite graph backend (`sqlite-graph` feature). Vendored SQLite keeps
+# the CI matrix independent of the host's libsqlite3 and includes JSON1.
+rusqlite = { version = "0.32.1", optional = true, features = ["bundled"] }
 # 0.37 is selected because upstream xberg requires half 2.7.x; older LanceDB
 # releases pin half 2.4.x and cannot resolve beside it.
 lancedb = { version = "=0.37.1", optional = true, default-features = false }
