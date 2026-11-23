@@ -70,9 +70,11 @@ futures = { workspace = true, optional = true }
 # never raw content. Gated behind `streaming` with the rest of `stream.rs`.
 blake3 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
-# Embedded SQLite graph backend (`sqlite-graph` feature). Vendored SQLite keeps
-# the CI matrix independent of the host's libsqlite3 and includes JSON1.
-rusqlite = { version = "0.32.1", optional = true, features = ["bundled"] }
+# Embedded SQLite graph backend (`sqlite-graph` feature). Do NOT enable
+# `bundled`: libsqlite3-sys <=0.38.2 embeds SQLite affected by
+# RUSTSEC-2026-0459, and 0.39+ conflicts with sqlx-sqlite's links=sqlite3.
+# Link against the host SQLite (JSON1 is available on supported runners).
+rusqlite = { version = "0.32.1", optional = true }
 # 0.37 is selected because upstream xberg requires half 2.7.x; older LanceDB
 # releases pin half 2.4.x and cannot resolve beside it.
 lancedb = { version = "=0.37.1", optional = true, default-features = false }
