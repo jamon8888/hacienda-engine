@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `apps/hacienda-studio/lib/model-digests.ts` and one-slot IndexedDB eviction for model selection via `VITE_GLINER_MODEL_ID`.
   - `AuditEntry` now carries optional `model` provenance, framed in chain hash with tag `0xfe`; old chains verify with `model=None`.
 
-### Changed
+### GraphRAG hardening
 
 - **GraphRAG tenant isolation, durable SQLite graph, and NER weight integrity (unreleased).**
   Graph stores are scoped by `(collection, tenant_id)` with tenant-qualified entity and
