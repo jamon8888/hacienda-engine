@@ -68,9 +68,11 @@ pub use embedding::{XbergTextEmbedder, XbergTokenEmbedder};
 pub use error::{ComplexityKind, RagError, RagResult};
 pub use filter::{Filter, FilterField, FilterNamespace};
 pub use graph::{
-    retrieve_with_graph, EntityId, EntityLabel, EvidenceSpan, GraphContext, GraphEntity,
-    GraphHealth, GraphRagOutput, GraphRagQuery, GraphRelation, GraphStore, InMemoryGraphStore,
-    RelationType, MAX_ENTITY_IDS,
+    retrieve_with_graph, validate_graph_bounds, EntityId, EntityLabel, EvidenceSpan,
+    GraphBoundsError, GraphContext, GraphEntity, GraphHealth, GraphRagOutput, GraphRagQuery,
+    GraphRelation, GraphStore, InMemoryGraphStore, RelationType, DEFAULT_GRAPH_LIMIT,
+    DEFAULT_GRAPH_MIN_CONFIDENCE, DEFAULT_HOPS, MAX_ENTITY_IDS, MAX_GRAPH_LIMIT, MAX_HOPS,
+    MIN_GRAPH_LIMIT, MIN_HOPS,
 };
 pub use query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 pub use store::RagStore;

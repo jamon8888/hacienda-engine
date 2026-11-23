@@ -18,6 +18,76 @@ use std::sync::RwLock;
 /// backend-neutral query, and both store implementations — enforces the same
 /// cap before any full-collection load or BFS traversal.
 pub const MAX_ENTITY_IDS: usize = 100;
+/// Bounds and wire defaults shared by the graph contract and every API DTO.
+/// Keeping them here prevents the streaming and retrieval endpoints from
+/// drifting into accepting different requests.
+pub const MIN_HOPS: u8 = 1;
+pub const MAX_HOPS: u8 = 2;
+pub const MIN_GRAPH_LIMIT: usize = 1;
+pub const MAX_GRAPH_LIMIT: usize = 500;
+pub const DEFAULT_HOPS: u8 = 1;
+pub const DEFAULT_GRAPH_LIMIT: usize = 50;
+pub const DEFAULT_GRAPH_MIN_CONFIDENCE: f32 = 0.9;
+
+/// A rejected graph request bound, with enough context to tell the caller
+/// which field was wrong and what it accepts (never the entity values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphBoundsError {
+    pub field: &'static str,
+    pub rejected: String,
+    pub accepted: String,
+}
+
+impl std::fmt::Display for GraphBoundsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid graph bound '{}': {} (expected {}, got {})",
+            self.field, self.accepted, self.field, self.rejected
+        )
+    }
+}
+
+impl std::error::Error for GraphBoundsError {}
+
+/// Validate every graph request bound. Callers translate this into their own
+/// error type (RagError / ApiError) without duplicating the numeric limits.
+pub fn validate_graph_bounds(
+    entity_id_count: usize,
+    hops: u8,
+    limit: usize,
+    min_confidence: f32,
+) -> Result<(), GraphBoundsError> {
+    if entity_id_count == 0 || entity_id_count > MAX_ENTITY_IDS {
+        return Err(GraphBoundsError {
+            field: "entity_ids",
+            rejected: entity_id_count.to_string(),
+            accepted: format!("between 1 and {MAX_ENTITY_IDS} ids"),
+        });
+    }
+    if !(MIN_HOPS..=MAX_HOPS).contains(&hops) {
+        return Err(GraphBoundsError {
+            field: "hops",
+            rejected: hops.to_string(),
+            accepted: format!("between {MIN_HOPS} and {MAX_HOPS}"),
+        });
+    }
+    if !(MIN_GRAPH_LIMIT..=MAX_GRAPH_LIMIT).contains(&limit) {
+        return Err(GraphBoundsError {
+            field: "limit",
+            rejected: limit.to_string(),
+            accepted: format!("between {MIN_GRAPH_LIMIT} and {MAX_GRAPH_LIMIT}"),
+        });
+    }
+    if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+        return Err(GraphBoundsError {
+            field: "min_confidence",
+            rejected: min_confidence.to_string(),
+            accepted: "a finite value between 0 and 1".to_owned(),
+        });
+    }
+    Ok(())
+}
 
 /// Stable identifier for a graph entity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -131,22 +201,8 @@ pub(crate) fn validate_neighborhood_bounds(
     limit: usize,
     min_confidence: f32,
 ) -> RagResult<()> {
-    if entity_ids.is_empty() || entity_ids.len() > MAX_ENTITY_IDS {
-        return Err(RagError::InvalidQuery(format!(
-            "neighborhood requires between 1 and {MAX_ENTITY_IDS} entity_ids"
-        )));
-    }
-    if !(1..=2).contains(&hops) || limit == 0 || limit > 500 {
-        return Err(RagError::InvalidQuery(
-            "neighborhood requires hops in 1..=2 and limit in 1..=500".to_owned(),
-        ));
-    }
-    if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
-        return Err(RagError::InvalidQuery(
-            "neighborhood min_confidence must be finite and between 0 and 1".to_owned(),
-        ));
-    }
-    Ok(())
+    validate_graph_bounds(entity_ids.len(), hops, limit, min_confidence)
+        .map_err(|error| RagError::InvalidQuery(format!("neighborhood {error}")))
 }
 
 /// Identity of an entity inside one collection. The tenant is part of the key:
@@ -205,43 +261,26 @@ pub struct GraphRagQuery {
 impl GraphRagQuery {
     /// Validate graph-specific bounds before touching either backend.
     pub fn validate(&self) -> RagResult<()> {
-        if self.entity_ids.is_empty() || self.entity_ids.len() > MAX_ENTITY_IDS {
-            return Err(RagError::InvalidQuery(format!(
-                "graph retrieval requires between 1 and {MAX_ENTITY_IDS} entity_ids"
-            )));
-        }
-        if !(1..=2).contains(&self.hops) {
-            return Err(RagError::InvalidQuery(
-                "graph retrieval hops must be between 1 and 2".to_owned(),
-            ));
-        }
-        if self.graph_limit == 0 || self.graph_limit > 500 {
-            return Err(RagError::InvalidQuery(
-                "graph retrieval graph_limit must be between 1 and 500".to_owned(),
-            ));
-        }
-        if !self.graph_min_confidence.is_finite()
-            || !(0.0..=1.0).contains(&self.graph_min_confidence)
-        {
-            return Err(RagError::InvalidQuery(
-                "graph retrieval graph_min_confidence must be finite and between 0 and 1"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
+        validate_graph_bounds(
+            self.entity_ids.len(),
+            self.hops,
+            self.graph_limit,
+            self.graph_min_confidence,
+        )
+        .map_err(|error| RagError::InvalidQuery(format!("graph retrieval {error}")))
     }
 }
 
 fn default_hops() -> u8 {
-    1
+    DEFAULT_HOPS
 }
 
 fn default_graph_limit() -> usize {
-    50
+    DEFAULT_GRAPH_LIMIT
 }
 
 fn default_graph_min_confidence() -> f32 {
-    0.9
+    DEFAULT_GRAPH_MIN_CONFIDENCE
 }
 
 /// The vector/full-text result and its bounded, tenant-scoped graph context.
@@ -325,10 +364,43 @@ pub trait GraphStore: Send + Sync + 'static {
     async fn health(&self, tenant_id: &str) -> RagResult<GraphHealth>;
 }
 
+type RelationKey = (String, EntityId, RelationType, EntityId, String);
+
 #[derive(Default)]
 struct GraphData {
     entities: HashMap<EntityKey, GraphEntity>,
-    relations: HashMap<(String, EntityId, RelationType, EntityId, String), GraphRelation>,
+    relations: HashMap<RelationKey, GraphRelation>,
+    /// Tenant-qualified endpoint -> incident relation keys. Maintained under
+    /// the same write lock as `relations`, so a seed with no incident edges
+    /// never scans unrelated edges.
+    adjacency: HashMap<EntityKey, HashSet<RelationKey>>,
+}
+
+fn index_relation(graph: &mut GraphData, key: &RelationKey, relation: &GraphRelation) {
+    let tenant = effective_tenant(relation.tenant_id.as_deref()).to_owned();
+    graph
+        .adjacency
+        .entry((tenant.clone(), relation.subject.clone()))
+        .or_default()
+        .insert(key.clone());
+    graph
+        .adjacency
+        .entry((tenant, relation.object.clone()))
+        .or_default()
+        .insert(key.clone());
+}
+
+fn unindex_relation(graph: &mut GraphData, key: &RelationKey, relation: &GraphRelation) {
+    let tenant = effective_tenant(relation.tenant_id.as_deref()).to_owned();
+    for endpoint in [&relation.subject, &relation.object] {
+        let entity_key = (tenant.clone(), endpoint.clone());
+        if let Some(keys) = graph.adjacency.get_mut(&entity_key) {
+            keys.remove(key);
+            if keys.is_empty() {
+                graph.adjacency.remove(&entity_key);
+            }
+        }
+    }
 }
 
 /// Exact, deterministic graph backend used by tests and local development.
@@ -338,6 +410,20 @@ pub struct InMemoryGraphStore {
 }
 
 impl InMemoryGraphStore {
+    /// Validate a relation row itself, independently of its endpoints. Used by
+    /// durable backends to distinguish corrupt stored rows from a stale edge
+    /// whose endpoint was legitimately re-assigned to another tenant.
+    pub(crate) fn validate_relation_payload(relation: &GraphRelation) -> RagResult<()> {
+        relation.evidence.validate()?;
+        Self::validate_confidence(relation.confidence, "relation")?;
+        if relation.ontology_version.trim().is_empty() {
+            return Err(RagError::InvalidQuery(
+                "relation ontology_version must not be empty".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_entity(entity: &GraphEntity) -> RagResult<()> {
         Self::validate_confidence(entity.confidence, "entity")?;
         if entity.start >= entity.end {
@@ -392,13 +478,7 @@ impl InMemoryGraphStore {
         relations: &[GraphRelation],
     ) -> RagResult<()> {
         for relation in relations {
-            relation.evidence.validate()?;
-            Self::validate_confidence(relation.confidence, "relation")?;
-            if relation.ontology_version.trim().is_empty() {
-                return Err(RagError::InvalidQuery(
-                    "relation ontology_version must not be empty".to_owned(),
-                ));
-            }
+            Self::validate_relation_payload(relation)?;
         }
         let mut data = self
             .collections
@@ -444,7 +524,10 @@ impl InMemoryGraphStore {
         }
         for relation in relations {
             let key = relation_key(relation);
-            graph.relations.insert(key, relation.clone());
+            if let Some(previous) = graph.relations.insert(key.clone(), relation.clone()) {
+                unindex_relation(graph, &key, &previous);
+            }
+            index_relation(graph, &key, relation);
         }
         Ok(())
     }
@@ -479,13 +562,7 @@ impl GraphStore for InMemoryGraphStore {
         relations: &[GraphRelation],
     ) -> RagResult<()> {
         for relation in relations {
-            relation.evidence.validate()?;
-            Self::validate_confidence(relation.confidence, "relation")?;
-            if relation.ontology_version.trim().is_empty() {
-                return Err(RagError::InvalidQuery(
-                    "relation ontology_version must not be empty".to_owned(),
-                ));
-            }
+            Self::validate_relation_payload(relation)?;
             if effective_tenant(relation.tenant_id.as_deref()) != tenant_id {
                 return Err(RagError::InvalidQuery(format!(
                     "relation {}->{} belongs to tenant {}, expected {}",
@@ -528,7 +605,15 @@ impl GraphStore for InMemoryGraphStore {
             if !seen.insert(current.clone()) || depth >= hops {
                 continue;
             }
-            for (key, relation) in &graph.relations {
+            let incident: Vec<RelationKey> = graph
+                .adjacency
+                .get(&current)
+                .map(|keys| keys.iter().cloned().collect())
+                .unwrap_or_default();
+            for key in &incident {
+                let Some(relation) = graph.relations.get(key) else {
+                    continue;
+                };
                 // Relation identity and owner are tenant-qualified: never follow
                 // an edge belonging to a different tenant, even if its ids match.
                 if key.0 != tenant_id
@@ -618,16 +703,30 @@ impl GraphStore for InMemoryGraphStore {
             .collect();
         let removed_entities = entity_ids.len() as u64;
         graph.entities.retain(|key, _| !entity_ids.contains(key));
-        graph.relations.retain(|key, relation| {
-            // An edge owned by another tenant is never removed by this tenant's
-            // document deletion, even when its evidence names the same document.
-            if key.0 != tenant_id || effective_tenant(relation.tenant_id.as_deref()) != tenant_id {
-                return true;
-            }
-            let endpoint_removed = entity_ids.contains(&(tenant_id.to_owned(), key.1.clone()))
-                || entity_ids.contains(&(tenant_id.to_owned(), key.3.clone()));
-            !endpoint_removed && relation.evidence.document_id != *document_id
-        });
+        let removed_relations = graph
+            .relations
+            .iter()
+            .filter(|(key, relation)| {
+                // An edge owned by another tenant is never removed by this
+                // tenant's document deletion, even when its evidence names the
+                // same document.
+                if key.0 != tenant_id
+                    || effective_tenant(relation.tenant_id.as_deref()) != tenant_id
+                {
+                    return false;
+                }
+                let endpoint_removed = entity_ids.contains(&(tenant_id.to_owned(), key.1.clone()))
+                    || entity_ids.contains(&(tenant_id.to_owned(), key.3.clone()));
+                endpoint_removed || relation.evidence.document_id == *document_id
+            })
+            .map(|(key, relation)| (key.clone(), relation.clone()))
+            .collect::<Vec<_>>();
+        for (key, _) in &removed_relations {
+            graph.relations.remove(key);
+        }
+        for (key, relation) in &removed_relations {
+            unindex_relation(graph, key, relation);
+        }
         Ok(removed_entities)
     }
 
