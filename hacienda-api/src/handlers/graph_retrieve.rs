@@ -40,13 +40,13 @@ pub struct GraphRetrieveRequest {
 }
 
 fn default_hops() -> u8 {
-    1
+    hacienda_rag::DEFAULT_HOPS
 }
 fn default_graph_limit() -> usize {
-    50
+    hacienda_rag::DEFAULT_GRAPH_LIMIT
 }
 fn default_graph_min_confidence() -> f32 {
-    0.9
+    hacienda_rag::DEFAULT_GRAPH_MIN_CONFIDENCE
 }
 
 impl From<GraphRetrieveRequest> for GraphRagQuery {

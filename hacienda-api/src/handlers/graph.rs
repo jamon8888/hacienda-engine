@@ -40,32 +40,26 @@ pub struct NeighborhoodRequest {
 }
 
 fn default_hops() -> u8 {
-    1
+    hacienda_rag::DEFAULT_HOPS
 }
 
 fn default_limit() -> usize {
-    50
+    hacienda_rag::DEFAULT_GRAPH_LIMIT
 }
 
 fn default_min_confidence() -> f32 {
-    0.9
+    hacienda_rag::DEFAULT_GRAPH_MIN_CONFIDENCE
 }
 
 impl NeighborhoodRequest {
     fn validate(&self) -> Result<(), ApiError> {
-        if self.entity_ids.is_empty()
-            || self.entity_ids.len() > hacienda_rag::MAX_ENTITY_IDS
-            || !(1..=2).contains(&self.hops)
-            || self.limit == 0
-            || self.limit > 500
-            || !self.min_confidence.is_finite()
-            || !(0.0..=1.0).contains(&self.min_confidence)
-        {
-            return Err(ApiError::invalid_request(
-                "invalid graph neighborhood bounds",
-            ));
-        }
-        Ok(())
+        hacienda_rag::validate_graph_bounds(
+            self.entity_ids.len(),
+            self.hops,
+            self.limit,
+            self.min_confidence,
+        )
+        .map_err(|error| ApiError::invalid_request(error.to_string()))
     }
 }
 

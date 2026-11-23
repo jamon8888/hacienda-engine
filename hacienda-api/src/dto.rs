@@ -1340,21 +1340,16 @@ pub struct AnswerGraphRequest {
 }
 
 impl AnswerGraphRequest {
-    /// Validate graph bounds with the same limits the graph store enforces.
+    /// Validate graph bounds with the graph contract's shared limits. The
+    /// error names the rejected field, its value and the accepted range.
     pub fn validate(&self) -> Result<(), crate::error::ApiError> {
-        if self.entity_ids.is_empty()
-            || self.entity_ids.len() > hacienda_rag::MAX_ENTITY_IDS
-            || !(1..=2).contains(&self.hops)
-            || self.limit == 0
-            || self.limit > 500
-            || !self.min_confidence.is_finite()
-            || !(0.0..=1.0).contains(&self.min_confidence)
-        {
-            return Err(crate::error::ApiError::invalid_request(
-                "invalid graph neighborhood bounds",
-            ));
-        }
-        Ok(())
+        hacienda_rag::validate_graph_bounds(
+            self.entity_ids.len(),
+            self.hops,
+            self.limit,
+            self.min_confidence,
+        )
+        .map_err(|error| crate::error::ApiError::invalid_request(error.to_string()))
     }
 }
 
