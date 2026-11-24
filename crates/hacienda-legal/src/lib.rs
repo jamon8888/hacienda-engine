@@ -7,12 +7,7 @@
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    str::FromStr,
-    sync::{Mutex, OnceLock},
-    time::Duration,
-};
+use std::{str::FromStr, time::Duration};
 use thiserror::Error;
 use url::Url;
 
@@ -23,9 +18,6 @@ const MAX_FETCH_BYTES: usize = 256 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_RESEARCH_QUERY_CHARS: usize = 2_000;
 const MAX_PROVIDER_ID_CHARS: usize = 128;
-
-static TASK_SOURCES: OnceLock<Mutex<HashMap<String, LegalSource>>> = OnceLock::new();
-static MONITOR_SOURCES: OnceLock<Mutex<HashMap<String, LegalSource>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -349,7 +341,6 @@ impl LegalResearchClient {
             .await?;
         let run_id = required_string(&raw, "run_id")?;
         validate_provider_id(run_id, "trun_")?;
-        remember_source(&TASK_SOURCES, run_id, request.source)?;
         Ok(LegalTaskRunResponse {
             run_id: run_id.to_owned(),
             source: request.source,
@@ -366,9 +357,7 @@ impl LegalResearchClient {
         let raw = self
             .parallel_get(format!("{PARALLEL_API_BASE}/tasks/runs/{run_id}"))
             .await?;
-        let source = lookup_source(&TASK_SOURCES, run_id)
-            .or_else(|_| source_from_provider(&raw).ok_or(LegalError::InvalidResponse))?;
-        remember_source(&TASK_SOURCES, run_id, source)?;
+        let source = source_from_provider(&raw).ok_or(LegalError::InvalidResponse)?;
         Ok(LegalTaskRunResponse {
             run_id: required_string(&raw, "run_id")?.to_owned(),
             source,
@@ -388,9 +377,7 @@ impl LegalResearchClient {
             ))
             .await?;
         let run = raw.get("run").ok_or(LegalError::InvalidResponse)?;
-        let source = lookup_source(&TASK_SOURCES, run_id)
-            .or_else(|_| source_from_provider(run).ok_or(LegalError::InvalidResponse))?;
-        remember_source(&TASK_SOURCES, run_id, source)?;
+        let source = source_from_provider(run).ok_or(LegalError::InvalidResponse)?;
         let output = raw.get("output").filter(|value| !value.is_null()).cloned();
         validate_output_citations(output.as_ref(), source)?;
         Ok(LegalTaskResultResponse {
@@ -430,7 +417,6 @@ impl LegalResearchClient {
             .await?;
         let monitor_id = required_string(&raw, "monitor_id")?;
         validate_provider_id(monitor_id, "monitor_")?;
-        remember_source(&MONITOR_SOURCES, monitor_id, request.source)?;
         Ok(LegalMonitorResponse {
             monitor_id: monitor_id.to_owned(),
             source: request.source,
@@ -444,16 +430,10 @@ impl LegalResearchClient {
         monitor_id: &str,
     ) -> Result<LegalMonitorEventsResponse, LegalError> {
         validate_provider_id(monitor_id, "monitor_")?;
-        let source = if let Ok(source) = lookup_source(&MONITOR_SOURCES, monitor_id) {
-            source
-        } else {
-            let monitor = self
-                .parallel_get(format!("{PARALLEL_API_BASE}/monitors/{monitor_id}"))
-                .await?;
-            let source = source_from_provider(&monitor).ok_or(LegalError::InvalidResponse)?;
-            remember_source(&MONITOR_SOURCES, monitor_id, source)?;
-            source
-        };
+        let monitor = self
+            .parallel_get(format!("{PARALLEL_API_BASE}/monitors/{monitor_id}"))
+            .await?;
+        let source = source_from_provider(&monitor).ok_or(LegalError::InvalidResponse)?;
         let mut url = Url::parse(&format!("{PARALLEL_API_BASE}/monitors/{monitor_id}/events"))
             .map_err(|_| LegalError::InvalidResponse)?;
         {
@@ -494,8 +474,7 @@ impl LegalResearchClient {
         let raw = read_parallel_json(response).await?;
         Ok(LegalMonitorResponse {
             monitor_id: required_string(&raw, "monitor_id")?.to_owned(),
-            source: lookup_source(&MONITOR_SOURCES, monitor_id)
-                .or_else(|_| source_from_provider(&raw).ok_or(LegalError::InvalidResponse))?,
+            source: source_from_provider(&raw).ok_or(LegalError::InvalidResponse)?,
             status: required_string(&raw, "status")?.to_owned(),
         })
     }
@@ -668,32 +647,6 @@ fn required_string<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a st
         .and_then(serde_json::Value::as_str)
         .filter(|text| !text.is_empty())
         .ok_or(LegalError::InvalidResponse)
-}
-
-fn remember_source(
-    sources: &OnceLock<Mutex<HashMap<String, LegalSource>>>,
-    id: &str,
-    source: LegalSource,
-) -> Result<(), LegalError> {
-    sources
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| LegalError::ProviderNotConfigured)?
-        .insert(id.to_owned(), source);
-    Ok(())
-}
-
-fn lookup_source(
-    sources: &OnceLock<Mutex<HashMap<String, LegalSource>>>,
-    id: &str,
-) -> Result<LegalSource, LegalError> {
-    sources
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| LegalError::ProviderNotConfigured)?
-        .get(id)
-        .copied()
-        .ok_or(LegalError::InvalidProviderId)
 }
 
 fn source_from_provider(value: &serde_json::Value) -> Option<LegalSource> {
