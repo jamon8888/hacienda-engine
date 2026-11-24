@@ -1732,6 +1732,18 @@ fn legal_error(error: LegalError) -> anyhow::Error {
         LegalError::InvalidQuery => {
             anyhow::anyhow!("query must contain between 1 and 2000 characters")
         }
+        LegalError::InvalidFrequency => anyhow::anyhow!(
+            "frequency must be 1h–30d using an integer and h, d, or w suffix"
+        ),
+        LegalError::InvalidProcessor => {
+            anyhow::anyhow!("processor must be lite, base, or core")
+        }
+        LegalError::InvalidCursor => anyhow::anyhow!(
+            "cursor is invalid; reuse the next_cursor value returned by the previous page"
+        ),
+        LegalError::ResultUnavailable => anyhow::anyhow!(
+            "the run is completed but its brief is not available yet; retry shortly"
+        ),
         LegalError::UnsafeUrl => {
             anyhow::anyhow!("URL is not an HTTPS URL on the selected official source")
         }
@@ -1976,9 +1988,8 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                     format,
                 }) => {
                     let response = legal_client()?
-                    .monitor_events_for_tenant(
+                    .monitor_events_with_options(
                         &monitor_id,
-                        "default",
                         cursor.as_deref(),
                         include_completions,
                     )

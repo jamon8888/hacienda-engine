@@ -109,7 +109,8 @@ pub struct LegalSearchResponseDto {
     pub provider_search_id: String,
     /// Source used to constrain the provider request.
     pub source: LegalSourceDto,
-    /// Validated results. Empty means the provider found no matching legal pages.
+    /// Provider candidates that passed source URL validation; an empty list means no
+    /// candidate passed that validation, not necessarily that the provider found none.
     pub results: Vec<LegalSearchResultDto>,
 }
 
@@ -148,7 +149,7 @@ pub struct LegalDeepResearchStatusDto {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-/// Deep-research result; `output` is absent while the provider is still running.
+/// Deep-research result; `output` is absent while active or if the run ended without a brief.
 pub struct LegalDeepResearchResultDto {
     /// Opaque provider task-run identifier.
     pub run_id: String,
@@ -216,6 +217,19 @@ fn provider_error(error: hacienda_legal::LegalError) -> ApiError {
         E::InvalidQuery => ApiError::invalid_request(
             "Invalid `query`; provide 1–2,000 characters of legal research terms.",
         ),
+        E::InvalidFrequency => ApiError::invalid_request(
+            "Invalid `frequency`; use a value from 1h through 30d with an h, d, or w suffix.",
+        ),
+        E::InvalidProcessor => ApiError::invalid_request(
+            "Invalid `processor`; choose lite, base, or core.",
+        ),
+        E::InvalidCursor => ApiError::invalid_request(
+            "Invalid `cursor`; reuse the next_cursor value returned by the previous page.",
+        ),
+        E::ResultUnavailable => {
+            tracing::warn!("completed legal research output is temporarily unavailable");
+            ApiError::internal()
+        }
         E::UnsupportedSource => ApiError::invalid_request(
             "Invalid `source`; choose eurlex, legifrance, gesetze, rechtspraak, boe, or normattiva.",
         ),
@@ -309,7 +323,7 @@ pub async fn deep_research_result(
         .deep_research_result_for_tenant(&run_id, &tenant_scope(&parts))
         .await
         .map_err(provider_error)?;
-    let pending = result.status != "completed";
+    let pending = matches!(result.status.as_str(), "queued" | "running" | "cancelling");
     let dto = LegalDeepResearchResultDto {
         run_id: result.run_id,
         source: result.source.into(),

@@ -237,6 +237,14 @@ pub enum LegalError {
     UnsupportedSource,
     #[error("query must contain between 1 and 2000 characters")]
     InvalidQuery,
+    #[error("frequency must use an integer followed by h, d, or w")]
+    InvalidFrequency,
+    #[error("processor must be lite, base, or core")]
+    InvalidProcessor,
+    #[error("cursor is invalid; reuse the previous next_cursor value")]
+    InvalidCursor,
+    #[error("completed research output is not available yet; retry shortly")]
+    ResultUnavailable,
     #[error("URL is outside the selected official source")]
     UnsafeUrl,
     #[error("upstream legal source request failed")]
@@ -471,40 +479,50 @@ impl LegalResearchClient {
         tenant_scope: &str,
     ) -> Result<LegalTaskResultResponse, LegalError> {
         validate_provider_id(run_id, "trun_")?;
-        let response = self
-            .authenticated(self.http.get(format!(
-                "{PARALLEL_API_BASE}/tasks/runs/{run_id}/result?timeout=20"
-            )))
-            .send()
-            .await
-            .map_err(|_| LegalError::Upstream)?;
+        let response = self.task_result_response(run_id, 20).await?;
         if response.status() == reqwest::StatusCode::REQUEST_TIMEOUT {
             let status = self
                 .deep_research_status_for_tenant(run_id, tenant_scope)
                 .await?;
-            return Ok(LegalTaskResultResponse {
-                run_id: status.run_id,
-                source: status.source,
-                status: status.status,
-                output: None,
-            });
+            if status.status != "completed" {
+                return Ok(LegalTaskResultResponse {
+                    run_id: status.run_id,
+                    source: status.source,
+                    status: status.status,
+                    output: None,
+                });
+            }
+
+            // A completed status can briefly precede result availability. Retry the
+            // short result wait a bounded number of times, then return a retryable error.
+            for attempt in 0..3 {
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                let retry = self.task_result_response(run_id, 1).await?;
+                if retry.status() == reqwest::StatusCode::REQUEST_TIMEOUT {
+                    continue;
+                }
+                let raw = read_parallel_json(retry).await?;
+                return parse_task_result(raw, tenant_scope);
+            }
+            return Err(LegalError::ResultUnavailable);
         }
         let raw = read_parallel_json(response).await?;
-        let run = raw.get("run").ok_or(LegalError::InvalidResponse)?;
-        ensure_tenant(run, tenant_scope)?;
-        let source = source_from_provider(run).ok_or(LegalError::InvalidResponse)?;
-        let output = raw.get("output").filter(|value| !value.is_null()).cloned();
-        let status = required_string(run, "status")?;
-        if status == "completed" && output.is_none() {
-            return Err(LegalError::InvalidResponse);
-        }
-        validate_output_citations(output.as_ref(), source)?;
-        Ok(LegalTaskResultResponse {
-            run_id: required_string(run, "run_id")?.to_owned(),
-            source,
-            status: status.to_owned(),
-            output,
-        })
+        parse_task_result(raw, tenant_scope)
+    }
+
+    async fn task_result_response(
+        &self,
+        run_id: &str,
+        timeout_seconds: u8,
+    ) -> Result<reqwest::Response, LegalError> {
+        self.authenticated(self.http.get(format!(
+            "{PARALLEL_API_BASE}/tasks/runs/{run_id}/result?timeout={timeout_seconds}"
+        )))
+        .send()
+        .await
+        .map_err(|_| LegalError::Upstream)
     }
 
     /// Start an `event_stream` monitor restricted to the selected official source.
@@ -527,7 +545,7 @@ impl LegalResearchClient {
         validate_frequency(&request.frequency)?;
         let processor = request.processor.as_deref().unwrap_or("lite");
         if !matches!(processor, "lite" | "base" | "core") {
-            return Err(LegalError::InvalidQuery);
+            return Err(LegalError::InvalidProcessor);
         }
         let body = serde_json::json!({
             "type": "event_stream",
@@ -561,8 +579,24 @@ impl LegalResearchClient {
         &self,
         monitor_id: &str,
     ) -> Result<LegalMonitorEventsResponse, LegalError> {
-        self.monitor_events_for_tenant(monitor_id, DEFAULT_TENANT_SCOPE, None, false)
+        self.monitor_events_with_options(monitor_id, None, false)
             .await
+    }
+
+    /// Read one event page with optional pagination using the default tenant scope.
+    pub async fn monitor_events_with_options(
+        &self,
+        monitor_id: &str,
+        cursor: Option<&str>,
+        include_completions: bool,
+    ) -> Result<LegalMonitorEventsResponse, LegalError> {
+        self.monitor_events_for_tenant(
+            monitor_id,
+            DEFAULT_TENANT_SCOPE,
+            cursor,
+            include_completions,
+        )
+        .await
     }
 
     /// Read one bounded monitor event page only for the creating tenant.
@@ -577,7 +611,7 @@ impl LegalResearchClient {
         if cursor.is_some_and(|cursor| {
             cursor.len() > MAX_PROVIDER_RESPONSE_BYTES || cursor.chars().any(char::is_control)
         }) {
-            return Err(LegalError::InvalidQuery);
+            return Err(LegalError::InvalidCursor);
         }
         let monitor = self
             .parallel_get(format!("{PARALLEL_API_BASE}/monitors/{monitor_id}"))
@@ -833,17 +867,17 @@ fn validate_frequency(frequency: &str) -> Result<(), LegalError> {
         .find(|ch: char| !ch.is_ascii_digit())
         .unwrap_or(frequency.len());
     let (amount, unit) = frequency.split_at(split);
-    let amount: u32 = amount.parse().map_err(|_| LegalError::InvalidQuery)?;
+    let amount: u32 = amount.parse().map_err(|_| LegalError::InvalidFrequency)?;
     let hours = match unit {
         "h" => amount,
         "d" => amount.saturating_mul(24),
         "w" => amount.saturating_mul(24 * 7),
-        _ => return Err(LegalError::InvalidQuery),
+        _ => return Err(LegalError::InvalidFrequency),
     };
     if (1..=30 * 24).contains(&hours) {
         Ok(())
     } else {
-        Err(LegalError::InvalidQuery)
+        Err(LegalError::InvalidFrequency)
     }
 }
 
@@ -931,33 +965,47 @@ fn validate_output_citations(
     Ok(())
 }
 
+fn parse_task_result(
+    raw: serde_json::Value,
+    tenant_scope: &str,
+) -> Result<LegalTaskResultResponse, LegalError> {
+    let run = raw.get("run").ok_or(LegalError::InvalidResponse)?;
+    ensure_tenant(run, tenant_scope)?;
+    let source = source_from_provider(run).ok_or(LegalError::InvalidResponse)?;
+    let output = raw.get("output").filter(|value| !value.is_null()).cloned();
+    let status = required_string(run, "status")?;
+    if status == "completed" && output.is_none() {
+        return Err(LegalError::ResultUnavailable);
+    }
+    validate_output_citations(output.as_ref(), source)?;
+    Ok(LegalTaskResultResponse {
+        run_id: required_string(run, "run_id")?.to_owned(),
+        source,
+        status: status.to_owned(),
+        output,
+    })
+}
+
 fn validate_content_urls(value: &serde_json::Value, source: LegalSource) -> Result<(), LegalError> {
     match value {
         serde_json::Value::String(text) => {
-            for token in text.split_whitespace() {
-                let candidate = token.trim_matches(|ch: char| {
-                    matches!(
-                        ch,
-                        '(' | ')'
-                            | '['
-                            | ']'
-                            | '{'
-                            | '}'
-                            | '<'
-                            | '>'
-                            | '"'
-                            | '\''
-                            | ','
-                            | '.'
-                            | ';'
-                            | ':'
-                    )
-                });
-                if (candidate.starts_with("https://") || candidate.starts_with("http://"))
-                    && !url_belongs_to_source(source, candidate)
-                {
+            let mut remaining = text.as_str();
+            while let Some((start, scheme)) = ["https://", "http://"]
+                .iter()
+                .filter_map(|scheme| remaining.find(scheme).map(|index| (index, *scheme)))
+                .min_by_key(|(index, _)| *index)
+            {
+                let candidate = &remaining[start..];
+                let end = candidate
+                    .find(|ch: char| {
+                        ch.is_whitespace() || matches!(ch, ')' | ']' | '}' | '>' | '"' | '\'')
+                    })
+                    .unwrap_or(candidate.len());
+                let candidate = candidate[..end].trim_end_matches([',', '.', ';', ':']);
+                if !url_belongs_to_source(source, candidate) {
                     return Err(LegalError::InvalidResponse);
                 }
+                remaining = &remaining[start + scheme.len()..];
             }
         }
         serde_json::Value::Array(values) => {
@@ -1015,4 +1063,22 @@ fn validate_monitor_event_citations(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod legal_response_validation_tests {
+    use super::*;
+
+    #[test]
+    fn validates_markdown_link_destinations() {
+        let official = serde_json::json!(
+            "See [the judgment](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:1)."
+        );
+        let foreign = serde_json::json!("See [the judgment](https://example.org/case).");
+        assert!(validate_content_urls(&official, LegalSource::Eurlex).is_ok());
+        assert!(matches!(
+            validate_content_urls(&foreign, LegalSource::Eurlex),
+            Err(LegalError::InvalidResponse)
+        ));
+    }
 }

@@ -241,7 +241,7 @@ pub enum McpCommand {
     "  hacienda legal fetch --source de https://www.gesetze-im-internet.de/bdsg_2018/\n",
     "  hacienda legal deep-research submit --source eu 'AI Act high-risk obligations'\n",
     "  hacienda legal deep-research status <run-id> --format json\n",
-    "  hacienda legal monitor create --source fr --frequency daily 'DPIA guidance'\n",
+    "  hacienda legal monitor create --source fr --frequency 1d 'DPIA guidance'\n",
     "  hacienda legal monitor events <monitor-id> --format json\n",
     "  hacienda legal mcp --source nl\n",
 ))]
@@ -346,7 +346,7 @@ pub struct LegalMonitorCreateArgs {
     #[arg(long, value_name = "SOURCE", value_enum)]
     pub source: LegalSourceArg,
 
-    /// Provider-defined cadence for the monitor (for example `daily` or `weekly`).
+    /// Monitor cadence from 1 hour to 30 days, as an integer plus `h`, `d`, or `w` (for example `1d` or `1w`).
     #[arg(long, value_name = "FREQUENCY")]
     pub frequency: String,
 
@@ -372,6 +372,7 @@ pub struct LegalMonitorIdArgs {
 }
 
 #[derive(Debug, Parser)]
+/// Select one monitor event page, optionally resuming from a previous cursor.
 pub struct LegalMonitorEventsArgs {
     /// Provider monitor id, as printed by `legal monitor create`.
     #[arg(value_name = "MONITOR_ID")]

@@ -886,9 +886,8 @@ impl HaciendaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
         let response = client
-            .monitor_events_for_tenant(
+            .monitor_events_with_options(
                 &params.monitor_id,
-                "default",
                 params.cursor.as_deref(),
                 params.include_completions,
             )
@@ -999,6 +998,22 @@ fn map_legal_error(error: hacienda_legal::LegalError) -> rmcp::ErrorData {
     match error {
         E::InvalidQuery => rmcp::ErrorData::invalid_params(
             "`query` must contain between 1 and 2,000 characters",
+            None,
+        ),
+        E::InvalidFrequency => rmcp::ErrorData::invalid_params(
+            "`frequency` must be 1h–30d using an integer and h, d, or w suffix",
+            None,
+        ),
+        E::InvalidProcessor => rmcp::ErrorData::invalid_params(
+            "`processor` must be lite, base, or core",
+            None,
+        ),
+        E::InvalidCursor => rmcp::ErrorData::invalid_params(
+            "`cursor` is invalid; reuse the `next_cursor` from the previous page",
+            None,
+        ),
+        E::ResultUnavailable => rmcp::ErrorData::internal_error(
+            "completed research output is not available yet; retry shortly",
             None,
         ),
         E::UnsupportedSource => rmcp::ErrorData::invalid_params(
