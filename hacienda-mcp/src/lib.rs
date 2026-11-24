@@ -1009,6 +1009,10 @@ fn map_legal_error(error: hacienda_legal::LegalError) -> rmcp::ErrorData {
             "`url` must use HTTPS on the selected source's official host",
             None,
         ),
+        E::UnsupportedDocumentFormat => rmcp::ErrorData::invalid_params(
+            "official URL must return UTF-8 HTML, XHTML, JSON, XML, or plain text; PDF and binary formats are unsupported",
+            None,
+        ),
         E::InvalidProviderId => rmcp::ErrorData::invalid_params(
             "use a run_id or monitor_id returned by a legal research create tool",
             None,

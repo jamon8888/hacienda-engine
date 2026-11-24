@@ -245,6 +245,8 @@ pub enum LegalError {
     UpstreamStatus { status: u16 },
     #[error("provider returned an invalid response")]
     InvalidResponse,
+    #[error("official source returned a non-text or non-UTF-8 document")]
+    UnsupportedDocumentFormat,
     #[error("provider resource identifier is invalid")]
     InvalidProviderId,
     #[error("legal research resource was not found")]
@@ -719,10 +721,14 @@ impl LegalResearchClient {
             .as_deref()
             .is_some_and(|value| !is_supported_text_mime(value))
         {
-            return Err(LegalError::InvalidResponse);
+            return Err(LegalError::UnsupportedDocumentFormat);
         }
         let bytes = read_bounded(response, MAX_FETCH_BYTES).await?;
-        let content = String::from_utf8(bytes).map_err(|_| LegalError::InvalidResponse)?;
+        if bytes.starts_with(b"%PDF-") || bytes.contains(&0) {
+            return Err(LegalError::UnsupportedDocumentFormat);
+        }
+        let content =
+            String::from_utf8(bytes).map_err(|_| LegalError::UnsupportedDocumentFormat)?;
         Ok(LegalFetchResponse {
             source: request.source,
             url: url.to_string(),

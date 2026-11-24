@@ -1735,6 +1735,9 @@ fn legal_error(error: LegalError) -> anyhow::Error {
         LegalError::UnsafeUrl => {
             anyhow::anyhow!("URL is not an HTTPS URL on the selected official source")
         }
+        LegalError::UnsupportedDocumentFormat => anyhow::anyhow!(
+            "official URL did not return UTF-8 HTML, XHTML, JSON, XML, or plain text; PDF and binary formats are not supported by this fetch endpoint"
+        ),
         LegalError::Upstream => anyhow::anyhow!(
             "upstream legal provider request failed; verify network access and retry"
         ),

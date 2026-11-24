@@ -222,6 +222,9 @@ fn provider_error(error: hacienda_legal::LegalError) -> ApiError {
         E::UnsafeUrl => ApiError::invalid_request(
             "Invalid `url`; use HTTPS on the selected source's official host.",
         ),
+        E::UnsupportedDocumentFormat => ApiError::invalid_request(
+            "The official URL must return UTF-8 HTML, XHTML, JSON, XML, or plain text; PDF and binary formats are not supported by this fetch endpoint.",
+        ),
         E::ResourceNotFound => ApiError::not_found(),
         error @ (E::Disabled | E::ProviderNotConfigured) => {
             tracing::warn!(error = %error, "legal research provider is not enabled or configured");
