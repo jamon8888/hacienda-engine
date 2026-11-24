@@ -351,9 +351,20 @@ impl SqliteGraphStore {
             let relation: GraphRelation = serde_json::from_str(payload)
                 .map_err(|error| RagError::Backend(Box::new(error)))?;
             let tenant_key = crate::graph::effective_tenant(relation.tenant_id.as_deref());
-            let stale = [&relation.subject, &relation.object]
-                .iter()
-                .any(|id| !entities.contains_key(&(tenant_key.to_owned(), (*id).clone())));
+            // An endpoint can be upserted to another document (or tenant) after
+            // the edge was written. Such an edge is stale, not corrupt: skip it
+            // like the in-memory backend does instead of letting insert_relations
+            // fail the entire neighborhood. Payload-level errors were already
+            // reported by validate_relation_payload above.
+            let stale = [&relation.subject, &relation.object].iter().any(|id| {
+                match entities.get(&(tenant_key.to_owned(), (*id).clone())) {
+                    None => true,
+                    Some(endpoint) => {
+                        crate::graph::effective_tenant(endpoint.tenant_id.as_deref()) != tenant_key
+                            || endpoint.document_id != relation.evidence.document_id
+                    }
+                }
+            });
             if stale {
                 continue;
             }
@@ -676,6 +687,78 @@ mod tests {
             .unwrap();
         assert_eq!(context.entities.len(), 2);
         assert_eq!(context.relations.len(), 1);
+    }
+
+    /// An endpoint moved to another document leaves a stale edge. The SQLite
+    /// read path must skip it, matching the in-memory backend, instead of
+    /// failing the whole neighborhood.
+    #[tokio::test]
+    async fn neighborhood_skips_edge_after_endpoint_document_change() {
+        let store = SqliteGraphStore::open(":memory:").unwrap();
+        store
+            .upsert_entities("contracts", "acme", &[entity("a"), entity("b")])
+            .await
+            .unwrap();
+        store
+            .upsert_relations("contracts", "acme", &[relation("a", "b", "hash-1")])
+            .await
+            .unwrap();
+
+        let mut moved = entity("b");
+        moved.document_id = DocumentId("doc-2".to_owned());
+        store
+            .upsert_entities("contracts", "acme", &[moved])
+            .await
+            .unwrap();
+
+        let context = store
+            .neighborhood("contracts", "acme", &[EntityId("a".to_owned())], 1, 10, 0.9)
+            .await
+            .expect("a stale edge must not fail the query");
+        assert_eq!(context.entities.len(), 1);
+        assert_eq!(context.entities[0].id.0, "a");
+        assert!(context.relations.is_empty());
+    }
+
+    /// Skipping stale edges must not swallow genuine payload corruption.
+    #[tokio::test]
+    async fn malformed_relation_payload_still_errors() {
+        let store = SqliteGraphStore::open(":memory:").unwrap();
+        store
+            .upsert_entities("contracts", "acme", &[entity("a"), entity("b")])
+            .await
+            .unwrap();
+        let mut malformed = relation("a", "b", "bad-hash");
+        malformed.ontology_version.clear();
+        let payload = serde_json::to_string(&malformed).unwrap();
+        {
+            let connection = store.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO graph_relations
+                     (collection, tenant_key, subject_id, predicate, object_id, tenant_id, evidence_hash, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        "contracts",
+                        "acme",
+                        "a",
+                        "\"REFERENCES\"",
+                        "b",
+                        "acme",
+                        "bad-hash",
+                        payload
+                    ],
+                )
+                .unwrap();
+        }
+        let error = store
+            .neighborhood("contracts", "acme", &[EntityId("a".to_owned())], 1, 10, 0.9)
+            .await
+            .expect_err("malformed relation payload must produce a contextual error");
+        assert!(
+            matches!(error, RagError::Backend(_)),
+            "unexpected error: {error}"
+        );
     }
 
     /// Two tenants using the same EntityId in one collection must keep their
