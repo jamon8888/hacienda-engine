@@ -521,6 +521,8 @@ mod tests {
         "RevealTokenResponse",
         "DocumentResult",
         "ProcessDocumentsResponse",
+        "LegalSearchRequestDto",
+        "LegalFetchRequestDto",
         "LegalSearchResultDto",
         "LegalSourceDto",
         "LegalSearchResponseDto",

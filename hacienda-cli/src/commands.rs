@@ -6,9 +6,9 @@ use crate::cli::{
     ComplianceReportArgs, ConcurrencyArgs, ExtractArgs, Format, FormatsArgs, LegalArgs,
     LegalCommand, LegalDeepResearchArgs, LegalDeepResearchCommand, LegalDeepResearchSubmitArgs,
     LegalFetchArgs, LegalMcpArgs, LegalMonitorArgs, LegalMonitorCommand, LegalMonitorCreateArgs,
-    LegalMonitorIdArgs, LegalSearchArgs, LegalSourceArg, LegalTaskArgs, MimeArgs, RevealArgs,
-    ReviewAssignArgs, ReviewDecideArgs, ReviewDecisionArg, ReviewListArgs, ReviewShowArgs,
-    ReviewStatsArgs, ReviewStatusArg, ReviewStoreArgs, ScanArgs, ServeArgs,
+    LegalMonitorEventsArgs, LegalMonitorIdArgs, LegalSearchArgs, LegalSourceArg, LegalTaskArgs,
+    MimeArgs, RevealArgs, ReviewAssignArgs, ReviewDecideArgs, ReviewDecisionArg, ReviewListArgs,
+    ReviewShowArgs, ReviewStatsArgs, ReviewStatusArg, ReviewStoreArgs, ScanArgs, ServeArgs,
 };
 use crate::config::load_config;
 use anyhow::{Context, Result};
@@ -1735,11 +1735,17 @@ fn legal_error(error: LegalError) -> anyhow::Error {
         LegalError::UnsafeUrl => {
             anyhow::anyhow!("URL is not an HTTPS URL on the selected official source")
         }
-        LegalError::Upstream => anyhow::anyhow!("upstream legal source request failed"),
+        LegalError::Upstream => anyhow::anyhow!(
+            "upstream legal provider request failed; verify network access and retry"
+        ),
+        LegalError::UpstreamStatus { status } => anyhow::anyhow!(
+            "upstream legal provider returned HTTP {status}; check provider credentials or quota, then retry"
+        ),
         LegalError::InvalidResponse => anyhow::anyhow!("provider returned an invalid response"),
         LegalError::InvalidProviderId => {
             anyhow::anyhow!("run id or monitor id is not a valid provider identifier")
         }
+        LegalError::ResourceNotFound => anyhow::anyhow!("legal research resource was not found"),
     }
 }
 
@@ -1839,6 +1845,9 @@ fn print_legal_monitor_events(response: &LegalMonitorEventsResponse) {
         serde_json::to_string_pretty(&response.events)
             .unwrap_or_else(|_| response.events.to_string())
     );
+    if let Some(cursor) = &response.next_cursor {
+        println!("next_cursor: {cursor}");
+    }
 }
 
 /// Run `hacienda legal ...` — optional research over public legal sources.
@@ -1908,7 +1917,10 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                 let response = legal_client()?
                     .deep_research_status(&run_id)
                     .await
-                    .map_err(legal_error)?;
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not read legal task status for run {run_id}; verify the ID and retry")
+                    })?;
                 match format {
                     Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
                     Format::Text => print_legal_task_run(&response),
@@ -1919,7 +1931,10 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                 let response = legal_client()?
                     .deep_research_result(&run_id)
                     .await
-                    .map_err(legal_error)?;
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not read legal task result for run {run_id}; poll its status and retry")
+                    })?;
                 match format {
                     Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
                     Format::Text => print_legal_task_result(&response),
@@ -1927,52 +1942,70 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                 Ok(())
             }
         },
-        LegalCommand::Monitor(LegalMonitorArgs { command }) => match command {
-            LegalMonitorCommand::Create(LegalMonitorCreateArgs {
-                query,
-                source,
-                frequency,
-                processor,
-                format,
-            }) => {
-                let response = legal_client()?
-                    .create_monitor(LegalMonitorRequest {
-                        source: legal_source(source),
-                        query,
-                        frequency,
-                        processor,
-                    })
-                    .await
-                    .map_err(legal_error)?;
-                match format {
-                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                    Format::Text => print_legal_monitor(&response),
+        LegalCommand::Monitor(LegalMonitorArgs { command }) => {
+            match command {
+                LegalMonitorCommand::Create(LegalMonitorCreateArgs {
+                    query,
+                    source,
+                    frequency,
+                    processor,
+                    format,
+                }) => {
+                    let response = legal_client()?
+                        .create_monitor(LegalMonitorRequest {
+                            source: legal_source(source),
+                            query,
+                            frequency,
+                            processor,
+                        })
+                        .await
+                        .map_err(legal_error)?;
+                    match format {
+                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                        Format::Text => print_legal_monitor(&response),
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            LegalMonitorCommand::Events(LegalMonitorIdArgs { monitor_id, format }) => {
-                let response = legal_client()?
-                    .monitor_events(&monitor_id)
+                LegalMonitorCommand::Events(LegalMonitorEventsArgs {
+                    monitor_id,
+                    cursor,
+                    include_completions,
+                    format,
+                }) => {
+                    let response = legal_client()?
+                    .monitor_events_for_tenant(
+                        &monitor_id,
+                        "default",
+                        cursor.as_deref(),
+                        include_completions,
+                    )
                     .await
-                    .map_err(legal_error)?;
-                match format {
-                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                    Format::Text => print_legal_monitor_events(&response),
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not read legal monitor events for monitor {monitor_id}; verify the ID and retry")
+                    })?;
+                    match format {
+                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                        Format::Text => print_legal_monitor_events(&response),
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            LegalMonitorCommand::Cancel(LegalMonitorIdArgs { monitor_id, format }) => {
-                let response = legal_client()?
+                LegalMonitorCommand::Cancel(LegalMonitorIdArgs { monitor_id, format }) => {
+                    let response = legal_client()?
                     .cancel_monitor(&monitor_id)
                     .await
-                    .map_err(legal_error)?;
-                match format {
-                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                    Format::Text => print_legal_monitor(&response),
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not cancel legal monitor {monitor_id}; verify the ID and retry")
+                    })?;
+                    match format {
+                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                        Format::Text => print_legal_monitor(&response),
+                    }
+                    Ok(())
                 }
-                Ok(())
             }
-        },
+        }
         LegalCommand::Mcp(LegalMcpArgs { source }) => run_legal_mcp(legal_source(source)),
     }
 }

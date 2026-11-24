@@ -331,7 +331,7 @@ pub enum LegalMonitorCommand {
     /// Create a recurring monitor on one official source.
     Create(LegalMonitorCreateArgs),
     /// Read a monitor's event feed, including its citation basis, by monitor id.
-    Events(LegalMonitorIdArgs),
+    Events(LegalMonitorEventsArgs),
     /// Cancel a monitor by id.
     Cancel(LegalMonitorIdArgs),
 }
@@ -367,6 +367,25 @@ pub struct LegalMonitorIdArgs {
     pub monitor_id: String,
 
     /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalMonitorEventsArgs {
+    /// Provider monitor id, as printed by `legal monitor create`.
+    #[arg(value_name = "MONITOR_ID")]
+    pub monitor_id: String,
+
+    /// Opaque cursor returned by the previous events page.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+
+    /// Include scheduled runs that detected no material changes.
+    #[arg(long)]
+    pub include_completions: bool,
+
+    /// Output format. `json` emits a stable JSON object; `text` is for humans.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
 }

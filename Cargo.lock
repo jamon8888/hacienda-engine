@@ -3922,6 +3922,7 @@ name = "hacienda-legal"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "reqwest 0.13.5",
  "rmcp",
  "serde",

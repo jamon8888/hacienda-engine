@@ -103,8 +103,8 @@ use hacienda_legal::{
 use params::{
     AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams,
     EmailRedactParams, EmptyParams, LegalDeepResearchParams, LegalFetchParams,
-    LegalMonitorCreateParams, LegalMonitorIdParams, LegalSearchParams, LegalTaskIdParams,
-    MimeDetectParams, TextParams,
+    LegalMonitorCreateParams, LegalMonitorEventsParams, LegalMonitorIdParams, LegalSearchParams,
+    LegalTaskIdParams, MimeDetectParams, TextParams,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -882,11 +882,16 @@ impl HaciendaMcp {
     )]
     async fn monitor_events(
         &self,
-        Parameters(params): Parameters<LegalMonitorIdParams>,
+        Parameters(params): Parameters<LegalMonitorEventsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
         let response = client
-            .monitor_events(&params.monitor_id)
+            .monitor_events_for_tenant(
+                &params.monitor_id,
+                "default",
+                params.cursor.as_deref(),
+                params.include_completions,
+            )
             .await
             .map_err(map_legal_error)?;
         json_tool_result(&response)
@@ -992,19 +997,49 @@ fn map_hacienda_error(error: hacienda::HaciendaError) -> rmcp::ErrorData {
 fn map_legal_error(error: hacienda_legal::LegalError) -> rmcp::ErrorData {
     use hacienda_legal::LegalError as E;
     match error {
-        E::InvalidQuery | E::UnsupportedSource | E::UnsafeUrl | E::InvalidProviderId => {
-            rmcp::ErrorData::invalid_params("invalid legal research request", None)
-        }
+        E::InvalidQuery => rmcp::ErrorData::invalid_params(
+            "`query` must contain between 1 and 2,000 characters",
+            None,
+        ),
+        E::UnsupportedSource => rmcp::ErrorData::invalid_params(
+            "`source` must be eurlex, legifrance, gesetze, rechtspraak, boe, or normattiva",
+            None,
+        ),
+        E::UnsafeUrl => rmcp::ErrorData::invalid_params(
+            "`url` must use HTTPS on the selected source's official host",
+            None,
+        ),
+        E::InvalidProviderId => rmcp::ErrorData::invalid_params(
+            "use a run_id or monitor_id returned by a legal research create tool",
+            None,
+        ),
+        E::ResourceNotFound => rmcp::ErrorData::invalid_params(
+            "legal research resource was not found for this tenant",
+            None,
+        ),
         E::Disabled | E::ProviderNotConfigured => {
             tracing::warn!("legal research provider is not enabled or configured");
             rmcp::ErrorData::internal_error(
-                "legal research provider is not enabled or configured",
+                "legal research is unavailable; enable the add-on and configure a server-side Parallel API key",
+                None,
+            )
+        }
+        E::UpstreamStatus { status } => {
+            tracing::warn!(
+                provider_status = status,
+                "legal research provider request failed"
+            );
+            rmcp::ErrorData::internal_error(
+                "legal research provider request failed; check provider credentials or quota and retry",
                 None,
             )
         }
         E::Upstream | E::InvalidResponse => {
             tracing::warn!("legal research provider request failed");
-            rmcp::ErrorData::internal_error("legal research provider request failed", None)
+            rmcp::ErrorData::internal_error(
+                "legal research provider request failed; check network access and retry",
+                None,
+            )
         }
     }
 }

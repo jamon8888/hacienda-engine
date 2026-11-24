@@ -552,3 +552,17 @@ pub struct LegalMonitorIdParams {
     /// Monitor identifier returned by `create_monitor`.
     pub monitor_id: String,
 }
+
+/// Parameters for retrieving one page from a monitor's event feed.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalMonitorEventsParams {
+    /// Monitor identifier returned by `create_monitor`.
+    pub monitor_id: String,
+    /// Opaque cursor returned by the previous page, when continuing pagination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Include scheduled runs that detected no material changes.
+    #[serde(default)]
+    pub include_completions: bool,
+}
