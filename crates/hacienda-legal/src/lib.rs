@@ -250,7 +250,10 @@ impl LegalResearchClient {
             "objective": format!("Find authoritative legal instruments, judgments, or official guidance on: {query}. Search only the official source {host}.", host = source.host()),
             "search_queries": [format!("site:{} {}", source.host(), query)],
             "mode": "fast",
-            "advanced_settings": { "max_results": max_results }
+            "advanced_settings": {
+                "max_results": max_results,
+                "source_policy": { "include_domains": [source.host()] }
+            }
         });
         let response = self
             .http
