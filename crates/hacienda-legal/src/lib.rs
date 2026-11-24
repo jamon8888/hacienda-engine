@@ -667,9 +667,11 @@ impl LegalResearchClient {
                     return Err(LegalError::IdempotencyKeyConflict);
                 }
                 let source = source_from_provider(monitor).ok_or(LegalError::InvalidResponse)?;
+                let monitor_id = required_string(monitor, "monitor_id")?;
+                validate_provider_id(monitor_id, "monitor_")?;
                 return Ok(Some(LegalMonitorResponse {
                     source,
-                    monitor_id: required_string(monitor, "monitor_id")?.to_owned(),
+                    monitor_id: monitor_id.to_owned(),
                     status: required_string(monitor, "status")?.to_owned(),
                 }));
             }
