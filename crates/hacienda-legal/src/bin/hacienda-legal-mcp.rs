@@ -142,6 +142,8 @@ fn map_error(error: LegalError) -> rmcp::ErrorData {
         | LegalError::InvalidFrequency
         | LegalError::InvalidProcessor
         | LegalError::InvalidCursor
+        | LegalError::InvalidIdempotencyKey
+        | LegalError::IdempotencyKeyConflict
         | LegalError::UnsafeUrl
         | LegalError::UnsupportedDocumentFormat
         | LegalError::UnsupportedSource => rmcp::ErrorData::invalid_params(error.to_string(), None),

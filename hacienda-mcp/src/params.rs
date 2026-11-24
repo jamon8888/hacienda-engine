@@ -543,6 +543,8 @@ pub struct LegalMonitorCreateParams {
     /// Optional provider processor name; omitted means the provider's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processor: Option<String>,
+    /// Required 1–128 character key for retrying the same create request without duplication.
+    pub idempotency_key: String,
 }
 
 /// Parameters for `monitor_events` and `cancel_monitor`.

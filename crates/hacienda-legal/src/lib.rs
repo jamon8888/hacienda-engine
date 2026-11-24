@@ -18,8 +18,12 @@ const MAX_FETCH_BYTES: usize = 256 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_RESEARCH_QUERY_CHARS: usize = 2_000;
 const MAX_PROVIDER_ID_CHARS: usize = 128;
+const MAX_IDEMPOTENCY_KEY_CHARS: usize = 128;
+const MAX_IDEMPOTENCY_SCAN_PAGES: usize = 100;
 const DEFAULT_TENANT_SCOPE: &str = "default";
 const TENANT_METADATA_KEY: &str = "legal_tenant";
+const MONITOR_REQUEST_KEY: &str = "legal_req";
+const MONITOR_FINGERPRINT_KEY: &str = "legal_fp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -202,6 +206,8 @@ pub struct LegalMonitorRequest {
     pub frequency: String,
     /// Optional Parallel processor (`lite`, `base`, or `core`).
     pub processor: Option<String>,
+    /// Stable caller-supplied key to recover the monitor after an ambiguous create response.
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,6 +249,12 @@ pub enum LegalError {
     InvalidProcessor,
     #[error("cursor is invalid; reuse the previous next_cursor value")]
     InvalidCursor,
+    #[error("idempotency_key must be 1–128 ASCII letters, digits, hyphens, or underscores")]
+    InvalidIdempotencyKey,
+    #[error("idempotency_key was already used for a different monitor request")]
+    IdempotencyKeyConflict,
+    #[error("monitor idempotency lookup exceeded its page limit; retry later with the same key")]
+    IdempotencyLookupLimit,
     #[error("completed research output is not available yet; retry shortly")]
     ResultUnavailable,
     #[error("URL is outside the selected official source")]
@@ -543,9 +555,30 @@ impl LegalResearchClient {
         let query = request.query.trim();
         validate_query(query)?;
         validate_frequency(&request.frequency)?;
+        validate_idempotency_key(&request.idempotency_key)?;
         let processor = request.processor.as_deref().unwrap_or("lite");
         if !matches!(processor, "lite" | "base" | "core") {
             return Err(LegalError::InvalidProcessor);
+        }
+        let request_key = blake3::hash(request.idempotency_key.as_bytes())
+            .to_hex()
+            .to_string();
+        let fingerprint_input = format!(
+            "{}\0{}\0{}\0{}\0{}",
+            tenant_scope,
+            request.source.tool_prefix(),
+            query,
+            request.frequency,
+            processor
+        );
+        let request_fingerprint = blake3::hash(fingerprint_input.as_bytes())
+            .to_hex()
+            .to_string();
+        if let Some(existing) = self
+            .find_active_monitor(&request_key, &request_fingerprint, tenant_scope)
+            .await?
+        {
+            return Ok(existing);
         }
         let body = serde_json::json!({
             "type": "event_stream",
@@ -553,7 +586,9 @@ impl LegalResearchClient {
             "processor": processor,
             "metadata": {
                 "legal_src": request.source.tool_prefix(),
-                (TENANT_METADATA_KEY): tenant_marker(tenant_scope)
+                (TENANT_METADATA_KEY): tenant_marker(tenant_scope),
+                (MONITOR_REQUEST_KEY): request_key.as_str(),
+                (MONITOR_FINGERPRINT_KEY): request_fingerprint.as_str()
             },
             "settings": {
                 "query": query,
@@ -562,9 +597,21 @@ impl LegalResearchClient {
                 }
             }
         });
-        let raw = self
+        let raw = match self
             .parallel_post(format!("{PARALLEL_API_BASE}/monitors"), &body)
-            .await?;
+            .await
+        {
+            Ok(raw) => raw,
+            Err(error) => {
+                if let Ok(Some(existing)) = self
+                    .find_active_monitor(&request_key, &request_fingerprint, tenant_scope)
+                    .await
+                {
+                    return Ok(existing);
+                }
+                return Err(error);
+            }
+        };
         let monitor_id = required_string(&raw, "monitor_id")?;
         validate_provider_id(monitor_id, "monitor_")?;
         Ok(LegalMonitorResponse {
@@ -572,6 +619,73 @@ impl LegalResearchClient {
             source: request.source,
             status: required_string(&raw, "status")?.to_owned(),
         })
+    }
+
+    async fn find_active_monitor(
+        &self,
+        request_key: &str,
+        request_fingerprint: &str,
+        tenant_scope: &str,
+    ) -> Result<Option<LegalMonitorResponse>, LegalError> {
+        let tenant = tenant_marker(tenant_scope);
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_IDEMPOTENCY_SCAN_PAGES {
+            let mut url = Url::parse(&format!("{PARALLEL_API_BASE}/monitors"))
+                .map_err(|_| LegalError::InvalidResponse)?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("type", "event_stream");
+                query.append_pair("status", "active");
+                query.append_pair("limit", "100");
+                if let Some(cursor) = cursor.as_deref() {
+                    query.append_pair("cursor", cursor);
+                }
+            }
+            let page = self.parallel_get(url.to_string()).await?;
+            let monitors = page
+                .get("monitors")
+                .and_then(serde_json::Value::as_array)
+                .ok_or(LegalError::InvalidResponse)?;
+            for monitor in monitors {
+                let metadata = monitor.get("metadata");
+                if metadata
+                    .and_then(|value| value.get(TENANT_METADATA_KEY))
+                    .and_then(serde_json::Value::as_str)
+                    != Some(tenant.as_str())
+                    || metadata
+                        .and_then(|value| value.get(MONITOR_REQUEST_KEY))
+                        .and_then(serde_json::Value::as_str)
+                        != Some(request_key)
+                {
+                    continue;
+                }
+                if metadata
+                    .and_then(|value| value.get(MONITOR_FINGERPRINT_KEY))
+                    .and_then(serde_json::Value::as_str)
+                    != Some(request_fingerprint)
+                {
+                    return Err(LegalError::IdempotencyKeyConflict);
+                }
+                let source = source_from_provider(monitor).ok_or(LegalError::InvalidResponse)?;
+                return Ok(Some(LegalMonitorResponse {
+                    source,
+                    monitor_id: required_string(monitor, "monitor_id")?.to_owned(),
+                    status: required_string(monitor, "status")?.to_owned(),
+                }));
+            }
+            cursor = page
+                .get("next_cursor")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                return Ok(None);
+            }
+        }
+        if cursor.is_some() {
+            Err(LegalError::IdempotencyLookupLimit)
+        } else {
+            Ok(None)
+        }
     }
 
     /// List a bounded page of events from one monitor.
@@ -878,6 +992,19 @@ fn validate_frequency(frequency: &str) -> Result<(), LegalError> {
         Ok(())
     } else {
         Err(LegalError::InvalidFrequency)
+    }
+}
+
+fn validate_idempotency_key(key: &str) -> Result<(), LegalError> {
+    if key.is_empty()
+        || key.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Err(LegalError::InvalidIdempotencyKey)
+    } else {
+        Ok(())
     }
 }
 

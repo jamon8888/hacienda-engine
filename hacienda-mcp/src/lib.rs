@@ -841,7 +841,8 @@ impl HaciendaMcp {
     #[tool(
         description = "Create a legal monitor on one required official source (eurlex, \
             legifrance, gesetze, rechtspraak, boe, normattiva) with a query and frequency. \
-            Only the query is sent to the provider; no private document content is sent. \
+            Provide a stable idempotency_key to safely retry creation. Only the query is \
+            sent to the provider; no private document content is sent. \
             Returns a monitor_id for `monitor_events` and `cancel_monitor`.",
         annotations(
             title = "Create Legal Monitor",
@@ -862,6 +863,7 @@ impl HaciendaMcp {
                 query: params.query,
                 frequency: params.frequency,
                 processor: params.processor,
+                idempotency_key: params.idempotency_key,
             })
             .await
             .map_err(map_legal_error)?;
@@ -1010,6 +1012,18 @@ fn map_legal_error(error: hacienda_legal::LegalError) -> rmcp::ErrorData {
         ),
         E::InvalidCursor => rmcp::ErrorData::invalid_params(
             "`cursor` is invalid; reuse the `next_cursor` from the previous page",
+            None,
+        ),
+        E::InvalidIdempotencyKey => rmcp::ErrorData::invalid_params(
+            "`idempotency_key` must be 1–128 ASCII letters, digits, hyphens, or underscores",
+            None,
+        ),
+        E::IdempotencyKeyConflict => rmcp::ErrorData::invalid_params(
+            "`idempotency_key` was already used for a different active monitor request",
+            None,
+        ),
+        E::IdempotencyLookupLimit => rmcp::ErrorData::internal_error(
+            "monitor retry lookup reached its page limit; retry later with the same idempotency key",
             None,
         ),
         E::ResultUnavailable => rmcp::ErrorData::internal_error(

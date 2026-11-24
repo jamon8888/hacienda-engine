@@ -1741,6 +1741,15 @@ fn legal_error(error: LegalError) -> anyhow::Error {
         LegalError::InvalidCursor => anyhow::anyhow!(
             "cursor is invalid; reuse the next_cursor value returned by the previous page"
         ),
+        LegalError::InvalidIdempotencyKey => anyhow::anyhow!(
+            "idempotency key must be 1–128 ASCII letters, digits, hyphens, or underscores"
+        ),
+        LegalError::IdempotencyKeyConflict => anyhow::anyhow!(
+            "idempotency key was already used for a different active monitor request"
+        ),
+        LegalError::IdempotencyLookupLimit => anyhow::anyhow!(
+            "monitor retry lookup reached its page limit; retry later with the same idempotency key"
+        ),
         LegalError::ResultUnavailable => anyhow::anyhow!(
             "the run is completed but its brief is not available yet; retry shortly"
         ),
@@ -1964,6 +1973,7 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                     source,
                     frequency,
                     processor,
+                    idempotency_key,
                     format,
                 }) => {
                     let response = legal_client()?
@@ -1972,6 +1982,7 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                             query,
                             frequency,
                             processor,
+                            idempotency_key,
                         })
                         .await
                         .map_err(legal_error)?;

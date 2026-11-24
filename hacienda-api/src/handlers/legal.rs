@@ -174,6 +174,8 @@ pub struct LegalMonitorRequestDto {
     pub frequency: String,
     /// Optional processor: `lite`, `base`, or `core`.
     pub processor: Option<String>,
+    /// Required stable key (1–128 safe characters) for retrying after a lost response.
+    pub idempotency_key: String,
 }
 fn default_monitor_frequency() -> String {
     "1d".to_owned()
@@ -226,6 +228,16 @@ fn provider_error(error: hacienda_legal::LegalError) -> ApiError {
         E::InvalidCursor => ApiError::invalid_request(
             "Invalid `cursor`; reuse the next_cursor value returned by the previous page.",
         ),
+        E::InvalidIdempotencyKey => ApiError::invalid_request(
+            "Invalid `idempotency_key`; use 1–128 ASCII letters, digits, hyphens, or underscores.",
+        ),
+        E::IdempotencyKeyConflict => ApiError::invalid_request(
+            "This `idempotency_key` was already used for a different active monitor request.",
+        ),
+        E::IdempotencyLookupLimit => {
+            tracing::warn!("legal monitor idempotency lookup reached its pagination limit");
+            ApiError::internal()
+        }
         E::ResultUnavailable => {
             tracing::warn!("completed legal research output is temporarily unavailable");
             ApiError::internal()
@@ -353,6 +365,7 @@ pub async fn create_monitor(
                 query: request.query,
                 frequency: request.frequency,
                 processor: request.processor,
+                idempotency_key: request.idempotency_key,
             },
             &tenant_scope(&parts),
         )

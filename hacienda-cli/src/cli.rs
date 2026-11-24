@@ -241,7 +241,7 @@ pub enum McpCommand {
     "  hacienda legal fetch --source de https://www.gesetze-im-internet.de/bdsg_2018/\n",
     "  hacienda legal deep-research submit --source eu 'AI Act high-risk obligations'\n",
     "  hacienda legal deep-research status <run-id> --format json\n",
-    "  hacienda legal monitor create --source fr --frequency 1d 'DPIA guidance'\n",
+    "  hacienda legal monitor create --source fr --frequency 1d --idempotency-key case-123 'DPIA guidance'\n",
     "  hacienda legal monitor events <monitor-id> --format json\n",
     "  hacienda legal mcp --source nl\n",
 ))]
@@ -353,6 +353,10 @@ pub struct LegalMonitorCreateArgs {
     /// Optional provider processor name. Omit to use the provider default.
     #[arg(long, value_name = "PROCESSOR")]
     pub processor: Option<String>,
+
+    /// Stable key to safely retry monitor creation after a lost response.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: String,
 
     /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
     #[arg(long, value_enum, default_value_t = Format::Text)]
