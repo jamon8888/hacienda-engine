@@ -3765,6 +3765,7 @@ dependencies = [
  "hacienda-client-core",
  "hacienda-core",
  "hacienda-email",
+ "hacienda-legal",
  "hacienda-rag",
  "serde",
  "serde_json",
@@ -3812,6 +3813,7 @@ dependencies = [
  "hacienda-api",
  "hacienda-core",
  "hacienda-email",
+ "hacienda-legal",
  "hacienda-mcp",
  "hacienda-rag",
  "num_cpus",
@@ -3916,6 +3918,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hacienda-legal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.13.5",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "hacienda-mcp"
 version = "0.1.0"
 dependencies = [
@@ -3923,6 +3939,7 @@ dependencies = [
  "hacienda",
  "hacienda-core",
  "hacienda-email",
+ "hacienda-legal",
  "rmcp",
  "serde",
  "serde_json",

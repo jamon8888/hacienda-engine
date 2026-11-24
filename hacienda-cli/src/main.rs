@@ -62,6 +62,7 @@ fn main() -> std::process::ExitCode {
                     commands::run_mcp_serve(cli.config, cli.config_json).await
                 }
             },
+            Command::Legal(args) => commands::run_legal(args).await,
             Command::Review { command } => match command {
                 cli::ReviewCommand::List(args) => commands::run_review_list(args).await,
                 cli::ReviewCommand::Show(args) => commands::run_review_show(args).await,

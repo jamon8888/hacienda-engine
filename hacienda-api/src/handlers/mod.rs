@@ -18,6 +18,7 @@ pub mod graph_retrieve;
 pub mod info;
 pub mod jobs;
 pub mod keys;
+pub mod legal;
 pub mod openapi;
 pub mod pii;
 pub mod presets;

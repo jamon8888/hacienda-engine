@@ -20,6 +20,7 @@ futures = { workspace = true }
 hacienda-client-core = { path = "../crates/hacienda-client-core" }
 hacienda-core = { path = "../hacienda-core", features = ["jobs", "postgres", "s3", "ner-candle"] }
 hacienda-email = { path = "../crates/hacienda-email", features = ["imap", "maildir", "rustls-ring", "attachments", "rag"] }
+hacienda-legal = { path = "../crates/hacienda-legal" }
 # `streaming` is always on here (unlike `rag-embeddings` below): it pulls
 # `liter-llm`'s `native-http` (reqwest/rustls) and `futures`, both already
 # resolved elsewhere in this workspace's graph (reqwest via the S3 presign
