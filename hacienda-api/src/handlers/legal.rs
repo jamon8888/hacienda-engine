@@ -9,6 +9,7 @@ use hacienda_legal::{
     LegalSearchRequest, LegalSource,
 };
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use utoipa::ToSchema;
 
 use crate::error::ApiError;

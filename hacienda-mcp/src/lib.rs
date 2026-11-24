@@ -92,7 +92,7 @@
 
 mod params;
 
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};

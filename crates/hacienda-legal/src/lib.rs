@@ -9,6 +9,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    str::FromStr,
     sync::{Mutex, OnceLock},
     time::Duration,
 };
@@ -68,8 +69,12 @@ impl LegalSource {
             Self::Normattiva => "normattiva",
         }
     }
+}
 
-    pub fn from_str(value: &str) -> Result<Self, LegalError> {
+impl FromStr for LegalSource {
+    type Err = LegalError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.to_ascii_lowercase().as_str() {
             "eurlex" | "eur-lex" | "eu" => Ok(Self::Eurlex),
             "legifrance" | "fr" => Ok(Self::Legifrance),
