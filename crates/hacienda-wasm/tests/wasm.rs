@@ -111,7 +111,7 @@ async fn redaction_round_trip_has_a_real_clock_and_uuid_on_wasm32() {
 #[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
 #[wasm_bindgen_test]
 fn from_candle_bytes_rejects_garbage_input_on_wasm32() {
-    let result = NerDetector::from_candle_bytes(&[], &[], &[]);
+    let result = NerDetector::from_candle_bytes(&[], &[], &[], None);
     assert!(
         result.is_err(),
         "empty/garbage model bytes must fail to load, not silently produce a usable detector"

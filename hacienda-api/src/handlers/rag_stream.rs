@@ -47,8 +47,8 @@ use hacienda_core::{
     HaciendaError, HaciendaFacade,
 };
 use hacienda_rag::{
-    AnswerEvent, EgressRole, GuardedLlm, LlmAnswerConfig, LlmEgressAuditor, LlmEgressEvent,
-    RagError, RagResult, Redactor, RetrievedContext,
+    AnswerEvent, EgressRole, GraphContext, GuardedLlm, LlmAnswerConfig, LlmEgressAuditor,
+    LlmEgressEvent, RagError, RagResult, Redactor, RetrievedChunk, RetrievedContext,
 };
 
 use crate::{
@@ -56,7 +56,13 @@ use crate::{
     error::ApiError,
     extract::Json as SafeJson,
     handlers::{
-        caller_from_arc, extract_auth_context, rag::require_store, rag::scope_collection_name,
+        caller_from_arc, extract_auth_context,
+        graph::require_graph_store,
+        rag::require_store,
+        rag::{
+            enforce_post_retrieval_tenant, merge_with_tenant_filter, scope_collection_name,
+            tenant_authorization_filter, validate_collection_name,
+        },
     },
     state::ApiState,
 };
@@ -200,6 +206,7 @@ pub async fn answer(
     let ctx = extract_auth_context(&parts);
     let caller = caller_from_arc(&ctx);
     let tenant_ctx = caller.tenant_ctx();
+    validate_collection_name(&name)?;
     let scoped_name = scope_collection_name(&tenant_ctx, &name);
 
     let store = require_store(&state)?;
@@ -211,22 +218,46 @@ pub async fn answer(
 
     // Answer synthesis has nothing to ground on without chunk text, regardless
     // of what the caller sent.
+    if let Some(graph_request) = body.graph.as_ref() {
+        graph_request.validate()?;
+    }
     body.retrieve.include_content = true;
+    body.retrieve.tenant_id = Some(tenant_ctx.tenant.as_str().to_owned());
+    body.retrieve.filter = merge_with_tenant_filter(
+        tenant_authorization_filter(&tenant_ctx),
+        body.retrieve.filter.take(),
+    );
     body.retrieve.validate(&spec).map_err(ApiError::from)?;
 
-    let output = store
+    let mut output = store
         .retrieve(&scoped_name, &body.retrieve)
         .await
         .map_err(ApiError::from)?;
+    enforce_post_retrieval_tenant(&tenant_ctx, &mut output.chunks);
 
     // Mandatory PII redaction gate: `GuardedLlm` (P6) redacts the prompt and every
     // chunk's content through `FacadeRedactor` before `answer_stream` — which performs
     // no redaction of its own — ever sees them. This is now enforced by `GuardedLlm`'s
     // own construction rather than by this handler remembering to call
     // `redact_text_with_auth` twice by hand before reaching `answer_stream` directly.
-    let context = RetrievedContext {
-        chunks: output.chunks,
-    };
+    let mut chunks = output.chunks;
+    if let Some(graph_request) = body.graph {
+        let graph_store = require_graph_store(&state)?;
+        let tenant = tenant_ctx.tenant.as_str();
+        let graph = graph_store
+            .neighborhood(
+                &scoped_name,
+                tenant,
+                &graph_request.entity_ids,
+                graph_request.hops,
+                graph_request.limit,
+                graph_request.min_confidence,
+            )
+            .await
+            .map_err(ApiError::from)?;
+        attach_evidence_backed_graph(&mut chunks, graph);
+    }
+    let context = RetrievedContext { chunks };
     let config = LlmAnswerConfig {
         llm: body.llm,
         system_prompt: body.system_prompt,
@@ -257,6 +288,67 @@ pub async fn answer(
     let events = stream.map(to_sse_event);
 
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+/// Add graph facts only to chunks retrieved and authorized by the vector path.
+/// Keeping facts in `RetrievedChunk.content` makes the existing PII redaction,
+/// citation, and egress-audit gates apply without a parallel prompt channel.
+fn attach_evidence_backed_graph(chunks: &mut [RetrievedChunk], graph: GraphContext) {
+    for chunk in chunks {
+        let Some(content) = chunk.content.as_mut() else {
+            continue;
+        };
+        let entities = graph
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.document_id == chunk.document_id
+                    && entity.chunk_id.as_ref().is_none_or(|id| id == &chunk.id)
+            })
+            .collect::<Vec<_>>();
+        let mut facts = Vec::new();
+        for entity in &entities {
+            facts.push(format!(
+                "entity {:?}: {}",
+                entity.label, entity.normalized_value
+            ));
+        }
+        for relation in &graph.relations {
+            let evidence = &relation.evidence;
+            if evidence.document_id != chunk.document_id
+                || evidence.chunk_id.as_ref().is_some_and(|id| id != &chunk.id)
+            {
+                continue;
+            }
+            let subject = graph.entities.iter().find(|e| e.id == relation.subject);
+            let object = graph.entities.iter().find(|e| e.id == relation.object);
+            if let (Some(subject), Some(object)) = (subject, object) {
+                if subject.document_id == chunk.document_id
+                    && object.document_id == chunk.document_id
+                    // Evidence must ground both endpoints in *this* chunk. An
+                    // endpoint from an unretrieved sibling chunk would otherwise
+                    // be presented as grounded in this source's header.
+                    && subject.chunk_id.as_ref().is_none_or(|id| id == &chunk.id)
+                    && object.chunk_id.as_ref().is_none_or(|id| id == &chunk.id)
+                {
+                    facts.push(format!(
+                        "relation: {} {:?} {}",
+                        subject.normalized_value, relation.predicate, object.normalized_value
+                    ));
+                }
+            }
+        }
+        facts.sort();
+        facts.dedup();
+        if !facts.is_empty() {
+            content.push_str("\n\n[Graph context grounded in this source]\n");
+            for fact in facts {
+                content.push_str("- ");
+                content.push_str(&fact);
+                content.push('\n');
+            }
+        }
+    }
 }
 
 /// Map one `hacienda_rag::stream` event to an outgoing SSE [`Event`].
@@ -300,7 +392,7 @@ fn to_sse_event(item: RagResult<AnswerEvent>) -> Result<Event, Infallible> {
 mod tests {
     use super::*;
     use hacienda_core::{pii::PipelineConfig, HaciendaConfig};
-    use hacienda_rag::EgressPart;
+    use hacienda_rag::{EgressPart, EntityId, GraphEntity};
 
     /// A witness value that must never reach the audit chain in plain text —
     /// deliberately unlike anything else in the codebase (same discipline as
@@ -394,5 +486,190 @@ mod tests {
             .verify_audit()
             .await
             .expect("the chain still verifies");
+    }
+
+    fn chunk(doc: &str, id: &str) -> RetrievedChunk {
+        RetrievedChunk {
+            id: hacienda_rag::ChunkId(id.to_owned()),
+            document_id: hacienda_rag::DocumentId(doc.to_owned()),
+            ordinal: 0,
+            external_id: None,
+            content: Some("original chunk text".to_owned()),
+            score: 1.0,
+            primary_score: hacienda_rag::PrimaryScore::Vector { score: 1.0 },
+            chunk_metadata: serde_json::Value::Null,
+            document: None,
+            tenant_id: None,
+            acl: None,
+        }
+    }
+
+    fn entity(id: &str, doc: &str, chunk_id: Option<&str>) -> GraphEntity {
+        GraphEntity {
+            id: EntityId(id.to_owned()),
+            label: hacienda_rag::EntityLabel::Organization,
+            normalized_value: format!("entity-{id}"),
+            document_id: hacienda_rag::DocumentId(doc.to_owned()),
+            tenant_id: None,
+            chunk_id: chunk_id.map(|id| hacienda_rag::ChunkId(id.to_owned())),
+            start: 0,
+            end: 4,
+            confidence: 0.99,
+            model_version: "test".to_owned(),
+            properties: serde_json::Value::Null,
+        }
+    }
+
+    /// Facts must land only on the retrieved chunk whose (document, chunk)
+    /// evidence matches — a same-document sibling chunk or another document
+    /// must stay untouched even when it was retrieved in the same request.
+    #[test]
+    fn attach_evidence_backed_graph_uses_document_and_chunk_evidence() {
+        let mut chunks = vec![
+            chunk("doc-1", "c0"),
+            chunk("doc-1", "c1"),
+            chunk("doc-2", "c0"),
+        ];
+        let graph = GraphContext {
+            entities: vec![
+                entity("e0", "doc-1", Some("c0")),
+                entity("e1", "doc-2", Some("c0")),
+            ],
+            relations: Vec::new(),
+        };
+
+        attach_evidence_backed_graph(&mut chunks, graph);
+
+        assert!(chunks[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("[Graph context"));
+        assert!(chunks[0].content.as_deref().unwrap().contains("entity-e0"));
+        assert!(!chunks[1]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("[Graph context"));
+        assert!(chunks[2]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("[Graph context"));
+        assert!(chunks[2].content.as_deref().unwrap().contains("entity-e1"));
+    }
+
+    /// A relation whose evidence points at a different chunk of the same
+    /// document must not be attached to the current chunk.
+    #[test]
+    fn attach_evidence_backed_graph_rejects_mismatched_relation_evidence() {
+        let mut chunks = vec![chunk("doc-1", "c0")];
+        let relation = hacienda_rag::GraphRelation {
+            subject: EntityId("e0".to_owned()),
+            predicate: hacienda_rag::RelationType::References,
+            object: EntityId("e1".to_owned()),
+            evidence: hacienda_rag::EvidenceSpan {
+                document_id: hacienda_rag::DocumentId("doc-1".to_owned()),
+                chunk_id: Some(hacienda_rag::ChunkId("c1".to_owned())),
+                start: 0,
+                end: 4,
+                text_hash: "hash".to_owned(),
+            },
+            confidence: 0.95,
+            ontology_version: "test-v1".to_owned(),
+            tenant_id: None,
+        };
+        let graph = GraphContext {
+            entities: vec![
+                entity("e0", "doc-1", Some("c0")),
+                entity("e1", "doc-1", Some("c1")),
+            ],
+            relations: vec![relation],
+        };
+
+        attach_evidence_backed_graph(&mut chunks, graph);
+
+        let content = chunks[0].content.as_deref().unwrap();
+        assert!(
+            content.contains("entity-e0"),
+            "matching entity should attach"
+        );
+        assert!(
+            !content.contains("relation:"),
+            "relation with mismatched evidence must not attach: {content}"
+        );
+    }
+
+    /// Relation evidence in the current chunk does not make an endpoint from a
+    /// different chunk grounded: the object's value must not be shown here.
+    #[test]
+    fn attach_evidence_backed_graph_requires_both_endpoints_in_chunk() {
+        let mut chunks = vec![chunk("doc-1", "c0")];
+        let relation = hacienda_rag::GraphRelation {
+            subject: EntityId("e0".to_owned()),
+            predicate: hacienda_rag::RelationType::References,
+            object: EntityId("e1".to_owned()),
+            evidence: hacienda_rag::EvidenceSpan {
+                document_id: hacienda_rag::DocumentId("doc-1".to_owned()),
+                chunk_id: Some(hacienda_rag::ChunkId("c0".to_owned())),
+                start: 0,
+                end: 4,
+                text_hash: "hash".to_owned(),
+            },
+            confidence: 0.95,
+            ontology_version: "test-v1".to_owned(),
+            tenant_id: None,
+        };
+        let graph = GraphContext {
+            entities: vec![
+                entity("e0", "doc-1", Some("c0")),
+                entity("e1", "doc-1", Some("c1")),
+            ],
+            relations: vec![relation],
+        };
+
+        attach_evidence_backed_graph(&mut chunks, graph);
+
+        let content = chunks[0].content.as_deref().unwrap();
+        assert!(content.contains("entity-e0"));
+        assert!(
+            !content.contains("relation:"),
+            "an endpoint in c1 must not be shown as c0 evidence: {content}"
+        );
+    }
+
+    #[test]
+    fn answer_graph_request_validates_bounds() {
+        use crate::dto::AnswerGraphRequest;
+
+        let valid = || AnswerGraphRequest {
+            entity_ids: vec![EntityId("e".to_owned())],
+            hops: 1,
+            limit: 30,
+            min_confidence: 0.9,
+        };
+        assert!(valid().validate().is_ok());
+
+        let mut empty = valid();
+        empty.entity_ids.clear();
+        assert!(empty.validate().is_err());
+
+        let mut oversized = valid();
+        oversized.limit = 501;
+        assert!(oversized.validate().is_err());
+
+        let mut too_many_ids = valid();
+        too_many_ids.entity_ids = (0..=hacienda_rag::MAX_ENTITY_IDS)
+            .map(|i| EntityId(format!("e-{i}")))
+            .collect();
+        assert!(too_many_ids.validate().is_err());
+
+        let mut too_many_hops = valid();
+        too_many_hops.hops = 3;
+        assert!(too_many_hops.validate().is_err());
+
+        let mut nan = valid();
+        nan.min_confidence = f32::NAN;
+        assert!(nan.validate().is_err());
     }
 }

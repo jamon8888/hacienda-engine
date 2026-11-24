@@ -24,8 +24,9 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, capabilities, claude_messages, documents, email, info, jobs,
-        keys, openapi, pii, presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
+        audit, audit_review, auth, capabilities, claude_messages, documents, email, graph,
+        graph_retrieve, info, jobs, keys, openapi, pii, presets, rag, rag_stream, uploads, usage,
+        versions, xberg_surface,
     },
     quota::quota_middleware,
     state::ApiState,
@@ -373,6 +374,24 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/rag/collections/{name}/retrieve",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || post(rag::retrieve),
+    },
+    // GraphRAG: bounded, tenant-scoped graph context on top of the same
+    // redaction/capability gates as the vector routes. These return 400 when
+    // `ApiState` has no graph store attached.
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/graph/neighborhood",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(graph::neighborhood),
+    },
+    RouteSpec {
+        path: "/v1/rag/collections/{name}/graph/retrieve",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(graph_retrieve::retrieve),
+    },
+    RouteSpec {
+        path: "/v1/rag/graph/health",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(graph::health),
     },
     RouteSpec {
         path: "/v1/rag/collections/{name}/migrate-embeddings",

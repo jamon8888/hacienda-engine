@@ -43,6 +43,7 @@ pub mod chunk;
 pub mod embedding;
 pub mod error;
 pub mod filter;
+pub mod graph;
 pub mod query;
 mod scoring;
 pub mod store;
@@ -53,6 +54,8 @@ pub mod types;
 #[cfg(feature = "lancedb")]
 pub use backends::lancedb::LanceDbStore;
 pub use backends::memory::InMemoryVectorStore;
+#[cfg(feature = "sqlite-graph")]
+pub use backends::sqlite_graph::SqliteGraphStore;
 pub use capability::Capabilities;
 #[cfg(feature = "chunking")]
 pub use chunk::chunk_full_text;
@@ -64,6 +67,13 @@ pub use embedding::{
 pub use embedding::{XbergTextEmbedder, XbergTokenEmbedder};
 pub use error::{ComplexityKind, RagError, RagResult};
 pub use filter::{Filter, FilterField, FilterNamespace};
+pub use graph::{
+    retrieve_with_graph, validate_graph_bounds, EntityId, EntityLabel, EvidenceSpan,
+    GraphBoundsError, GraphContext, GraphEntity, GraphHealth, GraphRagOutput, GraphRagQuery,
+    GraphRelation, GraphStore, InMemoryGraphStore, RelationType, DEFAULT_GRAPH_LIMIT,
+    DEFAULT_GRAPH_MIN_CONFIDENCE, DEFAULT_HOPS, MAX_ENTITY_IDS, MAX_GRAPH_LIMIT, MAX_HOPS,
+    MIN_GRAPH_LIMIT, MIN_HOPS,
+};
 pub use query::{RetrieveMode, RetrieveOutput, RetrieveQuery};
 pub use store::RagStore;
 #[cfg(feature = "streaming")]

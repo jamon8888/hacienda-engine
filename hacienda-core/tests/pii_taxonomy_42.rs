@@ -46,7 +46,7 @@ fn should_map_all_42_privacy_filter_labels_to_pii_category() {
             "sensitive_account_id",
             PiiCategory::Custom("sensitive_account_id".into()),
         ),
-        ("recovery_code", PiiCategory::Custom("recovery_code".into())),
+        ("recovery_code", PiiCategory::SecretToken),
         (
             "sensitive_date",
             PiiCategory::Custom("sensitive_date".into()),

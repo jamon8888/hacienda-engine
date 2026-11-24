@@ -137,6 +137,17 @@ impl NerDetector {
     ///
     /// Entities without a confidence score are kept: a backend that does not report
     /// confidence should not be silently filtered to nothing.
+    ///
+    /// # Candle GLiNER threshold floor
+    ///
+    /// `xberg::text::ner::candle::CandleBackend::detect` hard-codes an internal
+    /// threshold of `0.5` before `NerDetector`'s own filter runs. Consequently
+    /// `with_threshold` can only ever *raise* the effective threshold above `0.5`;
+    /// it can never lower it. Entities the Candle backend scores below `0.5` are
+    /// invisible at any configured threshold, so every recall figure measured
+    /// through this detector is *truncated recall at 0.5*, not recall. This is an
+    /// upstream xberg limitation, not something this crate can work around without
+    /// patching `CandleBackend::detect`.
     pub fn with_threshold(mut self, threshold: f32) -> Self {
         self.threshold = threshold;
         self
@@ -153,25 +164,96 @@ impl NerDetector {
     /// Backends are cached process-wide by `(model_dir, lora_adapter_dir)`, so the
     /// model-load and adapter-merge cost is paid once per pair rather than per document.
     ///
-    /// The resulting detector reports `runtime_ready = true` with no model id: a
-    /// privately fine-tuned/unpinned model is still model-backed even though there
-    /// is no registry identity to report.
+    /// When `expected_weights_hash` is `Some`, the blake3 digest is checked against
+    /// the exact bytes handed to Candle, and the backend is built from those same
+    /// bytes via the uncached in-memory loader. A mismatch aborts with
+    /// [`PiiError::Ner`] so a tampered or corrupted model can never be executed.
+    /// That path intentionally rejects a LoRA adapter: merged adapter bytes cannot
+    /// be bound to the base-weights digest, so verification must fail closed.
+    ///
+    /// Without a hash, the resulting detector reports `runtime_ready = true` with
+    /// no model id: a privately fine-tuned/unpinned model is still model-backed
+    /// even though there is no registry identity to report.
     ///
     /// # Errors
     ///
-    /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded.
+    /// Returns [`PiiError::Ner`] if the model or adapter cannot be loaded, or if
+    /// `expected_weights_hash` is set and the weights digest does not match.
     #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
     pub fn from_candle_local(
         model_dir: &std::path::Path,
         lora_adapter_dir: Option<&std::path::Path>,
+        expected_weights_hash: Option<&str>,
     ) -> Result<Self, PiiError> {
-        let backend =
+        let backend = if let Some(expected) = expected_weights_hash {
+            if lora_adapter_dir.is_some() {
+                return Err(PiiError::Ner {
+                    message: "weights-hash verification does not support LoRA adapters".into(),
+                    source: Box::new(xberg::XbergError::Io(std::io::Error::other(
+                        "unverified adapter bytes",
+                    ))),
+                });
+            }
+            Self::load_hashed_backend(model_dir, expected)?
+        } else {
             xberg::text::ner::candle::CandleBackend::get_or_init(model_dir, lora_adapter_dir)
                 .map_err(|source| PiiError::Ner {
                     message: format!("loading Candle GLiNER2 from {}", model_dir.display()),
                     source: Box::new(source),
-                })?;
+                })?
+        };
         Ok(Self::with_runtime(backend, NerRuntimeState::loaded(None)))
+    }
+
+    /// Read the model files once, verify the weights digest, then build the backend
+    /// from those very bytes. The path-keyed process cache is deliberately bypassed:
+    /// it could otherwise return an earlier backend built from different weights.
+    #[cfg(all(feature = "ner-candle", not(target_arch = "wasm32")))]
+    fn load_hashed_backend(
+        model_dir: &std::path::Path,
+        expected: &str,
+    ) -> Result<Arc<dyn NerBackend>, PiiError> {
+        let read = |relative: &std::path::Path| {
+            let path = model_dir.join(relative);
+            std::fs::read(&path).map_err(|source| PiiError::Ner {
+                message: format!("reading model asset from {}", path.display()),
+                source: Box::new(xberg::XbergError::Io(source)),
+            })
+        };
+        let weights = read(std::path::Path::new("model.safetensors"))?;
+        let digest = blake3::hash(&weights).to_hex().to_string();
+        if digest != expected {
+            return Err(PiiError::Ner {
+                message: format!(
+                    "model weights integrity check failed: expected {}, got {}",
+                    expected, digest
+                ),
+                source: Box::new(xberg::XbergError::Io(std::io::Error::other(
+                    "weights hash mismatch",
+                ))),
+            });
+        }
+        let tokenizer = read(std::path::Path::new("tokenizer.json"))?;
+        let nested_config = std::path::Path::new("encoder_config").join("config.json");
+        let config_path = if model_dir.join(&nested_config).exists() {
+            nested_config
+        } else {
+            std::path::Path::new("config.json").into()
+        };
+        let encoder_config = read(&config_path)?;
+        let backend = xberg::text::ner::candle::CandleBackend::from_bytes(
+            &weights,
+            &tokenizer,
+            &encoder_config,
+        )
+        .map_err(|source| PiiError::Ner {
+            message: format!(
+                "loading verified Candle GLiNER2 from {}",
+                model_dir.display()
+            ),
+            source: Box::new(source),
+        })?;
+        Ok(Arc::new(backend) as Arc<dyn NerBackend>)
     }
 
     /// Load a pinned GLiNER2 model, verifying the local directory against the
@@ -230,13 +312,29 @@ impl NerDetector {
     ///
     /// # Errors
     ///
-    /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded.
+    /// Returns [`PiiError::Ner`] if the model bytes cannot be loaded, or if
+    /// `expected_weights_hash` is set and the weights digest does not match.
     #[cfg(all(target_arch = "wasm32", feature = "ner-candle-wasm"))]
     pub fn from_candle_bytes(
         weights: &[u8],
         tokenizer_json: &[u8],
         encoder_config_json: &[u8],
+        expected_weights_hash: Option<&str>,
     ) -> Result<Self, PiiError> {
+        if let Some(expected) = expected_weights_hash {
+            let digest = blake3::hash(weights).to_hex().to_string();
+            if digest != expected {
+                return Err(PiiError::Ner {
+                    message: format!(
+                        "model weights integrity check failed: expected {}, got {}",
+                        expected, digest
+                    ),
+                    source: Box::new(xberg::XbergError::Io(std::io::Error::other(
+                        "weights hash mismatch",
+                    ))),
+                });
+            }
+        }
         let backend = xberg::text::ner::candle::CandleBackend::from_bytes(
             weights,
             tokenizer_json,
@@ -355,7 +453,7 @@ pub fn to_pii_category(category: &EntityCategory) -> PiiCategory {
             "password" => PiiCategory::Password,
             "secret" => PiiCategory::SecretToken,
             "api_key" => PiiCategory::ApiKey,
-            "access_token" => PiiCategory::SecretToken,
+            "access_token" | "recovery_code" => PiiCategory::SecretToken,
             "url" => PiiCategory::Url,
             _ => PiiCategory::Custom(label.clone()),
         },

@@ -938,7 +938,7 @@ mod runner {
             }
             let (categories, label_set) = categories_for_fixture(fixture_name);
 
-            let detector = NerDetector::from_candle_local(&model_dir, None)
+            let detector = NerDetector::from_candle_local(&model_dir, None, None)
                 .expect("loading the Candle GLiNER2 backend from HACIENDA_EVAL_MODEL_DIR")
                 .with_categories(categories.clone())
                 .with_threshold(default_threshold);
@@ -976,7 +976,7 @@ mod runner {
                 threshold_sweep_values()
             };
             for threshold in thresholds {
-                let swept = NerDetector::from_candle_local(&model_dir, None)
+                let swept = NerDetector::from_candle_local(&model_dir, None, None)
                     .expect("loading the Candle GLiNER2 backend from HACIENDA_EVAL_MODEL_DIR")
                     .with_categories(categories.clone())
                     .with_threshold(threshold);

@@ -1302,6 +1302,10 @@ pub struct MigrateStatusResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AnswerRequest {
+    /// Optional GraphRAG expansion over the authorized retrieval result. Bound
+    /// checked before any graph store access; absent means vector-only answers.
+    #[serde(default)]
+    pub graph: Option<AnswerGraphRequest>,
     /// The question sent to the LLM. Redacted for PII before it leaves this
     /// process — see `handlers::rag_stream::answer`'s module doc.
     pub prompt: String,
@@ -1317,6 +1321,36 @@ pub struct AnswerRequest {
     /// `hacienda_rag::LlmAnswerConfig::system_prompt`.
     #[serde(default)]
     pub system_prompt: Option<String>,
+}
+
+/// Bounded graph expansion requested alongside a streaming answer.
+///
+/// Entity ids are caller-supplied seeds; the handler always scopes them to the
+/// authenticated tenant before touching a graph store. All four bounds are
+/// validated before the store is consulted so a large request cannot force an
+/// unbounded traversal.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerGraphRequest {
+    #[schema(value_type = Vec<String>)]
+    pub entity_ids: Vec<hacienda_rag::EntityId>,
+    pub hops: u8,
+    pub limit: usize,
+    pub min_confidence: f32,
+}
+
+impl AnswerGraphRequest {
+    /// Validate graph bounds with the graph contract's shared limits. The
+    /// error names the rejected field, its value and the accepted range.
+    pub fn validate(&self) -> Result<(), crate::error::ApiError> {
+        hacienda_rag::validate_graph_bounds(
+            self.entity_ids.len(),
+            self.hops,
+            self.limit,
+            self.min_confidence,
+        )
+        .map_err(|error| crate::error::ApiError::invalid_request(error.to_string()))
+    }
 }
 
 // ── Presets (`/v1/presets/*`) ────────────────────────────────────────────────

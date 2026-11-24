@@ -13,6 +13,8 @@ pub mod capabilities;
 pub mod claude_messages;
 pub mod documents;
 pub mod email;
+pub mod graph;
+pub mod graph_retrieve;
 pub mod info;
 pub mod jobs;
 pub mod keys;
