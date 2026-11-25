@@ -64,3 +64,6 @@ rag-embeddings = ["hacienda-core/rag-embeddings", "hacienda-rag/embeddings"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# The real loopback HTTP test binds a TCP listener and speaks HTTP/1.1 over a
+# raw socket; no HTTP client dependency is needed.
+tokio = { workspace = true, features = ["net", "io-util"] }

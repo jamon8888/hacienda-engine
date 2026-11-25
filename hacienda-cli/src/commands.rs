@@ -26,7 +26,10 @@ use hacienda::review::{
     ReviewStore as _,
 };
 use hacienda::{HaciendaConfig, HaciendaError, HaciendaFacade, HaciendaResult};
-use hacienda_api::{AnthropicMessagesProvider, ApiLimits, ApiState, ClaudeMessagesProvider};
+use hacienda_api::{
+    AnthropicMessagesProvider, ApiLimits, ApiState, ClaudeMessagesProvider,
+    CodexResponsesHttpClientProvider,
+};
 use hacienda_core::auth::authn::AuthConfig;
 use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
@@ -39,7 +42,7 @@ use hacienda_legal::{
     LegalTaskRunResponse,
 };
 use hacienda_rag::{InMemoryGraphStore, InMemoryVectorStore};
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,6 +53,24 @@ const ANTHROPIC_MESSAGES_API_KEY_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_API_KE
 const ANTHROPIC_MESSAGES_ENDPOINT_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_ENDPOINT";
 const DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const RAG_LLM_BASE_URL_ENV: &str = "HACIENDA_RAG_LLM_BASE_URL";
+/// Local gateway bearer secret. Codex sends it in `X-Hacienda-Gateway-Token`;
+/// `Authorization` is reserved for the user's ChatGPT credential and is
+/// forwarded to the official upstream by the gateway.
+const LOCAL_GATEWAY_SECRET_ENV: &str = "HACIENDA_GATEWAY_TOKEN";
+
+/// The local gateway secret must exist when the Codex surface is enabled and
+/// be long enough to be a real secret. No inference credential is configured
+/// server-side any more. Pure function so startup validation is testable.
+fn validate_local_gateway_secret(secret: Option<&str>, required: bool) -> Result<()> {
+    match secret {
+        Some(secret) if secret.len() >= 16 => Ok(()),
+        Some(_) => anyhow::bail!("{LOCAL_GATEWAY_SECRET_ENV} must be at least 16 characters long"),
+        None if required => anyhow::bail!(
+            "{LOCAL_GATEWAY_SECRET_ENV} must be set when the Codex gateway or viewer is enabled"
+        ),
+        None => Ok(()),
+    }
+}
 const LEGAL_RESEARCH_ENABLED_ENV: &str = "HACIENDA_LEGAL_RESEARCH_ENABLED";
 
 fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
@@ -1641,6 +1662,32 @@ pub fn run_completions(args: CompletionsArgs) -> Result<()> {
 /// who has actually replaced the placeholder.
 const PLACEHOLDER_STATIC_TOKEN: &str = "replace-me-before-deploying";
 
+/// Local-only gateway surfaces may never be reachable from the network even
+/// when a valid bearer token exists. The Codex responses gateway and its viewer
+/// carry local-only rehydration values; the Claude Mod surface carries
+/// `pii:reveal`-equivalent mappings. Both are stricter than `check_bind_policy`,
+/// which permits a non-loopback bind with authentication enabled.
+///
+/// The Mod routes are mounted unconditionally, so this surface is always on:
+/// a remote caller holding an ordinary `documents:process` bearer could
+/// otherwise bootstrap a capability and receive vaulted originals. Locality is
+/// additionally enforced per request from the actual TCP peer in the handlers;
+/// this bind check is the defense-in-depth layer that keeps the socket local.
+fn check_loopback_bind_for_local_surfaces(
+    bind: SocketAddr,
+    codex_surface_enabled: bool,
+    claude_surface_enabled: bool,
+) -> Result<()> {
+    if (codex_surface_enabled || claude_surface_enabled) && !bind.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to bind {bind}: the Codex gateway/viewer and Claude Mod surface expose \\
+             local-only rehydration data and must stay on loopback. Use 127.0.0.1, localhost \\
+             or ::1."
+        );
+    }
+    Ok(())
+}
+
 fn check_bind_policy(bind: SocketAddr, auth: &AuthConfig) -> Result<()> {
     if bind.ip().is_loopback() {
         return Ok(());
@@ -1717,7 +1764,7 @@ pub async fn run_mcp_serve(
 /// Deliberately does not echo the provider key or its configuration: a missing key and
 /// a disabled add-on are different operator actions, but neither needs the secret itself
 /// in the terminal (or in a script's captured stderr).
-fn legal_error(error: LegalError) -> anyhow::Error {
+fn legal_error(error: &LegalError) -> anyhow::Error {
     match error {
         LegalError::Disabled => anyhow::anyhow!(
             "legal research is disabled; set {LEGAL_RESEARCH_ENABLED_ENV}=true to enable it"
@@ -1748,7 +1795,7 @@ fn legal_error(error: LegalError) -> anyhow::Error {
             "idempotency key was already used for a different active monitor request"
         ),
         LegalError::IdempotencyLookupLimit => anyhow::anyhow!(
-            "monitor retry lookup reached its page limit; retry later with the same idempotency key"
+            "monitor retry lookup reached its page limit before finding the existing monitor; retry later with the same idempotency key (the lookup may reach the limit again)"
         ),
         LegalError::ResultUnavailable => anyhow::anyhow!(
             "the run is completed but its brief is not available yet; retry shortly"
@@ -1773,6 +1820,22 @@ fn legal_error(error: LegalError) -> anyhow::Error {
     }
 }
 
+fn legal_error_with_cause(error: LegalError) -> anyhow::Error {
+    let guidance = legal_error(&error).to_string();
+    anyhow::Error::new(error).context(guidance)
+}
+
+fn legal_output_error(
+    error: impl Into<anyhow::Error>,
+    operation: &str,
+    identifier: &str,
+    recovery: &str,
+) -> anyhow::Error {
+    error.into().context(format!(
+        "legal {operation} completed, but writing its response for {identifier} to stdout failed; {recovery}"
+    ))
+}
+
 /// The CLI's `LegalSourceArg` mirror converted to the provider crate's type. The match is
 /// exhaustive, so adding a source to the CLI surface is a compile error until the provider
 /// mapping is updated too — no stringly-typed round trip through `LegalSource::from_str`.
@@ -1793,85 +1856,106 @@ fn legal_source(arg: LegalSourceArg) -> LegalSource {
 /// the credential lookup; the CLI must not duplicate or relax either check, and has no
 /// flag that could carry a key.
 fn legal_client() -> Result<LegalResearchClient> {
-    LegalResearchClient::from_env().map_err(legal_error)
+    LegalResearchClient::from_env().map_err(legal_error_with_cause)
 }
 
-fn print_legal_search_text(response: &LegalSearchResponse) {
-    println!("source: {}", response.source.host());
-    println!("provider search id: {}", response.provider_search_id);
+fn print_legal_search_text(out: &mut impl Write, response: &LegalSearchResponse) -> io::Result<()> {
+    writeln!(out, "source: {}", response.source.host())?;
+    writeln!(out, "provider search id: {}", response.provider_search_id)?;
     if response.results.is_empty() {
-        println!("no results");
-        return;
+        writeln!(out, "no results")?;
+        return Ok(());
     }
     for (index, result) in response.results.iter().enumerate() {
-        println!("\n[{}] {}", index + 1, result.title);
-        println!("    url: {}", result.url);
+        writeln!(out, "\n[{}] {}", index + 1, result.title)?;
+        writeln!(out, "    url: {}", result.url)?;
         if let Some(published) = &result.published {
-            println!("    published: {published}");
+            writeln!(out, "    published: {published}")?;
         }
         for excerpt in &result.excerpts {
-            println!("    {excerpt}");
+            writeln!(out, "    {excerpt}")?;
         }
     }
+    Ok(())
 }
 
-fn print_legal_fetch_text(response: &LegalFetchResponse) {
-    println!("source: {}", response.source.host());
-    println!("url: {}", response.url);
+fn print_legal_fetch_text(out: &mut impl Write, response: &LegalFetchResponse) -> io::Result<()> {
+    writeln!(out, "source: {}", response.source.host())?;
+    writeln!(out, "url: {}", response.url)?;
     if let Some(content_type) = &response.content_type {
-        println!("content-type: {content_type}");
+        writeln!(out, "content-type: {content_type}")?;
     }
-    println!();
-    println!("{}", response.content);
+    writeln!(out)?;
+    writeln!(out, "{}", response.content)
 }
 
 /// Text rendering keeps the run id on stdout: that is the handle the caller needs for
 /// `deep-research status`/`result`, so it must never be folded into prose.
-fn print_legal_task_run(response: &LegalTaskRunResponse) {
-    println!("run_id: {}", response.run_id);
-    println!("source: {}", response.source.tool_prefix());
-    println!("status: {}", response.status);
+fn print_legal_task_run(out: &mut impl Write, response: &LegalTaskRunResponse) -> io::Result<()> {
+    writeln!(out, "run_id: {}", response.run_id)?;
+    writeln!(out, "source: {}", response.source.tool_prefix())?;
+    writeln!(out, "status: {}", response.status)
 }
 
 /// `output` is the provider's full brief, including its citation basis. It is printed
 /// verbatim as JSON rather than summarised: a human-friendly condensation would silently
 /// drop the source URLs that make the brief usable for legal work. JSON mode goes further
 /// and serialises the entire response untouched.
-fn print_legal_task_result(response: &LegalTaskResultResponse) {
-    println!("run_id: {}", response.run_id);
-    println!("source: {}", response.source.tool_prefix());
-    println!("status: {}", response.status);
+fn print_legal_task_result(
+    out: &mut impl Write,
+    response: &LegalTaskResultResponse,
+) -> io::Result<()> {
+    writeln!(out, "run_id: {}", response.run_id)?;
+    writeln!(out, "source: {}", response.source.tool_prefix())?;
+    writeln!(out, "status: {}", response.status)?;
     match &response.output {
         Some(output) => {
-            println!("output:");
-            println!(
+            writeln!(out, "output:")?;
+            writeln!(
+                out,
                 "{}",
                 serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
-            );
+            )?;
         }
-        None => println!("output: (not available yet)"),
+        None => writeln!(out, "output: (not available yet)")?,
     }
+    Ok(())
 }
 
-fn print_legal_monitor(response: &LegalMonitorResponse) {
-    println!("monitor_id: {}", response.monitor_id);
-    println!("source: {}", response.source.tool_prefix());
-    println!("status: {}", response.status);
+fn print_legal_monitor(out: &mut impl Write, response: &LegalMonitorResponse) -> io::Result<()> {
+    writeln!(out, "monitor_id: {}", response.monitor_id)?;
+    writeln!(out, "source: {}", response.source.tool_prefix())?;
+    writeln!(out, "status: {}", response.status)
 }
 
 /// Monitor events are provider JSON whose content includes the citation basis. Render it
 /// as-is for the same reason as `print_legal_task_result`.
-fn print_legal_monitor_events(response: &LegalMonitorEventsResponse) {
-    println!("monitor_id: {}", response.monitor_id);
-    println!("events:");
-    println!(
+fn print_legal_monitor_events(
+    out: &mut impl Write,
+    response: &LegalMonitorEventsResponse,
+) -> io::Result<()> {
+    writeln!(out, "monitor_id: {}", response.monitor_id)?;
+    writeln!(out, "events:")?;
+    writeln!(
+        out,
         "{}",
         serde_json::to_string_pretty(&response.events)
             .unwrap_or_else(|_| response.events.to_string())
-    );
+    )?;
     if let Some(cursor) = &response.next_cursor {
-        println!("next_cursor: {cursor}");
+        writeln!(out, "next_cursor: {cursor}")?;
     }
+    Ok(())
+}
+
+fn write_legal_json(out: &mut impl Write, value: &impl serde::Serialize) -> Result<()> {
+    writeln!(out, "{}", serde_json::to_string_pretty(value)?)?;
+    Ok(())
+}
+
+fn flush_legal_stdout(out: &mut impl Write) -> Result<()> {
+    out.flush()
+        .context("flushing legal command output to stdout")
 }
 
 /// Run `hacienda legal ...` — optional research over public legal sources.
@@ -1895,11 +1979,36 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                     max_results,
                 })
                 .await
-                .map_err(legal_error)?;
+                .map_err(legal_error_with_cause)?;
+            let mut stdout = io::stdout().lock();
             match format {
-                Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                Format::Text => print_legal_search_text(&response),
+                Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                    legal_output_error(
+                        error,
+                        "search",
+                        &format!("search {}", response.provider_search_id),
+                        "retry the search if you still need its result",
+                    )
+                })?,
+                Format::Text => {
+                    print_legal_search_text(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "search",
+                            &format!("search {}", response.provider_search_id),
+                            "retry the search if you still need its result",
+                        )
+                    })?
+                }
             }
+            flush_legal_stdout(&mut stdout).map_err(|error| {
+                legal_output_error(
+                    error,
+                    "search",
+                    &format!("search {}", response.provider_search_id),
+                    "retry the search if you still need its result",
+                )
+            })?;
             Ok(())
         }
         LegalCommand::Fetch(LegalFetchArgs {
@@ -1908,14 +2017,48 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
             format,
         }) => {
             let source = legal_source(source);
+            // The source host is a safe URL identifier: it cannot include userinfo,
+            // query parameters, or caller-controlled path segments.
+            let url_identifier = format!("https://{}", source.host());
             let response = legal_client()?
                 .fetch(LegalFetchRequest { source, url })
                 .await
-                .map_err(legal_error)?;
+                .map_err(|error| {
+                    let guidance = legal_error(&error).to_string();
+                    anyhow::Error::new(error).context(format!(
+                        "{guidance}; fetch from selected source {} failed for URL {url_identifier}; select a supported text endpoint",
+                        source.tool_prefix()
+                    ))
+                })?;
+            let mut stdout = io::stdout().lock();
             match format {
-                Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                Format::Text => print_legal_fetch_text(&response),
+                Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                    legal_output_error(
+                        error,
+                        "fetch",
+                        &url_identifier,
+                        "retry the fetch for this official source",
+                    )
+                })?,
+                Format::Text => {
+                    print_legal_fetch_text(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "fetch",
+                            &url_identifier,
+                            "retry the fetch for this official source",
+                        )
+                    })?
+                }
             }
+            flush_legal_stdout(&mut stdout).map_err(|error| {
+                legal_output_error(
+                    error,
+                    "fetch",
+                    &url_identifier,
+                    "retry the fetch for this official source",
+                )
+            })?;
             Ok(())
         }
         LegalCommand::DeepResearch(LegalDeepResearchArgs { command }) => match command {
@@ -1930,107 +2073,229 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                         query,
                     })
                     .await
-                    .map_err(legal_error)?;
+                    .map_err(legal_error_with_cause)?;
+                let mut stdout = io::stdout().lock();
+                let run_identifier = format!("run {}", response.run_id);
+                let recovery = "the provider accepted this run; use its run ID with `legal deep-research status` to recover the receipt";
                 match format {
-                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                    Format::Text => print_legal_task_run(&response),
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "deep-research submission",
+                            &run_identifier,
+                            recovery,
+                        )
+                    })?,
+                    Format::Text => {
+                        print_legal_task_run(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "deep-research submission",
+                                &run_identifier,
+                                recovery,
+                            )
+                        })?
+                    }
                 }
+                stdout.flush().map_err(|error| {
+                    legal_output_error(error, "deep-research submission", &run_identifier, recovery)
+                })?;
                 Ok(())
             }
             LegalDeepResearchCommand::Status(LegalTaskArgs { run_id, format }) => {
                 let response = legal_client()?
                     .deep_research_status(&run_id)
                     .await
-                    .map_err(legal_error)
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
                         format!("could not read legal task status for run {run_id}; verify the ID and retry")
                     })?;
+                let mut stdout = io::stdout().lock();
+                let run_identifier = format!("run {run_id}");
+                let recovery = format!("retry `legal deep-research status {run_id}`");
                 match format {
-                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                    Format::Text => print_legal_task_run(&response),
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "deep-research status",
+                            &run_identifier,
+                            &recovery,
+                        )
+                    })?,
+                    Format::Text => {
+                        print_legal_task_run(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "deep-research status",
+                                &run_identifier,
+                                &recovery,
+                            )
+                        })?
+                    }
                 }
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "deep-research status", &run_identifier, &recovery)
+                })?;
                 Ok(())
             }
             LegalDeepResearchCommand::Result(LegalTaskArgs { run_id, format }) => {
                 let response = legal_client()?
                     .deep_research_result(&run_id)
                     .await
-                    .map_err(legal_error)
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
                         format!("could not read legal task result for run {run_id}; poll its status and retry")
                     })?;
+                let mut stdout = io::stdout().lock();
+                let run_identifier = format!("run {run_id}");
+                let recovery = format!("retry `legal deep-research result {run_id}`");
                 match format {
-                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                    Format::Text => print_legal_task_result(&response),
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "deep-research result",
+                            &run_identifier,
+                            &recovery,
+                        )
+                    })?,
+                    Format::Text => {
+                        print_legal_task_result(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "deep-research result",
+                                &run_identifier,
+                                &recovery,
+                            )
+                        })?
+                    }
                 }
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "deep-research result", &run_identifier, &recovery)
+                })?;
                 Ok(())
             }
         },
-        LegalCommand::Monitor(LegalMonitorArgs { command }) => {
-            match command {
-                LegalMonitorCommand::Create(LegalMonitorCreateArgs {
-                    query,
-                    source,
-                    frequency,
-                    processor,
-                    idempotency_key,
-                    format,
-                }) => {
-                    let response = legal_client()?
-                        .create_monitor(LegalMonitorRequest {
-                            source: legal_source(source),
-                            query,
-                            frequency,
-                            processor,
-                            idempotency_key,
-                        })
-                        .await
-                        .map_err(legal_error)?;
-                    match format {
-                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                        Format::Text => print_legal_monitor(&response),
+        LegalCommand::Monitor(LegalMonitorArgs { command }) => match command {
+            LegalMonitorCommand::Create(LegalMonitorCreateArgs {
+                query,
+                source,
+                frequency,
+                processor,
+                idempotency_key,
+                format,
+            }) => {
+                let response = legal_client()?
+                    .create_monitor(LegalMonitorRequest {
+                        source: legal_source(source),
+                        query,
+                        frequency,
+                        processor,
+                        idempotency_key,
+                    })
+                    .await
+                    .map_err(legal_error_with_cause)?;
+                let mut stdout = io::stdout().lock();
+                let monitor_identifier = format!("monitor {}", response.monitor_id);
+                let recovery = "the provider accepted this monitor; use its monitor ID with `legal monitor events` to recover the receipt";
+                match format {
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(error, "monitor creation", &monitor_identifier, recovery)
+                    })?,
+                    Format::Text => {
+                        print_legal_monitor(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "monitor creation",
+                                &monitor_identifier,
+                                recovery,
+                            )
+                        })?
                     }
-                    Ok(())
                 }
-                LegalMonitorCommand::Events(LegalMonitorEventsArgs {
-                    monitor_id,
-                    cursor,
-                    include_completions,
-                    format,
-                }) => {
-                    let response = legal_client()?
+                stdout.flush().map_err(|error| {
+                    legal_output_error(error, "monitor creation", &monitor_identifier, recovery)
+                })?;
+                Ok(())
+            }
+            LegalMonitorCommand::Events(LegalMonitorEventsArgs {
+                monitor_id,
+                cursor,
+                include_completions,
+                format,
+            }) => {
+                let response = legal_client()?
                     .monitor_events_with_options(
                         &monitor_id,
                         cursor.as_deref(),
                         include_completions,
                     )
                     .await
-                    .map_err(legal_error)
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
                         format!("could not read legal monitor events for monitor {monitor_id}; verify the ID and retry")
                     })?;
-                    match format {
-                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                        Format::Text => print_legal_monitor_events(&response),
+                let mut stdout = io::stdout().lock();
+                let monitor_identifier = format!("monitor {monitor_id}");
+                let recovery = format!("retry `legal monitor events {monitor_id}`");
+                match format {
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(error, "monitor events", &monitor_identifier, &recovery)
+                    })?,
+                    Format::Text => {
+                        print_legal_monitor_events(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "monitor events",
+                                &monitor_identifier,
+                                &recovery,
+                            )
+                        })?
                     }
-                    Ok(())
                 }
-                LegalMonitorCommand::Cancel(LegalMonitorIdArgs { monitor_id, format }) => {
-                    let response = legal_client()?
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "monitor events", &monitor_identifier, &recovery)
+                })?;
+                Ok(())
+            }
+            LegalMonitorCommand::Cancel(LegalMonitorIdArgs { monitor_id, format }) => {
+                let response = legal_client()?
                     .cancel_monitor(&monitor_id)
                     .await
-                    .map_err(legal_error)
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
-                        format!("could not cancel legal monitor {monitor_id}; verify the ID and retry")
+                        format!(
+                            "could not cancel legal monitor {monitor_id}; verify the ID and retry"
+                        )
                     })?;
-                    match format {
-                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
-                        Format::Text => print_legal_monitor(&response),
+                let mut stdout = io::stdout().lock();
+                let monitor_identifier = format!("monitor {monitor_id}");
+                let recovery = "the provider cancellation succeeded; check monitor status before retrying the cancellation";
+                match format {
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "monitor cancellation",
+                            &monitor_identifier,
+                            recovery,
+                        )
+                    })?,
+                    Format::Text => {
+                        print_legal_monitor(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "monitor cancellation",
+                                &monitor_identifier,
+                                recovery,
+                            )
+                        })?
                     }
-                    Ok(())
                 }
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "monitor cancellation", &monitor_identifier, recovery)
+                })?;
+                Ok(())
             }
-        }
+        },
         LegalCommand::Mcp(LegalMcpArgs { source }) => run_legal_mcp(legal_source(source)),
     }
 }
@@ -2045,7 +2310,7 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
 /// that can only return errors for every tool call.
 fn run_legal_mcp(source: LegalSource) -> Result<()> {
     if std::env::var(LEGAL_RESEARCH_ENABLED_ENV).ok().as_deref() != Some("true") {
-        return Err(legal_error(LegalError::Disabled));
+        return Err(legal_error(&LegalError::Disabled));
     }
     let mut command = std::process::Command::new(legal_mcp_binary());
     command.env("HACIENDA_LEGAL_SOURCE", source.tool_prefix());
@@ -2097,14 +2362,34 @@ pub async fn run_serve(
 ) -> Result<()> {
     let config = load_config(config_path, config_json, None, None)?;
 
+    let claude_messages_provider = build_anthropic_messages_provider()?;
+    // No server-side inference credential: Codex sends its ChatGPT bearer and
+    // account header per request and the gateway forwards both upstream.
+    let codex_responses_provider = CodexResponsesHttpClientProvider::from_env()
+        .map_err(|_| anyhow::anyhow!("invalid Codex Responses gateway configuration"))?;
+    let rag_egress = read_optional_env(RAG_LLM_BASE_URL_ENV)?;
+
+    let viewer_enabled = args.viewer_dir.is_some();
+    let codex_gateway_enabled = codex_responses_provider.is_some();
+    let codex_surface_enabled = codex_gateway_enabled || viewer_enabled;
+    // The /mod/* routes are always mounted, but they cannot receive any projection
+    // mappings unless the Claude Messages provider is configured. Keep authenticated
+    // non-loopback serves available when that local-only surface cannot operate.
+    let claude_surface_enabled = claude_messages_provider.is_some();
+    let local_secret = read_optional_env(LOCAL_GATEWAY_SECRET_ENV)?;
+    validate_local_gateway_secret(local_secret.as_deref(), codex_surface_enabled)?;
+
     // Before the socket, not after: a bind that succeeds and is then torn down has
     // already been reachable.
     check_bind_policy(args.bind, &config.auth)?;
+    check_loopback_bind_for_local_surfaces(
+        args.bind,
+        codex_surface_enabled,
+        claude_surface_enabled,
+    )?;
 
     let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
     let auth_enabled = config.auth.enabled;
-    let claude_messages_provider = build_anthropic_messages_provider()?;
-    let rag_egress = read_optional_env(RAG_LLM_BASE_URL_ENV)?;
 
     let facade = Arc::new(build_facade(config).context("building the facade")?);
     // RUNTIME LIMITATION: this is the only in-repo ApiState constructor and it
@@ -2136,6 +2421,18 @@ pub async fn run_serve(
         Some(provider) => state.with_claude_messages_provider(provider),
         None => state,
     };
+    let state = match codex_responses_provider {
+        Some(provider) => state.with_codex_responses_provider(Arc::new(provider)),
+        None => state,
+    };
+    let state = match local_secret {
+        Some(secret) => state.with_codex_gateway_secret(secret),
+        None => state,
+    };
+    let state = match args.viewer_dir {
+        Some(dir) => state.with_viewer_assets(dir),
+        None => state,
+    };
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -2156,10 +2453,27 @@ pub async fn run_serve(
     // Operator-visible statement of the limitation above: a restart clears the
     // job registry, so polling a previously accepted job id returns 404.
     eprintln!("  job state: in-memory (NOT durable — queued jobs are lost on restart)");
+    eprintln!(
+        "  codex responses gateway: {}",
+        if codex_gateway_enabled {
+            "enabled (X-Hacienda-Gateway-Token local secret; ChatGPT credential forwarded)"
+        } else {
+            "disabled (set HACIENDA_CODEX_RESPONSES_ENDPOINT)"
+        }
+    );
+    if viewer_enabled {
+        eprintln!("  codex viewer: http://{local_addr}/viewer (same origin, loopback only)");
+    }
 
-    axum::serve(listener, hacienda_api::router(state))
-        .await
-        .context("serving the API")
+    // ConnectInfo is required by the /mod/* handlers, which decide locality
+    // from the real TCP peer rather than a client-supplied Host/Origin header.
+    // Without this, the extractor fails closed and no Mod route can be used.
+    axum::serve(
+        listener,
+        hacienda_api::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("serving the API")
 }
 
 /// Build an EmailConfig from an optional TOML file, falling back to an
@@ -2309,11 +2623,105 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_bind_policy, parse_anthropic_messages_config, DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT,
-        PLACEHOLDER_STATIC_TOKEN,
+        check_bind_policy, check_loopback_bind_for_local_surfaces, legal_error, legal_output_error,
+        parse_anthropic_messages_config, print_legal_task_run, validate_local_gateway_secret,
+        DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT, PLACEHOLDER_STATIC_TOKEN,
     };
     use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
+    use hacienda_legal::{LegalSource, LegalTaskRunResponse};
+    use std::io::{self, Write};
     use std::net::SocketAddr;
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"))
+        }
+    }
+
+    #[test]
+    fn legal_task_run_receipt_propagates_stdout_write_failure() {
+        let response = LegalTaskRunResponse {
+            run_id: "run-123".to_owned(),
+            source: LegalSource::Eurlex,
+            status: "queued".to_owned(),
+        };
+
+        let error = print_legal_task_run(&mut BrokenWriter, &response)
+            .expect_err("a closed stdout pipe must be reported");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn legal_output_error_keeps_the_write_failure_as_its_cause() {
+        let output_failure = io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe");
+        let error = legal_output_error(
+            output_failure,
+            "monitor cancellation",
+            "monitor monitor-123",
+            "the provider cancellation succeeded; check status before retrying",
+        );
+
+        let message = format!("{error:#}");
+        assert!(message.contains("monitor cancellation"), "{message}");
+        assert!(message.contains("monitor-123"), "{message}");
+        assert!(
+            message.contains("provider cancellation succeeded"),
+            "{message}"
+        );
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string() == "closed pipe"),
+            "original output error must remain in the error chain: {message}"
+        );
+    }
+
+    #[test]
+    fn idempotency_lookup_limit_message_is_actionable_without_promising_recovery() {
+        let message = legal_error(&hacienda_legal::LegalError::IdempotencyLookupLimit).to_string();
+        assert!(message.contains("retry later with the same idempotency key"));
+        assert!(message.contains("may reach the limit again"));
+    }
+
+    #[test]
+    fn local_secret_validation_rejects_missing_and_short_values() {
+        assert!(validate_local_gateway_secret(None, false).is_ok());
+        assert!(validate_local_gateway_secret(None, true).is_err());
+        assert!(validate_local_gateway_secret(Some("short"), true).is_err());
+        assert!(validate_local_gateway_secret(Some("local-secret-123456"), true).is_ok());
+    }
+
+    #[test]
+    fn codex_surface_requires_loopback_bind() {
+        let local = check_loopback_bind_for_local_surfaces;
+        assert!(local(addr("127.0.0.1:8787"), true, false).is_ok());
+        assert!(local(addr("[::1]:8787"), true, false).is_ok());
+        assert!(local(addr("0.0.0.0:8787"), true, false).is_err());
+        assert!(local(addr("192.168.1.2:8787"), true, false).is_err());
+        assert!(local(addr("0.0.0.0:8787"), false, false).is_ok());
+    }
+
+    #[test]
+    fn claude_mod_surface_requires_loopback_bind() {
+        // When the Claude Messages provider is configured, the /mod/* routes can
+        // publish original-revealing mappings and must stay on loopback.
+        let local = check_loopback_bind_for_local_surfaces;
+        assert!(local(addr("127.0.0.1:8787"), false, true).is_ok());
+        assert!(local(addr("127.0.0.53:8787"), false, true).is_ok());
+        assert!(local(addr("[::1]:8787"), false, true).is_ok());
+        assert!(local(addr("0.0.0.0:8787"), false, true).is_err());
+        assert!(local(addr("192.168.1.2:8787"), false, true).is_err());
+        assert!(local(addr("0.0.0.0:8787"), true, true).is_err());
+        // Without the Claude provider, the Mod routes cannot receive mappings and
+        // must not block an otherwise authenticated API bind.
+        assert!(local(addr("0.0.0.0:8787"), false, false).is_ok());
+    }
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()

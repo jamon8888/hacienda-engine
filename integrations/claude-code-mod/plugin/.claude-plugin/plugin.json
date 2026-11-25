@@ -1,0 +1,6 @@
+{
+  "name": "hacienda-projection-renderer",
+  "version": "0.1.0",
+  "description": "Ephemeral local projection renderer for Claude Code assistant messages",
+  "author": { "name": "Hacienda" }
+}

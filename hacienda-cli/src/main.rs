@@ -1,6 +1,8 @@
 //! The `hacienda` binary.
 
+pub(crate) mod claude_install;
 mod cli;
+pub(crate) mod codex_install;
 mod commands;
 mod config;
 
@@ -86,6 +88,12 @@ fn main() -> std::process::ExitCode {
                 cli::ComplianceCommand::Report(args) => {
                     commands::run_compliance_report(args, cli.config, cli.config_json).await
                 }
+            },
+            Command::Codex { command } => match command {
+                cli::CodexCommand::Install(args) => codex_install::run_codex_install(args).await,
+            },
+            Command::Claude { command } => match command {
+                cli::ClaudeCommand::Install(args) => claude_install::run_claude_install(args).await,
             },
             Command::Completions(_) => unreachable!("handled above, before the runtime starts"),
             Command::Email(args) => commands::run_email(args).await,

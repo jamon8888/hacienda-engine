@@ -8,16 +8,19 @@
 //!
 //! Strict mode is structural rather than a caller option.  Unknown content blocks,
 //! attachments, and fields which this module cannot inspect are rejected before the
-//! provider seam is reached.  Provider SSE frames are similarly validated and their
-//! text deltas are redacted as one logical response so a sensitive value split across
-//! deltas cannot escape.
+//! provider seam is reached.  Provider SSE frames are similarly validated: text,
+//! tool-use JSON and thinking deltas are redacted as one logical block before any
+//! of its deltas are emitted, so a sensitive value split across deltas cannot escape.
+//! Lifecycle frames and safe `ping` keepalives are relayed as they arrive; Claude
+//! Code stalls on a buffered response and trips its idle watchdog on missing pings.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
     fmt,
     pin::Pin,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -33,16 +36,33 @@ use futures::{stream, Stream, StreamExt};
 use hacienda_client_core::{
     ProviderHttpClient, ProviderHttpRequest, ProviderSseEvent, ReqwestHttpClient, TransportError,
 };
-use hacienda_core::{auth::Caller, HaciendaError, HaciendaFacade};
+use hacienda_core::{
+    auth::{AuthContext, Caller, Capability},
+    HaciendaError, HaciendaFacade,
+};
 use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
 use crate::{
-    error::ApiError, extract::Json as SafeJson, handlers::extract_auth_context, state::ApiState,
+    error::ApiError,
+    extract::Json as SafeJson,
+    handlers::{
+        claude_mod::{correlation as mod_correlation, ModSessionStore},
+        extract_auth_context,
+    },
+    state::ApiState,
 };
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The authenticated scope a projection session must match before it may
+/// receive any local mapping. Derived only from the request `AuthContext`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModScope {
+    tenant: String,
+    principal: String,
+}
 
 /// Content-free provider failure.  The variant deliberately carries no endpoint,
 /// credential, request body, tenant, or provider response text.
@@ -280,9 +300,33 @@ pub async fn messages(
         .ok_or_else(|| ApiError::invalid_request("The provider gateway is not configured."))?;
     let text_paths = validate_and_collect_text_paths(&body)
         .map_err(|_| ApiError::invalid_request("The request contains unsupported content."))?;
-    redact_paths(&mut body, &text_paths, &state.facade, caller).await?;
 
-    let tenant = caller.tenant_ctx().tenant.as_str().to_owned();
+    // Local-only projection correlation. It is a non-secret hint; if it is
+    // absent or malformed no mapping is published and the Mod keeps pseudonyms.
+    let correlation = mod_correlation(&headers).map(str::to_owned);
+    let scope = ModScope {
+        tenant: auth_context.tenant.as_str().to_owned(),
+        principal: auth_context.principal_id.clone(),
+    };
+    // Projection may reveal originals only when the authenticated caller has
+    // `pii:reveal`; the gateway never grants that capability on the caller's behalf.
+    let reveal_context = caller
+        .require(Capability::PiiReveal)
+        .is_ok()
+        .then(|| auth_context.as_ref().clone());
+    redact_paths(
+        &mut body,
+        &text_paths,
+        &state.facade,
+        caller,
+        reveal_context.as_ref(),
+        &state.mod_sessions,
+        &scope,
+        correlation.as_deref(),
+    )
+    .await?;
+
+    let tenant = scope.tenant.clone();
     let provider_request = ClaudeMessagesProviderRequest {
         body,
         headers: safe_routing_headers(&headers)?,
@@ -294,17 +338,28 @@ pub async fn messages(
     })?;
     let response_headers = safe_response_headers(&provider_stream.response.headers)?;
     let facade = Arc::clone(&state.facade);
-    let relay = ResponseRelay::new(provider_stream.events, facade, auth_context);
+    let relay = ResponseRelay::new(
+        provider_stream.events,
+        facade,
+        auth_context,
+        reveal_context,
+        Arc::clone(&state.mod_sessions),
+        scope,
+        correlation,
+    );
     let output = stream::unfold(relay, |mut relay| async move {
         relay
             .next_event()
             .await
             .map(|event| (Ok::<Event, Infallible>(event), relay))
     });
-    Ok((
-        response_headers,
-        Sse::new(output).keep_alive(KeepAlive::default()),
-    ))
+    // Claude Code reads SSE frames as they arrive and uses `ping` as liveness
+    // during a long thinking pause. Emit our own named ping while idle instead
+    // of only a comment, and keep the wire content type explicitly Anthropic.
+    let keep_alive = KeepAlive::new()
+        .interval(Duration::from_secs(15))
+        .event(Event::default().event("ping").data(r#"{"type":"ping"}"#));
+    Ok((response_headers, Sse::new(output).keep_alive(keep_alive)))
 }
 
 fn safe_response_headers(headers: &[(String, String)]) -> Result<HeaderMap, ApiError> {
@@ -317,6 +372,10 @@ fn safe_response_headers(headers: &[(String, String)]) -> Result<HeaderMap, ApiE
         "x-request-id",
     ];
     let mut safe = HeaderMap::new();
+    safe.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
     for (name, value) in headers {
         if !ALLOWED
             .iter()
@@ -675,11 +734,18 @@ fn path_value(path: &[String]) -> String {
     pointer(&path.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
+// These are request-scoped services and authorization scopes that must stay
+// bound to the same redaction operation.
+#[allow(clippy::too_many_arguments)]
 async fn redact_paths(
     body: &mut Value,
     paths: &[String],
     facade: &HaciendaFacade,
     caller: Caller<'_>,
+    reveal_context: Option<&AuthContext>,
+    mod_sessions: &ModSessionStore,
+    scope: &ModScope,
+    correlation: Option<&str>,
 ) -> Result<(), ApiError> {
     let mut seen = HashSet::new();
     for path in paths {
@@ -695,19 +761,145 @@ async fn redact_paths(
             .await
             .map_err(ApiError::from)?
             .redacted_text;
+        publish_mod_mappings(
+            facade,
+            reveal_context,
+            mod_sessions,
+            scope,
+            correlation,
+            &redacted,
+        )
+        .await;
         let slot = body.pointer_mut(path).ok_or_else(ApiError::internal)?;
         *slot = Value::String(redacted);
     }
     Ok(())
 }
 
+/// Extract tokens minted by this gateway from a redacted string. Unknown text
+/// is ignored: a token the facade cannot resolve locally stays unrevealed.
+fn extract_mod_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        let Some(relative_end) = rest[start..].find(']') else {
+            break;
+        };
+        let end = start + relative_end;
+        let token = &rest[start..=end];
+        let parts: Vec<&str> = token[1..token.len() - 1].split(':').collect();
+        let valid = parts.len() == 3
+            && !parts[0].is_empty()
+            && parts[0]
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && !parts[1].is_empty()
+            && parts[1]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            && parts[2]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+        if valid {
+            tokens.push(token.to_owned());
+        }
+        rest = &rest[end + 1..];
+    }
+    tokens
+}
+
+/// Resolve token → original locally and publish to the one active, fully
+/// scoped Mod session. No value reaches this function's caller except through
+/// that in-memory channel, and no original is logged or persisted.
+async fn publish_mod_mappings(
+    facade: &HaciendaFacade,
+    reveal_context: Option<&AuthContext>,
+    mod_sessions: &ModSessionStore,
+    scope: &ModScope,
+    correlation: Option<&str>,
+    redacted: &str,
+) {
+    let Some(correlation) = correlation else {
+        return;
+    };
+    let Some(reveal_context) = reveal_context else {
+        return;
+    };
+    if !mod_sessions.has_active_projection(&scope.tenant, &scope.principal, correlation) {
+        return;
+    }
+    let mut mappings: HashMap<String, String> = HashMap::new();
+    for token in extract_mod_tokens(redacted) {
+        if mappings.contains_key(&token) {
+            continue;
+        }
+        if let Ok(original) = facade
+            .reveal_token_with_auth(Caller::Principal(reveal_context), &token)
+            .await
+        {
+            mappings.insert(token, original);
+        }
+    }
+    for (token, original) in mappings {
+        mod_sessions.publish(
+            &scope.tenant,
+            &scope.principal,
+            correlation,
+            &token,
+            original,
+        );
+    }
+}
+
+/// Owned-argument wrapper for the streaming relay. Taking `&self` across an
+/// await would require `ResponseRelay` to be `Sync`, but its boxed provider
+/// stream is only `Send`; cloning the small scope values keeps the relay future
+/// sendable without changing the client-visible frames.
+async fn relay_publish_mappings(
+    facade: Arc<HaciendaFacade>,
+    reveal_context: Option<AuthContext>,
+    mod_sessions: Arc<ModSessionStore>,
+    scope: ModScope,
+    correlation: Option<String>,
+    redacted: String,
+) {
+    publish_mod_mappings(
+        &facade,
+        reveal_context.as_ref(),
+        &mod_sessions,
+        &scope,
+        correlation.as_deref(),
+        &redacted,
+    )
+    .await;
+}
+
+impl ResponseRelay {
+    fn project_side_channel(&self, redacted: &str) -> impl std::future::Future<Output = ()> + Send {
+        relay_publish_mappings(
+            Arc::clone(&self.facade),
+            self.reveal_context.clone(),
+            Arc::clone(&self.mod_sessions),
+            self.scope.clone(),
+            self.correlation.clone(),
+            redacted.to_owned(),
+        )
+    }
+}
+
 const MAX_BLOCK_BUFFER: usize = 1024 * 1024;
 const MAX_SSE_FRAME: usize = 1024 * 1024;
+const MAX_BLOCK_DELTAS: usize = 4096;
 
 struct ResponseRelay {
     events: ClaudeMessagesEventStream,
     facade: Arc<HaciendaFacade>,
     auth_context: Arc<hacienda_core::auth::AuthContext>,
+    /// Server-side reveal context, scoped to the caller's tenant only.
+    reveal_context: Option<AuthContext>,
+    mod_sessions: Arc<ModSessionStore>,
+    scope: ModScope,
+    correlation: Option<String>,
     validator: ResponseValidator,
     active: Option<BufferedBlock>,
     pending: VecDeque<ProviderSseEvent>,
@@ -718,12 +910,14 @@ struct BufferedBlock {
     kind: BlockKind,
     joined: String,
     deltas: Vec<ProviderSseEvent>,
+    retained_bytes: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockKind {
     Text,
     ToolUse,
+    Thinking,
 }
 
 impl ResponseRelay {
@@ -731,11 +925,19 @@ impl ResponseRelay {
         events: ClaudeMessagesEventStream,
         facade: Arc<HaciendaFacade>,
         auth_context: Arc<hacienda_core::auth::AuthContext>,
+        reveal_context: Option<AuthContext>,
+        mod_sessions: Arc<ModSessionStore>,
+        scope: ModScope,
+        correlation: Option<String>,
     ) -> Self {
         Self {
             events,
             facade,
             auth_context,
+            reveal_context,
+            mod_sessions,
+            scope,
+            correlation,
             validator: ResponseValidator::default(),
             active: None,
             pending: VecDeque::new(),
@@ -752,16 +954,24 @@ impl ResponseRelay {
                 return None;
             }
             let Some(result) = self.events.next().await else {
-                self.closed = self.validator.finish().is_err() || self.active.is_some();
+                // A body that stops before `message_delta`/`message_stop` is a
+                // dropped connection to Claude Code, not a clean completion.
+                self.closed = true;
+                if self.validator.finish().is_err() || self.active.is_some() {
+                    self.pending.push_back(invalid_response_event());
+                    continue;
+                }
                 return None;
             };
             let Ok(event) = result else {
                 self.closed = true;
-                return None;
+                self.pending.push_back(invalid_response_event());
+                continue;
             };
             if self.accept(event).await.is_err() {
                 self.closed = true;
-                return None;
+                self.pending.push_back(invalid_response_event());
+                continue;
             }
         }
     }
@@ -774,8 +984,30 @@ impl ResponseRelay {
                     kind,
                     joined: String::new(),
                     deltas: Vec::new(),
+                    retained_bytes: 0,
                 });
-                self.pending.push_back(event);
+                let mut safe = event;
+                if kind == BlockKind::ToolUse {
+                    // Tool names are model-generated free-form text.
+                    let mut value: Value = serde_json::from_str(&safe.data).map_err(|_| ())?;
+                    let name = value
+                        .pointer("/content_block/name")
+                        .and_then(Value::as_str)
+                        .ok_or(())?
+                        .to_owned();
+                    let caller = Caller::Principal(self.auth_context.as_ref());
+                    let redacted = self
+                        .facade
+                        .redact_text_with_auth(caller, &name)
+                        .await
+                        .map_err(|_| ())?
+                        .redacted_text;
+                    *value.pointer_mut("/content_block/name").ok_or(())? =
+                        Value::String(redacted.clone());
+                    self.project_side_channel(&redacted).await;
+                    safe.data = serde_json::to_string(&value).map_err(|_| ())?;
+                }
+                self.pending.push_back(safe);
             }
             ValidationAction::BlockDelta { kind } => {
                 let value: Value = serde_json::from_str(&event.data).map_err(|_| ())?;
@@ -784,11 +1016,32 @@ impl ResponseRelay {
                     BlockKind::ToolUse => {
                         value.pointer("/delta/partial_json").and_then(Value::as_str)
                     }
+                    // A signature delta carries no inspectable text but stays
+                    // in the buffered block until the whole block is redacted.
+                    BlockKind::Thinking => {
+                        match value.pointer("/delta/type").and_then(Value::as_str) {
+                            Some("thinking_delta") => {
+                                value.pointer("/delta/thinking").and_then(Value::as_str)
+                            }
+                            Some("signature_delta") => None,
+                            _ => return Err(()),
+                        }
+                    }
+                };
+                if let Some(fragment) = fragment {
+                    let active = self.active.as_mut().ok_or(())?;
+                    active.joined.push_str(fragment);
+                    if active.joined.len() > MAX_BLOCK_BUFFER {
+                        return Err(());
+                    }
                 }
-                .ok_or(())?;
                 let active = self.active.as_mut().ok_or(())?;
-                active.joined.push_str(fragment);
-                if active.joined.len() > MAX_BLOCK_BUFFER {
+                active.retained_bytes = active
+                    .retained_bytes
+                    .checked_add(event.data.len())
+                    .filter(|bytes| *bytes <= MAX_BLOCK_BUFFER)
+                    .ok_or(())?;
+                if active.deltas.len() >= MAX_BLOCK_DELTAS {
                     return Err(());
                 }
                 active.deltas.push(event);
@@ -796,7 +1049,9 @@ impl ResponseRelay {
             ValidationAction::BlockStop => {
                 let active = self.active.take().ok_or(())?;
                 let redacted = self.redact_block(&active).await?;
-                for event in redact_block_deltas(active.deltas, active.kind, redacted)? {
+                for event in
+                    redact_block_deltas(active.deltas, active.kind, redacted, &active.joined)?
+                {
                     self.pending.push_back(event);
                 }
                 self.pending.push_back(event);
@@ -814,31 +1069,78 @@ impl ResponseRelay {
                     .await
                     .map_err(|_| ())?
                     .redacted_text;
-                *value.pointer_mut("/error/message").ok_or(())? = Value::String(redacted);
+                *value.pointer_mut("/error/message").ok_or(())? = Value::String(redacted.clone());
+                self.project_side_channel(&redacted).await;
                 let mut safe = event;
                 safe.data = serde_json::to_string(&value).map_err(|_| ())?;
                 self.pending.push_back(safe);
             }
-            ValidationAction::Immediate => self.pending.push_back(event),
+            ValidationAction::Immediate => {
+                let mut safe = event;
+                if safe.comment.is_some() {
+                    safe.comment = Some("ping".to_owned());
+                }
+                if safe.event.as_deref() == Some("message_delta") {
+                    let mut value: Value = serde_json::from_str(&safe.data).map_err(|_| ())?;
+                    if value
+                        .pointer("/delta/stop_sequence")
+                        .and_then(Value::as_str)
+                        .is_some()
+                    {
+                        let stop = value
+                            .pointer("/delta/stop_sequence")
+                            .and_then(Value::as_str)
+                            .ok_or(())?
+                            .to_owned();
+                        let caller = Caller::Principal(self.auth_context.as_ref());
+                        let redacted = self
+                            .facade
+                            .redact_text_with_auth(caller, &stop)
+                            .await
+                            .map_err(|_| ())?
+                            .redacted_text;
+                        *value.pointer_mut("/delta/stop_sequence").ok_or(())? =
+                            Value::String(redacted.clone());
+                        self.project_side_channel(&redacted).await;
+                        safe.data = serde_json::to_string(&value).map_err(|_| ())?;
+                    }
+                }
+                self.pending.push_back(safe);
+            }
         }
         Ok(())
     }
 
     async fn redact_block(&mut self, block: &BufferedBlock) -> Result<String, ()> {
-        if block.kind == BlockKind::ToolUse
-            && !serde_json::from_str::<Value>(&block.joined)
-                .ok()
-                .is_some_and(|value| value.is_object())
-        {
-            return Err(());
-        }
         let caller = Caller::Principal(self.auth_context.as_ref());
-        let redacted = self
-            .facade
-            .redact_text_with_auth(caller, &block.joined)
-            .await
-            .map_err(|_| ())?
-            .redacted_text;
+        let redacted = if block.kind == BlockKind::ToolUse {
+            let mut value: Value = serde_json::from_str(&block.joined).map_err(|_| ())?;
+            if !value.is_object() {
+                return Err(());
+            }
+            redact_tool_argument_values(
+                &self.facade,
+                Caller::Principal(self.auth_context.as_ref()),
+                &mut value,
+                "/content_block/input",
+            )
+            .await?;
+            serde_json::to_string(&value).map_err(|_| ())?
+        } else {
+            self.facade
+                .redact_text_with_auth(caller, &block.joined)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        operation = "redact Claude response block",
+                        json_pointer = "/content_block/text",
+                        cause = %error,
+                        recovery = "check the configured PII redaction pipeline",
+                        "provider response redaction failed"
+                    );
+                })?
+                .redacted_text
+        };
         if redacted.len() > MAX_BLOCK_BUFFER {
             return Err(());
         }
@@ -849,8 +1151,111 @@ impl ResponseRelay {
         {
             return Err(());
         }
+        self.project_side_channel(&redacted).await;
         Ok(redacted)
     }
+}
+
+fn redact_tool_argument_values<'a>(
+    facade: &'a HaciendaFacade,
+    caller: Caller<'a>,
+    value: &'a mut Value,
+    pointer: &'a str,
+) -> Pin<Box<dyn std::future::Future<Output = Result<(), ()>> + Send + 'a>> {
+    Box::pin(async move {
+        match value {
+            Value::String(text) => {
+                if text.len() > MAX_BLOCK_BUFFER {
+                    return Err(());
+                }
+                *text = facade
+                    .redact_text_with_auth(caller, text)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(
+                            operation = "redact Claude tool argument",
+                            json_pointer = pointer,
+                            cause = %error,
+                            recovery = "check the configured PII redaction pipeline",
+                            "provider tool argument redaction failed"
+                        );
+                    })?
+                    .redacted_text;
+                Ok(())
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter_mut().enumerate() {
+                    let child_pointer = format!("{pointer}/{index}");
+                    redact_tool_argument_values(facade, caller, item, &child_pointer).await?;
+                }
+                Ok(())
+            }
+            Value::Object(object) => {
+                let keys: Vec<String> = object.keys().cloned().collect();
+                for key in keys {
+                    let safe_key = facade
+                        .redact_text_with_auth(caller, &key)
+                        .await
+                        .map_err(|error| {
+                            tracing::error!(
+                                operation = "validate Claude tool argument key",
+                                json_pointer = pointer,
+                                cause = %error,
+                                recovery = "check the configured PII redaction pipeline",
+                                "provider tool argument key validation failed"
+                            );
+                        })?
+                        .redacted_text;
+                    if safe_key != key {
+                        return Err(());
+                    }
+                    let child_pointer = format!("{pointer}/<object-key>");
+                    redact_tool_argument_values(
+                        facade,
+                        caller,
+                        object.get_mut(&key).ok_or(())?,
+                        &child_pointer,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        }
+    })
+}
+
+/// Content-free error emitted in place of a silently truncated stream. It
+/// never echoes provider text, so it cannot leak unredacted content.
+fn invalid_response_event() -> ProviderSseEvent {
+    ProviderSseEvent::new(
+        Some("error".to_owned()),
+        None,
+        serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "The provider response was invalid."
+            }
+        })
+        .to_string(),
+    )
+}
+
+/// Only content-free SSE heartbeats are safe to relay to the client.
+fn is_safe_keepalive_comment(comment: &str) -> bool {
+    let comment = comment.trim();
+    if comment.is_empty() || comment == "ping" {
+        return true;
+    }
+    let Some(remainder) = comment.strip_prefix("ping - ") else {
+        return false;
+    };
+    !remainder.is_empty()
+        && remainder.bytes().all(|byte| {
+            byte.is_ascii_digit() || matches!(byte, b'-' | b':' | b'.' | b'T' | b'Z' | b' ')
+        })
+        && remainder.bytes().any(|byte| byte.is_ascii_digit())
 }
 
 fn render_event(event: ProviderSseEvent) -> Event {
@@ -861,6 +1266,15 @@ fn render_event(event: ProviderSseEvent) -> Event {
     if let Some(id) = event.id {
         rendered = rendered.id(id);
     }
+    if let Some(retry) = event.retry {
+        rendered = rendered.retry(Duration::from_millis(retry));
+    }
+    if let Some(comment) = event.comment {
+        rendered = rendered.comment(comment);
+        if event.data.is_empty() {
+            return rendered;
+        }
+    }
     rendered.data(event.data)
 }
 
@@ -868,20 +1282,58 @@ fn redact_block_deltas(
     mut deltas: Vec<ProviderSseEvent>,
     kind: BlockKind,
     redacted: String,
+    original: &str,
 ) -> Result<Vec<ProviderSseEvent>, ()> {
-    let pointer = match kind {
-        BlockKind::Text => "/delta/text",
-        BlockKind::ToolUse => "/delta/partial_json",
+    // A thinking signature authenticates the original text. If redaction changes
+    // that text, drop the signature instead of forwarding a mismatched pair.
+    if kind == BlockKind::Thinking && redacted != original {
+        deltas.retain(|event| {
+            serde_json::from_str::<Value>(&event.data)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/delta/type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                != Some("signature_delta")
+        });
+    }
+    let pointer_for = |event: &ProviderSseEvent| -> Result<Option<&'static str>, ()> {
+        match kind {
+            BlockKind::Text => Ok(Some("/delta/text")),
+            BlockKind::ToolUse => Ok(Some("/delta/partial_json")),
+            BlockKind::Thinking => {
+                let value: Value = serde_json::from_str(&event.data).map_err(|_| ())?;
+                match value.pointer("/delta/type").and_then(Value::as_str) {
+                    Some("thinking_delta") => Ok(Some("/delta/thinking")),
+                    Some("signature_delta") => Ok(None),
+                    _ => Err(()),
+                }
+            }
+        }
     };
-    for event in &mut deltas {
+    let redactable = deltas
+        .iter()
+        .map(pointer_for)
+        .collect::<Result<Vec<_>, ()>>()?;
+    let last = redactable
+        .iter()
+        .rposition(|pointer| pointer.is_some())
+        .ok_or(())?;
+    for (event, pointer) in deltas.iter_mut().zip(redactable.iter()) {
+        let Some(pointer) = pointer else {
+            continue;
+        };
         let mut value: Value = serde_json::from_str(&event.data).map_err(|_| ())?;
         *value.pointer_mut(pointer).ok_or(())? = Value::String(String::new());
         event.data = serde_json::to_string(&value).map_err(|_| ())?;
     }
-    let last = deltas.last_mut().ok_or(())?;
-    let mut value: Value = serde_json::from_str(&last.data).map_err(|_| ())?;
+    let pointer = redactable[last].ok_or(())?;
+    let mut value: Value = serde_json::from_str(&deltas[last].data).map_err(|_| ())?;
     *value.pointer_mut(pointer).ok_or(())? = Value::String(redacted);
-    last.data = serde_json::to_string(&value).map_err(|_| ())?;
+    deltas[last].data = serde_json::to_string(&value).map_err(|_| ())?;
     Ok(deltas)
 }
 
@@ -901,7 +1353,19 @@ enum ValidationAction {
 
 impl ResponseValidator {
     fn accept(&mut self, event: &ProviderSseEvent) -> Result<ValidationAction, ()> {
-        if event.comment.is_some() || event.id.is_some() || event.retry.is_some() {
+        if let Some(comment) = event.comment.as_deref() {
+            if self.phase == ResponsePhase::Done
+                || !is_safe_keepalive_comment(comment)
+                || !event.data.is_empty()
+                || event.event.is_some()
+                || event.id.is_some()
+                || event.retry.is_some()
+            {
+                return Err(());
+            }
+            return Ok(ValidationAction::Immediate);
+        }
+        if event.id.is_some() || event.retry.is_some() {
             return Err(());
         }
         let kind = event.event.as_deref().ok_or(())?;
@@ -977,6 +1441,15 @@ impl ResponseValidator {
                         }
                         BlockKind::ToolUse
                     }
+                    Some("thinking") => {
+                        reject_unknown_keys(block, &["type", "thinking", "signature"])?;
+                        if block.get("thinking").and_then(Value::as_str) != Some("")
+                            || !block.get("signature").is_some_and(Value::is_string)
+                        {
+                            return Err(());
+                        }
+                        BlockKind::Thinking
+                    }
                     _ => return Err(()),
                 };
                 self.active = Some((index, block_kind));
@@ -1011,6 +1484,21 @@ impl ResponseValidator {
                             return Err(());
                         }
                     }
+                    BlockKind::Thinking => match delta.get("type").and_then(Value::as_str) {
+                        Some("thinking_delta") => {
+                            reject_unknown_keys(delta, &["type", "thinking"])?;
+                            if !delta.get("thinking").is_some_and(Value::is_string) {
+                                return Err(());
+                            }
+                        }
+                        Some("signature_delta") => {
+                            reject_unknown_keys(delta, &["type", "signature"])?;
+                            if !delta.get("signature").is_some_and(Value::is_string) {
+                                return Err(());
+                            }
+                        }
+                        _ => return Err(()),
+                    },
                 }
                 Ok(ValidationAction::BlockDelta { kind: block_kind })
             }
@@ -1131,24 +1619,61 @@ async fn redact_and_validate_provider_events(
                     kind,
                     joined: String::new(),
                     deltas: Vec::new(),
+                    retained_bytes: 0,
                 });
-                output.push(event.clone());
+                let mut safe = event.clone();
+                if kind == BlockKind::ToolUse {
+                    let mut value: Value =
+                        serde_json::from_str(&safe.data).map_err(|_| ApiError::internal())?;
+                    let name = value
+                        .pointer("/content_block/name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(ApiError::internal)?
+                        .to_owned();
+                    let redacted = facade
+                        .redact_text_with_auth(caller, &name)
+                        .await
+                        .map_err(ApiError::from)?
+                        .redacted_text;
+                    *value
+                        .pointer_mut("/content_block/name")
+                        .ok_or_else(ApiError::internal)? = Value::String(redacted);
+                    safe.data = serde_json::to_string(&value).map_err(|_| ApiError::internal())?;
+                }
+                output.push(safe);
             }
             ValidationAction::BlockDelta { kind } => {
                 let value: Value =
                     serde_json::from_str(&event.data).map_err(|_| ApiError::internal())?;
-                let pointer = if kind == BlockKind::Text {
-                    "/delta/text"
-                } else {
-                    "/delta/partial_json"
+                let fragment = match kind {
+                    BlockKind::Text => value.pointer("/delta/text").and_then(Value::as_str),
+                    BlockKind::ToolUse => {
+                        value.pointer("/delta/partial_json").and_then(Value::as_str)
+                    }
+                    BlockKind::Thinking => {
+                        match value.pointer("/delta/type").and_then(Value::as_str) {
+                            Some("thinking_delta") => {
+                                value.pointer("/delta/thinking").and_then(Value::as_str)
+                            }
+                            Some("signature_delta") => None,
+                            _ => return Err(ApiError::internal()),
+                        }
+                    }
                 };
-                let fragment = value
-                    .pointer(pointer)
-                    .and_then(Value::as_str)
-                    .ok_or_else(ApiError::internal)?;
+                if let Some(fragment) = fragment {
+                    let block = active.as_mut().ok_or_else(ApiError::internal)?;
+                    block.joined.push_str(fragment);
+                    if block.joined.len() > MAX_BLOCK_BUFFER {
+                        return Err(ApiError::internal());
+                    }
+                }
                 let block = active.as_mut().ok_or_else(ApiError::internal)?;
-                block.joined.push_str(fragment);
-                if block.joined.len() > MAX_BLOCK_BUFFER {
+                block.retained_bytes = block
+                    .retained_bytes
+                    .checked_add(event.data.len())
+                    .filter(|bytes| *bytes <= MAX_BLOCK_BUFFER)
+                    .ok_or_else(ApiError::internal)?;
+                if block.deltas.len() >= MAX_BLOCK_DELTAS {
                     return Err(ApiError::internal());
                 }
                 block.deltas.push(event.clone());
@@ -1164,11 +1689,20 @@ async fn redact_and_validate_provider_events(
                 } else {
                     block.joined.clone()
                 };
-                let redacted = facade
-                    .redact_text_with_auth(caller, &joined)
-                    .await
-                    .map_err(ApiError::from)?
-                    .redacted_text;
+                let redacted = if block.kind == BlockKind::ToolUse {
+                    let mut value: Value =
+                        serde_json::from_str(&joined).map_err(|_| ApiError::internal())?;
+                    redact_tool_argument_values(facade, caller, &mut value, "/content_block/input")
+                        .await
+                        .map_err(|_| ApiError::internal())?;
+                    serde_json::to_string(&value).map_err(|_| ApiError::internal())?
+                } else {
+                    facade
+                        .redact_text_with_auth(caller, &joined)
+                        .await
+                        .map_err(ApiError::from)?
+                        .redacted_text
+                };
                 if block.kind == BlockKind::ToolUse
                     && !serde_json::from_str::<Value>(&redacted)
                         .ok()
@@ -1177,7 +1711,7 @@ async fn redact_and_validate_provider_events(
                     return Err(ApiError::internal());
                 }
                 output.extend(
-                    redact_block_deltas(block.deltas, block.kind, redacted)
+                    redact_block_deltas(block.deltas, block.kind, redacted, &block.joined)
                         .map_err(|_| ApiError::internal())?,
                 );
                 output.push(event.clone());
@@ -1273,6 +1807,7 @@ struct SseDecoder {
     event: Option<String>,
     id: Option<String>,
     comment: Option<String>,
+    frame_bytes: usize,
 }
 
 impl SseDecoder {
@@ -1281,17 +1816,26 @@ impl SseDecoder {
         bytes: &[u8],
         callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
-        self.pending.extend_from_slice(bytes);
-        if self.pending.len() > MAX_SSE_FRAME {
-            return Err(TransportError::Failed);
-        }
-        while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.pending.drain(..=index).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if self
+                .pending
+                .len()
+                .saturating_add(self.frame_bytes)
+                .saturating_add(part.len())
+                > MAX_SSE_FRAME
+            {
+                return Err(TransportError::Failed);
             }
-            self.line(&line, callback)?;
+            self.pending.extend_from_slice(part);
+            if part.last() == Some(&b'\n') {
+                let newline = self.pending.len() - 1;
+                let mut line = self.pending.drain(..=newline).collect::<Vec<_>>();
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                self.line(&line, callback)?;
+            }
         }
         Ok(())
     }
@@ -1305,6 +1849,11 @@ impl SseDecoder {
             return Err(TransportError::Failed);
         }
         let line = std::str::from_utf8(line).map_err(|_| TransportError::Failed)?;
+        self.frame_bytes = self
+            .frame_bytes
+            .checked_add(line.len().saturating_add(1))
+            .filter(|size| *size <= MAX_SSE_FRAME)
+            .ok_or(TransportError::Failed)?;
         if line.is_empty() {
             if !self.data.is_empty() || self.comment.is_some() {
                 let event = ProviderSseEvent {
@@ -1317,6 +1866,7 @@ impl SseDecoder {
                 callback(event)?;
             }
             self.data.clear();
+            self.frame_bytes = 0;
             return Ok(());
         }
         if let Some(comment) = line.strip_prefix(':') {
@@ -1329,9 +1879,11 @@ impl SseDecoder {
             "event" => self.event = Some(value.to_owned()),
             "id" if !value.contains('\0') => self.id = Some(value.to_owned()),
             "data" => {
-                if self.data.iter().map(String::len).sum::<usize>() + value.len() > MAX_SSE_FRAME {
-                    return Err(TransportError::Failed);
-                }
+                self.frame_bytes = self
+                    .frame_bytes
+                    .checked_add(std::mem::size_of::<String>())
+                    .filter(|size| *size <= MAX_SSE_FRAME)
+                    .ok_or(TransportError::Failed)?;
                 self.data.push(value.to_owned());
             }
             _ => {}
@@ -1576,6 +2128,39 @@ mod tests {
         assert!(final_delta.is_some_and(|json| serde_json::from_str::<Value>(&json).is_ok()));
     }
 
+    #[tokio::test]
+    async fn tool_use_redacts_json_escaped_email_values_after_decoding() {
+        let mut events = valid_tool_response_events();
+        events[2].data = serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"email\":\"bob\\u0040example.com\"}"}
+        })
+        .to_string();
+        events[3].data = serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": ""}
+        })
+        .to_string();
+
+        let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
+            .await
+            .expect("escaped tool argument is redacted");
+        let arguments = safe
+            .iter()
+            .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
+            .filter_map(|value| {
+                value
+                    .pointer("/delta/partial_json")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect::<String>();
+        let decoded: Value = serde_json::from_str(&arguments).expect("valid finalized arguments");
+        let decoded_email = decoded["email"].as_str().expect("email string");
+        assert_ne!(decoded_email, "bob@example.com");
+        assert!(!decoded_email.contains("bob@example.com"));
+    }
+
     #[test]
     fn repeated_message_deltas_are_valid_before_message_stop() {
         let mut events = valid_response_events();
@@ -1671,5 +2256,138 @@ mod tests {
             .to_string(),
         );
         assert!(validate_provider_events(&[event]).is_err());
+    }
+
+    fn valid_thinking_response_events() -> Vec<ProviderSseEvent> {
+        let mut events = valid_response_events();
+        events[1].data = serde_json::json!({
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""}
+        })
+        .to_string();
+        events[2].data = serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "note alice@"}
+        })
+        .to_string();
+        events.insert(
+            3,
+            ProviderSseEvent::new(
+                Some("content_block_delta".into()),
+                None,
+                serde_json::json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "signature_delta", "signature": "c2ln"}
+                })
+                .to_string(),
+            ),
+        );
+        events.insert(
+            4,
+            ProviderSseEvent::new(
+                Some("content_block_delta".into()),
+                None,
+                serde_json::json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "example.com"}
+                })
+                .to_string(),
+            ),
+        );
+        events
+    }
+
+    #[tokio::test]
+    async fn thinking_deltas_are_redacted_as_one_logical_block() {
+        let events = valid_thinking_response_events();
+        let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
+            .await
+            .expect("thinking redaction");
+        assert!(safe
+            .iter()
+            .all(|event| !event.data.contains("alice@example.com")));
+        let joined: String = safe
+            .iter()
+            .filter_map(|event| {
+                let value = serde_json::from_str::<Value>(&event.data).ok()?;
+                value
+                    .pointer("/delta/thinking")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert!(!joined.contains("alice@example.com"));
+        assert!(joined.contains("[EMAIL]"));
+        assert!(!safe.iter().any(|event| {
+            serde_json::from_str::<Value>(&event.data)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/delta/signature")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                == Some("c2ln".to_owned())
+        }));
+    }
+
+    #[tokio::test]
+    async fn keepalive_comments_are_relayed_but_plaintext_comments_fail_closed() {
+        let mut events = valid_response_events();
+        let keepalive = ProviderSseEvent {
+            event: None,
+            id: None,
+            retry: None,
+            comment: Some("ping - 1763990000".to_owned()),
+            data: String::new(),
+        };
+        events.insert(1, keepalive.clone());
+        let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
+            .await
+            .expect("safe keepalive is relayed");
+        assert!(safe
+            .iter()
+            .any(|event| event.comment.as_deref() == Some("ping - 1763990000")));
+        let rendered = Sse::new(futures::stream::once(async move {
+            Ok::<Event, Infallible>(render_event(keepalive))
+        }))
+        .into_response();
+        let bytes = axum::body::to_bytes(rendered.into_body(), 1024)
+            .await
+            .expect("rendered keepalive");
+        assert!(String::from_utf8_lossy(&bytes).contains(": ping - 1763990000"));
+
+        let mut unsafe_events = valid_response_events();
+        unsafe_events.insert(
+            1,
+            ProviderSseEvent {
+                event: None,
+                id: None,
+                retry: None,
+                comment: Some("alice@example.com".to_owned()),
+                data: String::new(),
+            },
+        );
+        assert!(validate_provider_events(&unsafe_events).is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_use_name_is_redacted_before_the_block_is_relayed() {
+        let mut events = valid_tool_response_events();
+        events[1].data = serde_json::json!({
+            "type": "content_block_start", "index": 0,
+            "content_block": {
+                "type": "tool_use", "id": "tool-1",
+                "name": "alice@example.com", "input": {}
+            }
+        })
+        .to_string();
+        let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
+            .await
+            .expect("tool name redaction");
+        let start: Value = serde_json::from_str(&safe[1].data).expect("block start JSON");
+        let name = start["content_block"]["name"].as_str().expect("name");
+        assert!(!name.contains("alice@example.com"));
+        assert!(name.contains("[EMAIL]"));
     }
 }
