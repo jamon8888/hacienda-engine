@@ -112,7 +112,7 @@ user settings written here reach the embedded Claude Code for those general sett
 the `apiKeyHelper` script.
 
 However, the current official documentation is explicit: **the Desktop app reads gateway
-_routing_ from its third-party inference configuration, not from `ANTHROPIC_BASE_URL` or
+*routing* from its third-party inference configuration, not from `ANTHROPIC_BASE_URL` or
 `settings.json`.** To route the Desktop app through Hacienda you must configure that separately:
 
 1. In Claude Desktop, enable **Help → Troubleshooting → Enable Developer Mode** (this restarts
