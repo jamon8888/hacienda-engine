@@ -7,9 +7,15 @@ use hacienda_core::store::postgres::usage::UsageStore;
 use hacienda_core::store::postgres::versions::DocumentVersionStore;
 use hacienda_core::{auth::AuthState, HaciendaFacade};
 use hacienda_rag::{GraphStore, RagStore};
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use crate::handlers::claude_messages::ClaudeMessagesProvider;
+use crate::handlers::claude_mod::ModSessionStore;
+use crate::handlers::codex_responses::CodexResponsesProvider;
+use crate::handlers::codex_viewer::ViewerSessionStore;
 use crate::job_state::{GuardedJobStore, JobRetention, RetryPolicy};
 use crate::quota::InMemoryQuotaStore;
 
@@ -104,6 +110,24 @@ pub struct ApiState {
     /// Anthropic Messages provider used by the authenticated Claude Code gateway.
     /// `None` keeps the route registered but disabled, which is the safe default.
     pub(crate) claude_messages_provider: Option<Arc<dyn ClaudeMessagesProvider>>,
+    /// Codex Responses provider used by the authenticated `/v1/responses` and
+    /// `/v1/models` gateway. `None` keeps both routes registered but disabled,
+    /// which is the fail-closed default.
+    pub(crate) codex_responses_provider: Option<Arc<dyn CodexResponsesProvider>>,
+    /// BLAKE3 digest of the local gateway bearer secret. Codex sends it in
+    /// `X-Hacienda-Gateway-Token`; `Authorization` is reserved for the user's
+    /// ChatGPT token and is forwarded to the official upstream unchanged.
+    pub(crate) codex_gateway_secret: Option<[u8; 32]>,
+    /// Short-lived, in-memory Codex viewer sessions. Rehydration values never
+    /// leave this process except over the authenticated viewer SSE channel.
+    pub(crate) viewer_sessions: Arc<ViewerSessionStore>,
+    /// Directory holding the loopback viewer assets. `None` disables the viewer
+    /// routes; the host opts in explicitly so the default API stays unchanged.
+    pub(crate) viewer_assets_dir: Option<PathBuf>,
+    /// Short-lived, tenant/principal/correlation-bound Claude Mod projection
+    /// sessions. Unlike the cookie-bound Codex viewer, these are bootstrapped
+    /// out of band by an authenticated host adapter and never broadcast.
+    pub(crate) mod_sessions: Arc<ModSessionStore>,
     /// Server-owned destinations permitted for RAG answer synthesis.
     /// `None` is fail-closed: the request cannot choose an LLM destination.
     pub(crate) rag_egress_allowlist: Option<Vec<String>>,
@@ -148,6 +172,11 @@ impl ApiState {
             quota_store: None,
             probe_state: Arc::new(Mutex::new(ProbeState::Idle)),
             claude_messages_provider: None,
+            codex_responses_provider: None,
+            codex_gateway_secret: None,
+            viewer_sessions: Arc::new(ViewerSessionStore::default()),
+            viewer_assets_dir: None,
+            mod_sessions: Arc::new(ModSessionStore::default()),
             rag_egress_allowlist: None,
             email_sources: Arc::new(crate::team_email::EmailSourceRegistry::from_env()),
             viewer_capabilities: Arc::new(crate::team_email::ViewerCapabilityStore::default()),
@@ -273,6 +302,51 @@ impl ApiState {
         provider: Arc<dyn ClaudeMessagesProvider>,
     ) -> Self {
         self.claude_messages_provider = Some(provider);
+        self
+    }
+
+    /// Enable the authenticated Codex Responses gateway.
+    #[must_use]
+    pub fn with_codex_responses_provider(
+        mut self,
+        provider: Arc<dyn CodexResponsesProvider>,
+    ) -> Self {
+        self.codex_responses_provider = Some(provider);
+        self
+    }
+
+    /// Access the in-memory Codex viewer sessions for host-side diagnostics.
+    #[must_use]
+    pub fn viewer_sessions(&self) -> &Arc<ViewerSessionStore> {
+        &self.viewer_sessions
+    }
+
+    /// Access the in-memory Claude Mod projection sessions for host diagnostics.
+    #[must_use]
+    pub fn mod_sessions(&self) -> &Arc<ModSessionStore> {
+        &self.mod_sessions
+    }
+
+    /// Override the Mod projection store (e.g. a shorter TTL in tests or a
+    /// host-specific lifetime policy). Builder-style, like the other stores.
+    #[must_use]
+    pub fn with_mod_sessions(mut self, store: Arc<ModSessionStore>) -> Self {
+        self.mod_sessions = store;
+        self
+    }
+
+    /// Configure the local gateway secret. Only its digest is retained; the
+    /// plaintext never enters state, a log, or a response body.
+    #[must_use]
+    pub fn with_codex_gateway_secret(mut self, secret: impl AsRef<str>) -> Self {
+        self.codex_gateway_secret = Some(*blake3::hash(secret.as_ref().as_bytes()).as_bytes());
+        self
+    }
+
+    /// Enable the same-origin loopback viewer by pointing it at its asset dir.
+    #[must_use]
+    pub fn with_viewer_assets(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.viewer_assets_dir = Some(dir.into());
         self
     }
 

@@ -23,7 +23,10 @@ use hacienda::review::{
     ReviewStore as _,
 };
 use hacienda::{HaciendaConfig, HaciendaError, HaciendaFacade, HaciendaResult};
-use hacienda_api::{AnthropicMessagesProvider, ApiLimits, ApiState, ClaudeMessagesProvider};
+use hacienda_api::{
+    AnthropicMessagesProvider, ApiLimits, ApiState, ClaudeMessagesProvider,
+    CodexResponsesHttpClientProvider,
+};
 use hacienda_core::auth::authn::AuthConfig;
 use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
@@ -41,6 +44,24 @@ const ANTHROPIC_MESSAGES_API_KEY_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_API_KE
 const ANTHROPIC_MESSAGES_ENDPOINT_ENV: &str = "HACIENDA_ANTHROPIC_MESSAGES_ENDPOINT";
 const DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const RAG_LLM_BASE_URL_ENV: &str = "HACIENDA_RAG_LLM_BASE_URL";
+/// Local gateway bearer secret. Codex sends it in `X-Hacienda-Gateway-Token`;
+/// `Authorization` is reserved for the user's ChatGPT credential and is
+/// forwarded to the official upstream by the gateway.
+const LOCAL_GATEWAY_SECRET_ENV: &str = "HACIENDA_GATEWAY_TOKEN";
+
+/// The local gateway secret must exist when the Codex surface is enabled and
+/// be long enough to be a real secret. No inference credential is configured
+/// server-side any more. Pure function so startup validation is testable.
+fn validate_local_gateway_secret(secret: Option<&str>, required: bool) -> Result<()> {
+    match secret {
+        Some(secret) if secret.len() >= 16 => Ok(()),
+        Some(_) => anyhow::bail!("{LOCAL_GATEWAY_SECRET_ENV} must be at least 16 characters long"),
+        None if required => anyhow::bail!(
+            "{LOCAL_GATEWAY_SECRET_ENV} must be set when the Codex gateway or viewer is enabled"
+        ),
+        None => Ok(()),
+    }
+}
 
 fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
     args.concurrency.unwrap_or_else(num_cpus::get)
@@ -1631,6 +1652,32 @@ pub fn run_completions(args: CompletionsArgs) -> Result<()> {
 /// who has actually replaced the placeholder.
 const PLACEHOLDER_STATIC_TOKEN: &str = "replace-me-before-deploying";
 
+/// Local-only gateway surfaces may never be reachable from the network even
+/// when a valid bearer token exists. The Codex responses gateway and its viewer
+/// carry local-only rehydration values; the Claude Mod surface carries
+/// `pii:reveal`-equivalent mappings. Both are stricter than `check_bind_policy`,
+/// which permits a non-loopback bind with authentication enabled.
+///
+/// The Mod routes are mounted unconditionally, so this surface is always on:
+/// a remote caller holding an ordinary `documents:process` bearer could
+/// otherwise bootstrap a capability and receive vaulted originals. Locality is
+/// additionally enforced per request from the actual TCP peer in the handlers;
+/// this bind check is the defense-in-depth layer that keeps the socket local.
+fn check_loopback_bind_for_local_surfaces(
+    bind: SocketAddr,
+    codex_surface_enabled: bool,
+    claude_surface_enabled: bool,
+) -> Result<()> {
+    if (codex_surface_enabled || claude_surface_enabled) && !bind.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to bind {bind}: the Codex gateway/viewer and Claude Mod surface expose \\
+             local-only rehydration data and must stay on loopback. Use 127.0.0.1, localhost \\
+             or ::1."
+        );
+    }
+    Ok(())
+}
+
 fn check_bind_policy(bind: SocketAddr, auth: &AuthConfig) -> Result<()> {
     if bind.ip().is_loopback() {
         return Ok(());
@@ -1710,14 +1757,33 @@ pub async fn run_serve(
 ) -> Result<()> {
     let config = load_config(config_path, config_json, None, None)?;
 
+    let claude_messages_provider = build_anthropic_messages_provider()?;
+    // No server-side inference credential: Codex sends its ChatGPT bearer and
+    // account header per request and the gateway forwards both upstream.
+    let codex_responses_provider = CodexResponsesHttpClientProvider::from_env()
+        .map_err(|_| anyhow::anyhow!("invalid Codex Responses gateway configuration"))?;
+    let rag_egress = read_optional_env(RAG_LLM_BASE_URL_ENV)?;
+
+    let viewer_enabled = args.viewer_dir.is_some();
+    let codex_gateway_enabled = codex_responses_provider.is_some();
+    let codex_surface_enabled = codex_gateway_enabled || viewer_enabled;
+    // The /mod/* routes are always mounted, so the Claude projection surface is
+    // always live even when no provider credential is configured.
+    let claude_surface_enabled = true;
+    let local_secret = read_optional_env(LOCAL_GATEWAY_SECRET_ENV)?;
+    validate_local_gateway_secret(local_secret.as_deref(), codex_surface_enabled)?;
+
     // Before the socket, not after: a bind that succeeds and is then torn down has
     // already been reachable.
     check_bind_policy(args.bind, &config.auth)?;
+    check_loopback_bind_for_local_surfaces(
+        args.bind,
+        codex_surface_enabled,
+        claude_surface_enabled,
+    )?;
 
     let auth = AuthState::from_config(&config.auth).context("building the auth state")?;
     let auth_enabled = config.auth.enabled;
-    let claude_messages_provider = build_anthropic_messages_provider()?;
-    let rag_egress = read_optional_env(RAG_LLM_BASE_URL_ENV)?;
 
     let facade = Arc::new(build_facade(config).context("building the facade")?);
     // RUNTIME LIMITATION: this is the only in-repo ApiState constructor and it
@@ -1749,6 +1815,18 @@ pub async fn run_serve(
         Some(provider) => state.with_claude_messages_provider(provider),
         None => state,
     };
+    let state = match codex_responses_provider {
+        Some(provider) => state.with_codex_responses_provider(Arc::new(provider)),
+        None => state,
+    };
+    let state = match local_secret {
+        Some(secret) => state.with_codex_gateway_secret(secret),
+        None => state,
+    };
+    let state = match args.viewer_dir {
+        Some(dir) => state.with_viewer_assets(dir),
+        None => state,
+    };
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -1769,10 +1847,27 @@ pub async fn run_serve(
     // Operator-visible statement of the limitation above: a restart clears the
     // job registry, so polling a previously accepted job id returns 404.
     eprintln!("  job state: in-memory (NOT durable — queued jobs are lost on restart)");
+    eprintln!(
+        "  codex responses gateway: {}",
+        if codex_gateway_enabled {
+            "enabled (X-Hacienda-Gateway-Token local secret; ChatGPT credential forwarded)"
+        } else {
+            "disabled (set HACIENDA_CODEX_RESPONSES_ENDPOINT)"
+        }
+    );
+    if viewer_enabled {
+        eprintln!("  codex viewer: http://{local_addr}/viewer (same origin, loopback only)");
+    }
 
-    axum::serve(listener, hacienda_api::router(state))
-        .await
-        .context("serving the API")
+    // ConnectInfo is required by the /mod/* handlers, which decide locality
+    // from the real TCP peer rather than a client-supplied Host/Origin header.
+    // Without this, the extractor fails closed and no Mod route can be used.
+    axum::serve(
+        listener,
+        hacienda_api::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("serving the API")
 }
 
 /// Build an EmailConfig from an optional TOML file, falling back to an
@@ -1922,11 +2017,43 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_bind_policy, parse_anthropic_messages_config, DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT,
+        check_bind_policy, check_loopback_bind_for_local_surfaces, parse_anthropic_messages_config,
+        validate_local_gateway_secret, DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT,
         PLACEHOLDER_STATIC_TOKEN,
     };
     use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
     use std::net::SocketAddr;
+
+    #[test]
+    fn local_secret_validation_rejects_missing_and_short_values() {
+        assert!(validate_local_gateway_secret(None, false).is_ok());
+        assert!(validate_local_gateway_secret(None, true).is_err());
+        assert!(validate_local_gateway_secret(Some("short"), true).is_err());
+        assert!(validate_local_gateway_secret(Some("local-secret-123456"), true).is_ok());
+    }
+
+    #[test]
+    fn codex_surface_requires_loopback_bind() {
+        let local = check_loopback_bind_for_local_surfaces;
+        assert!(local(addr("127.0.0.1:8787"), true, false).is_ok());
+        assert!(local(addr("[::1]:8787"), true, false).is_ok());
+        assert!(local(addr("0.0.0.0:8787"), true, false).is_err());
+        assert!(local(addr("192.168.1.2:8787"), true, false).is_err());
+        assert!(local(addr("0.0.0.0:8787"), false, false).is_ok());
+    }
+
+    #[test]
+    fn claude_mod_surface_requires_loopback_bind() {
+        // The /mod/* routes are always mounted; a bearer-authenticated remote
+        // caller must not be able to mint an original-revealing capability.
+        let local = check_loopback_bind_for_local_surfaces;
+        assert!(local(addr("127.0.0.1:8787"), false, true).is_ok());
+        assert!(local(addr("127.0.0.53:8787"), false, true).is_ok());
+        assert!(local(addr("[::1]:8787"), false, true).is_ok());
+        assert!(local(addr("0.0.0.0:8787"), false, true).is_err());
+        assert!(local(addr("192.168.1.2:8787"), false, true).is_err());
+        assert!(local(addr("0.0.0.0:8787"), true, true).is_err());
+    }
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()

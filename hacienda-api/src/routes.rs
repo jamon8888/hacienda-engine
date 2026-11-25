@@ -24,9 +24,9 @@ use hacienda_core::{
 
 use crate::{
     handlers::{
-        audit, audit_review, auth, capabilities, claude_messages, documents, email, graph,
-        graph_retrieve, info, jobs, keys, openapi, pii, presets, rag, rag_stream, uploads, usage,
-        versions, xberg_surface,
+        audit, audit_review, auth, capabilities, claude_messages, claude_mod, codex_responses,
+        codex_viewer, documents, email, graph, graph_retrieve, info, jobs, keys, openapi, pii,
+        presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
     },
     quota::quota_middleware,
     state::ApiState,
@@ -496,6 +496,81 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/messages",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || post(claude_messages::messages),
+    },
+    // Loopback-only projection channel for the Claude Code Mod. These routes
+    // use the same authenticated capability as `/v1/messages` so a bootstrap
+    // cannot be minted by an unauthenticated local process. Handlers add the
+    // loopback guard, correlation-hint check and short-lived session capability;
+    // the middleware alone is intentionally not enough.
+    RouteSpec {
+        path: "/mod/session",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(claude_mod::session),
+    },
+    RouteSpec {
+        path: "/mod/events",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(claude_mod::events),
+    },
+    // Bounded one-shot alternative to the SSE stream for hosts whose
+    // `$.http.fetch` cannot consume a long-lived response. Same bearer,
+    // loopback-peer and capability requirements as `/mod/events`.
+    RouteSpec {
+        path: "/mod/poll",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || get(claude_mod::poll),
+    },
+    RouteSpec {
+        path: "/mod/revoke",
+        access: Access::Capability(Capability::DocumentsProcess),
+        make_router: || post(claude_mod::revoke),
+    },
+    // Codex inside ChatGPT Desktop resolves `/responses` against its configured
+    // `/v1` base. The same redaction-bearing capability is required here: the
+    // provider call carries the caller's pseudonymous text and no client-chosen
+    // tenant context. The Codex gateway validates its own dedicated local-secret
+    // header inside the handler: `Authorization` carries the user's ChatGPT
+    // token and must stay available for forwarding to the official upstream.
+    // These are therefore public to the shared bearer middleware, but fail
+    // closed without the gateway header.
+    RouteSpec {
+        path: "/v1/responses",
+        access: Access::Public,
+        make_router: || post(codex_responses::responses),
+    },
+    RouteSpec {
+        path: "/v1/models",
+        access: Access::Public,
+        make_router: || get(codex_responses::models),
+    },
+    // Loopback viewer: served from the same origin as the gateway so no CORS
+    // exception or bearer token is needed in the browser. The page mints a
+    // short-lived cookie-bound session; the two API routes below validate it
+    // themselves (the middleware cannot set per-route cookie requirements).
+    RouteSpec {
+        path: "/viewer",
+        access: Access::Public,
+        make_router: || get(codex_viewer::viewer_page),
+    },
+    RouteSpec {
+        path: "/viewer/viewer.js",
+        access: Access::Public,
+        make_router: || get(codex_viewer::viewer_script),
+    },
+    RouteSpec {
+        path: "/viewer/viewer.css",
+        access: Access::Public,
+        make_router: || get(codex_viewer::viewer_styles),
+    },
+    RouteSpec {
+        path: "/viewer/events",
+        access: Access::Public,
+        make_router: || get(codex_viewer::viewer_events),
+    },
+    RouteSpec {
+        path: "/viewer/reveal",
+        access: Access::Public,
+        make_router: || post(codex_viewer::viewer_reveal),
     },
 ];
 

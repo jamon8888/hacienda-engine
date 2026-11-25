@@ -23,6 +23,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use crate::claude_install::ClaudeInstallArgs;
+use crate::codex_install::CodexInstallArgs;
+
 /// Redaction-by-default document extraction.
 ///
 /// The polarity is inverted from `xberg` on purpose: `xberg extract` yields text,
@@ -99,6 +102,40 @@ pub enum Command {
     /// Process emails (archive, NER, RAG index, redact) using the same PII engine
     /// and extraction stack as document processing.
     Email(EmailArgs),
+
+    /// Configure le provider Codex local : ajoute le provider dans le config.toml
+    /// utilisateur sans écraser les autres providers, sert le viewer web en boucle
+    /// locale et l'ouvre dans le navigateur.
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommand,
+    },
+
+    /// Configure le gateway Hacienda pour Claude Code (CLI et onglet Code de
+    /// Claude Desktop) dans ~/.claude/settings.json, sans écraser les autres
+    /// réglages et sans credential codé en dur.
+    Claude {
+        #[command(subcommand)]
+        command: ClaudeCommand,
+    },
+}
+
+/// `hacienda codex` sous-commandes.
+#[derive(Debug, Subcommand)]
+pub enum CodexCommand {
+    /// Installe le provider Hacienda dans le config.toml utilisateur de Codex,
+    /// préserve les autres providers, sert le viewer en boucle locale et l'ouvre
+    /// dans le navigateur.
+    Install(CodexInstallArgs),
+}
+
+/// `hacienda claude` sous-commandes.
+#[derive(Debug, Subcommand)]
+pub enum ClaudeCommand {
+    /// Écrit ANTHROPIC_BASE_URL et un credential de gateway dans le bloc env du
+    /// settings.json utilisateur, en préservant les autres clés. Le secret vient
+    /// de l'environnement ou d'un fichier, jamais du code.
+    Install(ClaudeInstallArgs),
 }
 
 /// Email processing arguments.
@@ -561,6 +598,12 @@ pub struct ServeArgs {
     /// network" plus "no authentication" has no legitimate use on this product.
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8787")]
     pub bind: SocketAddr,
+
+    /// Directory containing the loopback Codex viewer assets (index.html,
+    /// viewer.js, viewer.css). When set, the viewer is served same-origin with
+    /// the gateway at `/viewer`. The local secret stays outside Codex config.
+    #[arg(long, value_name = "DIR", env = "HACIENDA_CODEX_VIEWER_DIR")]
+    pub viewer_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

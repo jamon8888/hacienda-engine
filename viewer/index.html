@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex local viewer — Hacienda</title>
+<link rel="stylesheet" href="viewer.css">
+</head>
+<body data-viewer-config="__VIEWER_CONFIG__">
+  <header>
+    <h1>Codex local viewer</h1>
+    <p class="subtitle">Hacienda gateway — rendu local, boucle locale uniquement, aucune requête externe</p>
+  </header>
+
+  <section class="toolbar">
+    <span class="subtitle">Canal SSE local, même origine que le gateway (aucun token saisi dans le navigateur)</span>
+    <button type="button" id="connectBtn">Reconnecter</button>
+    <button type="button" id="disconnectBtn" disabled>Déconnecter</button>
+    <button type="button" id="clearBtn">Effacer le rendu</button>
+    <div id="status" class="status status-disconnected">Déconnecté</div>
+  </section>
+
+  <section class="render">
+    <h2>Réponse du gateway (tokens, entités locales en gris)</h2>
+    <div id="output" class="output" aria-live="polite"></div>
+  </section>
+
+  <section class="map" style="display:none">
+    <h2>Carte de réhydratation en mémoire (token → original)</h2>
+    <p>Cette carte ne contient que des pseudonymes et leurs originales. Elle est conservée en mémoire uniquement, jamais écrite sur le disque.</p>
+    <div id="mapEditor"></div>
+  </section>
+
+  <section class="audit">
+    <h2>Audit des révélations (sans contenu)</h2>
+    <div id="audit" class="audit-log"></div>
+    <p class="hint">L'audit enregistre l'action et l'horodatage uniquement. Aucun contenu en clair n'est jamais journalisé.</p>
+  </section>
+
+<script src="viewer.js"></script>
+</body>
+</html>

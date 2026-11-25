@@ -685,12 +685,19 @@ impl<H> AnthropicProviderTransport<H> {
         Self { http, config }
     }
 
-    /// Collect and relay validated Claude SSE events after response redaction.
+    /// Relay validated Claude SSE events as they arrive, redacting each logical
+    /// text before any of its deltas are released.
     ///
-    /// The wire is read incrementally, but the complete logical response is
-    /// retained in memory until EOF because `RedactionAdapter` has no streaming
-    /// safety contract: PII may span arbitrarily many text deltas. Callbacks only
-    /// receive events after joined text inspection and successful validation.
+    /// Claude Code consumes a streaming response event by event; buffering the
+    /// whole body stalls the client and can trip its idle watchdog. The safety
+    /// contract is *per logical text*, not per transport chunk: every redactable
+    /// fragment of a content block is joined and passed through
+    /// [`RedactionAdapter::redact_text`] once at `content_block_stop` (or at a
+    /// terminal boundary), so PII split across deltas can never be observed in
+    /// an earlier callback. Events without free-form text (message lifecycle,
+    /// `ping` keepalives and safe SSE comments) are relayed immediately and in
+    /// provider order. Unknown events, unsafe comments and malformed frames are
+    /// refused without releasing buffered text.
     ///
     /// # Errors
     /// Returns an error if the provider, transport, event sequence, or redaction is invalid.
@@ -735,40 +742,28 @@ impl<H> AnthropicProviderTransport<H> {
         );
         let mut decoder = SseDecoder::default();
         let mut response_metadata = None;
-        let mut events = Vec::new();
+        let metadata_invalid = std::cell::Cell::new(false);
+        let mut relay = ClaudeSseRelay::new(redactor, &mut callback);
         self.http.send_stream(
             http_request,
             &mut |status, headers| {
-                response_metadata = Some(ProviderSseMetadata { status, headers });
+                let metadata = ProviderSseMetadata { status, headers };
+                let invalid = !valid_claude_response_metadata(&metadata);
+                metadata_invalid.set(invalid);
+                if !invalid {
+                    response_metadata = Some(metadata);
+                }
             },
             &mut |bytes| {
-                decoder.push(bytes, &mut events)?;
-                Ok(())
+                if metadata_invalid.get() {
+                    return Err(TransportError::Failed);
+                }
+                decoder.push_with(bytes, &mut |event| relay.accept(event))
             },
         )?;
-        decoder.finish(&events)?;
-        if !matches!(
-            events.last().and_then(|event| event.event.as_deref()),
-            Some("message_stop" | "error")
-        ) {
-            return Err(TransportError::Failed);
-        }
-        let metadata = response_metadata.ok_or(TransportError::Failed)?;
-        if !(200..300).contains(&metadata.status) {
-            return Err(TransportError::Failed);
-        }
-        for (name, value) in &metadata.headers {
-            if name.eq_ignore_ascii_case("content-type")
-                && !value.to_ascii_lowercase().starts_with("text/event-stream")
-            {
-                return Err(TransportError::Failed);
-            }
-        }
-        let safe = redact_claude_sse_events(redactor, events)?;
-        for event in safe {
-            callback(event);
-        }
-        Ok(metadata)
+        decoder.finish()?;
+        relay.finish()?;
+        response_metadata.ok_or(TransportError::Failed)
     }
 }
 
@@ -1111,10 +1106,24 @@ struct SseDecoder {
 }
 
 impl SseDecoder {
+    #[cfg(test)]
     fn push(
         &mut self,
         bytes: &[u8],
         events: &mut Vec<ProviderSseEvent>,
+    ) -> Result<(), TransportError> {
+        self.push_with(bytes, &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+    }
+
+    /// Decode complete frames and hand each one to `callback` immediately, so a
+    /// relay can validate and release safe events while the body is still open.
+    fn push_with(
+        &mut self,
+        bytes: &[u8],
+        callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
         self.pending.extend_from_slice(bytes);
         while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
@@ -1123,7 +1132,7 @@ impl SseDecoder {
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            self.line(&line, events)?;
+            self.line(&line, callback)?;
         }
         Ok(())
     }
@@ -1131,18 +1140,18 @@ impl SseDecoder {
     fn line(
         &mut self,
         line: &[u8],
-        events: &mut Vec<ProviderSseEvent>,
+        callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
         let line = std::str::from_utf8(line).map_err(|_| TransportError::Failed)?;
         if line.is_empty() {
             if !self.data.is_empty() || self.comment.is_some() {
-                events.push(ProviderSseEvent {
+                callback(ProviderSseEvent {
                     event: self.event.take(),
                     id: self.id.clone(),
                     retry: self.retry.take(),
                     comment: self.comment.take(),
                     data: self.data.join("\n"),
-                });
+                })?;
             } else {
                 self.event = None;
                 self.retry = None;
@@ -1168,13 +1177,10 @@ impl SseDecoder {
         Ok(())
     }
 
-    fn finish(self, events: &[ProviderSseEvent]) -> Result<(), TransportError> {
+    fn finish(self) -> Result<(), TransportError> {
         // The protocol requires a blank-line terminator; incomplete UTF-8, lines,
         // and event frames are discarded as truncated input.
         if !self.pending.is_empty() || self.frame_touched {
-            return Err(TransportError::Failed);
-        }
-        if events.is_empty() {
             return Err(TransportError::Failed);
         }
         Ok(())
@@ -1192,91 +1198,173 @@ where
     for chunk in chunks {
         decoder.push(chunk?.as_ref().as_bytes(), &mut events)?;
     }
-    decoder.finish(&events)?;
+    decoder.finish()?;
+    if events.is_empty() {
+        return Err(TransportError::Failed);
+    }
     Ok(events)
 }
 
+fn valid_claude_response_metadata(metadata: &ProviderSseMetadata) -> bool {
+    (200..300).contains(&metadata.status)
+        && metadata.headers.iter().all(|(name, value)| {
+            !name.eq_ignore_ascii_case("content-type")
+                || value.to_ascii_lowercase().starts_with("text/event-stream")
+        })
+}
+
+/// Only content-free SSE heartbeats may cross the relay. Anthropic uses
+/// `: ping` / `: ping - <epoch>` frames; an empty comment is the axum keepalive.
+fn is_safe_keepalive_comment(comment: &str) -> bool {
+    let comment = comment.trim();
+    if comment.is_empty() || comment == "ping" {
+        return true;
+    }
+    let Some(remainder) = comment.strip_prefix("ping - ") else {
+        return false;
+    };
+    !remainder.is_empty()
+        && remainder.bytes().all(|byte| {
+            byte.is_ascii_digit() || matches!(byte, b'-' | b':' | b'.' | b'T' | b'Z' | b' ')
+        })
+        && remainder.bytes().any(|byte| byte.is_ascii_digit())
+}
+
+#[cfg(test)]
 fn validate_claude_sse_events(events: &[ProviderSseEvent]) -> Result<(), TransportError> {
     for event in events {
-        if event.comment.is_some() {
-            // Comment payloads have no structured contract here and may carry
-            // provider content; do not forward them as anonymous heartbeats.
-            return Err(TransportError::Failed);
-        }
-        let kind = event.event.as_deref().ok_or(TransportError::Failed)?;
-        if kind == "[DONE]" {
-            return Err(TransportError::Failed);
-        }
-        let value: Value = serde_json::from_str(&event.data).map_err(|_| TransportError::Failed)?;
-        if !value.is_object() || value.get("type").and_then(Value::as_str) != Some(kind) {
-            return Err(TransportError::Failed);
-        }
-        match kind {
-            "ping" | "message_stop" => require_keys(&value, &["type"])?,
-            "content_block_delta" => {
-                require_keys(&value, &["type", "index", "delta"])?;
-                let delta = value.get("delta").ok_or(TransportError::Failed)?;
-                require_keys(delta, &["type", "text"])?;
-                if delta.get("type").and_then(Value::as_str) != Some("text_delta")
-                    || !delta.get("text").is_some_and(Value::is_string)
-                {
-                    return Err(TransportError::Failed);
-                }
-            }
-            "content_block_start" => {
-                require_keys(&value, &["type", "index", "content_block"])?;
-                let block = value.get("content_block").ok_or(TransportError::Failed)?;
-                require_keys(block, &["type", "text"])?;
-                if block.get("type").and_then(Value::as_str) != Some("text")
-                    || block.get("text").and_then(Value::as_str) != Some("")
-                {
-                    return Err(TransportError::Failed);
-                }
-            }
-            "content_block_stop" => require_keys(&value, &["type", "index"])?,
-            "message_start" => {
-                require_keys(&value, &["type", "message"])?;
-                let message = value.get("message").ok_or(TransportError::Failed)?;
-                require_keys(
-                    message,
-                    &[
-                        "id",
-                        "type",
-                        "role",
-                        "model",
-                        "content",
-                        "stop_reason",
-                        "stop_sequence",
-                        "usage",
-                    ],
-                )?;
-                if message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .is_none_or(|items| !items.is_empty())
-                {
-                    return Err(TransportError::Failed);
-                }
-                validate_usage(message.get("usage").ok_or(TransportError::Failed)?)?;
-            }
-            "message_delta" => {
-                require_keys(&value, &["type", "delta", "usage"])?;
-                let delta = value.get("delta").ok_or(TransportError::Failed)?;
-                require_keys(delta, &["stop_reason", "stop_sequence"])?;
-                validate_usage(value.get("usage").ok_or(TransportError::Failed)?)?;
-            }
-            "error" => {
-                require_keys(&value, &["type", "error"])?;
-                let detail = value.get("error").ok_or(TransportError::Failed)?;
-                require_keys(detail, &["type", "message"])?;
-                if !detail.get("message").is_some_and(Value::is_string) {
-                    return Err(TransportError::Failed);
-                }
-            }
-            _ => return Err(TransportError::Failed),
-        }
+        validate_claude_sse_event(event)?;
     }
     Ok(())
+}
+
+fn validate_claude_sse_event(event: &ProviderSseEvent) -> Result<(), TransportError> {
+    if let Some(comment) = event.comment.as_deref() {
+        if !is_safe_keepalive_comment(comment)
+            || !event.data.is_empty()
+            || event.event.is_some()
+            || event.id.is_some()
+            || event.retry.is_some()
+        {
+            return Err(TransportError::Failed);
+        }
+        return Ok(());
+    }
+    let kind = event.event.as_deref().ok_or(TransportError::Failed)?;
+    if kind == "[DONE]" {
+        return Err(TransportError::Failed);
+    }
+    let value: Value = serde_json::from_str(&event.data).map_err(|_| TransportError::Failed)?;
+    if !value.is_object() || value.get("type").and_then(Value::as_str) != Some(kind) {
+        return Err(TransportError::Failed);
+    }
+    match kind {
+        "ping" | "message_stop" => require_keys(&value, &["type"])?,
+        "content_block_delta" => {
+            require_keys(&value, &["type", "index", "delta"])?;
+            require_sse_index(&value)?;
+            let delta = value.get("delta").ok_or(TransportError::Failed)?;
+            match delta.get("type").and_then(Value::as_str) {
+                Some("text_delta") => require_text_field(delta, "text")?,
+                Some("input_json_delta") => require_text_field(delta, "partial_json")?,
+                Some("thinking_delta") => require_text_field(delta, "thinking")?,
+                Some("signature_delta") => require_text_field(delta, "signature")?,
+                _ => return Err(TransportError::Failed),
+            }
+        }
+        "content_block_start" => {
+            require_keys(&value, &["type", "index", "content_block"])?;
+            require_sse_index(&value)?;
+            let block = value.get("content_block").ok_or(TransportError::Failed)?;
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    require_keys(block, &["type", "text"])?;
+                    if block.get("text").and_then(Value::as_str) != Some("") {
+                        return Err(TransportError::Failed);
+                    }
+                }
+                Some("tool_use") => {
+                    require_keys(block, &["type", "id", "name", "input"])?;
+                    if !block.get("id").is_some_and(Value::is_string)
+                        || !block.get("name").is_some_and(Value::is_string)
+                        || !block.get("input").is_some_and(Value::is_object)
+                    {
+                        return Err(TransportError::Failed);
+                    }
+                }
+                Some("thinking") => {
+                    require_keys(block, &["type", "thinking", "signature"])?;
+                    if block.get("thinking").and_then(Value::as_str) != Some("")
+                        || !block.get("signature").is_some_and(Value::is_string)
+                    {
+                        return Err(TransportError::Failed);
+                    }
+                }
+                _ => return Err(TransportError::Failed),
+            }
+        }
+        "content_block_stop" => {
+            require_keys(&value, &["type", "index"])?;
+            require_sse_index(&value)?;
+        }
+        "message_start" => {
+            require_keys(&value, &["type", "message"])?;
+            let message = value.get("message").ok_or(TransportError::Failed)?;
+            require_keys(
+                message,
+                &[
+                    "id",
+                    "type",
+                    "role",
+                    "model",
+                    "content",
+                    "stop_reason",
+                    "stop_sequence",
+                    "usage",
+                ],
+            )?;
+            if message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_none_or(|items| !items.is_empty())
+            {
+                return Err(TransportError::Failed);
+            }
+            validate_usage(message.get("usage").ok_or(TransportError::Failed)?)?;
+        }
+        "message_delta" => {
+            require_keys(&value, &["type", "delta", "usage"])?;
+            let delta = value.get("delta").ok_or(TransportError::Failed)?;
+            require_keys(delta, &["stop_reason", "stop_sequence"])?;
+            validate_usage(value.get("usage").ok_or(TransportError::Failed)?)?;
+        }
+        "error" => {
+            require_keys(&value, &["type", "error"])?;
+            let detail = value.get("error").ok_or(TransportError::Failed)?;
+            require_keys(detail, &["type", "message"])?;
+            if !detail.get("message").is_some_and(Value::is_string) {
+                return Err(TransportError::Failed);
+            }
+        }
+        _ => return Err(TransportError::Failed),
+    }
+    Ok(())
+}
+
+fn require_sse_index(value: &Value) -> Result<u64, TransportError> {
+    value
+        .get("index")
+        .and_then(Value::as_u64)
+        .ok_or(TransportError::Failed)
+}
+
+fn require_text_field(value: &Value, field: &str) -> Result<(), TransportError> {
+    require_keys(value, &["type", field])?;
+    if value.get(field).is_some_and(Value::is_string) {
+        Ok(())
+    } else {
+        Err(TransportError::Failed)
+    }
 }
 
 fn validate_usage(value: &Value) -> Result<(), TransportError> {
@@ -1326,50 +1414,297 @@ fn require_keys(value: &Value, allowed: &[&str]) -> Result<(), TransportError> {
     Ok(())
 }
 
+const MAX_REDACTION_BUFFER: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaudeBlockKind {
+    Text,
+    ToolUse,
+    Thinking,
+}
+
+struct PendingClaudeBlock {
+    index: u64,
+    kind: ClaudeBlockKind,
+    joined: String,
+    /// Delta frame plus the JSON pointer of its redactable fragment. A
+    /// `signature_delta` has no redactable text and is relayed unchanged.
+    deltas: Vec<(ProviderSseEvent, Option<&'static str>)>,
+}
+
+/// Incremental redaction relay for Anthropic SSE frames.
+///
+/// The relay holds back only the *current* logical text. Every redactable
+/// fragment of a content block is joined into `joined` and passed through the
+/// adapter once before that block's deltas are released, so PII split across
+/// provider deltas cannot escape in a partial callback. Structural frames are
+/// forwarded as they arrive, keeping Claude's idle watchdog pacified.
+struct ClaudeSseRelay<'a, R, F>
+where
+    R: RedactionAdapter,
+    F: FnMut(ProviderSseEvent),
+{
+    redactor: &'a R,
+    callback: &'a mut F,
+    active: Option<PendingClaudeBlock>,
+    terminal: bool,
+}
+
+impl<'a, R, F> ClaudeSseRelay<'a, R, F>
+where
+    R: RedactionAdapter,
+    F: FnMut(ProviderSseEvent),
+{
+    fn new(redactor: &'a R, callback: &'a mut F) -> Self {
+        Self {
+            redactor,
+            callback,
+            active: None,
+            terminal: false,
+        }
+    }
+
+    fn emit(&mut self, event: ProviderSseEvent) {
+        (self.callback)(event);
+    }
+
+    fn accept(&mut self, event: ProviderSseEvent) -> Result<(), TransportError> {
+        validate_claude_sse_event(&event)?;
+        if event.comment.is_some() {
+            self.emit(event);
+            return Ok(());
+        }
+        let kind = event
+            .event
+            .as_deref()
+            .ok_or(TransportError::Failed)?
+            .to_owned();
+        let value: Value = serde_json::from_str(&event.data).map_err(|_| TransportError::Failed)?;
+        match kind.as_str() {
+            "message_start" | "ping" => self.emit(event),
+            "content_block_start" => {
+                // A new block implies the previous one is logically finished.
+                self.flush()?;
+                let index = require_sse_index(&value)?;
+                let block = value.get("content_block").ok_or(TransportError::Failed)?;
+                let block_kind = match block.get("type").and_then(Value::as_str) {
+                    Some("text") => ClaudeBlockKind::Text,
+                    Some("tool_use") => ClaudeBlockKind::ToolUse,
+                    Some("thinking") => ClaudeBlockKind::Thinking,
+                    _ => return Err(TransportError::Failed),
+                };
+                let mut safe = event;
+                if block_kind == ClaudeBlockKind::ToolUse {
+                    safe.data =
+                        redact_json_string(&safe.data, "/content_block/name", self.redactor)?;
+                }
+                self.active = Some(PendingClaudeBlock {
+                    index,
+                    kind: block_kind,
+                    joined: String::new(),
+                    deltas: Vec::new(),
+                });
+                self.emit(safe);
+            }
+            "content_block_delta" => {
+                let index = require_sse_index(&value)?;
+                let delta = value.get("delta").ok_or(TransportError::Failed)?;
+                let (pointer, block_kind) = match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => (Some("/delta/text"), ClaudeBlockKind::Text),
+                    Some("input_json_delta") => {
+                        (Some("/delta/partial_json"), ClaudeBlockKind::ToolUse)
+                    }
+                    Some("thinking_delta") => (Some("/delta/thinking"), ClaudeBlockKind::Thinking),
+                    Some("signature_delta") => (None, ClaudeBlockKind::Thinking),
+                    _ => return Err(TransportError::Failed),
+                };
+                let active = self.active.get_or_insert(PendingClaudeBlock {
+                    index,
+                    kind: block_kind,
+                    joined: String::new(),
+                    deltas: Vec::new(),
+                });
+                if active.index != index || active.kind != block_kind {
+                    return Err(TransportError::Failed);
+                }
+                if let Some(pointer) = pointer {
+                    let fragment = value
+                        .pointer(pointer)
+                        .and_then(Value::as_str)
+                        .ok_or(TransportError::Failed)?;
+                    active.joined.push_str(fragment);
+                    if active.joined.len() > MAX_REDACTION_BUFFER {
+                        return Err(TransportError::Failed);
+                    }
+                }
+                active.deltas.push((event, pointer));
+            }
+            "content_block_stop" => {
+                let index = require_sse_index(&value)?;
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|block| block.index != index)
+                {
+                    return Err(TransportError::Failed);
+                }
+                self.flush()?;
+                self.emit(event);
+            }
+            "message_delta" => {
+                self.flush()?;
+                let safe = if value
+                    .pointer("/delta/stop_sequence")
+                    .and_then(Value::as_str)
+                    .is_some()
+                {
+                    ProviderSseEvent {
+                        data: redact_json_string(
+                            &event.data,
+                            "/delta/stop_sequence",
+                            self.redactor,
+                        )?,
+                        ..event
+                    }
+                } else {
+                    event
+                };
+                self.emit(safe);
+            }
+            "message_stop" => {
+                self.flush()?;
+                self.terminal = true;
+                self.emit(event);
+            }
+            "error" => {
+                self.flush()?;
+                let message = value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .ok_or(TransportError::Failed)?;
+                let redacted = self
+                    .redactor
+                    .redact_text(message)
+                    .map_err(|_| TransportError::Failed)?
+                    .text;
+                if redacted.len() > MAX_REDACTION_BUFFER {
+                    return Err(TransportError::Failed);
+                }
+                let mut data = event.data;
+                replace_json_string(&mut data, "/error/message", redacted)?;
+                self.emit(ProviderSseEvent { data, ..event });
+            }
+            _ => return Err(TransportError::Failed),
+        }
+        Ok(())
+    }
+
+    /// Redact and release the buffered logical text, if any. This is the only
+    /// place buffered provider text crosses the callback boundary.
+    fn flush(&mut self) -> Result<(), TransportError> {
+        let Some(block) = self.active.take() else {
+            return Ok(());
+        };
+        if block.kind == ClaudeBlockKind::ToolUse && !is_json_object(&block.joined) {
+            return Err(TransportError::Failed);
+        }
+        let safe_text = if block.joined.is_empty() {
+            None
+        } else {
+            let text = self
+                .redactor
+                .redact_text(&block.joined)
+                .map_err(|_| TransportError::Failed)?
+                .text;
+            if text.len() > MAX_REDACTION_BUFFER {
+                return Err(TransportError::Failed);
+            }
+            if block.kind == ClaudeBlockKind::ToolUse && !is_json_object(&text) {
+                return Err(TransportError::Failed);
+            }
+            Some(text)
+        };
+        let mut deltas = block.deltas;
+        let last_redactable = deltas.iter().rposition(|(_, pointer)| pointer.is_some());
+        for (position, (event, pointer)) in deltas.iter_mut().enumerate() {
+            let Some(pointer) = pointer else {
+                continue;
+            };
+            let text = if Some(position) == last_redactable {
+                safe_text.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            replace_json_string(&mut event.data, pointer, text)?;
+        }
+        for (event, _) in deltas {
+            self.emit(event);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), TransportError> {
+        self.flush()?;
+        if self.terminal {
+            Ok(())
+        } else {
+            Err(TransportError::Failed)
+        }
+    }
+}
+
+fn is_json_object(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).is_ok_and(|value| value.is_object())
+}
+
+fn replace_json_string(
+    data: &mut String,
+    pointer: &str,
+    value: String,
+) -> Result<(), TransportError> {
+    let mut json: Value = serde_json::from_str(data).map_err(|_| TransportError::Failed)?;
+    *json.pointer_mut(pointer).ok_or(TransportError::Failed)? = Value::String(value);
+    *data = serde_json::to_string(&json).map_err(|_| TransportError::Failed)?;
+    Ok(())
+}
+
+fn redact_json_string<R: RedactionAdapter>(
+    data: &str,
+    pointer: &str,
+    redactor: &R,
+) -> Result<String, TransportError> {
+    let json: Value = serde_json::from_str(data).map_err(|_| TransportError::Failed)?;
+    let text = json
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .ok_or(TransportError::Failed)?;
+    let safe = redactor
+        .redact_text(text)
+        .map_err(|_| TransportError::Failed)?
+        .text;
+    let mut redacted = data.to_owned();
+    replace_json_string(&mut redacted, pointer, safe)?;
+    Ok(redacted)
+}
+
+/// Buffered variant of the relay, retained for adapters that already hold the
+/// complete frame sequence. It follows the same fail-closed redaction path.
+#[cfg(test)]
 fn redact_claude_sse_events<R: RedactionAdapter>(
     redactor: &R,
-    mut events: Vec<ProviderSseEvent>,
+    events: Vec<ProviderSseEvent>,
 ) -> Result<Vec<ProviderSseEvent>, TransportError> {
     validate_claude_sse_events(&events)?;
-    let mut text = String::new();
-    let mut text_slots = Vec::new();
-    for (index, event) in events.iter().enumerate() {
-        let (pointer, text_value) = match event.event.as_deref() {
-            Some("content_block_delta") => ("/delta/text", "/delta/text"),
-            Some("error") => ("/error/message", "/error/message"),
-            _ => continue,
-        };
-        let value: Value = serde_json::from_str(&event.data).map_err(|_| TransportError::Failed)?;
-        text.push_str(
-            value
-                .pointer(text_value)
-                .and_then(Value::as_str)
-                .ok_or(TransportError::Failed)?,
-        );
-        text_slots.push((index, pointer));
-    }
-    if !text_slots.is_empty() {
-        // Redact all provider text together so sensitive values split across
-        // text deltas (or an error detail) cannot escape in separate callbacks.
-        let safe_text = redactor
-            .redact_text(&text)
-            .map_err(|_| TransportError::Failed)?
-            .text;
-        for (index, pointer) in &text_slots {
-            let mut value: Value =
-                serde_json::from_str(&events[*index].data).map_err(|_| TransportError::Failed)?;
-            *value.pointer_mut(pointer).ok_or(TransportError::Failed)? =
-                Value::String(String::new());
-            events[*index].data =
-                serde_json::to_string(&value).map_err(|_| TransportError::Failed)?;
+    let mut safe = Vec::with_capacity(events.len());
+    {
+        let mut collect = |event| safe.push(event);
+        let mut relay = ClaudeSseRelay::new(redactor, &mut collect);
+        for event in events {
+            relay.accept(event)?;
         }
-        let (index, pointer) = *text_slots.last().ok_or(TransportError::Failed)?;
-        let mut value: Value =
-            serde_json::from_str(&events[index].data).map_err(|_| TransportError::Failed)?;
-        *value.pointer_mut(pointer).ok_or(TransportError::Failed)? = Value::String(safe_text);
-        events[index].data = serde_json::to_string(&value).map_err(|_| TransportError::Failed)?;
+        relay.flush()?;
     }
-    Ok(events)
+    Ok(safe)
 }
 
 fn anthropic_text(value: &Value) -> Option<String> {
@@ -2173,8 +2508,12 @@ mod tests {
             .expect("chunked SSE response succeeds");
         assert_eq!(metadata.status, 200);
         assert_eq!(delivered.len(), 5);
-        assert_eq!(delivered[0].id.as_deref(), Some("first"));
-        assert_eq!(delivered[1].event.as_deref(), Some("ping"));
+        // A content-free keepalive is relayed while the block's text is still
+        // buffered; the split-PII deltas are released together at the terminal
+        // boundary, before the error and final stop frames.
+        assert_eq!(delivered[0].event.as_deref(), Some("ping"));
+        assert_eq!(delivered[0].id.as_deref(), Some("heartbeat"));
+        assert_eq!(delivered[1].id.as_deref(), Some("first"));
         assert_eq!(delivered[2].id.as_deref(), Some("second"));
         assert_eq!(delivered[3].event.as_deref(), Some("error"));
         let joined = delivered
@@ -2210,7 +2549,227 @@ mod tests {
             ),
             Err(TransportError::Failed)
         );
-        assert_eq!(delivered, Vec::new());
+        // The content-free ping is safe to relay immediately; the absence of a
+        // terminal frame is still refused rather than treated as a clean end.
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].event.as_deref(), Some("ping"));
+    }
+
+    /// Captures what the callback has observed after each provider chunk so a
+    /// test can prove that text is withheld until its block is redacted.
+    #[derive(Clone, Default)]
+    struct ObservingFixture {
+        chunks: Vec<Vec<u8>>,
+        seen: Arc<Mutex<Vec<ProviderSseEvent>>>,
+        snapshots: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl ProviderHttpClient for ObservingFixture {
+        fn send(
+            &mut self,
+            _request: ProviderHttpRequest,
+        ) -> Result<ProviderHttpResponse, TransportError> {
+            Err(TransportError::Failed)
+        }
+
+        fn send_stream(
+            &mut self,
+            _request: ProviderHttpRequest,
+            on_response: &mut dyn FnMut(u16, Vec<(String, String)>),
+            on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), TransportError>,
+        ) -> Result<(), TransportError> {
+            on_response(
+                200,
+                vec![("content-type".into(), "text/event-stream".into())],
+            );
+            for chunk in &self.chunks {
+                on_chunk(chunk)?;
+                self.snapshots
+                    .lock()
+                    .expect("snapshot lock")
+                    .push(self.seen.lock().expect("seen lock").len());
+            }
+            Ok(())
+        }
+    }
+
+    fn message_start() -> String {
+        concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{",
+            "\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",",
+            "\"model\":\"claude\",\"content\":[],\"stop_reason\":null,",
+            "\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"
+        )
+        .to_owned()
+    }
+
+    fn message_end() -> String {
+        concat!(
+            "event: message_delta\ndata: {\"type\":\"message_delta\",",
+            "\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},",
+            "\"usage\":{\"output_tokens\":2}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        )
+        .to_owned()
+    }
+
+    #[test]
+    fn claude_events_stream_early_but_hold_split_pii_until_block_stop() {
+        let first = message_start()
+            + ": ping - 1763990000\n\n"
+            + "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello <per\"}}\n\n";
+        let second = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"son-fixture>\"}}\n\n".to_owned()
+            + "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            + &message_end();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let mut transport = AnthropicProviderTransport::new(
+            ObservingFixture {
+                chunks: vec![first.into_bytes(), second.into_bytes()],
+                seen: Arc::clone(&seen),
+                snapshots: Arc::clone(&snapshots),
+            },
+            ProviderTransportConfig::new(
+                "https://gateway.invalid/v1/messages",
+                "claude",
+                32,
+                "key",
+            ),
+        );
+        {
+            let sink = Arc::clone(&seen);
+            transport
+                .collect_redacted_events(
+                    &redacted_request(ProviderKind::ClaudeDesktop),
+                    &TestRedactor,
+                    |event| sink.lock().expect("callback lock").push(event),
+                )
+                .expect("streamed Claude response");
+        }
+        let snapshots = snapshots.lock().expect("snapshots lock").clone();
+        // message_start, keepalive and block start are live; the first delta is
+        // not released even though its bytes already arrived on the wire.
+        assert_eq!(snapshots, vec![3, 8]);
+        let delivered = seen.lock().expect("seen lock").clone();
+        assert_eq!(delivered.len(), 8);
+        assert_eq!(delivered[1].comment.as_deref(), Some("ping - 1763990000"));
+        let joined: String = delivered
+            .iter()
+            .filter_map(|event| {
+                let value = serde_json::from_str::<Value>(&event.data).ok()?;
+                value
+                    .pointer("/delta/text")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert!(!joined.contains(PERSON));
+        assert!(joined.contains(PERSON_TOKEN));
+        assert_eq!(delivered[6].event.as_deref(), Some("message_delta"));
+        assert_eq!(delivered[7].event.as_deref(), Some("message_stop"));
+    }
+
+    #[test]
+    fn claude_tool_and_thinking_streams_are_redacted_per_block() {
+        let wire = message_start()
+            + "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"lookup\",\"input\":{}}}\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"email\\\":\\\"<per\"}}\n\n"
+            + ": ping\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"son-fixture>\\\"}\"}}\n\n"
+            + "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            + "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"note <per\"}}\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"c2ln\"}}\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"son-fixture>\"}}\n\n"
+            + "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+            + &message_end();
+        let mut transport = AnthropicProviderTransport::new(
+            ChunkedHttpFixture {
+                chunks: wire.as_bytes().chunks(17).map(<[u8]>::to_vec).collect(),
+            },
+            ProviderTransportConfig::new(
+                "https://gateway.invalid/v1/messages",
+                "claude",
+                32,
+                "key",
+            ),
+        );
+        let mut delivered = Vec::new();
+        transport
+            .collect_redacted_events(
+                &redacted_request(ProviderKind::ClaudeDesktop),
+                &TestRedactor,
+                |event| delivered.push(event),
+            )
+            .expect("tool and thinking stream succeeds");
+        let serialized = delivered
+            .iter()
+            .map(|event| event.data.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!serialized.contains(PERSON));
+        let joined = |pointer: &str| -> String {
+            delivered
+                .iter()
+                .filter_map(|event| {
+                    let value = serde_json::from_str::<Value>(&event.data).ok()?;
+                    value
+                        .pointer(pointer)
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect()
+        };
+        let partial_json = joined("/delta/partial_json");
+        assert!(is_json_object(&partial_json));
+        assert!(partial_json.contains(PERSON_TOKEN));
+        assert!(joined("/delta/thinking").contains(PERSON_TOKEN));
+        assert!(delivered.iter().any(|event| {
+            serde_json::from_str::<Value>(&event.data)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/delta/signature")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                == Some("c2ln".to_owned())
+        }));
+    }
+
+    #[test]
+    fn claude_unknown_event_fails_closed_before_buffered_text_is_released() {
+        let wire = message_start()
+            + "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"<person-fixture>\"}}\n\n"
+            + "event: future_debug\ndata: {\"type\":\"future_debug\",\"text\":\"<person-fixture>\"}\n\n"
+            + "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            + &message_end();
+        let mut transport = AnthropicProviderTransport::new(
+            ChunkedHttpFixture {
+                chunks: vec![wire.into_bytes()],
+            },
+            ProviderTransportConfig::new(
+                "https://gateway.invalid/v1/messages",
+                "claude",
+                32,
+                "key",
+            ),
+        );
+        let mut delivered = Vec::new();
+        assert_eq!(
+            transport.collect_redacted_events(
+                &redacted_request(ProviderKind::ClaudeDesktop),
+                &TestRedactor,
+                |event| delivered.push(event),
+            ),
+            Err(TransportError::Failed)
+        );
+        assert!(delivered.iter().all(|event| !event.data.contains(PERSON)));
+        assert!(delivered
+            .iter()
+            .all(|event| event.event.as_deref() != Some("content_block_delta")));
     }
 
     #[derive(Clone)]
