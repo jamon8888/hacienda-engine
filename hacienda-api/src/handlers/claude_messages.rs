@@ -1665,7 +1665,7 @@ async fn redact_and_validate_provider_events(
                     return Err(ApiError::internal());
                 }
                 output.extend(
-                    redact_block_deltas(block.deltas, block.kind, redacted)
+                    redact_block_deltas(block.deltas, block.kind, redacted, &block.joined)
                         .map_err(|_| ApiError::internal())?,
                 );
                 output.push(event.clone());

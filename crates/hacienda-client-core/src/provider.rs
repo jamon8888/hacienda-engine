@@ -1604,10 +1604,10 @@ where
             }
             "content_block_stop" => {
                 let index = require_sse_index(&value)?;
-                if !self
+                if self
                     .active
                     .as_ref()
-                    .is_some_and(|block| block.index == index)
+                    .is_none_or(|block| block.index != index)
                 {
                     return Err(TransportError::Failed);
                 }
