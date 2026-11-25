@@ -1118,8 +1118,12 @@ impl ResponseRelay {
             if !value.is_object() {
                 return Err(());
             }
-            redact_tool_argument_values(&self.facade, self.auth_context.as_ref(), &mut value)
-                .await?;
+            redact_tool_argument_values(
+                &self.facade,
+                Caller::Principal(self.auth_context.as_ref()),
+                &mut value,
+            )
+            .await?;
             serde_json::to_string(&value).map_err(|_| ())?
         } else {
             self.facade
@@ -1145,7 +1149,7 @@ impl ResponseRelay {
 
 fn redact_tool_argument_values<'a>(
     facade: &'a HaciendaFacade,
-    auth_context: &'a AuthContext,
+    caller: Caller<'a>,
     value: &'a mut Value,
 ) -> Pin<Box<dyn std::future::Future<Output = Result<(), ()>> + Send + 'a>> {
     Box::pin(async move {
@@ -1155,7 +1159,7 @@ fn redact_tool_argument_values<'a>(
                     return Err(());
                 }
                 *text = facade
-                    .redact_text_with_auth(Caller::Principal(auth_context), text)
+                    .redact_text_with_auth(caller, text)
                     .await
                     .map_err(|_| ())?
                     .redacted_text;
@@ -1171,19 +1175,15 @@ fn redact_tool_argument_values<'a>(
                 let keys: Vec<String> = object.keys().cloned().collect();
                 for key in keys {
                     let safe_key = facade
-                        .redact_text_with_auth(Caller::Principal(auth_context), &key)
+                        .redact_text_with_auth(caller, &key)
                         .await
                         .map_err(|_| ())?
                         .redacted_text;
                     if safe_key != key {
                         return Err(());
                     }
-                    redact_tool_argument_values(
-                        facade,
-                        auth_context,
-                        object.get_mut(&key).ok_or(())?,
-                    )
-                    .await?;
+                    redact_tool_argument_values(facade, caller, object.get_mut(&key).ok_or(())?)
+                        .await?;
                 }
                 Ok(())
             }
@@ -1656,11 +1656,20 @@ async fn redact_and_validate_provider_events(
                 } else {
                     block.joined.clone()
                 };
-                let redacted = facade
-                    .redact_text_with_auth(caller, &joined)
-                    .await
-                    .map_err(ApiError::from)?
-                    .redacted_text;
+                let redacted = if block.kind == BlockKind::ToolUse {
+                    let mut value: Value =
+                        serde_json::from_str(&joined).map_err(|_| ApiError::internal())?;
+                    redact_tool_argument_values(facade, caller, &mut value)
+                        .await
+                        .map_err(|_| ApiError::internal())?;
+                    serde_json::to_string(&value).map_err(|_| ApiError::internal())?
+                } else {
+                    facade
+                        .redact_text_with_auth(caller, &joined)
+                        .await
+                        .map_err(ApiError::from)?
+                        .redacted_text
+                };
                 if block.kind == BlockKind::ToolUse
                     && !serde_json::from_str::<Value>(&redacted)
                         .ok()
