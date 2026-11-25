@@ -476,3 +476,95 @@ pub struct CacheWarmParams {
     pub preset: String,
     pub confirm: bool,
 }
+
+/// Parameters for the six source-named legal search tools.
+///
+/// Only `query` is ever sent to the external paid web-search provider (as a
+/// `site:`-scoped query). This struct deliberately has no field for document text, file
+/// paths, or facade output, so private Hacienda documents cannot be forwarded to the
+/// provider through this tool surface.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalSearchParams {
+    /// Research terms or a legal question (1–2000 characters).
+    pub query: String,
+    /// Maximum results (1–20). Defaults to 10, as in the `hacienda-legal` library.
+    #[serde(default = "default_legal_max_results")]
+    pub max_results: u8,
+}
+
+/// Parameters for `official_fetch`. The URL is host-checked by `hacienda-legal` before
+/// any request is made; no local document content is involved in a fetch.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalFetchParams {
+    /// One official-source provider: eurlex, legifrance, gesetze, rechtspraak, boe, normattiva.
+    pub source: String,
+    /// HTTPS URL on the selected provider's official domain.
+    pub url: String,
+}
+
+const fn default_legal_max_results() -> u8 {
+    10
+}
+
+/// Parameters for `create_deep_research`.
+///
+/// `source` is mandatory: a deep-research run must be scoped to one official
+/// jurisdiction from the moment it is submitted. As with the search tools, only `query`
+/// is forwarded to the external provider; this struct has no document-content field.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalDeepResearchParams {
+    /// Required official source: eurlex, legifrance, gesetze, rechtspraak, boe, normattiva.
+    pub source: String,
+    /// Research terms or a legal question (1–2000 characters).
+    pub query: String,
+}
+
+/// Parameters for `deep_research_status` and `deep_research_result`.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalTaskIdParams {
+    /// Provider task identifier returned by `create_deep_research`.
+    pub run_id: String,
+}
+
+/// Parameters for `create_monitor`.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalMonitorCreateParams {
+    /// Required official source: eurlex, legifrance, gesetze, rechtspraak, boe, normattiva.
+    pub source: String,
+    /// Research terms or a legal question (1–2000 characters).
+    pub query: String,
+    /// Provider schedule/frequency for the monitor.
+    pub frequency: String,
+    /// Optional provider processor name; omitted means the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processor: Option<String>,
+    /// Required 1–128 character key for retrying the same create request without duplication.
+    pub idempotency_key: String,
+}
+
+/// Parameters for `monitor_events` and `cancel_monitor`.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalMonitorIdParams {
+    /// Monitor identifier returned by `create_monitor`.
+    pub monitor_id: String,
+}
+
+/// Parameters for retrieving one page from a monitor's event feed.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegalMonitorEventsParams {
+    /// Monitor identifier returned by `create_monitor`.
+    pub monitor_id: String,
+    /// Opaque cursor returned by the previous page, when continuing pagination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Include scheduled runs that detected no material changes.
+    #[serde(default)]
+    pub include_completions: bool,
+}

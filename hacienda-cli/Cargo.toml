@@ -41,6 +41,7 @@ hacienda-api = { path = "../hacienda-api" }
 hacienda-core = { path = "../hacienda-core", features = ["jobs", "ner-candle"] }
 hacienda-email = { path = "../crates/hacienda-email", features = ["imap", "maildir", "rustls-ring", "attachments", "rag"] }
 hacienda-mcp = { path = "../hacienda-mcp" }
+hacienda-legal = { path = "../crates/hacienda-legal" }
 # `serve` attaches an in-memory RAG store by default, matching the job store's own
 # in-memory-by-default precedent — see `run_serve` in src/commands.rs.
 hacienda-rag = { path = "../crates/hacienda-rag" }

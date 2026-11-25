@@ -3,9 +3,12 @@
 use crate::cli::{
     AuditExportArgs, AuditExportFormat, AuditListArgs, AuditStoreArgs, AuditVerifyArgs,
     CacheCommand, CapabilitiesArgs, CompletionsArgs, ComplianceDoraArgs, ComplianceFormatArgs,
-    ComplianceReportArgs, ConcurrencyArgs, ExtractArgs, Format, FormatsArgs, MimeArgs, RevealArgs,
-    ReviewAssignArgs, ReviewDecideArgs, ReviewDecisionArg, ReviewListArgs, ReviewShowArgs,
-    ReviewStatsArgs, ReviewStatusArg, ReviewStoreArgs, ScanArgs, ServeArgs,
+    ComplianceReportArgs, ConcurrencyArgs, ExtractArgs, Format, FormatsArgs, LegalArgs,
+    LegalCommand, LegalDeepResearchArgs, LegalDeepResearchCommand, LegalDeepResearchSubmitArgs,
+    LegalFetchArgs, LegalMcpArgs, LegalMonitorArgs, LegalMonitorCommand, LegalMonitorCreateArgs,
+    LegalMonitorEventsArgs, LegalMonitorIdArgs, LegalSearchArgs, LegalSourceArg, LegalTaskArgs,
+    MimeArgs, RevealArgs, ReviewAssignArgs, ReviewDecideArgs, ReviewDecisionArg, ReviewListArgs,
+    ReviewShowArgs, ReviewStatsArgs, ReviewStatusArg, ReviewStoreArgs, ScanArgs, ServeArgs,
 };
 use crate::config::load_config;
 use anyhow::{Context, Result};
@@ -32,6 +35,12 @@ use hacienda_core::auth::{AuthState, Caller};
 use hacienda_core::jobs::InMemoryJobStore;
 use hacienda_core::pii::PipelineConfig;
 use hacienda_core::redaction::{EnvKeyResolver, RedactionMode};
+use hacienda_legal::{
+    LegalDeepResearchRequest, LegalError, LegalFetchRequest, LegalFetchResponse,
+    LegalMonitorEventsResponse, LegalMonitorRequest, LegalMonitorResponse, LegalResearchClient,
+    LegalSearchRequest, LegalSearchResponse, LegalSource, LegalTaskResultResponse,
+    LegalTaskRunResponse,
+};
 use hacienda_rag::{InMemoryGraphStore, InMemoryVectorStore};
 use std::io::Read;
 use std::net::SocketAddr;
@@ -62,6 +71,7 @@ fn validate_local_gateway_secret(secret: Option<&str>, required: bool) -> Result
         None => Ok(()),
     }
 }
+const LEGAL_RESEARCH_ENABLED_ENV: &str = "HACIENDA_LEGAL_RESEARCH_ENABLED";
 
 fn parse_concurrency(args: &ConcurrencyArgs) -> usize {
     args.concurrency.unwrap_or_else(num_cpus::get)
@@ -1747,6 +1757,383 @@ pub async fn run_mcp_serve(
         .await
         .map_err(|error| anyhow::anyhow!(error))
         .context("serving the MCP surface over stdio")
+}
+
+/// Map a provider error to an actionable CLI message.
+///
+/// Deliberately does not echo the provider key or its configuration: a missing key and
+/// a disabled add-on are different operator actions, but neither needs the secret itself
+/// in the terminal (or in a script's captured stderr).
+fn legal_error(error: LegalError) -> anyhow::Error {
+    match error {
+        LegalError::Disabled => anyhow::anyhow!(
+            "legal research is disabled; set {LEGAL_RESEARCH_ENABLED_ENV}=true to enable it"
+        ),
+        LegalError::ProviderNotConfigured => anyhow::anyhow!(
+            "legal research provider is not configured; set HACIENDA_PARALLEL_API_KEY \
+             (or PARALLEL_API_KEY) in the server environment"
+        ),
+        LegalError::UnsupportedSource => {
+            anyhow::anyhow!("unsupported legal source; choose one of eu, fr, de, nl, es, it")
+        }
+        LegalError::InvalidQuery => {
+            anyhow::anyhow!("query must contain between 1 and 2000 characters")
+        }
+        LegalError::InvalidFrequency => anyhow::anyhow!(
+            "frequency must be 1h–30d using an integer and h, d, or w suffix"
+        ),
+        LegalError::InvalidProcessor => {
+            anyhow::anyhow!("processor must be lite, base, or core")
+        }
+        LegalError::InvalidCursor => anyhow::anyhow!(
+            "cursor is invalid; reuse the next_cursor value returned by the previous page"
+        ),
+        LegalError::InvalidIdempotencyKey => anyhow::anyhow!(
+            "idempotency key must be 1–128 ASCII letters, digits, hyphens, or underscores"
+        ),
+        LegalError::IdempotencyKeyConflict => anyhow::anyhow!(
+            "idempotency key was already used for a different active monitor request"
+        ),
+        LegalError::IdempotencyLookupLimit => anyhow::anyhow!(
+            "monitor retry lookup reached its page limit; retry later with the same idempotency key"
+        ),
+        LegalError::ResultUnavailable => anyhow::anyhow!(
+            "the run is completed but its brief is not available yet; retry shortly"
+        ),
+        LegalError::UnsafeUrl => {
+            anyhow::anyhow!("URL is not an HTTPS URL on the selected official source")
+        }
+        LegalError::UnsupportedDocumentFormat => anyhow::anyhow!(
+            "official URL did not return UTF-8 HTML, XHTML, JSON, XML, or plain text; PDF and binary formats are not supported by this fetch endpoint"
+        ),
+        LegalError::Upstream => anyhow::anyhow!(
+            "upstream legal provider request failed; verify network access and retry"
+        ),
+        LegalError::UpstreamStatus { status } => anyhow::anyhow!(
+            "upstream legal provider returned HTTP {status}; check provider credentials or quota, then retry"
+        ),
+        LegalError::InvalidResponse => anyhow::anyhow!("provider returned an invalid response"),
+        LegalError::InvalidProviderId => {
+            anyhow::anyhow!("run id or monitor id is not a valid provider identifier")
+        }
+        LegalError::ResourceNotFound => anyhow::anyhow!("legal research resource was not found"),
+    }
+}
+
+/// The CLI's `LegalSourceArg` mirror converted to the provider crate's type. The match is
+/// exhaustive, so adding a source to the CLI surface is a compile error until the provider
+/// mapping is updated too — no stringly-typed round trip through `LegalSource::from_str`.
+fn legal_source(arg: LegalSourceArg) -> LegalSource {
+    match arg {
+        LegalSourceArg::Eu => LegalSource::Eurlex,
+        LegalSourceArg::Fr => LegalSource::Legifrance,
+        LegalSourceArg::De => LegalSource::GesetzeImInternet,
+        LegalSourceArg::Nl => LegalSource::Rechtspraak,
+        LegalSourceArg::Es => LegalSource::Boe,
+        LegalSourceArg::It => LegalSource::Normattiva,
+    }
+}
+
+/// Construct the provider client from the process environment only.
+///
+/// `from_env` is the crate's single gate for both `HACIENDA_LEGAL_RESEARCH_ENABLED` and
+/// the credential lookup; the CLI must not duplicate or relax either check, and has no
+/// flag that could carry a key.
+fn legal_client() -> Result<LegalResearchClient> {
+    LegalResearchClient::from_env().map_err(legal_error)
+}
+
+fn print_legal_search_text(response: &LegalSearchResponse) {
+    println!("source: {}", response.source.host());
+    println!("provider search id: {}", response.provider_search_id);
+    if response.results.is_empty() {
+        println!("no results");
+        return;
+    }
+    for (index, result) in response.results.iter().enumerate() {
+        println!("\n[{}] {}", index + 1, result.title);
+        println!("    url: {}", result.url);
+        if let Some(published) = &result.published {
+            println!("    published: {published}");
+        }
+        for excerpt in &result.excerpts {
+            println!("    {excerpt}");
+        }
+    }
+}
+
+fn print_legal_fetch_text(response: &LegalFetchResponse) {
+    println!("source: {}", response.source.host());
+    println!("url: {}", response.url);
+    if let Some(content_type) = &response.content_type {
+        println!("content-type: {content_type}");
+    }
+    println!();
+    println!("{}", response.content);
+}
+
+/// Text rendering keeps the run id on stdout: that is the handle the caller needs for
+/// `deep-research status`/`result`, so it must never be folded into prose.
+fn print_legal_task_run(response: &LegalTaskRunResponse) {
+    println!("run_id: {}", response.run_id);
+    println!("source: {}", response.source.tool_prefix());
+    println!("status: {}", response.status);
+}
+
+/// `output` is the provider's full brief, including its citation basis. It is printed
+/// verbatim as JSON rather than summarised: a human-friendly condensation would silently
+/// drop the source URLs that make the brief usable for legal work. JSON mode goes further
+/// and serialises the entire response untouched.
+fn print_legal_task_result(response: &LegalTaskResultResponse) {
+    println!("run_id: {}", response.run_id);
+    println!("source: {}", response.source.tool_prefix());
+    println!("status: {}", response.status);
+    match &response.output {
+        Some(output) => {
+            println!("output:");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
+            );
+        }
+        None => println!("output: (not available yet)"),
+    }
+}
+
+fn print_legal_monitor(response: &LegalMonitorResponse) {
+    println!("monitor_id: {}", response.monitor_id);
+    println!("source: {}", response.source.tool_prefix());
+    println!("status: {}", response.status);
+}
+
+/// Monitor events are provider JSON whose content includes the citation basis. Render it
+/// as-is for the same reason as `print_legal_task_result`.
+fn print_legal_monitor_events(response: &LegalMonitorEventsResponse) {
+    println!("monitor_id: {}", response.monitor_id);
+    println!("events:");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response.events)
+            .unwrap_or_else(|_| response.events.to_string())
+    );
+    if let Some(cursor) = &response.next_cursor {
+        println!("next_cursor: {cursor}");
+    }
+}
+
+/// Run `hacienda legal ...` — optional research over public legal sources.
+///
+/// JSON mode serialises the provider response directly: the wire types are `Serialize`
+/// with stable snake_case fields, so scripts get the same shape the HTTP API returns
+/// without a second, drifting DTO. Text mode is a human-facing rendering of the same data.
+pub async fn run_legal(args: LegalArgs) -> Result<()> {
+    match args.command {
+        LegalCommand::Search(LegalSearchArgs {
+            query,
+            source,
+            max_results,
+            format,
+        }) => {
+            let source = legal_source(source);
+            let response = legal_client()?
+                .search(LegalSearchRequest {
+                    query,
+                    source,
+                    max_results,
+                })
+                .await
+                .map_err(legal_error)?;
+            match format {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                Format::Text => print_legal_search_text(&response),
+            }
+            Ok(())
+        }
+        LegalCommand::Fetch(LegalFetchArgs {
+            source,
+            url,
+            format,
+        }) => {
+            let source = legal_source(source);
+            let response = legal_client()?
+                .fetch(LegalFetchRequest { source, url })
+                .await
+                .map_err(legal_error)?;
+            match format {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                Format::Text => print_legal_fetch_text(&response),
+            }
+            Ok(())
+        }
+        LegalCommand::DeepResearch(LegalDeepResearchArgs { command }) => match command {
+            LegalDeepResearchCommand::Submit(LegalDeepResearchSubmitArgs {
+                query,
+                source,
+                format,
+            }) => {
+                let response = legal_client()?
+                    .create_deep_research(LegalDeepResearchRequest {
+                        source: legal_source(source),
+                        query,
+                    })
+                    .await
+                    .map_err(legal_error)?;
+                match format {
+                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                    Format::Text => print_legal_task_run(&response),
+                }
+                Ok(())
+            }
+            LegalDeepResearchCommand::Status(LegalTaskArgs { run_id, format }) => {
+                let response = legal_client()?
+                    .deep_research_status(&run_id)
+                    .await
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not read legal task status for run {run_id}; verify the ID and retry")
+                    })?;
+                match format {
+                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                    Format::Text => print_legal_task_run(&response),
+                }
+                Ok(())
+            }
+            LegalDeepResearchCommand::Result(LegalTaskArgs { run_id, format }) => {
+                let response = legal_client()?
+                    .deep_research_result(&run_id)
+                    .await
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not read legal task result for run {run_id}; poll its status and retry")
+                    })?;
+                match format {
+                    Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                    Format::Text => print_legal_task_result(&response),
+                }
+                Ok(())
+            }
+        },
+        LegalCommand::Monitor(LegalMonitorArgs { command }) => {
+            match command {
+                LegalMonitorCommand::Create(LegalMonitorCreateArgs {
+                    query,
+                    source,
+                    frequency,
+                    processor,
+                    idempotency_key,
+                    format,
+                }) => {
+                    let response = legal_client()?
+                        .create_monitor(LegalMonitorRequest {
+                            source: legal_source(source),
+                            query,
+                            frequency,
+                            processor,
+                            idempotency_key,
+                        })
+                        .await
+                        .map_err(legal_error)?;
+                    match format {
+                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                        Format::Text => print_legal_monitor(&response),
+                    }
+                    Ok(())
+                }
+                LegalMonitorCommand::Events(LegalMonitorEventsArgs {
+                    monitor_id,
+                    cursor,
+                    include_completions,
+                    format,
+                }) => {
+                    let response = legal_client()?
+                    .monitor_events_with_options(
+                        &monitor_id,
+                        cursor.as_deref(),
+                        include_completions,
+                    )
+                    .await
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not read legal monitor events for monitor {monitor_id}; verify the ID and retry")
+                    })?;
+                    match format {
+                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                        Format::Text => print_legal_monitor_events(&response),
+                    }
+                    Ok(())
+                }
+                LegalMonitorCommand::Cancel(LegalMonitorIdArgs { monitor_id, format }) => {
+                    let response = legal_client()?
+                    .cancel_monitor(&monitor_id)
+                    .await
+                    .map_err(legal_error)
+                    .with_context(|| {
+                        format!("could not cancel legal monitor {monitor_id}; verify the ID and retry")
+                    })?;
+                    match format {
+                        Format::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                        Format::Text => print_legal_monitor(&response),
+                    }
+                    Ok(())
+                }
+            }
+        }
+        LegalCommand::Mcp(LegalMcpArgs { source }) => run_legal_mcp(legal_source(source)),
+    }
+}
+
+/// Launch `hacienda-legal-mcp`, the source-pinned stdio MCP binary shipped by the
+/// provider crate.
+///
+/// The child inherits the process environment, so the API key is never passed on the
+/// command line and stays server-side; only the source pin is injected. The enable flag
+/// is checked here as well as in the child's own `LegalResearchClient::from_env()`, so a
+/// disabled add-on fails immediately with a usable message instead of starting a server
+/// that can only return errors for every tool call.
+fn run_legal_mcp(source: LegalSource) -> Result<()> {
+    if std::env::var(LEGAL_RESEARCH_ENABLED_ENV).ok().as_deref() != Some("true") {
+        return Err(legal_error(LegalError::Disabled));
+    }
+    let mut command = std::process::Command::new(legal_mcp_binary());
+    command.env("HACIENDA_LEGAL_SOURCE", source.tool_prefix());
+    exec_legal_mcp(command)
+}
+
+/// Prefer the provider binary installed next to this executable (an install or a
+/// workspace build puts both there); fall back to PATH for development shells.
+fn legal_mcp_binary() -> PathBuf {
+    let name = format!("hacienda-legal-mcp{}", std::env::consts::EXE_SUFFIX);
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(candidate) = exe.parent().map(|dir| dir.join(&name)) {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(name)
+}
+
+#[cfg(unix)]
+fn exec_legal_mcp(mut command: std::process::Command) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    // Replacing this process keeps the MCP client's stdio pipes, exit code and signals
+    // attached to the server rather than to a wrapper. Returns only on failure.
+    Err(command.exec()).context(
+        "starting the legal research MCP server (build it with `cargo build -p \
+         hacienda-legal --bin hacienda-legal-mcp`, or put it on PATH)",
+    )
+}
+
+#[cfg(not(unix))]
+fn exec_legal_mcp(mut command: std::process::Command) -> Result<()> {
+    let status = command
+        .status()
+        .context("starting the legal research MCP server")?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("legal research MCP server exited with {status}")
+    }
 }
 
 /// Run `hacienda serve` — the HTTP API of the integration design §5.

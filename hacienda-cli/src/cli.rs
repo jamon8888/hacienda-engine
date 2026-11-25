@@ -17,7 +17,8 @@
 //! `audit` (`list`/`export` against a durable `FileAuditStore` directory — distinct from
 //! `verify`, which reads the flat `--audit-out` export), and `completions`. The `xberg`
 //! passthrough remains deliberately absent — a separate, larger design question this
-//! slice does not settle.
+//! slice does not settle. A final slice adds the optional paid legal-research `legal`
+//! subcommands (`search`, `fetch`, `mcp`) over the shared `hacienda-legal` provider crate.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::net::SocketAddr;
@@ -87,6 +88,8 @@ pub enum Command {
     /// agent-facing tool inventory excludes pseudonym rehydration; human rehydration is
     /// reserved for the authenticated, audited Tauri viewer.
     Mcp(McpArgs),
+    /// Search or fetch content from official EU and national legal sources.
+    Legal(LegalArgs),
     /// Operations on the human review queue (AI Act Art. 14 human oversight).
     Review {
         #[command(subcommand)]
@@ -252,6 +255,249 @@ pub enum CacheCommand {
 pub enum McpCommand {
     /// Start the MCP server on the stdio transport.
     Serve,
+}
+
+/// Optional, paid legal research over public European legal sources.
+///
+/// This is an add-on: it does nothing until `HACIENDA_LEGAL_RESEARCH_ENABLED=true` is
+/// set in the environment. Private Hacienda documents are never sent to the provider —
+/// `search` sends only the query text, and `fetch` goes directly to an allowlisted
+/// official URL. Provider credentials are read only from the environment
+/// (`HACIENDA_PARALLEL_API_KEY`, or `PARALLEL_API_KEY`); there is deliberately no CLI
+/// flag or config field for a key, so it cannot end up in shell history, a process
+/// listing, or a script's source.
+#[derive(Debug, Parser)]
+#[command(after_help = concat!(
+    "Environment:\n",
+    "  HACIENDA_LEGAL_RESEARCH_ENABLED=true   enable the add-on (off by default)\n",
+    "  HACIENDA_PARALLEL_API_KEY              provider key (or PARALLEL_API_KEY)\n",
+    "\n",
+    "Examples:\n",
+    "  hacienda legal search 'GDPR Article 17' --source eu --format json\n",
+    "  hacienda legal search 'droit au respect de la vie privee' --source fr --max-results 5\n",
+    "  hacienda legal fetch --source de https://www.gesetze-im-internet.de/bdsg_2018/\n",
+    "  hacienda legal deep-research submit --source eu 'AI Act high-risk obligations'\n",
+    "  hacienda legal deep-research status <run-id> --format json\n",
+    "  hacienda legal monitor create --source fr --frequency 1d --idempotency-key case-123 'DPIA guidance'\n",
+    "  hacienda legal monitor events <monitor-id> --format json\n",
+    "  hacienda legal mcp --source nl\n",
+))]
+pub struct LegalArgs {
+    #[command(subcommand)]
+    pub command: LegalCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LegalCommand {
+    /// Search one official source through the configured provider.
+    ///
+    /// Results whose URL is outside the selected source's official domain are dropped.
+    /// Use `--format json` for machine-readable output on stdout.
+    Search(LegalSearchArgs),
+    /// Fetch one HTTPS URL from the selected source's official domain.
+    ///
+    /// The URL is checked before the request and redirects to other hosts are refused.
+    /// Use `--format json` for machine-readable output on stdout.
+    Fetch(LegalFetchArgs),
+    /// Launch the provider crate's source-pinned stdio MCP server.
+    ///
+    /// The child receives only the chosen source via `HACIENDA_LEGAL_SOURCE`; it reads
+    /// the provider key and the enable flag from the inherited server environment.
+    Mcp(LegalMcpArgs),
+    /// Submit and inspect asynchronous deep-research briefs.
+    ///
+    /// Submission returns a run id immediately; use `status` to poll and `result` to
+    /// read the finished brief. The result's citation basis is preserved verbatim.
+    DeepResearch(LegalDeepResearchArgs),
+    /// Create, inspect, and cancel recurring legal-source monitors.
+    Monitor(LegalMonitorArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalDeepResearchArgs {
+    #[command(subcommand)]
+    pub command: LegalDeepResearchCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LegalDeepResearchCommand {
+    /// Submit an asynchronous deep-research brief to one official source.
+    Submit(LegalDeepResearchSubmitArgs),
+    /// Poll the status of a submitted brief by run id.
+    Status(LegalTaskArgs),
+    /// Read the finished brief and its citations by run id.
+    Result(LegalTaskArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalDeepResearchSubmitArgs {
+    /// Research terms or a legal question. Only this text is sent to the provider.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Official source to research: eu, fr, de, nl, es, or it. Required — no implicit jurisdiction.
+    #[arg(long, value_name = "SOURCE", value_enum)]
+    pub source: LegalSourceArg,
+
+    /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+/// Shared by `deep-research status` and `deep-research result`: the run id returned by
+/// `deep-research submit`.
+#[derive(Debug, Parser)]
+pub struct LegalTaskArgs {
+    /// Provider run id, as printed by `legal deep-research submit`.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalMonitorArgs {
+    #[command(subcommand)]
+    pub command: LegalMonitorCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LegalMonitorCommand {
+    /// Create a recurring monitor on one official source.
+    Create(LegalMonitorCreateArgs),
+    /// Read a monitor's event feed, including its citation basis, by monitor id.
+    Events(LegalMonitorEventsArgs),
+    /// Cancel a monitor by id.
+    Cancel(LegalMonitorIdArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalMonitorCreateArgs {
+    /// What the monitor should watch for on the official source.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Official source to monitor: eu, fr, de, nl, es, or it. Required — no implicit jurisdiction.
+    #[arg(long, value_name = "SOURCE", value_enum)]
+    pub source: LegalSourceArg,
+
+    /// Monitor cadence from 1 hour to 30 days, as an integer plus `h`, `d`, or `w` (for example `1d` or `1w`).
+    #[arg(long, value_name = "FREQUENCY")]
+    pub frequency: String,
+
+    /// Optional provider processor name. Omit to use the provider default.
+    #[arg(long, value_name = "PROCESSOR")]
+    pub processor: Option<String>,
+
+    /// Stable key to safely retry monitor creation after a lost response.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: String,
+
+    /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+/// Shared by `legal monitor events` and `legal monitor cancel`.
+#[derive(Debug, Parser)]
+pub struct LegalMonitorIdArgs {
+    /// Provider monitor id, as printed by `legal monitor create`.
+    #[arg(value_name = "MONITOR_ID")]
+    pub monitor_id: String,
+
+    /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+/// Select one monitor event page, optionally resuming from a previous cursor.
+pub struct LegalMonitorEventsArgs {
+    /// Provider monitor id, as printed by `legal monitor create`.
+    #[arg(value_name = "MONITOR_ID")]
+    pub monitor_id: String,
+
+    /// Opaque cursor returned by the previous events page.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+
+    /// Include scheduled runs that detected no material changes.
+    #[arg(long)]
+    pub include_completions: bool,
+
+    /// Output format. `json` emits a stable JSON object; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalSearchArgs {
+    /// Research terms or a legal question (1–2000 characters). Only this text is sent to the provider.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Official source to search: eu, fr, de, nl, es, or it.
+    ///
+    /// Long names (eurlex, legifrance, gesetze, rechtspraak, boe, normattiva) work too.
+    #[arg(long, value_name = "SOURCE", value_enum)]
+    pub source: LegalSourceArg,
+
+    /// Maximum number of results to return (1–20).
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u8).range(1..=20))]
+    pub max_results: u8,
+
+    /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalFetchArgs {
+    /// Official source the URL must belong to: eu, fr, de, nl, es, or it.
+    #[arg(long, value_name = "SOURCE", value_enum)]
+    pub source: LegalSourceArg,
+
+    /// HTTPS URL on that source's official domain.
+    #[arg(value_name = "URL")]
+    pub url: String,
+
+    /// Output format. `json` emits one stable JSON object for scripts; `text` is for humans.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+#[derive(Debug, Parser)]
+pub struct LegalMcpArgs {
+    /// Source to pin the MCP server to: eu, fr, de, nl, es, or it.
+    #[arg(long, value_name = "SOURCE", value_enum)]
+    pub source: LegalSourceArg,
+}
+
+/// A local mirror of `hacienda_legal::LegalSource`, keeping `clap::ValueEnum` out of the
+/// provider crate's API. Same pattern as `Mode`/`AuditExportFormat`: the CLI owns its
+/// help text, and `commands.rs` does the one explicit conversion to the provider type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LegalSourceArg {
+    /// EU: eur-lex.europa.eu
+    #[value(name = "eu", alias = "eurlex", alias = "eur-lex")]
+    Eu,
+    /// France: legifrance.gouv.fr
+    #[value(name = "fr", alias = "legifrance")]
+    Fr,
+    /// Germany: gesetze-im-internet.de
+    #[value(name = "de", alias = "gesetze", alias = "gesetze_im_internet")]
+    De,
+    /// Netherlands: rechtspraak.nl
+    #[value(name = "nl", alias = "rechtspraak")]
+    Nl,
+    /// Spain: boe.es
+    #[value(name = "es", alias = "boe")]
+    Es,
+    /// Italy: normattiva.it
+    #[value(name = "it", alias = "normattiva")]
+    It,
 }
 
 #[derive(Debug, Subcommand)]

@@ -14,6 +14,7 @@ license.workspace = true
 hacienda = { path = "../hacienda" }
 hacienda-core = { path = "../hacienda-core" }
 hacienda-email = { path = "../crates/hacienda-email", features = ["maildir", "rustls-ring", "attachments"] }
+hacienda-legal = { path = "../crates/hacienda-legal" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 data-encoding = { workspace = true }

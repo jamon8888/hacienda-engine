@@ -27,6 +27,7 @@ use crate::{
         audit, audit_review, auth, capabilities, claude_messages, claude_mod, codex_responses,
         codex_viewer, documents, email, graph, graph_retrieve, info, jobs, keys, openapi, pii,
         presets, rag, rag_stream, uploads, usage, versions, xberg_surface,
+        legal,
     },
     quota::quota_middleware,
     state::ApiState,
@@ -124,6 +125,48 @@ pub static ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/email/process/async",
         access: Access::Capability(Capability::DocumentsProcess),
         make_router: || post(email::process_email_async),
+    },
+    // Paid external legal research. Local RAG remains available under its existing
+    // documents:process capability; external-source calls require legal:research.
+    RouteSpec {
+        path: "/v1/legal/search",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || post(legal::search),
+    },
+    RouteSpec {
+        path: "/v1/legal/fetch",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || post(legal::fetch),
+    },
+    RouteSpec {
+        path: "/v1/legal/deep-research",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || post(legal::create_deep_research),
+    },
+    RouteSpec {
+        path: "/v1/legal/deep-research/{run_id}",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || get(legal::deep_research_status),
+    },
+    RouteSpec {
+        path: "/v1/legal/deep-research/{run_id}/result",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || get(legal::deep_research_result),
+    },
+    RouteSpec {
+        path: "/v1/legal/monitors",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || post(legal::create_monitor),
+    },
+    RouteSpec {
+        path: "/v1/legal/monitors/{monitor_id}/events",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || get(legal::monitor_events),
+    },
+    RouteSpec {
+        path: "/v1/legal/monitors/{monitor_id}",
+        access: Access::Capability(Capability::LegalResearch),
+        make_router: || delete(legal::cancel_monitor),
     },
     // ── TeamOnPremise email (opaque refs only; no paths or credentials on the wire) ─────
     RouteSpec {
