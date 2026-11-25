@@ -488,6 +488,28 @@ impl ModSessionStore {
     /// validated session. The response body is capped at 256 KiB. This is the
     /// bounded one-shot transport for hosts whose `$.http.fetch` cannot consume
     /// a long-lived SSE stream.
+    /// Check that this exact scope has a live projection target before callers
+    /// resolve pseudonyms into original values for delivery.
+    pub fn has_active_projection(&self, tenant: &str, principal: &str, correlation: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.prune(Instant::now());
+        let key = ProjectionKey::new(tenant, principal, correlation);
+        let Some(projection) = inner.active.get(&key) else {
+            return false;
+        };
+        inner
+            .sessions
+            .get(&projection.session_id)
+            .is_some_and(|session| {
+                session.tenant == tenant
+                    && session.principal == principal
+                    && session.correlation == correlation
+                    && session.generation == projection.generation
+                    && !session.invalidated.load(Ordering::Acquire)
+                    && session.expires > Instant::now()
+            })
+    }
+
     pub fn poll(
         &self,
         session_id: &str,
@@ -1273,6 +1295,8 @@ mod tests {
                 "corr-2",
             )
             .unwrap();
+        assert!(!store.has_active_projection("acme", "alice", "corr-1"));
+        assert!(store.has_active_projection("acme", "bob", "corr-2"));
         let mut first_rx = store
             .subscribe(&first.session_id, &first.capability, "corr-1")
             .unwrap();

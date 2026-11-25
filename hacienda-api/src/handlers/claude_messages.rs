@@ -37,7 +37,7 @@ use hacienda_client_core::{
     ProviderHttpClient, ProviderHttpRequest, ProviderSseEvent, ReqwestHttpClient, TransportError,
 };
 use hacienda_core::{
-    auth::{AuthContext, Caller, Capability, CapabilitySet},
+    auth::{AuthContext, Caller, Capability},
     HaciendaError, HaciendaFacade,
 };
 use serde_json::{Map, Value};
@@ -308,20 +308,18 @@ pub async fn messages(
         tenant: auth_context.tenant.as_str().to_owned(),
         principal: auth_context.principal_id.clone(),
     };
-    // Reveal is re-scoped to the authenticated tenant under a server-side
-    // context. The gateway caller does not gain `pii:reveal`, and the originals
-    // go only to the authenticated local Mod channel, never to the provider.
-    let reveal_context = AuthContext::with_tenant(
-        auth_context.principal_id.clone(),
-        auth_context.tenant.clone(),
-        CapabilitySet::new([Capability::PiiReveal]),
-    );
+    // Projection may reveal originals only when the authenticated caller has
+    // `pii:reveal`; the gateway never grants that capability on the caller's behalf.
+    let reveal_context = caller
+        .require(Capability::PiiReveal)
+        .is_ok()
+        .then(|| auth_context.as_ref().clone());
     redact_paths(
         &mut body,
         &text_paths,
         &state.facade,
         caller,
-        &reveal_context,
+        reveal_context.as_ref(),
         &state.mod_sessions,
         &scope,
         correlation.as_deref(),
@@ -744,7 +742,7 @@ async fn redact_paths(
     paths: &[String],
     facade: &HaciendaFacade,
     caller: Caller<'_>,
-    reveal_context: &AuthContext,
+    reveal_context: Option<&AuthContext>,
     mod_sessions: &ModSessionStore,
     scope: &ModScope,
     correlation: Option<&str>,
@@ -815,7 +813,7 @@ fn extract_mod_tokens(text: &str) -> Vec<String> {
 /// that in-memory channel, and no original is logged or persisted.
 async fn publish_mod_mappings(
     facade: &HaciendaFacade,
-    reveal_context: &AuthContext,
+    reveal_context: Option<&AuthContext>,
     mod_sessions: &ModSessionStore,
     scope: &ModScope,
     correlation: Option<&str>,
@@ -824,6 +822,12 @@ async fn publish_mod_mappings(
     let Some(correlation) = correlation else {
         return;
     };
+    let Some(reveal_context) = reveal_context else {
+        return;
+    };
+    if !mod_sessions.has_active_projection(&scope.tenant, &scope.principal, correlation) {
+        return;
+    }
     let mut mappings: HashMap<String, String> = HashMap::new();
     for token in extract_mod_tokens(redacted) {
         if mappings.contains_key(&token) {
@@ -853,7 +857,7 @@ async fn publish_mod_mappings(
 /// sendable without changing the client-visible frames.
 async fn relay_publish_mappings(
     facade: Arc<HaciendaFacade>,
-    reveal_context: AuthContext,
+    reveal_context: Option<AuthContext>,
     mod_sessions: Arc<ModSessionStore>,
     scope: ModScope,
     correlation: Option<String>,
@@ -861,7 +865,7 @@ async fn relay_publish_mappings(
 ) {
     publish_mod_mappings(
         &facade,
-        &reveal_context,
+        reveal_context.as_ref(),
         &mod_sessions,
         &scope,
         correlation.as_deref(),
@@ -892,7 +896,7 @@ struct ResponseRelay {
     facade: Arc<HaciendaFacade>,
     auth_context: Arc<hacienda_core::auth::AuthContext>,
     /// Server-side reveal context, scoped to the caller's tenant only.
-    reveal_context: AuthContext,
+    reveal_context: Option<AuthContext>,
     mod_sessions: Arc<ModSessionStore>,
     scope: ModScope,
     correlation: Option<String>,
@@ -921,7 +925,7 @@ impl ResponseRelay {
         events: ClaudeMessagesEventStream,
         facade: Arc<HaciendaFacade>,
         auth_context: Arc<hacienda_core::auth::AuthContext>,
-        reveal_context: AuthContext,
+        reveal_context: Option<AuthContext>,
         mod_sessions: Arc<ModSessionStore>,
         scope: ModScope,
         correlation: Option<String>,
