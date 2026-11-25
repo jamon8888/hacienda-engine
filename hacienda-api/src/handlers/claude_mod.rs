@@ -37,6 +37,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     convert::Infallible,
+    fmt,
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -100,7 +101,7 @@ const MAX_LIVE_SESSIONS: usize = 256;
 /// `Mapping` mirrors the Mod contract exactly: `type`, `origin`, `sessionId`,
 /// `token`, `original`. `capability` lets the renderer's `verifyEvent` reject a
 /// frame that did not come from the bootstrapped session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum ModProjectionEvent {
     #[serde(rename = "Mapping")]
@@ -121,17 +122,49 @@ pub enum ModProjectionEvent {
     },
 }
 
+impl fmt::Debug for ModProjectionEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mapping { origin, .. } => formatter
+                .debug_struct("ModProjectionEvent::Mapping")
+                .field("origin", origin)
+                .field("session_id", &"<redacted>")
+                .field("token", &"<redacted>")
+                .field("original", &"<redacted>")
+                .field("capability", &"<redacted>")
+                .finish(),
+            Self::End { origin, .. } => formatter
+                .debug_struct("ModProjectionEvent::End")
+                .field("origin", origin)
+                .field("session_id", &"<redacted>")
+                .field("capability", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
 /// Body of the one-shot, capability-authenticated `/mod/poll` transport.
 ///
 /// `expired` reports that the session's TTL elapsed; `closed` reports that the
 /// session was revoked/expired and will never produce further events. Both are
 /// `false` for a live session. Poll is fail-closed: an unknown session or a
 /// wrong capability/correlation returns 401 with no events at all.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ModPollResponse {
     pub events: Vec<ModProjectionEvent>,
     pub expired: bool,
     pub closed: bool,
+}
+
+impl fmt::Debug for ModPollResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModPollResponse")
+            .field("event_count", &self.events.len())
+            .field("expired", &self.expired)
+            .field("closed", &self.closed)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -277,13 +310,26 @@ impl Default for ModSessionStore {
 
 /// What the bootstrap route returns to the host adapter. The capability is a
 /// secret in transit only; the store retains just its digest.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ModBootstrap {
     pub session_id: String,
     pub origin: String,
     pub expires_at: String,
     pub capability: String,
     pub correlation: String,
+}
+
+impl fmt::Debug for ModBootstrap {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModBootstrap")
+            .field("session_id", &"<redacted>")
+            .field("origin", &self.origin)
+            .field("expires_at", &self.expires_at)
+            .field("capability", &"<redacted>")
+            .field("correlation", &self.correlation)
+            .finish()
+    }
 }
 
 /// Receiver half handed to the SSE stream. Checking `invalidated` before and
@@ -1200,7 +1246,7 @@ pub async fn poll(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(query): Query<ModPollQuery>,
-) -> Result<Json<ModPollResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     if !loopback_request(&headers, peer) {
         state.mod_sessions.audit_access_denied("non_loopback_peer");
         return Err(ApiError::invalid_request(
@@ -1215,7 +1261,11 @@ pub async fn poll(
         correlation,
         query.limit.unwrap_or(MAX_POLL_EVENTS),
     )?;
-    Ok(Json(response))
+    let mut response = Json(response).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// `POST /mod/revoke` — drop the session and its queued originals.
@@ -1275,6 +1325,9 @@ mod tests {
         let bootstrap = store
             .create_session("acme", "alice", "corr-1", "http://127.0.0.1:8787")
             .expect("session created");
+        let bootstrap_debug = format!("{bootstrap:?}");
+        assert!(!bootstrap_debug.contains(&bootstrap.session_id));
+        assert!(!bootstrap_debug.contains(&bootstrap.capability));
         assert!(is_session_token(&bootstrap.session_id));
         assert!(is_capability(&bootstrap.capability));
         let headers = loopback_headers(
@@ -1287,6 +1340,22 @@ mod tests {
         assert!(store
             .subscribe(&bootstrap.session_id, &bootstrap.capability, "corr-1")
             .is_err());
+    }
+
+    #[test]
+    fn projection_event_debug_omits_originals_and_capabilities() {
+        let event = ModProjectionEvent::Mapping {
+            origin: "claude-code".to_owned(),
+            session_id: "cmsess_secret".to_owned(),
+            token: "[EMAIL:secret-token]".to_owned(),
+            original: "person@example.com".to_owned(),
+            capability: "cmcap_secret".to_owned(),
+        };
+        let debug = format!("{event:?}");
+        assert!(!debug.contains("person@example.com"));
+        assert!(!debug.contains("cmcap_secret"));
+        assert!(!debug.contains("cmsess_secret"));
+        assert!(!debug.contains("secret-token"));
     }
 
     #[test]
