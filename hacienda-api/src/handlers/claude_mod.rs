@@ -93,6 +93,7 @@ const MAX_POLL_EVENTS: usize = 32;
 /// Bounded memory of recently closed sessions, so a poller can be told that
 /// its session closed without keeping the session (and its PII) alive.
 const MAX_RECENTLY_CLOSED: usize = 256;
+const MAX_LIVE_SESSIONS: usize = 256;
 
 /// One event on the local-only Mod projection channel.
 ///
@@ -325,7 +326,7 @@ impl ModSessionStore {
         principal: &str,
         correlation: &str,
         origin: &str,
-    ) -> ModBootstrap {
+    ) -> Result<ModBootstrap, ApiError> {
         let session_id = format!(
             "{SESSION_PREFIX}{}{}",
             Uuid::new_v4().simple(),
@@ -342,6 +343,11 @@ impl ModSessionStore {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         inner.prune(now);
+        if inner.sessions.len() >= MAX_LIVE_SESSIONS {
+            return Err(ApiError::rate_limited(
+                "Too many active local projection sessions.",
+            ));
+        }
         inner.sessions.insert(
             session_id.clone(),
             ModSession {
@@ -367,13 +373,13 @@ impl ModSessionStore {
             &digest_ref("cap", &capability),
             "issued",
         );
-        ModBootstrap {
+        Ok(ModBootstrap {
             session_id,
             origin: origin.to_owned(),
             expires_at,
             capability,
             correlation: correlation.to_owned(),
-        }
+        })
     }
 
     /// Bind subsequent mapping events to one already-valid session. Every
@@ -1067,7 +1073,7 @@ pub async fn session(
         &auth.principal_id,
         correlation,
         &origin,
-    );
+    )?;
     // The freshly bootstrapped, authenticated session is the projection target
     // *for its own scope*. Activation cannot displace another scope's target.
     state.mod_sessions.activate(
@@ -1266,7 +1272,9 @@ mod tests {
     #[test]
     fn session_tokens_capabilities_and_correlation_are_shape_checked() {
         let store = ModSessionStore::new(Duration::from_millis(1));
-        let bootstrap = store.create_session("acme", "alice", "corr-1", "http://127.0.0.1:8787");
+        let bootstrap = store
+            .create_session("acme", "alice", "corr-1", "http://127.0.0.1:8787")
+            .expect("session created");
         assert!(is_session_token(&bootstrap.session_id));
         assert!(is_capability(&bootstrap.capability));
         let headers = loopback_headers(
@@ -1282,10 +1290,32 @@ mod tests {
     }
 
     #[test]
+    fn live_session_count_is_bounded() {
+        let store = ModSessionStore::new(MOD_SESSION_TTL);
+        for index in 0..MAX_LIVE_SESSIONS {
+            store
+                .create_session(
+                    "acme",
+                    &format!("principal-{index}"),
+                    "corr",
+                    "http://127.0.0.1:8787",
+                )
+                .expect("session remains within cap");
+        }
+        assert!(store
+            .create_session("acme", "overflow", "corr", "http://127.0.0.1:8787")
+            .is_err());
+    }
+
+    #[test]
     fn publish_is_scoped_to_the_active_session() {
         let store = ModSessionStore::new(MOD_SESSION_TTL);
-        let first = store.create_session("acme", "alice", "corr-1", "http://127.0.0.1:8787");
-        let second = store.create_session("acme", "bob", "corr-2", "http://127.0.0.1:8787");
+        let first = store
+            .create_session("acme", "alice", "corr-1", "http://127.0.0.1:8787")
+            .expect("first session created");
+        let second = store
+            .create_session("acme", "bob", "corr-2", "http://127.0.0.1:8787")
+            .expect("second session created");
         store
             .activate(
                 &second.session_id,
@@ -1329,7 +1359,9 @@ mod tests {
     #[test]
     fn ambiguous_correlation_fails_closed() {
         let store = ModSessionStore::new(MOD_SESSION_TTL);
-        let first = store.create_session("acme", "alice", "corr", "http://127.0.0.1:8787");
+        let first = store
+            .create_session("acme", "alice", "corr", "http://127.0.0.1:8787")
+            .expect("first session created");
         store
             .activate(
                 &first.session_id,
@@ -1341,7 +1373,9 @@ mod tests {
             .unwrap();
         // Only once a *second* live session exists with the same correlation
         // but a different scope does activation become ambiguous.
-        let second = store.create_session("acme", "bob", "corr", "http://127.0.0.1:8787");
+        let second = store
+            .create_session("acme", "bob", "corr", "http://127.0.0.1:8787")
+            .expect("second session created");
         assert!(store
             .activate(
                 &second.session_id,
@@ -1356,8 +1390,12 @@ mod tests {
     #[test]
     fn cross_principal_activation_cannot_evict_another_scope() {
         let store = ModSessionStore::new(MOD_SESSION_TTL);
-        let alice = store.create_session("acme", "alice", "corr-a", "http://127.0.0.1:8787");
-        let bob = store.create_session("acme", "bob", "corr-b", "http://127.0.0.1:8787");
+        let alice = store
+            .create_session("acme", "alice", "corr-a", "http://127.0.0.1:8787")
+            .expect("Alice session created");
+        let bob = store
+            .create_session("acme", "bob", "corr-b", "http://127.0.0.1:8787")
+            .expect("Bob session created");
         store
             .activate(
                 &alice.session_id,
@@ -1385,7 +1423,9 @@ mod tests {
         assert!(!store.publish("acme", "bob", "corr-a", "[EMAIL:k1:b]", "bob@x".into()));
         // Even a re-bootstrap by another principal of the *same* correlation
         // fails closed rather than displacing Alice.
-        let eve = store.create_session("acme", "eve", "corr-a", "http://127.0.0.1:8787");
+        let eve = store
+            .create_session("acme", "eve", "corr-a", "http://127.0.0.1:8787")
+            .expect("Eve session created");
         assert!(store
             .activate(&eve.session_id, &eve.capability, "acme", "eve", "corr-a")
             .is_err());
@@ -1394,8 +1434,12 @@ mod tests {
     #[test]
     fn revoke_requires_the_bootstrapped_capability() {
         let store = ModSessionStore::new(MOD_SESSION_TTL);
-        let first = store.create_session("acme", "alice", "corr", "http://127.0.0.1:8787");
-        let second = store.create_session("acme", "alice", "corr", "http://127.0.0.1:8787");
+        let first = store
+            .create_session("acme", "alice", "corr", "http://127.0.0.1:8787")
+            .expect("first session created");
+        let second = store
+            .create_session("acme", "alice", "corr", "http://127.0.0.1:8787")
+            .expect("second session created");
         assert!(store.revoke(&first.session_id, &second.capability).is_err());
         assert!(store.revoke(&first.session_id, &first.capability).is_ok());
     }
@@ -1403,7 +1447,9 @@ mod tests {
     #[test]
     fn bounded_queues_drop_under_pressure_and_revoke_clears_them() {
         let store = ModSessionStore::new(MOD_SESSION_TTL);
-        let bootstrap = store.create_session("acme", "alice", "corr", "http://127.0.0.1:8787");
+        let bootstrap = store
+            .create_session("acme", "alice", "corr", "http://127.0.0.1:8787")
+            .expect("session created");
         store
             .activate(
                 &bootstrap.session_id,
@@ -1471,7 +1517,9 @@ mod tests {
     #[test]
     fn oversize_originals_are_dropped_before_queueing() {
         let store = ModSessionStore::new(MOD_SESSION_TTL);
-        let bootstrap = store.create_session("acme", "alice", "corr", "http://127.0.0.1:8787");
+        let bootstrap = store
+            .create_session("acme", "alice", "corr", "http://127.0.0.1:8787")
+            .expect("session created");
         store
             .activate(
                 &bootstrap.session_id,
@@ -1526,7 +1574,9 @@ mod tests {
     #[test]
     fn lifecycle_audit_is_content_free_and_covers_transitions() {
         let store = ModSessionStore::new(MOD_SESSION_TTL);
-        let bootstrap = store.create_session("acme", "alice", "corr", "http://127.0.0.1:8787");
+        let bootstrap = store
+            .create_session("acme", "alice", "corr", "http://127.0.0.1:8787")
+            .expect("session created");
         store
             .activate(
                 &bootstrap.session_id,
