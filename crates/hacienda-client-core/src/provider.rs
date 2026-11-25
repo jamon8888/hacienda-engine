@@ -1479,6 +1479,8 @@ where
     redactor: &'a R,
     callback: &'a mut F,
     active: Option<PendingClaudeBlock>,
+    message_started: bool,
+    message_delta_seen: bool,
     terminal: bool,
 }
 
@@ -1492,6 +1494,8 @@ where
             redactor,
             callback,
             active: None,
+            message_started: false,
+            message_delta_seen: false,
             terminal: false,
         }
     }
@@ -1504,6 +1508,9 @@ where
     // make it harder to verify which frames can be emitted before buffered text is safe.
     #[allow(clippy::too_many_lines)]
     fn accept(&mut self, event: ProviderSseEvent) -> Result<(), TransportError> {
+        if self.terminal {
+            return Err(TransportError::Failed);
+        }
         validate_claude_sse_event(&event)?;
         if event.comment.is_some() {
             self.emit(ProviderSseEvent {
@@ -1522,10 +1529,18 @@ where
             .to_owned();
         let value: Value = serde_json::from_str(&event.data).map_err(|_| TransportError::Failed)?;
         match kind.as_str() {
-            "message_start" | "ping" => self.emit(event),
+            "message_start" => {
+                if self.message_started || self.message_delta_seen || self.active.is_some() {
+                    return Err(TransportError::Failed);
+                }
+                self.message_started = true;
+                self.emit(event);
+            }
+            "ping" => self.emit(event),
             "content_block_start" => {
-                // A new block implies the previous one is logically finished.
-                self.flush()?;
+                if !self.message_started || self.message_delta_seen || self.active.is_some() {
+                    return Err(TransportError::Failed);
+                }
                 let index = require_sse_index(&value)?;
                 let block = value.get("content_block").ok_or(TransportError::Failed)?;
                 let block_kind = match block.get("type").and_then(Value::as_str) {
@@ -1549,6 +1564,9 @@ where
                 self.emit(safe);
             }
             "content_block_delta" => {
+                if !self.message_started || self.message_delta_seen {
+                    return Err(TransportError::Failed);
+                }
                 let index = require_sse_index(&value)?;
                 let delta = value.get("delta").ok_or(TransportError::Failed)?;
                 let (pointer, block_kind) = match delta.get("type").and_then(Value::as_str) {
@@ -1560,13 +1578,7 @@ where
                     Some("signature_delta") => (None, ClaudeBlockKind::Thinking),
                     _ => return Err(TransportError::Failed),
                 };
-                let active = self.active.get_or_insert(PendingClaudeBlock {
-                    index,
-                    kind: block_kind,
-                    joined: String::new(),
-                    deltas: Vec::new(),
-                    retained_bytes: 0,
-                });
+                let active = self.active.as_mut().ok_or(TransportError::Failed)?;
                 if active.index != index || active.kind != block_kind {
                     return Err(TransportError::Failed);
                 }
@@ -1592,10 +1604,10 @@ where
             }
             "content_block_stop" => {
                 let index = require_sse_index(&value)?;
-                if self
+                if !self
                     .active
                     .as_ref()
-                    .is_some_and(|block| block.index != index)
+                    .is_some_and(|block| block.index == index)
                 {
                     return Err(TransportError::Failed);
                 }
@@ -1603,7 +1615,10 @@ where
                 self.emit(event);
             }
             "message_delta" => {
-                self.flush()?;
+                if !self.message_started || self.active.is_some() || self.message_delta_seen {
+                    return Err(TransportError::Failed);
+                }
+                self.message_delta_seen = true;
                 let safe = if value
                     .pointer("/delta/stop_sequence")
                     .and_then(Value::as_str)
@@ -1623,7 +1638,9 @@ where
                 self.emit(safe);
             }
             "message_stop" => {
-                self.flush()?;
+                if !self.message_started || !self.message_delta_seen || self.active.is_some() {
+                    return Err(TransportError::Failed);
+                }
                 self.terminal = true;
                 self.emit(event);
             }
@@ -1713,8 +1730,7 @@ where
     }
 
     fn finish(&mut self) -> Result<(), TransportError> {
-        self.flush()?;
-        if self.terminal {
+        if self.terminal && self.active.is_none() {
             Ok(())
         } else {
             Err(TransportError::Failed)
@@ -2588,13 +2604,14 @@ mod tests {
 
     #[test]
     fn public_claude_event_api_reads_network_chunks_and_delivers_only_redacted_events() {
-        let wire = concat!(
-            "event: content_block_delta\nid: first\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"<per\"}}\n\n",
-            "event: ping\nid: heartbeat\ndata: {\"type\":\"ping\"}\n\n",
-            "event: content_block_delta\nid: second\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"son-fixture>\"}}\n\n",
-            "event: error\nid: failure\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"<person-fixture>\"}}\n\n",
-            "event: message_stop\nid: final\ndata: {\"type\":\"message_stop\"}\n\n",
-        );
+        let wire = message_start()
+            + "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            + "event: content_block_delta\nid: first\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"<per\"}}\n\n"
+            + "event: ping\nid: heartbeat\ndata: {\"type\":\"ping\"}\n\n"
+            + "event: content_block_delta\nid: second\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"son-fixture>\"}}\n\n"
+            + "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            + "event: error\nid: failure\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"<person-fixture>\"}}\n\n"
+            + &message_end();
         let chunks = wire.as_bytes().chunks(13).map(<[u8]>::to_vec).collect();
         let mut transport = AnthropicProviderTransport::new(
             ChunkedHttpFixture { chunks },
@@ -2614,15 +2631,15 @@ mod tests {
             )
             .expect("chunked SSE response succeeds");
         assert_eq!(metadata.status, 200);
-        assert_eq!(delivered.len(), 5);
+        assert_eq!(delivered.len(), 9);
         // A content-free keepalive is relayed while the block's text is still
         // buffered; the split-PII deltas are released together at the terminal
         // boundary, before the error and final stop frames.
-        assert_eq!(delivered[0].event.as_deref(), Some("ping"));
-        assert_eq!(delivered[0].id.as_deref(), Some("heartbeat"));
-        assert_eq!(delivered[1].id.as_deref(), Some("first"));
-        assert_eq!(delivered[2].id.as_deref(), Some("second"));
-        assert_eq!(delivered[3].event.as_deref(), Some("error"));
+        assert_eq!(delivered[2].event.as_deref(), Some("ping"));
+        assert_eq!(delivered[2].id.as_deref(), Some("heartbeat"));
+        assert_eq!(delivered[3].id.as_deref(), Some("first"));
+        assert_eq!(delivered[4].id.as_deref(), Some("second"));
+        assert_eq!(delivered[6].event.as_deref(), Some("error"));
         let joined = delivered
             .iter()
             .filter_map(|event| {
