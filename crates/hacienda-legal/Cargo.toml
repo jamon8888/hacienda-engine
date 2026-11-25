@@ -1,0 +1,18 @@
+[package]
+name = "hacienda-legal"
+version.workspace = true
+edition.workspace = true
+description = "Optional legal research providers and source-scoped retrieval for Hacienda"
+license.workspace = true
+keywords = ["legal", "research", "eur-lex", "legifrance", "mcp"]
+
+[dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+rmcp = { version = "3.10.0", features = ["server", "macros", "transport-io"] }

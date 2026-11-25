@@ -32,12 +32,14 @@
 //!
 //! # Tool inventory
 //!
-//! Fourteen tools, each a thin wrapper over one [`hacienda::HaciendaFacade`] method already
-//! exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands (the Xberg and
-//! email tools are the exceptions: they drive their own backends directly — the email
-//! tool drives `hacienda_email::EmailProcessor`):
+//! Twenty-seven tools. Fourteen are thin wrappers over a [`hacienda::HaciendaFacade`] method
+//! already exercised by `hacienda-api`'s handlers or `hacienda-cli`'s subcommands (the
+//! Xberg and email tools are the exceptions: they drive their own backends directly — the
+//! email tool drives `hacienda_email::EmailProcessor`). The other thirteen are the legal
+//! research tools, which drive `hacienda_legal::LegalResearchClient` directly and never
+//! touch private Hacienda documents (see "Legal research boundary" below):
 //!
-//! | Tool | Facade method | Mirrors |
+//! | Tool | Backend | Mirrors |
 //! | --- | --- | --- |
 //! | `documents_process` | `process_batch_with_auth` | `POST /v1/documents`, `hacienda extract` |
 //! | `email_redact` | (`EmailProcessor::process`) | `POST /v1/email/process`, `hacienda email redact` |
@@ -53,16 +55,56 @@
 //! | `cache_clear` | (Xberg) | `POST /v1/cache/clear`, `hacienda cache clear` |
 //! | `cache_warm` | (Xberg) | `POST /v1/cache/warm`, `hacienda cache warm` |
 //! | `get_version` | (static) | `GET /version` |
+//! | `eurlex_search` | (`LegalResearchClient::search`, EUR-Lex) | `POST /v1/legal/search` |
+//! | `legifrance_search` | (`LegalResearchClient::search`, Légifrance) | `POST /v1/legal/search` |
+//! | `gesetze_search` | (`LegalResearchClient::search`, Gesetze im Internet) | `POST /v1/legal/search` |
+//! | `rechtspraak_search` | (`LegalResearchClient::search`, Rechtspraak) | `POST /v1/legal/search` |
+//! | `boe_search` | (`LegalResearchClient::search`, BOE) | `POST /v1/legal/search` |
+//! | `normattiva_search` | (`LegalResearchClient::search`, Normattiva) | `POST /v1/legal/search` |
+//! | `official_fetch` | (`LegalResearchClient::fetch`) | `POST /v1/legal/fetch` |
+//! | `create_deep_research` | (`LegalResearchClient::create_deep_research`) | (MCP only) |
+//! | `deep_research_status` | (`LegalResearchClient::deep_research_status`) | (MCP only) |
+//! | `deep_research_result` | (`LegalResearchClient::deep_research_result`) | (MCP only) |
+//! | `create_monitor` | (`LegalResearchClient::create_monitor`) | (MCP only) |
+//! | `monitor_events` | (`LegalResearchClient::monitor_events`) | (MCP only) |
+//! | `cancel_monitor` | (`LegalResearchClient::cancel_monitor`) | (MCP only) |
+//!
+//! # Legal research boundary
+//!
+//! The thirteen legal tools are a deliberate exception to the facade-only rule above:
+//! they use `hacienda_legal`, whose provider credentials come from server-side environment
+//! variables, never from an MCP request. The whole group stays behind the same
+//! disabled-by-default paid add-on gate (`HACIENDA_LEGAL_RESEARCH_ENABLED=true` plus a
+//! server-side provider key): construction goes through `LegalResearchClient::from_env`,
+//! so a disabled or unconfigured add-on fails every legal tool, not just search.
+//!
+//! Only the caller's research query is sent to the external search provider, scoped with a
+//! `site:` restriction to the selected official host. No document text, local path,
+//! pseudonym, or other facade data is ever passed to that provider — these tool parameters
+//! have no field that could carry one. `create_deep_research` and `create_monitor` require
+//! an explicit `source`; status, result, events, and cancellation are addressed by the
+//! opaque `run_id`/`monitor_id` the provider returned. Fetch URLs are checked against the
+//! selected source's HTTPS host before any request, and redirects are disabled in the
+//! library, so an allowlisted page cannot redirect a fetch off-host. Results are returned
+//! in the library's own response shapes verbatim — including deep-research `output` with
+//! its citation basis and monitor `events` — matching the REST and CLI surfaces; provider
+//! errors are reduced to fixed, content-free messages.
 
 mod params;
 
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use hacienda::HaciendaFacade;
 use hacienda_core::{auth::Caller, facade::SpanText};
+use hacienda_legal::{
+    LegalDeepResearchRequest, LegalFetchRequest, LegalMonitorRequest, LegalResearchClient,
+    LegalSearchRequest, LegalSource,
+};
 use params::{
     AuditEntriesParams, CacheConfirmParams, CacheWarmParams, DocumentsProcessParams,
-    EmailRedactParams, EmptyParams, MimeDetectParams, TextParams,
+    EmailRedactParams, EmptyParams, LegalDeepResearchParams, LegalFetchParams,
+    LegalMonitorCreateParams, LegalMonitorEventsParams, LegalMonitorIdParams, LegalSearchParams,
+    LegalTaskIdParams, MimeDetectParams, TextParams,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -546,6 +588,338 @@ impl HaciendaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         json_tool_result(&serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
     }
+
+    /// Shared implementation for the six source-named legal search tools.
+    async fn legal_search(
+        &self,
+        source: LegalSource,
+        params: LegalSearchParams,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .search(LegalSearchRequest {
+                query: params.query,
+                source,
+                max_results: params.max_results,
+            })
+            .await
+            .map_err(map_legal_error)?;
+        tracing::info!(
+            source = source.tool_prefix(),
+            provider_search_id = %response.provider_search_id,
+            result_count = response.results.len(),
+            "legal search completed"
+        );
+        // Return the library's response verbatim: MCP, REST, and CLI callers must see
+        // the same provenance and result schema for the same provider answer.
+        json_tool_result(&response)
+    }
+
+    /// Search EUR-Lex, the official EU legal source.
+    #[tool(
+        description = "Search EUR-Lex (eur-lex.europa.eu) for official EU legal instruments. \
+            Only the research query is sent to the configured web-search provider, scoped \
+            to that official host; no private document content is sent.",
+        annotations(
+            title = "Search EUR-Lex",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn eurlex_search(
+        &self,
+        Parameters(params): Parameters<LegalSearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.legal_search(LegalSource::Eurlex, params).await
+    }
+
+    /// Search Légifrance, the official French legal source.
+    #[tool(
+        description = "Search Légifrance (legifrance.gouv.fr) for official French legal \
+            instruments. Only the research query is sent to the configured web-search \
+            provider, scoped to that official host; no private document content is sent.",
+        annotations(
+            title = "Search Légifrance",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn legifrance_search(
+        &self,
+        Parameters(params): Parameters<LegalSearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.legal_search(LegalSource::Legifrance, params).await
+    }
+
+    /// Search Gesetze im Internet, the official German federal law source.
+    #[tool(
+        description = "Search Gesetze im Internet (gesetze-im-internet.de) for official German \
+            federal statutes. Only the research query is sent to the configured web-search \
+            provider, scoped to that official host; no private document content is sent.",
+        annotations(
+            title = "Search Gesetze im Internet",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn gesetze_search(
+        &self,
+        Parameters(params): Parameters<LegalSearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.legal_search(LegalSource::GesetzeImInternet, params)
+            .await
+    }
+
+    /// Search Rechtspraak, the official Dutch judiciary source.
+    #[tool(
+        description = "Search Rechtspraak (rechtspraak.nl) for official Dutch court decisions. \
+            Only the research query is sent to the configured web-search provider, scoped \
+            to that official host; no private document content is sent.",
+        annotations(
+            title = "Search Rechtspraak",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn rechtspraak_search(
+        &self,
+        Parameters(params): Parameters<LegalSearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.legal_search(LegalSource::Rechtspraak, params).await
+    }
+
+    /// Search BOE, the official Spanish state gazette.
+    #[tool(
+        description = "Search BOE (boe.es) for official Spanish legislation and gazette notices. \
+            Only the research query is sent to the configured web-search provider, scoped \
+            to that official host; no private document content is sent.",
+        annotations(
+            title = "Search BOE",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn boe_search(
+        &self,
+        Parameters(params): Parameters<LegalSearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.legal_search(LegalSource::Boe, params).await
+    }
+
+    /// Search Normattiva, the official Italian legislation source.
+    #[tool(
+        description = "Search Normattiva (normattiva.it) for official Italian legislation. \
+            Only the research query is sent to the configured web-search provider, scoped \
+            to that official host; no private document content is sent.",
+        annotations(
+            title = "Search Normattiva",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn normattiva_search(
+        &self,
+        Parameters(params): Parameters<LegalSearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.legal_search(LegalSource::Normattiva, params).await
+    }
+
+    /// Fetch one official-source URL after its host has been allowlisted.
+    #[tool(
+        description = "Fetch bounded content from an HTTPS URL on one of the six official legal \
+            sources (eurlex, legifrance, gesetze, rechtspraak, boe, normattiva). The URL's \
+            host is checked against `source` before the request and redirects are refused. \
+            No private document content is sent.",
+        annotations(
+            title = "Fetch Official Legal Source",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn official_fetch(
+        &self,
+        Parameters(params): Parameters<LegalFetchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let source = LegalSource::from_str(&params.source).map_err(map_legal_error)?;
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .fetch(LegalFetchRequest {
+                source,
+                url: params.url,
+            })
+            .await
+            .map_err(map_legal_error)?;
+        json_tool_result(&response)
+    }
+
+    /// Submit a source-scoped deep legal research task.
+    #[tool(
+        description = "Submit a deep legal research task restricted to one required official \
+            source (eurlex, legifrance, gesetze, rechtspraak, boe, normattiva). Only the \
+            research query is sent to the provider; private document content is never sent. \
+            Returns the provider's run_id and status; poll them with `deep_research_status` \
+            and read the finished answer with `deep_research_result`.",
+        annotations(
+            title = "Create Deep Legal Research Task",
+            read_only_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn create_deep_research(
+        &self,
+        Parameters(params): Parameters<LegalDeepResearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let source = LegalSource::from_str(&params.source).map_err(map_legal_error)?;
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .create_deep_research(LegalDeepResearchRequest {
+                source,
+                query: params.query,
+            })
+            .await
+            .map_err(map_legal_error)?;
+        json_tool_result(&response)
+    }
+
+    /// Read the current status of a deep legal research task.
+    #[tool(
+        description = "Read the provider status of a deep legal research run by its run_id. \
+            Read-only: this only reports provider state, it does not run a new search or \
+            send any document content.",
+        annotations(
+            title = "Deep Research Task Status",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn deep_research_status(
+        &self,
+        Parameters(params): Parameters<LegalTaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .deep_research_status(&params.run_id)
+            .await
+            .map_err(map_legal_error)?;
+        json_tool_result(&response)
+    }
+
+    /// Read a finished deep legal research result, including its citation basis.
+    #[tool(
+        description = "Read a deep legal research run's result by its run_id. The `output` \
+            field preserves the provider's answer and its citation basis verbatim; this \
+            tool never substitutes or rewrites citations. No document content is sent.",
+        annotations(
+            title = "Deep Research Task Result",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn deep_research_result(
+        &self,
+        Parameters(params): Parameters<LegalTaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .deep_research_result(&params.run_id)
+            .await
+            .map_err(map_legal_error)?;
+        json_tool_result(&response)
+    }
+
+    /// Create a recurring monitor over one official legal source.
+    #[tool(
+        description = "Create a legal monitor on one required official source (eurlex, \
+            legifrance, gesetze, rechtspraak, boe, normattiva) with a query and frequency. \
+            Provide a stable idempotency_key to safely retry creation. Only the query is \
+            sent to the provider; no private document content is sent. \
+            Returns a monitor_id for `monitor_events` and `cancel_monitor`.",
+        annotations(
+            title = "Create Legal Monitor",
+            read_only_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn create_monitor(
+        &self,
+        Parameters(params): Parameters<LegalMonitorCreateParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let source = LegalSource::from_str(&params.source).map_err(map_legal_error)?;
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .create_monitor(LegalMonitorRequest {
+                source,
+                query: params.query,
+                frequency: params.frequency,
+                processor: params.processor,
+                idempotency_key: params.idempotency_key,
+            })
+            .await
+            .map_err(map_legal_error)?;
+        json_tool_result(&response)
+    }
+
+    /// List events produced by a legal monitor.
+    #[tool(
+        description = "List provider events for a legal monitor by its monitor_id. Read-only; \
+            the events are returned in the provider's own shape, with no document content \
+            sent to the provider.",
+        annotations(
+            title = "Legal Monitor Events",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn monitor_events(
+        &self,
+        Parameters(params): Parameters<LegalMonitorEventsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .monitor_events_with_options(
+                &params.monitor_id,
+                params.cursor.as_deref(),
+                params.include_completions,
+            )
+            .await
+            .map_err(map_legal_error)?;
+        json_tool_result(&response)
+    }
+
+    /// Cancel a legal monitor.
+    #[tool(
+        description = "Permanently cancel a legal monitor by its monitor_id. Returns the \
+            provider's monitor_id, source, and resulting status in the library's own shape.",
+        annotations(
+            title = "Cancel Legal Monitor",
+            read_only_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn cancel_monitor(
+        &self,
+        Parameters(params): Parameters<LegalMonitorIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let client = LegalResearchClient::from_env().map_err(map_legal_error)?;
+        let response = client
+            .cancel_monitor(&params.monitor_id)
+            .await
+            .map_err(map_legal_error)?;
+        json_tool_result(&response)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -571,7 +945,9 @@ impl ServerHandler for HaciendaMcp {
                  Use `documents_process` to extract and redact whole documents, \
                  `pii_scan`/`pii_redact` for raw text, `audit_verify`/`audit_entries` \
                  to inspect the chain, and `compliance_report` for the \
-                 DPIA/model-card/DORA artefacts.",
+                 DPIA/model-card/DORA artefacts. The legal research tools query public \
+                 sources only, behind the disabled-by-default paid add-on gate; private \
+                 documents are never sent to an external provider.",
             )
     }
 }
@@ -611,6 +987,93 @@ fn map_hacienda_error(error: hacienda::HaciendaError) -> rmcp::ErrorData {
             rmcp::ErrorData::invalid_params(error.to_string(), None)
         }
         other => rmcp::ErrorData::internal_error(other.to_string(), None),
+    }
+}
+
+/// Map a [`hacienda_legal::LegalError`] onto an MCP tool error.
+///
+/// Messages are fixed strings on purpose: they must never echo the caller's URL, the
+/// provider's raw response, or any server-side credential. This mirrors the HTTP
+/// handler's `provider_error` classification without duplicating its wire DTOs.
+fn map_legal_error(error: hacienda_legal::LegalError) -> rmcp::ErrorData {
+    use hacienda_legal::LegalError as E;
+    match error {
+        E::InvalidQuery => rmcp::ErrorData::invalid_params(
+            "`query` must contain between 1 and 2,000 characters",
+            None,
+        ),
+        E::InvalidFrequency => rmcp::ErrorData::invalid_params(
+            "`frequency` must be 1h–30d using an integer and h, d, or w suffix",
+            None,
+        ),
+        E::InvalidProcessor => rmcp::ErrorData::invalid_params(
+            "`processor` must be lite, base, or core",
+            None,
+        ),
+        E::InvalidCursor => rmcp::ErrorData::invalid_params(
+            "`cursor` is invalid; reuse the `next_cursor` from the previous page",
+            None,
+        ),
+        E::InvalidIdempotencyKey => rmcp::ErrorData::invalid_params(
+            "`idempotency_key` must be 1–128 ASCII letters, digits, hyphens, or underscores",
+            None,
+        ),
+        E::IdempotencyKeyConflict => rmcp::ErrorData::invalid_params(
+            "`idempotency_key` was already used for a different active monitor request",
+            None,
+        ),
+        E::IdempotencyLookupLimit => rmcp::ErrorData::internal_error(
+            "monitor retry lookup reached its page limit; retry later with the same idempotency key",
+            None,
+        ),
+        E::ResultUnavailable => rmcp::ErrorData::internal_error(
+            "completed research output is not available yet; retry shortly",
+            None,
+        ),
+        E::UnsupportedSource => rmcp::ErrorData::invalid_params(
+            "`source` must be eurlex, legifrance, gesetze, rechtspraak, boe, or normattiva",
+            None,
+        ),
+        E::UnsafeUrl => rmcp::ErrorData::invalid_params(
+            "`url` must use HTTPS on the selected source's official host",
+            None,
+        ),
+        E::UnsupportedDocumentFormat => rmcp::ErrorData::invalid_params(
+            "official URL must return UTF-8 HTML, XHTML, JSON, XML, or plain text; PDF and binary formats are unsupported",
+            None,
+        ),
+        E::InvalidProviderId => rmcp::ErrorData::invalid_params(
+            "use a run_id or monitor_id returned by a legal research create tool",
+            None,
+        ),
+        E::ResourceNotFound => rmcp::ErrorData::invalid_params(
+            "legal research resource was not found for this tenant",
+            None,
+        ),
+        E::Disabled | E::ProviderNotConfigured => {
+            tracing::warn!("legal research provider is not enabled or configured");
+            rmcp::ErrorData::internal_error(
+                "legal research is unavailable; enable the add-on and configure a server-side Parallel API key",
+                None,
+            )
+        }
+        E::UpstreamStatus { status } => {
+            tracing::warn!(
+                provider_status = status,
+                "legal research provider request failed"
+            );
+            rmcp::ErrorData::internal_error(
+                "legal research provider request failed; check provider credentials or quota and retry",
+                None,
+            )
+        }
+        E::Upstream | E::InvalidResponse => {
+            tracing::warn!("legal research provider request failed");
+            rmcp::ErrorData::internal_error(
+                "legal research provider request failed; check network access and retry",
+                None,
+            )
+        }
     }
 }
 
@@ -764,6 +1227,19 @@ mod tests {
             "list_formats",
             "pii_redact",
             "pii_scan",
+            "eurlex_search",
+            "legifrance_search",
+            "gesetze_search",
+            "rechtspraak_search",
+            "boe_search",
+            "normattiva_search",
+            "official_fetch",
+            "create_deep_research",
+            "deep_research_status",
+            "deep_research_result",
+            "create_monitor",
+            "monitor_events",
+            "cancel_monitor",
         ];
         expected.sort_unstable();
         assert_eq!(names, expected);
