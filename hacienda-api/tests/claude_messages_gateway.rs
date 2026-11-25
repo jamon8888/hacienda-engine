@@ -409,7 +409,8 @@ async fn keepalive_comments_are_relayed_as_content_free_frames() {
     let response = post(&app, request()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let sse = sse_body(response).await;
-    assert!(sse.contains(": ping - 1763990000"));
+    assert!(sse.contains(": ping"));
+    assert!(!sse.contains("1763990000"));
     assert!(sse.contains("safe reply"));
 }
 
@@ -485,7 +486,7 @@ async fn tool_and_thinking_blocks_are_redacted_as_whole_logical_texts() {
     let sse = sse_body(response).await;
     assert!(!sse.contains(EMAIL), "client received a real value");
     assert!(sse.contains("[EMAIL]"));
-    assert!(sse.contains("\"signature\":\"c2ln\""));
+    assert!(!sse.contains("\"signature\":\"c2ln\""));
 
     let mut partial = String::new();
     let mut thinking = String::new();
