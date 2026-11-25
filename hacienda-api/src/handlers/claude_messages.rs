@@ -885,6 +885,7 @@ impl ResponseRelay {
 
 const MAX_BLOCK_BUFFER: usize = 1024 * 1024;
 const MAX_SSE_FRAME: usize = 1024 * 1024;
+const MAX_BLOCK_DELTAS: usize = 4096;
 
 struct ResponseRelay {
     events: ClaudeMessagesEventStream,
@@ -905,6 +906,7 @@ struct BufferedBlock {
     kind: BlockKind,
     joined: String,
     deltas: Vec<ProviderSseEvent>,
+    retained_bytes: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -978,6 +980,7 @@ impl ResponseRelay {
                     kind,
                     joined: String::new(),
                     deltas: Vec::new(),
+                    retained_bytes: 0,
                 });
                 let mut safe = event;
                 if kind == BlockKind::ToolUse {
@@ -1028,12 +1031,23 @@ impl ResponseRelay {
                         return Err(());
                     }
                 }
-                self.active.as_mut().ok_or(())?.deltas.push(event);
+                let active = self.active.as_mut().ok_or(())?;
+                active.retained_bytes = active
+                    .retained_bytes
+                    .checked_add(event.data.len())
+                    .filter(|bytes| *bytes <= MAX_BLOCK_BUFFER)
+                    .ok_or(())?;
+                if active.deltas.len() >= MAX_BLOCK_DELTAS {
+                    return Err(());
+                }
+                active.deltas.push(event);
             }
             ValidationAction::BlockStop => {
                 let active = self.active.take().ok_or(())?;
                 let redacted = self.redact_block(&active).await?;
-                for event in redact_block_deltas(active.deltas, active.kind, redacted)? {
+                for event in
+                    redact_block_deltas(active.deltas, active.kind, redacted, &active.joined)?
+                {
                     self.pending.push_back(event);
                 }
                 self.pending.push_back(event);
@@ -1059,6 +1073,9 @@ impl ResponseRelay {
             }
             ValidationAction::Immediate => {
                 let mut safe = event;
+                if safe.comment.is_some() {
+                    safe.comment = Some("ping".to_owned());
+                }
                 if safe.event.as_deref() == Some("message_delta") {
                     let mut value: Value = serde_json::from_str(&safe.data).map_err(|_| ())?;
                     if value
@@ -1091,20 +1108,22 @@ impl ResponseRelay {
     }
 
     async fn redact_block(&mut self, block: &BufferedBlock) -> Result<String, ()> {
-        if block.kind == BlockKind::ToolUse
-            && !serde_json::from_str::<Value>(&block.joined)
-                .ok()
-                .is_some_and(|value| value.is_object())
-        {
-            return Err(());
-        }
         let caller = Caller::Principal(self.auth_context.as_ref());
-        let redacted = self
-            .facade
-            .redact_text_with_auth(caller, &block.joined)
-            .await
-            .map_err(|_| ())?
-            .redacted_text;
+        let redacted = if block.kind == BlockKind::ToolUse {
+            let mut value: Value = serde_json::from_str(&block.joined).map_err(|_| ())?;
+            if !value.is_object() {
+                return Err(());
+            }
+            redact_tool_argument_values(&self.facade, self.auth_context.as_ref(), &mut value)
+                .await?;
+            serde_json::to_string(&value).map_err(|_| ())?
+        } else {
+            self.facade
+                .redact_text_with_auth(caller, &block.joined)
+                .await
+                .map_err(|_| ())?
+                .redacted_text
+        };
         if redacted.len() > MAX_BLOCK_BUFFER {
             return Err(());
         }
@@ -1118,6 +1137,55 @@ impl ResponseRelay {
         self.project_side_channel(&redacted).await;
         Ok(redacted)
     }
+}
+
+fn redact_tool_argument_values<'a>(
+    facade: &'a HaciendaFacade,
+    auth_context: &'a AuthContext,
+    value: &'a mut Value,
+) -> Pin<Box<dyn std::future::Future<Output = Result<(), ()>> + Send + 'a>> {
+    Box::pin(async move {
+        match value {
+            Value::String(text) => {
+                if text.len() > MAX_BLOCK_BUFFER {
+                    return Err(());
+                }
+                *text = facade
+                    .redact_text_with_auth(Caller::Principal(auth_context), text)
+                    .await
+                    .map_err(|_| ())?
+                    .redacted_text;
+                Ok(())
+            }
+            Value::Array(items) => {
+                for item in items {
+                    redact_tool_argument_values(facade, auth_context, item).await?;
+                }
+                Ok(())
+            }
+            Value::Object(object) => {
+                let keys: Vec<String> = object.keys().cloned().collect();
+                for key in keys {
+                    let safe_key = facade
+                        .redact_text_with_auth(Caller::Principal(auth_context), &key)
+                        .await
+                        .map_err(|_| ())?
+                        .redacted_text;
+                    if safe_key != key {
+                        return Err(());
+                    }
+                    redact_tool_argument_values(
+                        facade,
+                        auth_context,
+                        object.get_mut(&key).ok_or(())?,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        }
+    })
 }
 
 /// Content-free error emitted in place of a silently truncated stream. It
@@ -1177,9 +1245,24 @@ fn redact_block_deltas(
     mut deltas: Vec<ProviderSseEvent>,
     kind: BlockKind,
     redacted: String,
+    original: &str,
 ) -> Result<Vec<ProviderSseEvent>, ()> {
-    // Signature deltas carry opaque provider data, not inspectable text; they
-    // are relayed unchanged but still wait for the block to be redacted.
+    // A thinking signature authenticates the original text. If redaction changes
+    // that text, drop the signature instead of forwarding a mismatched pair.
+    if kind == BlockKind::Thinking && redacted != original {
+        deltas.retain(|event| {
+            serde_json::from_str::<Value>(&event.data)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/delta/type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                != Some("signature_delta")
+        });
+    }
     let pointer_for = |event: &ProviderSseEvent| -> Result<Option<&'static str>, ()> {
         match kind {
             BlockKind::Text => Ok(Some("/delta/text")),
@@ -1499,6 +1582,7 @@ async fn redact_and_validate_provider_events(
                     kind,
                     joined: String::new(),
                     deltas: Vec::new(),
+                    retained_bytes: 0,
                 });
                 let mut safe = event.clone();
                 if kind == BlockKind::ToolUse {
@@ -1546,11 +1630,16 @@ async fn redact_and_validate_provider_events(
                         return Err(ApiError::internal());
                     }
                 }
-                active
-                    .as_mut()
-                    .ok_or_else(ApiError::internal)?
-                    .deltas
-                    .push(event.clone());
+                let block = active.as_mut().ok_or_else(ApiError::internal)?;
+                block.retained_bytes = block
+                    .retained_bytes
+                    .checked_add(event.data.len())
+                    .filter(|bytes| *bytes <= MAX_BLOCK_BUFFER)
+                    .ok_or_else(ApiError::internal)?;
+                if block.deltas.len() >= MAX_BLOCK_DELTAS {
+                    return Err(ApiError::internal());
+                }
+                block.deltas.push(event.clone());
             }
             ValidationAction::BlockStop => {
                 let block = active.take().ok_or_else(ApiError::internal)?;
@@ -1672,6 +1761,7 @@ struct SseDecoder {
     event: Option<String>,
     id: Option<String>,
     comment: Option<String>,
+    frame_bytes: usize,
 }
 
 impl SseDecoder {
@@ -1680,8 +1770,17 @@ impl SseDecoder {
         bytes: &[u8],
         callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
+        if self
+            .pending
+            .len()
+            .saturating_add(self.frame_bytes)
+            .saturating_add(bytes.len())
+            > MAX_SSE_FRAME
+        {
+            return Err(TransportError::Failed);
+        }
         self.pending.extend_from_slice(bytes);
-        if self.pending.len() > MAX_SSE_FRAME {
+        if self.pending.len().saturating_add(self.frame_bytes) > MAX_SSE_FRAME {
             return Err(TransportError::Failed);
         }
         while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
@@ -1716,8 +1815,14 @@ impl SseDecoder {
                 callback(event)?;
             }
             self.data.clear();
+            self.frame_bytes = 0;
             return Ok(());
         }
+        self.frame_bytes = self
+            .frame_bytes
+            .checked_add(line.len().saturating_add(1))
+            .filter(|size| *size <= MAX_SSE_FRAME)
+            .ok_or(TransportError::Failed)?;
         if let Some(comment) = line.strip_prefix(':') {
             self.comment = Some(comment.strip_prefix(' ').unwrap_or(comment).to_owned());
             return Ok(());
@@ -1727,12 +1832,7 @@ impl SseDecoder {
         match field {
             "event" => self.event = Some(value.to_owned()),
             "id" if !value.contains('\0') => self.id = Some(value.to_owned()),
-            "data" => {
-                if self.data.iter().map(String::len).sum::<usize>() + value.len() > MAX_SSE_FRAME {
-                    return Err(TransportError::Failed);
-                }
-                self.data.push(value.to_owned());
-            }
+            "data" => self.data.push(value.to_owned()),
             _ => {}
         }
         Ok(())
@@ -1975,6 +2075,37 @@ mod tests {
         assert!(final_delta.is_some_and(|json| serde_json::from_str::<Value>(&json).is_ok()));
     }
 
+    #[tokio::test]
+    async fn tool_use_redacts_json_escaped_email_values_after_decoding() {
+        let mut events = valid_tool_response_events();
+        events[2].data = serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"email\":\"bob\\\\u0040example.com\"}"}
+        })
+        .to_string();
+        events[3].data = serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": ""}
+        })
+        .to_string();
+
+        let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
+            .await
+            .expect("escaped tool argument is redacted");
+        let arguments = safe
+            .iter()
+            .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
+            .filter_map(|value| {
+                value
+                    .pointer("/delta/partial_json")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect::<String>();
+        let decoded: Value = serde_json::from_str(&arguments).expect("valid finalized arguments");
+        assert!(!decoded.to_string().contains("bob@example.com"));
+    }
+
     #[test]
     fn repeated_message_deltas_are_valid_before_message_stop() {
         let mut events = valid_response_events();
@@ -2132,7 +2263,7 @@ mod tests {
             .collect();
         assert!(!joined.contains("alice@example.com"));
         assert!(joined.contains("[EMAIL]"));
-        assert!(safe.iter().any(|event| {
+        assert!(!safe.iter().any(|event| {
             serde_json::from_str::<Value>(&event.data)
                 .ok()
                 .and_then(|value| {

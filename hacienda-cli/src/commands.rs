@@ -2623,8 +2623,8 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_bind_policy, check_loopback_bind_for_local_surfaces, parse_anthropic_messages_config,
-        legal_error, legal_output_error, print_legal_task_run, validate_local_gateway_secret,
+        check_bind_policy, check_loopback_bind_for_local_surfaces, legal_error, legal_output_error,
+        parse_anthropic_messages_config, print_legal_task_run, validate_local_gateway_secret,
         DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT, PLACEHOLDER_STATIC_TOKEN,
     };
     use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
@@ -2670,9 +2670,14 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("monitor cancellation"), "{message}");
         assert!(message.contains("monitor-123"), "{message}");
-        assert!(message.contains("provider cancellation succeeded"), "{message}");
         assert!(
-            error.chain().any(|cause| cause.to_string() == "closed pipe"),
+            message.contains("provider cancellation succeeded"),
+            "{message}"
+        );
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string() == "closed pipe"),
             "original output error must remain in the error chain: {message}"
         );
     }

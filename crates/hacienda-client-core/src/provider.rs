@@ -1094,6 +1094,8 @@ fn sse_data(body: &str) -> Vec<String> {
     events
 }
 
+const MAX_PROVIDER_SSE_FRAME: usize = 1024 * 1024;
+
 #[derive(Default)]
 struct SseDecoder {
     pending: Vec<u8>,
@@ -1103,6 +1105,7 @@ struct SseDecoder {
     retry: Option<u64>,
     comment: Option<String>,
     frame_touched: bool,
+    frame_bytes: usize,
 }
 
 impl SseDecoder {
@@ -1125,7 +1128,19 @@ impl SseDecoder {
         bytes: &[u8],
         callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
+        if self
+            .pending
+            .len()
+            .saturating_add(self.frame_bytes)
+            .saturating_add(bytes.len())
+            > MAX_PROVIDER_SSE_FRAME
+        {
+            return Err(TransportError::Failed);
+        }
         self.pending.extend_from_slice(bytes);
+        if self.pending.len().saturating_add(self.frame_bytes) > MAX_PROVIDER_SSE_FRAME {
+            return Err(TransportError::Failed);
+        }
         while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
             let mut line = self.pending.drain(..=newline).collect::<Vec<_>>();
             line.pop();
@@ -1143,6 +1158,14 @@ impl SseDecoder {
         callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
         let line = std::str::from_utf8(line).map_err(|_| TransportError::Failed)?;
+        if line.len() > MAX_PROVIDER_SSE_FRAME {
+            return Err(TransportError::Failed);
+        }
+        self.frame_bytes = self
+            .frame_bytes
+            .checked_add(line.len().saturating_add(1))
+            .filter(|size| *size <= MAX_PROVIDER_SSE_FRAME)
+            .ok_or(TransportError::Failed)?;
         if line.is_empty() {
             if !self.data.is_empty() || self.comment.is_some() {
                 callback(ProviderSseEvent {
@@ -1158,6 +1181,7 @@ impl SseDecoder {
             }
             self.data.clear();
             self.frame_touched = false;
+            self.frame_bytes = 0;
             return Ok(());
         }
         self.frame_touched = true;
@@ -1289,7 +1313,10 @@ fn validate_claude_sse_event(event: &ProviderSseEvent) -> Result<(), TransportEr
                     require_keys(block, &["type", "id", "name", "input"])?;
                     if !block.get("id").is_some_and(Value::is_string)
                         || !block.get("name").is_some_and(Value::is_string)
-                        || !block.get("input").is_some_and(Value::is_object)
+                        || !block
+                            .get("input")
+                            .and_then(Value::as_object)
+                            .is_some_and(serde_json::Map::is_empty)
                     {
                         return Err(TransportError::Failed);
                     }
@@ -1417,6 +1444,7 @@ fn require_keys(value: &Value, allowed: &[&str]) -> Result<(), TransportError> {
 }
 
 const MAX_REDACTION_BUFFER: usize = 1024 * 1024;
+const MAX_REDACTION_DELTAS: usize = 4096;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClaudeBlockKind {
@@ -1430,8 +1458,10 @@ struct PendingClaudeBlock {
     kind: ClaudeBlockKind,
     joined: String,
     /// Delta frame plus the JSON pointer of its redactable fragment. A
-    /// `signature_delta` has no redactable text and is relayed unchanged.
+    /// `signature_delta` has no redactable text; it is dropped if the signed
+    /// thinking text changes during redaction.
     deltas: Vec<(ProviderSseEvent, Option<&'static str>)>,
+    retained_bytes: usize,
 }
 
 /// Incremental redaction relay for Anthropic SSE frames.
@@ -1476,7 +1506,13 @@ where
     fn accept(&mut self, event: ProviderSseEvent) -> Result<(), TransportError> {
         validate_claude_sse_event(&event)?;
         if event.comment.is_some() {
-            self.emit(event);
+            self.emit(ProviderSseEvent {
+                event: None,
+                id: None,
+                retry: None,
+                comment: Some("ping".to_owned()),
+                data: String::new(),
+            });
             return Ok(());
         }
         let kind = event
@@ -1508,6 +1544,7 @@ where
                     kind: block_kind,
                     joined: String::new(),
                     deltas: Vec::new(),
+                    retained_bytes: 0,
                 });
                 self.emit(safe);
             }
@@ -1528,6 +1565,7 @@ where
                     kind: block_kind,
                     joined: String::new(),
                     deltas: Vec::new(),
+                    retained_bytes: 0,
                 });
                 if active.index != index || active.kind != block_kind {
                     return Err(TransportError::Failed);
@@ -1541,6 +1579,14 @@ where
                     if active.joined.len() > MAX_REDACTION_BUFFER {
                         return Err(TransportError::Failed);
                     }
+                }
+                active.retained_bytes = active
+                    .retained_bytes
+                    .checked_add(event.data.len())
+                    .filter(|bytes| *bytes <= MAX_REDACTION_BUFFER)
+                    .ok_or(TransportError::Failed)?;
+                if active.deltas.len() >= MAX_REDACTION_DELTAS {
+                    return Err(TransportError::Failed);
                 }
                 active.deltas.push((event, pointer));
             }
@@ -1629,7 +1675,25 @@ where
             }
             Some(text)
         };
+        let invalidate_signature = block.kind == ClaudeBlockKind::Thinking
+            && safe_text
+                .as_deref()
+                .is_some_and(|text| text != block.joined);
         let mut deltas = block.deltas;
+        if invalidate_signature {
+            deltas.retain(|(event, _)| {
+                serde_json::from_str::<Value>(&event.data)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .pointer("/delta/type")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    != Some("signature_delta")
+            });
+        }
         let last_redactable = deltas.iter().rposition(|(_, pointer)| pointer.is_some());
         for (position, (event, pointer)) in deltas.iter_mut().enumerate() {
             let Some(pointer) = pointer else {
@@ -2437,6 +2501,44 @@ mod tests {
     }
 
     #[test]
+    fn sse_decoder_bounds_unterminated_lines_and_complete_frames() {
+        let oversized_line = "x".repeat(MAX_PROVIDER_SSE_FRAME + 1);
+        assert_eq!(
+            decode_sse_chunks([Ok(oversized_line)]),
+            Err(TransportError::Failed)
+        );
+
+        let oversized_frame = format!("data: {}\n\n", "x".repeat(MAX_PROVIDER_SSE_FRAME));
+        assert_eq!(
+            decode_sse_chunks([Ok(oversized_frame)]),
+            Err(TransportError::Failed)
+        );
+    }
+
+    #[test]
+    fn tool_block_start_rejects_nonempty_initial_input() {
+        let event = ProviderSseEvent::new(
+            Some("content_block_start".to_owned()),
+            None,
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tool-1",
+                    "name": "lookup",
+                    "input": {"email": "bob@example.com"}
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            validate_claude_sse_event(&event),
+            Err(TransportError::Failed)
+        );
+    }
+
+    #[test]
     fn sse_decoder_preserves_ping_and_fails_closed_on_error_event() {
         let events =
             decode_sse_chunks([Ok("event: ping\ndata: {\"type\":\"ping\"}\n\n".to_owned())])
@@ -2658,7 +2760,7 @@ mod tests {
         assert_eq!(snapshots, vec![3, 8]);
         let delivered = seen.lock().expect("seen lock").clone();
         assert_eq!(delivered.len(), 8);
-        assert_eq!(delivered[1].comment.as_deref(), Some("ping - 1763990000"));
+        assert_eq!(delivered[1].comment.as_deref(), Some("ping"));
         let joined: String = delivered
             .iter()
             .filter_map(|event| {
@@ -2730,7 +2832,7 @@ mod tests {
         assert!(is_json_object(&partial_json));
         assert!(partial_json.contains(PERSON_TOKEN));
         assert!(joined("/delta/thinking").contains(PERSON_TOKEN));
-        assert!(delivered.iter().any(|event| {
+        assert!(!delivered.iter().any(|event| {
             serde_json::from_str::<Value>(&event.data)
                 .ok()
                 .and_then(|value| {
