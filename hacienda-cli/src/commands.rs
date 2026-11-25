@@ -1795,7 +1795,7 @@ fn legal_error(error: &LegalError) -> anyhow::Error {
             "idempotency key was already used for a different active monitor request"
         ),
         LegalError::IdempotencyLookupLimit => anyhow::anyhow!(
-            "monitor retry lookup reached its page limit before finding the existing monitor"
+            "monitor retry lookup reached its page limit before finding the existing monitor; retry later with the same idempotency key (the lookup may reach the limit again)"
         ),
         LegalError::ResultUnavailable => anyhow::anyhow!(
             "the run is completed but its brief is not available yet; retry shortly"
@@ -1820,6 +1820,22 @@ fn legal_error(error: &LegalError) -> anyhow::Error {
     }
 }
 
+fn legal_error_with_cause(error: LegalError) -> anyhow::Error {
+    let guidance = legal_error(&error).to_string();
+    anyhow::Error::new(error).context(guidance)
+}
+
+fn legal_output_error(
+    error: impl Into<anyhow::Error>,
+    operation: &str,
+    identifier: &str,
+    recovery: &str,
+) -> anyhow::Error {
+    error.into().context(format!(
+        "legal {operation} completed, but writing its response for {identifier} to stdout failed; {recovery}"
+    ))
+}
+
 /// The CLI's `LegalSourceArg` mirror converted to the provider crate's type. The match is
 /// exhaustive, so adding a source to the CLI surface is a compile error until the provider
 /// mapping is updated too — no stringly-typed round trip through `LegalSource::from_str`.
@@ -1840,7 +1856,7 @@ fn legal_source(arg: LegalSourceArg) -> LegalSource {
 /// the credential lookup; the CLI must not duplicate or relax either check, and has no
 /// flag that could carry a key.
 fn legal_client() -> Result<LegalResearchClient> {
-    LegalResearchClient::from_env().map_err(|error| legal_error(&error))
+    LegalResearchClient::from_env().map_err(legal_error_with_cause)
 }
 
 fn print_legal_search_text(out: &mut impl Write, response: &LegalSearchResponse) -> io::Result<()> {
@@ -1963,13 +1979,36 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                     max_results,
                 })
                 .await
-                .map_err(|error| legal_error(&error))?;
+                .map_err(legal_error_with_cause)?;
             let mut stdout = io::stdout().lock();
             match format {
-                Format::Json => write_legal_json(&mut stdout, &response)?,
-                Format::Text => print_legal_search_text(&mut stdout, &response)?,
+                Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                    legal_output_error(
+                        error,
+                        "search",
+                        &format!("search {}", response.provider_search_id),
+                        "retry the search if you still need its result",
+                    )
+                })?,
+                Format::Text => {
+                    print_legal_search_text(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "search",
+                            &format!("search {}", response.provider_search_id),
+                            "retry the search if you still need its result",
+                        )
+                    })?
+                }
             }
-            flush_legal_stdout(&mut stdout)?;
+            flush_legal_stdout(&mut stdout).map_err(|error| {
+                legal_output_error(
+                    error,
+                    "search",
+                    &format!("search {}", response.provider_search_id),
+                    "retry the search if you still need its result",
+                )
+            })?;
             Ok(())
         }
         LegalCommand::Fetch(LegalFetchArgs {
@@ -1993,10 +2032,33 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                 })?;
             let mut stdout = io::stdout().lock();
             match format {
-                Format::Json => write_legal_json(&mut stdout, &response)?,
-                Format::Text => print_legal_fetch_text(&mut stdout, &response)?,
+                Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                    legal_output_error(
+                        error,
+                        "fetch",
+                        &url_identifier,
+                        "retry the fetch for this official source",
+                    )
+                })?,
+                Format::Text => {
+                    print_legal_fetch_text(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "fetch",
+                            &url_identifier,
+                            "retry the fetch for this official source",
+                        )
+                    })?
+                }
             }
-            flush_legal_stdout(&mut stdout)?;
+            flush_legal_stdout(&mut stdout).map_err(|error| {
+                legal_output_error(
+                    error,
+                    "fetch",
+                    &url_identifier,
+                    "retry the fetch for this official source",
+                )
+            })?;
             Ok(())
         }
         LegalCommand::DeepResearch(LegalDeepResearchArgs { command }) => match command {
@@ -2011,18 +2073,32 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                         query,
                     })
                     .await
-                    .map_err(|error| legal_error(&error))?;
+                    .map_err(legal_error_with_cause)?;
                 let mut stdout = io::stdout().lock();
+                let run_identifier = format!("run {}", response.run_id);
+                let recovery = "the provider accepted this run; use its run ID with `legal deep-research status` to recover the receipt";
                 match format {
                     Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
-                        anyhow::anyhow!("provider accepted deep-research run {}; failed to write its receipt to stdout: {error}", response.run_id)
+                        legal_output_error(
+                            error,
+                            "deep-research submission",
+                            &run_identifier,
+                            recovery,
+                        )
                     })?,
-                    Format::Text => print_legal_task_run(&mut stdout, &response).map_err(|error| {
-                        anyhow::anyhow!("provider accepted deep-research run {}; failed to write its receipt to stdout: {error}", response.run_id)
-                    })?,
+                    Format::Text => {
+                        print_legal_task_run(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "deep-research submission",
+                                &run_identifier,
+                                recovery,
+                            )
+                        })?
+                    }
                 }
                 stdout.flush().map_err(|error| {
-                    anyhow::anyhow!("provider accepted deep-research run {}; failed to write its receipt to stdout: {error}", response.run_id)
+                    legal_output_error(error, "deep-research submission", &run_identifier, recovery)
                 })?;
                 Ok(())
             }
@@ -2030,112 +2106,196 @@ pub async fn run_legal(args: LegalArgs) -> Result<()> {
                 let response = legal_client()?
                     .deep_research_status(&run_id)
                     .await
-                    .map_err(|error| legal_error(&error))
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
                         format!("could not read legal task status for run {run_id}; verify the ID and retry")
                     })?;
                 let mut stdout = io::stdout().lock();
+                let run_identifier = format!("run {run_id}");
+                let recovery = format!("retry `legal deep-research status {run_id}`");
                 match format {
-                    Format::Json => write_legal_json(&mut stdout, &response)?,
-                    Format::Text => print_legal_task_run(&mut stdout, &response)?,
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "deep-research status",
+                            &run_identifier,
+                            &recovery,
+                        )
+                    })?,
+                    Format::Text => {
+                        print_legal_task_run(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "deep-research status",
+                                &run_identifier,
+                                &recovery,
+                            )
+                        })?
+                    }
                 }
-                flush_legal_stdout(&mut stdout)?;
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "deep-research status", &run_identifier, &recovery)
+                })?;
                 Ok(())
             }
             LegalDeepResearchCommand::Result(LegalTaskArgs { run_id, format }) => {
                 let response = legal_client()?
                     .deep_research_result(&run_id)
                     .await
-                    .map_err(|error| legal_error(&error))
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
                         format!("could not read legal task result for run {run_id}; poll its status and retry")
                     })?;
                 let mut stdout = io::stdout().lock();
+                let run_identifier = format!("run {run_id}");
+                let recovery = format!("retry `legal deep-research result {run_id}`");
                 match format {
-                    Format::Json => write_legal_json(&mut stdout, &response)?,
-                    Format::Text => print_legal_task_result(&mut stdout, &response)?,
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "deep-research result",
+                            &run_identifier,
+                            &recovery,
+                        )
+                    })?,
+                    Format::Text => {
+                        print_legal_task_result(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "deep-research result",
+                                &run_identifier,
+                                &recovery,
+                            )
+                        })?
+                    }
                 }
-                flush_legal_stdout(&mut stdout)?;
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "deep-research result", &run_identifier, &recovery)
+                })?;
                 Ok(())
             }
         },
-        LegalCommand::Monitor(LegalMonitorArgs { command }) => {
-            match command {
-                LegalMonitorCommand::Create(LegalMonitorCreateArgs {
-                    query,
-                    source,
-                    frequency,
-                    processor,
-                    idempotency_key,
-                    format,
-                }) => {
-                    let response = legal_client()?
-                        .create_monitor(LegalMonitorRequest {
-                            source: legal_source(source),
-                            query,
-                            frequency,
-                            processor,
-                            idempotency_key,
-                        })
-                        .await
-                        .map_err(|error| legal_error(&error))?;
-                    let mut stdout = io::stdout().lock();
-                    match format {
-                        Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
-                            anyhow::anyhow!("provider accepted legal monitor {}; failed to write its receipt to stdout: {error}", response.monitor_id)
-                        })?,
-                        Format::Text => print_legal_monitor(&mut stdout, &response).map_err(|error| {
-                            anyhow::anyhow!("provider accepted legal monitor {}; failed to write its receipt to stdout: {error}", response.monitor_id)
-                        })?,
+        LegalCommand::Monitor(LegalMonitorArgs { command }) => match command {
+            LegalMonitorCommand::Create(LegalMonitorCreateArgs {
+                query,
+                source,
+                frequency,
+                processor,
+                idempotency_key,
+                format,
+            }) => {
+                let response = legal_client()?
+                    .create_monitor(LegalMonitorRequest {
+                        source: legal_source(source),
+                        query,
+                        frequency,
+                        processor,
+                        idempotency_key,
+                    })
+                    .await
+                    .map_err(legal_error_with_cause)?;
+                let mut stdout = io::stdout().lock();
+                let monitor_identifier = format!("monitor {}", response.monitor_id);
+                let recovery = "the provider accepted this monitor; use its monitor ID with `legal monitor events` to recover the receipt";
+                match format {
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(error, "monitor creation", &monitor_identifier, recovery)
+                    })?,
+                    Format::Text => {
+                        print_legal_monitor(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "monitor creation",
+                                &monitor_identifier,
+                                recovery,
+                            )
+                        })?
                     }
-                    stdout.flush().map_err(|error| {
-                        anyhow::anyhow!("provider accepted legal monitor {}; failed to write its receipt to stdout: {error}", response.monitor_id)
-                    })?;
-                    Ok(())
                 }
-                LegalMonitorCommand::Events(LegalMonitorEventsArgs {
-                    monitor_id,
-                    cursor,
-                    include_completions,
-                    format,
-                }) => {
-                    let response = legal_client()?
+                stdout.flush().map_err(|error| {
+                    legal_output_error(error, "monitor creation", &monitor_identifier, recovery)
+                })?;
+                Ok(())
+            }
+            LegalMonitorCommand::Events(LegalMonitorEventsArgs {
+                monitor_id,
+                cursor,
+                include_completions,
+                format,
+            }) => {
+                let response = legal_client()?
                     .monitor_events_with_options(
                         &monitor_id,
                         cursor.as_deref(),
                         include_completions,
                     )
                     .await
-                    .map_err(|error| legal_error(&error))
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
                         format!("could not read legal monitor events for monitor {monitor_id}; verify the ID and retry")
                     })?;
-                    let mut stdout = io::stdout().lock();
-                    match format {
-                        Format::Json => write_legal_json(&mut stdout, &response)?,
-                        Format::Text => print_legal_monitor_events(&mut stdout, &response)?,
+                let mut stdout = io::stdout().lock();
+                let monitor_identifier = format!("monitor {monitor_id}");
+                let recovery = format!("retry `legal monitor events {monitor_id}`");
+                match format {
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(error, "monitor events", &monitor_identifier, &recovery)
+                    })?,
+                    Format::Text => {
+                        print_legal_monitor_events(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "monitor events",
+                                &monitor_identifier,
+                                &recovery,
+                            )
+                        })?
                     }
-                    flush_legal_stdout(&mut stdout)?;
-                    Ok(())
                 }
-                LegalMonitorCommand::Cancel(LegalMonitorIdArgs { monitor_id, format }) => {
-                    let response = legal_client()?
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "monitor events", &monitor_identifier, &recovery)
+                })?;
+                Ok(())
+            }
+            LegalMonitorCommand::Cancel(LegalMonitorIdArgs { monitor_id, format }) => {
+                let response = legal_client()?
                     .cancel_monitor(&monitor_id)
                     .await
-                    .map_err(|error| legal_error(&error))
+                    .map_err(legal_error_with_cause)
                     .with_context(|| {
-                        format!("could not cancel legal monitor {monitor_id}; verify the ID and retry")
+                        format!(
+                            "could not cancel legal monitor {monitor_id}; verify the ID and retry"
+                        )
                     })?;
-                    let mut stdout = io::stdout().lock();
-                    match format {
-                        Format::Json => write_legal_json(&mut stdout, &response)?,
-                        Format::Text => print_legal_monitor(&mut stdout, &response)?,
+                let mut stdout = io::stdout().lock();
+                let monitor_identifier = format!("monitor {monitor_id}");
+                let recovery = "the provider cancellation succeeded; check monitor status before retrying the cancellation";
+                match format {
+                    Format::Json => write_legal_json(&mut stdout, &response).map_err(|error| {
+                        legal_output_error(
+                            error,
+                            "monitor cancellation",
+                            &monitor_identifier,
+                            recovery,
+                        )
+                    })?,
+                    Format::Text => {
+                        print_legal_monitor(&mut stdout, &response).map_err(|error| {
+                            legal_output_error(
+                                anyhow::Error::new(error),
+                                "monitor cancellation",
+                                &monitor_identifier,
+                                recovery,
+                            )
+                        })?
                     }
-                    flush_legal_stdout(&mut stdout)?;
-                    Ok(())
                 }
+                flush_legal_stdout(&mut stdout).map_err(|error| {
+                    legal_output_error(error, "monitor cancellation", &monitor_identifier, recovery)
+                })?;
+                Ok(())
             }
-        }
+        },
         LegalCommand::Mcp(LegalMcpArgs { source }) => run_legal_mcp(legal_source(source)),
     }
 }
@@ -2464,8 +2624,8 @@ pub async fn run_email(args: crate::cli::EmailArgs) -> Result<()> {
 mod tests {
     use super::{
         check_bind_policy, check_loopback_bind_for_local_surfaces, parse_anthropic_messages_config,
-        print_legal_task_run, validate_local_gateway_secret, DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT,
-        PLACEHOLDER_STATIC_TOKEN,
+        legal_error, legal_output_error, print_legal_task_run, validate_local_gateway_secret,
+        DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT, PLACEHOLDER_STATIC_TOKEN,
     };
     use hacienda_core::auth::authn::{AuthConfig, StaticTokenConfig, TokenResolverType};
     use hacienda_legal::{LegalSource, LegalTaskRunResponse};
@@ -2495,6 +2655,33 @@ mod tests {
         let error = print_legal_task_run(&mut BrokenWriter, &response)
             .expect_err("a closed stdout pipe must be reported");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn legal_output_error_keeps_the_write_failure_as_its_cause() {
+        let output_failure = io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe");
+        let error = legal_output_error(
+            output_failure,
+            "monitor cancellation",
+            "monitor monitor-123",
+            "the provider cancellation succeeded; check status before retrying",
+        );
+
+        let message = format!("{error:#}");
+        assert!(message.contains("monitor cancellation"), "{message}");
+        assert!(message.contains("monitor-123"), "{message}");
+        assert!(message.contains("provider cancellation succeeded"), "{message}");
+        assert!(
+            error.chain().any(|cause| cause.to_string() == "closed pipe"),
+            "original output error must remain in the error chain: {message}"
+        );
+    }
+
+    #[test]
+    fn idempotency_lookup_limit_message_is_actionable_without_promising_recovery() {
+        let message = legal_error(&hacienda_legal::LegalError::IdempotencyLookupLimit).to_string();
+        assert!(message.contains("retry later with the same idempotency key"));
+        assert!(message.contains("may reach the limit again"));
     }
 
     #[test]

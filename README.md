@@ -30,7 +30,7 @@ hacienda extracts text and structure from a wide range of document formats and t
 
 ```bash
 # Install CLI
-cargo install hacienda --features ner-candle
+cargo install hacienda-cli
 
 # Scan a document (detect only, no rewrite)
 hacienda scan "Contact john@example.com or call +1-555-123-4567"
@@ -63,7 +63,7 @@ The `hacienda legal mcp` command launches the separate `hacienda-legal-mcp` bina
 both the CLI and its legal helper before using that command:
 
 ```bash
-cargo install hacienda --features ner-candle
+cargo install hacienda-cli
 cargo install hacienda-legal
 ```
 
