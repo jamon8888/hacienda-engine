@@ -1356,6 +1356,18 @@ fn validate_claude_sse_event(event: &ProviderSseEvent) -> Result<(), TransportEr
                 .get("content")
                 .and_then(Value::as_array)
                 .is_none_or(|items| !items.is_empty())
+                || message
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                || message.get("type").and_then(Value::as_str) != Some("message")
+                || message.get("role").and_then(Value::as_str) != Some("assistant")
+                || message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                || !message.get("stop_reason").is_some_and(Value::is_null)
+                || !message.get("stop_sequence").is_some_and(Value::is_null)
             {
                 return Err(TransportError::Failed);
             }
@@ -1365,6 +1377,15 @@ fn validate_claude_sse_event(event: &ProviderSseEvent) -> Result<(), TransportEr
             require_keys(&value, &["type", "delta", "usage"])?;
             let delta = value.get("delta").ok_or(TransportError::Failed)?;
             require_keys(delta, &["stop_reason", "stop_sequence"])?;
+            if !delta
+                .get("stop_reason")
+                .is_some_and(|value| value.is_null() || value.is_string())
+                || !delta
+                    .get("stop_sequence")
+                    .is_some_and(|value| value.is_null() || value.is_string())
+            {
+                return Err(TransportError::Failed);
+            }
             validate_usage(value.get("usage").ok_or(TransportError::Failed)?)?;
         }
         "error" => {
@@ -2575,6 +2596,42 @@ mod tests {
     fn sse_decoder_rejects_truncated_event_at_eof() {
         assert_eq!(
             decode_sse_chunks([Ok("event: ping\ndata: {\"type\":\"ping\"}".to_owned())]),
+            Err(TransportError::Failed)
+        );
+    }
+
+    #[test]
+    fn claude_message_frames_reject_invalid_stop_sequence_types() {
+        let mut start: Value = serde_json::from_str(
+            message_start()
+                .split_once("data: ")
+                .expect("message start data")
+                .1
+                .trim(),
+        )
+        .expect("valid message start JSON");
+        *start
+            .pointer_mut("/message/stop_sequence")
+            .expect("start stop_sequence") = Value::String("unexpected".to_owned());
+        let start_event =
+            ProviderSseEvent::new(Some("message_start".to_owned()), None, start.to_string());
+        assert_eq!(
+            validate_claude_sse_event(&start_event),
+            Err(TransportError::Failed)
+        );
+
+        let delta_event = ProviderSseEvent::new(
+            Some("message_delta".to_owned()),
+            None,
+            serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": 7},
+                "usage": {"output_tokens": 2}
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            validate_claude_sse_event(&delta_event),
             Err(TransportError::Failed)
         );
     }
