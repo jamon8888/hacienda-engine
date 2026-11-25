@@ -1192,7 +1192,14 @@ impl SseDecoder {
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
-            "data" => self.data.push(value.to_owned()),
+            "data" => {
+                self.frame_bytes = self
+                    .frame_bytes
+                    .checked_add(std::mem::size_of::<String>())
+                    .filter(|size| *size <= MAX_PROVIDER_SSE_FRAME)
+                    .ok_or(TransportError::Failed)?;
+                self.data.push(value.to_owned());
+            }
             "event" => self.event = Some(value.to_owned()),
             "id" if !value.contains('\0') => self.id = Some(value.to_owned()),
             "retry" => self.retry = value.parse().ok(),

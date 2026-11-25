@@ -1832,7 +1832,14 @@ impl SseDecoder {
         match field {
             "event" => self.event = Some(value.to_owned()),
             "id" if !value.contains('\0') => self.id = Some(value.to_owned()),
-            "data" => self.data.push(value.to_owned()),
+            "data" => {
+                self.frame_bytes = self
+                    .frame_bytes
+                    .checked_add(std::mem::size_of::<String>())
+                    .filter(|size| *size <= MAX_SSE_FRAME)
+                    .ok_or(TransportError::Failed)?;
+                self.data.push(value.to_owned());
+            }
             _ => {}
         }
         Ok(())

@@ -1010,6 +1010,7 @@ fn extract_hacienda_tokens(text: &str) -> Vec<String> {
 const MAX_SSE_FRAME: usize = 1024 * 1024;
 const MAX_GROUP_BUFFER: usize = 1024 * 1024;
 const MAX_ACTIVE_GROUPS: usize = 256;
+const MAX_GROUP_EVENTS: usize = 4096;
 
 struct ResponseRelay {
     events: CodexResponsesEventStream,
@@ -1027,6 +1028,7 @@ struct BufferedGroup {
     joined: String,
     deltas: Vec<ProviderSseEvent>,
     total: usize,
+    retained_bytes: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -1129,9 +1131,18 @@ impl ResponseRelay {
                     joined: String::new(),
                     deltas: Vec::new(),
                     total: 0,
+                    retained_bytes: 0,
                 });
                 group.total = group.total.saturating_add(fragment.len());
                 if group.total > MAX_GROUP_BUFFER {
+                    return Err(());
+                }
+                group.retained_bytes = group
+                    .retained_bytes
+                    .checked_add(event.data.len())
+                    .filter(|bytes| *bytes <= MAX_GROUP_BUFFER)
+                    .ok_or(())?;
+                if group.deltas.len() >= MAX_GROUP_EVENTS {
                     return Err(());
                 }
                 group.joined.push_str(&fragment);
@@ -1713,6 +1724,7 @@ struct SseDecoder {
     event: Option<String>,
     id: Option<String>,
     comment: Option<String>,
+    frame_bytes: usize,
 }
 
 impl SseDecoder {
@@ -1721,6 +1733,15 @@ impl SseDecoder {
         bytes: &[u8],
         callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
+        if self
+            .pending
+            .len()
+            .saturating_add(self.frame_bytes)
+            .saturating_add(bytes.len())
+            > MAX_SSE_FRAME
+        {
+            return Err(TransportError::Failed);
+        }
         self.pending.extend_from_slice(bytes);
         if self.pending.len() > MAX_SSE_FRAME {
             return Err(TransportError::Failed);
@@ -1757,8 +1778,14 @@ impl SseDecoder {
                 callback(event)?;
             }
             self.data.clear();
+            self.frame_bytes = 0;
             return Ok(());
         }
+        self.frame_bytes = self
+            .frame_bytes
+            .checked_add(line.len().saturating_add(1))
+            .filter(|size| *size <= MAX_SSE_FRAME)
+            .ok_or(TransportError::Failed)?;
         if let Some(comment) = line.strip_prefix(':') {
             self.comment = Some(comment.strip_prefix(' ').unwrap_or(comment).to_owned());
             return Ok(());
@@ -1772,6 +1799,11 @@ impl SseDecoder {
                 if self.data.iter().map(String::len).sum::<usize>() + value.len() > MAX_SSE_FRAME {
                     return Err(TransportError::Failed);
                 }
+                self.frame_bytes = self
+                    .frame_bytes
+                    .checked_add(std::mem::size_of::<String>())
+                    .filter(|size| *size <= MAX_SSE_FRAME)
+                    .ok_or(TransportError::Failed)?;
                 self.data.push(value.to_owned());
             }
             _ => {}
@@ -1780,7 +1812,11 @@ impl SseDecoder {
     }
 
     fn finish(self) -> Result<(), ProviderGatewayError> {
-        if !self.pending.is_empty() || !self.data.is_empty() || self.comment.is_some() {
+        if !self.pending.is_empty()
+            || !self.data.is_empty()
+            || self.comment.is_some()
+            || self.frame_bytes != 0
+        {
             return Err(ProviderGatewayError::InvalidResponse);
         }
         Ok(())
@@ -1810,9 +1846,18 @@ pub(crate) async fn redact_and_validate_provider_events(
                     joined: String::new(),
                     deltas: Vec::new(),
                     total: 0,
+                    retained_bytes: 0,
                 });
                 group.total = group.total.saturating_add(fragment.len());
                 if group.total > MAX_GROUP_BUFFER {
+                    return Err(());
+                }
+                group.retained_bytes = group
+                    .retained_bytes
+                    .checked_add(event.data.len())
+                    .filter(|bytes| *bytes <= MAX_GROUP_BUFFER)
+                    .ok_or(())?;
+                if group.deltas.len() >= MAX_GROUP_EVENTS {
                     return Err(());
                 }
                 group.joined.push_str(&fragment);
@@ -1896,6 +1941,22 @@ mod tests {
     const LOCAL_SECRET: &str = "local-gateway-secret-123";
     const CHATGPT_AUTH: &str = "Bearer chatgpt-user-token";
     const ACCOUNT_ID: &str = "acct-123";
+
+    #[test]
+    fn sse_decoder_bounds_empty_data_fields_before_frame_terminator() {
+        let mut decoder = SseDecoder::default();
+        let mut failed = false;
+        for _ in 0..(MAX_SSE_FRAME / ("data:\n".len() + std::mem::size_of::<String>()) + 1) {
+            if decoder.push(b"data:\n", &mut |_| Ok(())).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "empty data fields must count toward the frame budget"
+        );
+    }
 
     fn pii_facade() -> HaciendaFacade {
         HaciendaFacade::new(HaciendaConfig::default().with_pii(PipelineConfig::default()))
