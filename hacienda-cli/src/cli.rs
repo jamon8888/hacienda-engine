@@ -282,11 +282,14 @@ pub enum McpCommand {
     "  hacienda legal monitor events <monitor-id> --format json\n",
     "  hacienda legal mcp --source nl\n",
 ))]
+/// Arguments for optional research against official legal sources.
 pub struct LegalArgs {
+    /// Legal operation to run, including requests that create provider resources and commands that inspect existing ones.
     #[command(subcommand)]
     pub command: LegalCommand,
 }
 
+/// Operations available under `hacienda legal`.
 #[derive(Debug, Subcommand)]
 pub enum LegalCommand {
     /// Search one official source through the configured provider.
@@ -314,12 +317,14 @@ pub enum LegalCommand {
 }
 
 #[derive(Debug, Parser)]
+/// Arguments for submitting or inspecting an asynchronous deep-research run.
 pub struct LegalDeepResearchArgs {
     #[command(subcommand)]
     pub command: LegalDeepResearchCommand,
 }
 
 #[derive(Debug, Subcommand)]
+/// Actions for creating a deep-research run or reading an existing run.
 pub enum LegalDeepResearchCommand {
     /// Submit an asynchronous deep-research brief to one official source.
     Submit(LegalDeepResearchSubmitArgs),
@@ -330,6 +335,7 @@ pub enum LegalDeepResearchCommand {
 }
 
 #[derive(Debug, Parser)]
+/// Inputs that create a deep-research run with the selected legal source.
 pub struct LegalDeepResearchSubmitArgs {
     /// Research terms or a legal question. Only this text is sent to the provider.
     #[arg(value_name = "QUERY")]
@@ -347,6 +353,7 @@ pub struct LegalDeepResearchSubmitArgs {
 /// Shared by `deep-research status` and `deep-research result`: the run id returned by
 /// `deep-research submit`.
 #[derive(Debug, Parser)]
+/// Arguments identifying an existing deep-research run.
 pub struct LegalTaskArgs {
     /// Provider run id, as printed by `legal deep-research submit`.
     #[arg(value_name = "RUN_ID")]
@@ -358,12 +365,14 @@ pub struct LegalTaskArgs {
 }
 
 #[derive(Debug, Parser)]
+/// Arguments for creating or managing recurring legal-source monitors.
 pub struct LegalMonitorArgs {
     #[command(subcommand)]
     pub command: LegalMonitorCommand,
 }
 
 #[derive(Debug, Subcommand)]
+/// Actions for creating a monitor or inspecting and cancelling an existing monitor.
 pub enum LegalMonitorCommand {
     /// Create a recurring monitor on one official source.
     Create(LegalMonitorCreateArgs),
@@ -374,6 +383,7 @@ pub enum LegalMonitorCommand {
 }
 
 #[derive(Debug, Parser)]
+/// Inputs that create a recurring provider monitor.
 pub struct LegalMonitorCreateArgs {
     /// What the monitor should watch for on the official source.
     #[arg(value_name = "QUERY")]
@@ -402,6 +412,7 @@ pub struct LegalMonitorCreateArgs {
 
 /// Shared by `legal monitor events` and `legal monitor cancel`.
 #[derive(Debug, Parser)]
+/// Arguments identifying an existing monitor for event retrieval or cancellation.
 pub struct LegalMonitorIdArgs {
     /// Provider monitor id, as printed by `legal monitor create`.
     #[arg(value_name = "MONITOR_ID")]
@@ -433,6 +444,7 @@ pub struct LegalMonitorEventsArgs {
 }
 
 #[derive(Debug, Parser)]
+/// Inputs for searching one official legal source.
 pub struct LegalSearchArgs {
     /// Research terms or a legal question (1–2000 characters). Only this text is sent to the provider.
     #[arg(value_name = "QUERY")]
@@ -454,6 +466,7 @@ pub struct LegalSearchArgs {
 }
 
 #[derive(Debug, Parser)]
+/// Inputs for fetching a supported text endpoint on an official legal source.
 pub struct LegalFetchArgs {
     /// Official source the URL must belong to: eu, fr, de, nl, es, or it.
     #[arg(long, value_name = "SOURCE", value_enum)]
@@ -469,6 +482,7 @@ pub struct LegalFetchArgs {
 }
 
 #[derive(Debug, Parser)]
+/// Inputs for launching the legal research stdio MCP helper.
 pub struct LegalMcpArgs {
     /// Source to pin the MCP server to: eu, fr, de, nl, es, or it.
     #[arg(long, value_name = "SOURCE", value_enum)]

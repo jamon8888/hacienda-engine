@@ -128,6 +128,23 @@ valide = "valide"
 # the honorific in "Maître Dupont") is split by the `[iî]` character class, so the checker sees
 # the bare fragment "tre" rather than the whole word and flags it as a typo for "tree"/"the".
 tre = "tre"
+# French UI copy and comments added with the gateway/installer work. These are
+# correct French words; the English-only dictionary suggests changes that would
+# make the prose incorrect.
+persistant = "persistant"
+contient = "contient"
+CATEGORIE = "CATEGORIE"
+originales = "originales"
+commandes = "commandes"
+environnement = "environnement"
+Construit = "Construit"
+existantes = "existantes"
+formate = "formate"
+commentaires = "commentaires"
+authentification = "authentification"
+Distincte = "Distincte"
+objet = "objet"
+remplacement = "remplacement"
 
 [default.extend-identifiers]
 # "EIN" (Employer Identification Number, US tax ID) is a real identifier used verbatim in

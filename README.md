@@ -57,6 +57,19 @@ hacienda serve
 hacienda = { version = "0.1", features = ["xberg-full", "pii", "compliance", "audit", "review", "glossary"] }
 ```
 
+### Legal research MCP helper
+
+The `hacienda legal mcp` command launches the separate `hacienda-legal-mcp` binary. Install
+both the CLI and its legal helper before using that command:
+
+```bash
+cargo install hacienda --features ner-candle
+cargo install hacienda-legal
+```
+
+The `hacienda-legal` crate provides `hacienda-legal-mcp`. That helper must be installed
+beside the `hacienda` executable or be available on `PATH`.
+
 ### Python (SDK generated from OpenAPI)
 
 ```bash
