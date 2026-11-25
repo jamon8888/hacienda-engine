@@ -318,7 +318,7 @@ pub(crate) fn is_loopback_request(headers: &HeaderMap) -> bool {
         };
         if parsed.scheme() != "http"
             || !loopback_host(&origin_host)
-            || origin_host.to_ascii_lowercase() != host_name.to_ascii_lowercase()
+            || !origin_host.eq_ignore_ascii_case(&host_name)
             || parsed.port_or_known_default().unwrap_or(80) != host_port
         {
             return false;
@@ -405,7 +405,7 @@ pub async fn viewer_page(
     let dir = state
         .viewer_assets_dir
         .as_ref()
-        .ok_or_else(|| ApiError::not_found())?;
+        .ok_or_else(ApiError::not_found)?;
     let html = tokio::fs::read_to_string(dir.join("index.html"))
         .await
         .map_err(|_| ApiError::not_found())?;

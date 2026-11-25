@@ -736,6 +736,9 @@ fn path_value(path: &[String]) -> String {
     pointer(&path.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
+// These are request-scoped services and authorization scopes that must stay
+// bound to the same redaction operation.
+#[allow(clippy::too_many_arguments)]
 async fn redact_paths(
     body: &mut Value,
     paths: &[String],
@@ -1747,7 +1750,7 @@ impl SseDecoder {
 mod tests {
     use super::*;
     use axum::http::Request;
-    use hacienda_core::{HaciendaConfig, auth::Caller, pii::PipelineConfig};
+    use hacienda_core::{auth::Caller, pii::PipelineConfig, HaciendaConfig};
 
     fn pii_facade() -> HaciendaFacade {
         HaciendaFacade::new(HaciendaConfig::default().with_pii(PipelineConfig::default()))
@@ -1915,10 +1918,9 @@ mod tests {
         let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
             .await
             .expect("provider response redaction");
-        assert!(
-            safe.iter()
-                .all(|event| !event.data.contains("bob@example.com"))
-        );
+        assert!(safe
+            .iter()
+            .all(|event| !event.data.contains("bob@example.com")));
         assert_eq!(safe[0].event.as_deref(), Some("message_start"));
         assert_eq!(safe[6].event.as_deref(), Some("message_stop"));
     }
@@ -1959,10 +1961,9 @@ mod tests {
         )
         .await
         .expect("tool arguments redaction");
-        assert!(
-            safe.iter()
-                .all(|event| !event.data.contains("bob@example.com"))
-        );
+        assert!(safe
+            .iter()
+            .all(|event| !event.data.contains("bob@example.com")));
         let final_delta = safe.iter().find_map(|event| {
             if event.event.as_deref() != Some("content_block_delta") {
                 return None;
@@ -2116,10 +2117,9 @@ mod tests {
         let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
             .await
             .expect("thinking redaction");
-        assert!(
-            safe.iter()
-                .all(|event| !event.data.contains("alice@example.com"))
-        );
+        assert!(safe
+            .iter()
+            .all(|event| !event.data.contains("alice@example.com")));
         let joined: String = safe
             .iter()
             .filter_map(|event| {
@@ -2159,10 +2159,9 @@ mod tests {
         let safe = redact_and_validate_provider_events(&events, &pii_facade(), Caller::Trusted)
             .await
             .expect("safe keepalive is relayed");
-        assert!(
-            safe.iter()
-                .any(|event| event.comment.as_deref() == Some("ping - 1763990000"))
-        );
+        assert!(safe
+            .iter()
+            .any(|event| event.comment.as_deref() == Some("ping - 1763990000")));
         let rendered = Sse::new(futures::stream::once(async move {
             Ok::<Event, Infallible>(render_event(keepalive))
         }))

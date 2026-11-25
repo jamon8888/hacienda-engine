@@ -356,10 +356,7 @@ mod tests {
             "Hacienda Responses Gateway"
         );
         assert_eq!(h.get("wire_api").unwrap().as_str().unwrap(), "responses");
-        assert_eq!(
-            h.get("requires_openai_auth").unwrap().as_bool().unwrap(),
-            true
-        );
+        assert!(h.get("requires_openai_auth").unwrap().as_bool().unwrap());
         assert!(h.get("env_key").is_none());
         let headers = h.get("env_http_headers").unwrap().as_table().unwrap();
         assert_eq!(
@@ -454,10 +451,7 @@ model_provider = "hacienda"
             h.get("name").unwrap().as_str().unwrap(),
             "Hacienda Responses Gateway"
         );
-        assert_eq!(
-            h.get("requires_openai_auth").unwrap().as_bool().unwrap(),
-            true
-        );
+        assert!(h.get("requires_openai_auth").unwrap().as_bool().unwrap());
         assert!(h.get("env_key").is_none());
         assert_eq!(
             h.get("env_http_headers")

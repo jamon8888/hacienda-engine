@@ -518,9 +518,9 @@ fn safe_response_headers(headers: &[(String, String)]) -> Result<HeaderMap, ApiE
 /// Extract the two credentials Codex supplies and the allowlisted routing
 /// headers. Both credentials are validated locally but never logged; only the
 /// ChatGPT bearer and account id are forwarded to the official upstream.
-fn forwarded_credentials(
-    headers: &HeaderMap,
-) -> Result<(String, String, Vec<(String, String)>), ApiError> {
+type ForwardedCredentials = (String, String, Vec<(String, String)>);
+
+fn forwarded_credentials(headers: &HeaderMap) -> Result<ForwardedCredentials, ApiError> {
     let authorization = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())

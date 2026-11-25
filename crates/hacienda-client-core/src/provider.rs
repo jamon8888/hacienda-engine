@@ -1238,6 +1238,8 @@ fn validate_claude_sse_events(events: &[ProviderSseEvent]) -> Result<(), Transpo
     Ok(())
 }
 
+// Keep the per-frame schema checks together so accepted wire shapes are easy to audit.
+#[allow(clippy::too_many_lines)]
 fn validate_claude_sse_event(event: &ProviderSseEvent) -> Result<(), TransportError> {
     if let Some(comment) = event.comment.as_deref() {
         if !is_safe_keepalive_comment(comment)
@@ -1468,6 +1470,9 @@ where
         (self.callback)(event);
     }
 
+    // This is the protocol state machine; splitting transitions across helpers would
+    // make it harder to verify which frames can be emitted before buffered text is safe.
+    #[allow(clippy::too_many_lines)]
     fn accept(&mut self, event: ProviderSseEvent) -> Result<(), TransportError> {
         validate_claude_sse_event(&event)?;
         if event.comment.is_some() {
@@ -2767,9 +2772,11 @@ mod tests {
             Err(TransportError::Failed)
         );
         assert!(delivered.iter().all(|event| !event.data.contains(PERSON)));
-        assert!(delivered
-            .iter()
-            .all(|event| event.event.as_deref() != Some("content_block_delta")));
+        assert!(
+            delivered
+                .iter()
+                .all(|event| event.event.as_deref() != Some("content_block_delta"))
+        );
     }
 
     #[derive(Clone)]

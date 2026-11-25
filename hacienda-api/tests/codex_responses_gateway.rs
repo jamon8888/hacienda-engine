@@ -46,11 +46,12 @@ const EMAIL: &str = "alice@example.com";
 const LOCAL_SECRET: &str = "local-gateway-secret-123";
 const CHATGPT_AUTH: &str = "Bearer chatgpt-user-token";
 const ACCOUNT_ID: &str = "acct-123";
+type RecordedHeaders = Vec<Vec<(String, String)>>;
 
 #[derive(Clone, Default)]
 struct RecordingProvider {
     bodies: Arc<Mutex<Vec<Value>>>,
-    headers: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+    headers: Arc<Mutex<RecordedHeaders>>,
     auths: Arc<Mutex<Vec<String>>>,
     accounts: Arc<Mutex<Vec<String>>>,
     calls: Arc<AtomicUsize>,
@@ -541,10 +542,7 @@ async fn read_until_headers(stream: &mut TcpStream) -> (String, Vec<u8>) {
 fn decode_chunks(raw: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::new();
     let mut rest = raw;
-    loop {
-        let Some(end) = find_bytes(rest, b"\r\n") else {
-            break;
-        };
+    while let Some(end) = find_bytes(rest, b"\r\n") {
         let Ok(size) =
             usize::from_str_radix(std::str::from_utf8(&rest[..end]).unwrap_or("0").trim(), 16)
         else {

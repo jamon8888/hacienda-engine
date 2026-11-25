@@ -1,10 +1,10 @@
 //! The `hacienda` binary.
 
+pub(crate) mod claude_install;
 mod cli;
+pub(crate) mod codex_install;
 mod commands;
 mod config;
-pub(crate) mod claude_install;
-pub(crate) mod codex_install;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -90,9 +90,7 @@ fn main() -> std::process::ExitCode {
                 }
             },
             Command::Codex { command } => match command {
-                cli::CodexCommand::Install(args) => {
-                    codex_install::run_codex_install(args).await
-                }
+                cli::CodexCommand::Install(args) => codex_install::run_codex_install(args).await,
             },
             Command::Claude { command } => match command {
                 cli::ClaudeCommand::Install(args) => claude_install::run_claude_install(args).await,

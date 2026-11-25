@@ -703,34 +703,35 @@ impl ModSessionStore {
         };
 
         let mut sse_delivered = false;
-        match session.tx.as_ref().map(|tx| tx.try_send(event.clone())) {
-            Some(Ok(())) => sse_delivered = true,
-            Some(Err(mpsc::error::TrySendError::Full(dropped))) => {
-                drop(dropped);
-                push_audit(
-                    audit,
-                    "project",
-                    tenant,
-                    principal,
-                    &session_ref,
-                    &token_ref,
-                    "dropped_backpressure",
-                );
+        if let Some(tx) = session.tx.as_ref() {
+            match tx.try_send(event.clone()) {
+                Ok(()) => sse_delivered = true,
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    drop(dropped);
+                    push_audit(
+                        audit,
+                        "project",
+                        tenant,
+                        principal,
+                        &session_ref,
+                        &token_ref,
+                        "dropped_backpressure",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(dropped)) => {
+                    drop(dropped);
+                    session.tx = None;
+                    push_audit(
+                        audit,
+                        "project",
+                        tenant,
+                        principal,
+                        &session_ref,
+                        &token_ref,
+                        "audience_closed",
+                    );
+                }
             }
-            Some(Err(mpsc::error::TrySendError::Closed(dropped))) => {
-                drop(dropped);
-                session.tx = None;
-                push_audit(
-                    audit,
-                    "project",
-                    tenant,
-                    principal,
-                    &session_ref,
-                    &token_ref,
-                    "audience_closed",
-                );
-            }
-            None => {}
         }
 
         let queued = if session.pending.len() < EVENT_CAPACITY {
