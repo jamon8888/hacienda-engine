@@ -2100,7 +2100,7 @@ mod tests {
         let mut events = valid_tool_response_events();
         events[2].data = serde_json::json!({
             "type": "content_block_delta", "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": "{\"email\":\"bob\\\\u0040example.com\"}"}
+            "delta": {"type": "input_json_delta", "partial_json": "{\"email\":\"bob\\u0040example.com\"}"}
         })
         .to_string();
         events[3].data = serde_json::json!({
@@ -2123,7 +2123,9 @@ mod tests {
             })
             .collect::<String>();
         let decoded: Value = serde_json::from_str(&arguments).expect("valid finalized arguments");
-        assert!(!decoded.to_string().contains("bob@example.com"));
+        let decoded_email = decoded["email"].as_str().expect("email string");
+        assert_ne!(decoded_email, "bob@example.com");
+        assert!(!decoded_email.contains("bob@example.com"));
     }
 
     #[test]
