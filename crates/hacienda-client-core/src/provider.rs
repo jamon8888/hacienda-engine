@@ -1699,6 +1699,18 @@ where
         }
         let safe_text = if block.joined.is_empty() {
             None
+        } else if block.kind == ClaudeBlockKind::ToolUse {
+            let mut value: Value =
+                serde_json::from_str(&block.joined).map_err(|_| TransportError::Failed)?;
+            if !value.is_object() {
+                return Err(TransportError::Failed);
+            }
+            redact_json_value_strings(&mut value, self.redactor)?;
+            let text = serde_json::to_string(&value).map_err(|_| TransportError::Failed)?;
+            if text.len() > MAX_REDACTION_BUFFER || !is_json_object(&text) {
+                return Err(TransportError::Failed);
+            }
+            Some(text)
         } else {
             let text = self
                 .redactor
@@ -1706,9 +1718,6 @@ where
                 .map_err(|_| TransportError::Failed)?
                 .text;
             if text.len() > MAX_REDACTION_BUFFER {
-                return Err(TransportError::Failed);
-            }
-            if block.kind == ClaudeBlockKind::ToolUse && !is_json_object(&text) {
                 return Err(TransportError::Failed);
             }
             Some(text)
@@ -1761,6 +1770,48 @@ where
 
 fn is_json_object(text: &str) -> bool {
     serde_json::from_str::<Value>(text).is_ok_and(|value| value.is_object())
+}
+
+fn redact_json_value_strings<R: RedactionAdapter>(
+    value: &mut Value,
+    redactor: &R,
+) -> Result<(), TransportError> {
+    match value {
+        Value::String(text) => {
+            if text.len() > MAX_REDACTION_BUFFER {
+                return Err(TransportError::Failed);
+            }
+            *text = redactor
+                .redact_text(text)
+                .map_err(|_| TransportError::Failed)?
+                .text;
+            Ok(())
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_json_value_strings(item, redactor)?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            let keys: Vec<String> = object.keys().cloned().collect();
+            for key in keys {
+                let safe_key = redactor
+                    .redact_text(&key)
+                    .map_err(|_| TransportError::Failed)?
+                    .text;
+                if safe_key != key {
+                    return Err(TransportError::Failed);
+                }
+                redact_json_value_strings(
+                    object.get_mut(&key).ok_or(TransportError::Failed)?,
+                    redactor,
+                )?;
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+    }
 }
 
 fn replace_json_string(
@@ -2638,14 +2689,28 @@ mod tests {
 
     #[test]
     fn response_redaction_buffers_deltas_so_split_pii_never_reaches_callback() {
-        let events = vec![
+        let mut events = decode_sse_chunks([Ok(message_start())]).expect("message start");
+        events.push(ProviderSseEvent::new(
+            Some("content_block_start".into()),
+            None,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+                .into(),
+        ));
+        events.extend(vec![
             ProviderSseEvent::new(Some("content_block_delta".into()), Some("1".into()),
                 r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<per"}}"#.into()),
             ProviderSseEvent::new(Some("content_block_delta".into()), Some("2".into()),
                 r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"son-fixture>"}}"#.into()),
-        ];
+        ]);
+        events.push(ProviderSseEvent::new(
+            Some("content_block_stop".into()),
+            None,
+            r#"{"type":"content_block_stop","index":0}"#.into(),
+        ));
+        events.extend(decode_sse_chunks([Ok(message_end())]).expect("message end"));
         let safe = redact_claude_sse_events(&TestRedactor, events).expect("redacts joined text");
-        let values: Vec<Value> = safe
+        let safe_deltas: Vec<_> = safe.iter().filter(|event| event.id.is_some()).collect();
+        let values: Vec<Value> = safe_deltas
             .iter()
             .map(|event| serde_json::from_str(&event.data).unwrap())
             .collect();
@@ -2655,8 +2720,8 @@ mod tests {
             .collect::<String>();
         assert!(!joined.contains(PERSON));
         assert!(joined.contains(PERSON_TOKEN));
-        assert_eq!(safe[0].id.as_deref(), Some("1"));
-        assert_eq!(safe[1].id.as_deref(), Some("2"));
+        assert_eq!(safe_deltas[0].id.as_deref(), Some("1"));
+        assert_eq!(safe_deltas[1].id.as_deref(), Some("2"));
     }
 
     #[test]
@@ -2917,6 +2982,30 @@ mod tests {
                 })
                 == Some("c2ln".to_owned())
         }));
+    }
+
+    #[test]
+    fn claude_tool_arguments_redact_unicode_escaped_strings_after_json_decode() {
+        let wire = message_start()
+            + "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"lookup\",\"input\":{}}}\n\n"
+            + "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"email\\\":\\\"\\\\u003cemail-fixture\\\\u003e\\\"}\"}}\n\n"
+            + "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            + &message_end();
+        let events = decode_sse_chunks([Ok(wire)]).expect("valid tool stream");
+        let safe = redact_claude_sse_events(&TestRedactor, events).expect("redacted tool stream");
+        let arguments = safe
+            .iter()
+            .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
+            .filter_map(|value| {
+                value
+                    .pointer("/delta/partial_json")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect::<String>();
+        let decoded: Value = serde_json::from_str(&arguments).expect("valid JSON arguments");
+        assert!(!decoded.to_string().contains(EMAIL));
+        assert!(decoded.to_string().contains("[EMAIL:opaque-2]"));
     }
 
     #[test]
