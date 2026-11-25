@@ -1167,7 +1167,7 @@ fn redact_tool_argument_values<'a>(
             }
             Value::Array(items) => {
                 for item in items {
-                    redact_tool_argument_values(facade, auth_context, item).await?;
+                    redact_tool_argument_values(facade, caller, item).await?;
                 }
                 Ok(())
             }
