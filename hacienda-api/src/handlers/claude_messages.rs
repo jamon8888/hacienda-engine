@@ -1122,6 +1122,7 @@ impl ResponseRelay {
                 &self.facade,
                 Caller::Principal(self.auth_context.as_ref()),
                 &mut value,
+                "/content_block/input",
             )
             .await?;
             serde_json::to_string(&value).map_err(|_| ())?
@@ -1129,7 +1130,15 @@ impl ResponseRelay {
             self.facade
                 .redact_text_with_auth(caller, &block.joined)
                 .await
-                .map_err(|_| ())?
+                .map_err(|error| {
+                    tracing::error!(
+                        operation = "redact Claude response block",
+                        json_pointer = "/content_block/text",
+                        cause = %error,
+                        recovery = "check the configured PII redaction pipeline",
+                        "provider response redaction failed"
+                    );
+                })?
                 .redacted_text
         };
         if redacted.len() > MAX_BLOCK_BUFFER {
@@ -1151,6 +1160,7 @@ fn redact_tool_argument_values<'a>(
     facade: &'a HaciendaFacade,
     caller: Caller<'a>,
     value: &'a mut Value,
+    pointer: &'a str,
 ) -> Pin<Box<dyn std::future::Future<Output = Result<(), ()>> + Send + 'a>> {
     Box::pin(async move {
         match value {
@@ -1161,13 +1171,22 @@ fn redact_tool_argument_values<'a>(
                 *text = facade
                     .redact_text_with_auth(caller, text)
                     .await
-                    .map_err(|_| ())?
+                    .map_err(|error| {
+                        tracing::error!(
+                            operation = "redact Claude tool argument",
+                            json_pointer = pointer,
+                            cause = %error,
+                            recovery = "check the configured PII redaction pipeline",
+                            "provider tool argument redaction failed"
+                        );
+                    })?
                     .redacted_text;
                 Ok(())
             }
             Value::Array(items) => {
-                for item in items {
-                    redact_tool_argument_values(facade, caller, item).await?;
+                for (index, item) in items.iter_mut().enumerate() {
+                    let child_pointer = format!("{pointer}/{index}");
+                    redact_tool_argument_values(facade, caller, item, &child_pointer).await?;
                 }
                 Ok(())
             }
@@ -1177,13 +1196,27 @@ fn redact_tool_argument_values<'a>(
                     let safe_key = facade
                         .redact_text_with_auth(caller, &key)
                         .await
-                        .map_err(|_| ())?
+                        .map_err(|error| {
+                            tracing::error!(
+                                operation = "validate Claude tool argument key",
+                                json_pointer = pointer,
+                                cause = %error,
+                                recovery = "check the configured PII redaction pipeline",
+                                "provider tool argument key validation failed"
+                            );
+                        })?
                         .redacted_text;
                     if safe_key != key {
                         return Err(());
                     }
-                    redact_tool_argument_values(facade, caller, object.get_mut(&key).ok_or(())?)
-                        .await?;
+                    let child_pointer = format!("{pointer}/<object-key>");
+                    redact_tool_argument_values(
+                        facade,
+                        caller,
+                        object.get_mut(&key).ok_or(())?,
+                        &child_pointer,
+                    )
+                    .await?;
                 }
                 Ok(())
             }
@@ -1659,7 +1692,7 @@ async fn redact_and_validate_provider_events(
                 let redacted = if block.kind == BlockKind::ToolUse {
                     let mut value: Value =
                         serde_json::from_str(&joined).map_err(|_| ApiError::internal())?;
-                    redact_tool_argument_values(facade, caller, &mut value)
+                    redact_tool_argument_values(facade, caller, &mut value, "/content_block/input")
                         .await
                         .map_err(|_| ApiError::internal())?;
                     serde_json::to_string(&value).map_err(|_| ApiError::internal())?
