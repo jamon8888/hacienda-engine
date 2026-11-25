@@ -1783,26 +1783,26 @@ impl SseDecoder {
         bytes: &[u8],
         callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
-        if self
-            .pending
-            .len()
-            .saturating_add(self.frame_bytes)
-            .saturating_add(bytes.len())
-            > MAX_SSE_FRAME
-        {
-            return Err(TransportError::Failed);
-        }
-        self.pending.extend_from_slice(bytes);
-        if self.pending.len().saturating_add(self.frame_bytes) > MAX_SSE_FRAME {
-            return Err(TransportError::Failed);
-        }
-        while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.pending.drain(..=index).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if self
+                .pending
+                .len()
+                .saturating_add(self.frame_bytes)
+                .saturating_add(part.len())
+                > MAX_SSE_FRAME
+            {
+                return Err(TransportError::Failed);
             }
-            self.line(&line, callback)?;
+            self.pending.extend_from_slice(part);
+            if part.last() == Some(&b'\n') {
+                let newline = self.pending.len() - 1;
+                let mut line = self.pending.drain(..=newline).collect::<Vec<_>>();
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                self.line(&line, callback)?;
+            }
         }
         Ok(())
     }
@@ -1816,6 +1816,11 @@ impl SseDecoder {
             return Err(TransportError::Failed);
         }
         let line = std::str::from_utf8(line).map_err(|_| TransportError::Failed)?;
+        self.frame_bytes = self
+            .frame_bytes
+            .checked_add(line.len().saturating_add(1))
+            .filter(|size| *size <= MAX_SSE_FRAME)
+            .ok_or(TransportError::Failed)?;
         if line.is_empty() {
             if !self.data.is_empty() || self.comment.is_some() {
                 let event = ProviderSseEvent {
@@ -1831,11 +1836,6 @@ impl SseDecoder {
             self.frame_bytes = 0;
             return Ok(());
         }
-        self.frame_bytes = self
-            .frame_bytes
-            .checked_add(line.len().saturating_add(1))
-            .filter(|size| *size <= MAX_SSE_FRAME)
-            .ok_or(TransportError::Failed)?;
         if let Some(comment) = line.strip_prefix(':') {
             self.comment = Some(comment.strip_prefix(' ').unwrap_or(comment).to_owned());
             return Ok(());

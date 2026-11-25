@@ -1128,26 +1128,26 @@ impl SseDecoder {
         bytes: &[u8],
         callback: &mut dyn FnMut(ProviderSseEvent) -> Result<(), TransportError>,
     ) -> Result<(), TransportError> {
-        if self
-            .pending
-            .len()
-            .saturating_add(self.frame_bytes)
-            .saturating_add(bytes.len())
-            > MAX_PROVIDER_SSE_FRAME
-        {
-            return Err(TransportError::Failed);
-        }
-        self.pending.extend_from_slice(bytes);
-        if self.pending.len().saturating_add(self.frame_bytes) > MAX_PROVIDER_SSE_FRAME {
-            return Err(TransportError::Failed);
-        }
-        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.pending.drain(..=newline).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if self
+                .pending
+                .len()
+                .saturating_add(self.frame_bytes)
+                .saturating_add(part.len())
+                > MAX_PROVIDER_SSE_FRAME
+            {
+                return Err(TransportError::Failed);
             }
-            self.line(&line, callback)?;
+            self.pending.extend_from_slice(part);
+            if part.last() == Some(&b'\n') {
+                let newline = self.pending.len() - 1;
+                let mut line = self.pending.drain(..=newline).collect::<Vec<_>>();
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                self.line(&line, callback)?;
+            }
         }
         Ok(())
     }
@@ -1623,6 +1623,7 @@ where
                 active.retained_bytes = active
                     .retained_bytes
                     .checked_add(event.data.len())
+                    .and_then(|bytes| bytes.checked_add(event.id.as_ref().map_or(0, String::len)))
                     .filter(|bytes| *bytes <= MAX_REDACTION_BUFFER)
                     .ok_or(TransportError::Failed)?;
                 if active.deltas.len() >= MAX_REDACTION_DELTAS {
