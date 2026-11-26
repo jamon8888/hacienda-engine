@@ -59,12 +59,13 @@ jobs:
       # root — vendored skill reference docs (e.g. `impeccable`), not this
       # repo's own prose.
       # Studio is not part of this CI; research notes are working documents,
-      # not reviewed prose, so neither is checked by the markdown linter.
+      # not reviewed prose, and Alef API references are generated outputs checked
+      # by `alef verify`, so none are checked by the markdown linter.
       - name: Lint markdown
         # MD013 (line length): long lines are intentional in prose and code blocks.
         # MD076 (blank line between list items): the CHANGELOG uses tight lists with
         # multi-line items by convention; rumdl started enforcing MD076 in 2026-11.
-        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,docs/research,apps/hacienda-studio" -d MD013,MD076
+        run: rumdl check . --exclude "superpowers,.ai-rulez,.agents,.github/skills,docs/research,apps/hacienda-studio,docs-site/src/content/docs/reference" -d MD013,MD076
 
       - name: Check spelling
         run: typos . --config _typos.toml
