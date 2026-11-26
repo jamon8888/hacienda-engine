@@ -102,10 +102,12 @@ pub struct Job {
     /// `Job` is not currently persisted via `serde_json` in any production backend, but
     /// carrying the same default keeps the type safe to serialize/deserialize should a
     /// future store do so.
-    #[serde(default = "default_tenant_id")]
+    #[serde(default = "Job::default_tenant_id")]
     pub tenant_id: String,
 }
 
-fn default_tenant_id() -> String {
-    crate::tenancy::DEFAULT_TENANT.to_owned()
+impl Job {
+    pub fn default_tenant_id() -> String {
+        crate::tenancy::DEFAULT_TENANT.to_owned()
+    }
 }

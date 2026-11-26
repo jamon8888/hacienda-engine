@@ -40,12 +40,14 @@ pub struct ReviewQueueItem {
     /// default names explicitly. Without it, `FileReviewStore::open`'s replay would
     /// fail outright on any log written before this change (`review/store_file.rs`
     /// reads exactly this struct back via `serde_json`).
-    #[serde(default = "default_tenant_id")]
+    #[serde(default = "ReviewQueueItem::default_tenant_id")]
     pub tenant_id: String,
 }
 
-fn default_tenant_id() -> String {
-    crate::tenancy::DEFAULT_TENANT.to_owned()
+impl ReviewQueueItem {
+    pub fn default_tenant_id() -> String {
+        crate::tenancy::DEFAULT_TENANT.to_owned()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,7 +226,7 @@ mod tests {
         }"#;
 
         let item: ReviewQueueItem = serde_json::from_str(legacy_json).unwrap();
-        assert_eq!(item.tenant_id, default_tenant_id());
+        assert_eq!(item.tenant_id, ReviewQueueItem::default_tenant_id());
     }
 
     /// A record that does carry a `tenant_id` key still deserializes to that tenant,

@@ -69,13 +69,7 @@ pub trait JobStore: Send + Sync {
     /// Fails with [`JobError::StatusMismatch`] if the job's current status is not
     /// `from`. This compare-and-swap is what stops two workers both claiming the same
     /// queued job: only the one whose `from` matches the stored status wins.
-    async fn transition(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-        from: JobStatus,
-        to: JobStatus,
-    ) -> Result<Job, JobError>;
+    async fn transition(&self, tenant: &TenantId, id: &str, from: JobStatus, to: JobStatus) -> Result<Job, JobError>;
 
     /// Mark a job as `Succeeded` and record its serialised result payload.
     ///
@@ -87,12 +81,7 @@ pub trait JobStore: Send + Sync {
     /// in-repo stores enforce this under their lock / row-level status
     /// predicate. `updated_at` is the retention clock for terminal jobs, so a
     /// duplicate write that refreshes it would extend retention indefinitely.
-    async fn finish(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-        result_json: String,
-    ) -> Result<Job, JobError>;
+    async fn finish(&self, tenant: &TenantId, id: &str, result_json: String) -> Result<Job, JobError>;
 
     /// Mark a job as `Failed` and record the reason.
     ///
@@ -101,7 +90,7 @@ pub trait JobStore: Send + Sync {
     /// otherwise return the stored job unchanged. This includes preserving the
     /// original reason and `updated_at` on a duplicate `fail` or on a `fail`
     /// racing a `finish`.
-    async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError>;
+    async fn fail(&self, tenant: &TenantId, id: &str, reason: String) -> Result<Job, JobError>;
 
     /// Overwrite a running job's progress payload.
     ///
@@ -118,20 +107,11 @@ pub trait JobStore: Send + Sync {
     /// terminal job that field is the terminal-transition time used to measure
     /// retention age, and letting a late tick overwrite it would make a
     /// completed job stay visible indefinitely.
-    async fn update_progress(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-        progress_json: String,
-    ) -> Result<Job, JobError>;
+    async fn update_progress(&self, tenant: &TenantId, id: &str, progress_json: String) -> Result<Job, JobError>;
 
     /// List every job belonging to `tenant`, optionally filtered by status. Ordered by
     /// creation time, oldest first.
-    async fn list(
-        &self,
-        tenant: &TenantId,
-        filter: Option<JobStatus>,
-    ) -> Result<Vec<Job>, JobError>;
+    async fn list(&self, tenant: &TenantId, filter: Option<JobStatus>) -> Result<Vec<Job>, JobError>;
 
     /// Permanently remove one job. Optional so existing backends keep compiling:
     /// the default is a typed "unsupported" error, and a retention policy that
@@ -142,9 +122,7 @@ pub trait JobStore: Send + Sync {
     /// Returns `true` when a row was actually removed.
     async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, JobError> {
         let _ = (tenant, id);
-        Err(JobError::DeleteUnsupported(
-            std::any::type_name::<Self>().into(),
-        ))
+        Err(JobError::DeleteUnsupported(std::any::type_name::<Self>().into()))
     }
 }
 
@@ -206,40 +184,22 @@ impl JobStore for InMemoryJobStore {
             tenant_id: tenant.to_string(),
         };
         // Take the guard, insert, drop — no .await while held.
-        let mut guard = self
-            .jobs
-            .lock()
-            .map_err(|_| lock_poisoned("create", tenant, &id))?;
+        let mut guard = self.jobs.lock().map_err(|_| lock_poisoned("create", tenant, &id))?;
         guard.insert(id, job.clone());
         Ok(job)
     }
 
     async fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Job>, JobError> {
-        let guard = self
-            .jobs
-            .lock()
-            .map_err(|_| lock_poisoned("get", tenant, id))?;
+        let guard = self.jobs.lock().map_err(|_| lock_poisoned("get", tenant, id))?;
         // Matching on id && tenant together, rather than looking up by id and checking
         // tenant after, means a cross-tenant id falls straight into the same `None` a
         // nonexistent id produces — the not-found-not-forbidden property (D-S1b-1) falls
         // out of the lookup itself.
-        Ok(guard
-            .get(id)
-            .filter(|j| j.tenant_id == tenant.as_str())
-            .cloned())
+        Ok(guard.get(id).filter(|j| j.tenant_id == tenant.as_str()).cloned())
     }
 
-    async fn transition(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-        from: JobStatus,
-        to: JobStatus,
-    ) -> Result<Job, JobError> {
-        let mut guard = self
-            .jobs
-            .lock()
-            .map_err(|_| lock_poisoned("transition", tenant, id))?;
+    async fn transition(&self, tenant: &TenantId, id: &str, from: JobStatus, to: JobStatus) -> Result<Job, JobError> {
+        let mut guard = self.jobs.lock().map_err(|_| lock_poisoned("transition", tenant, id))?;
         let job = guard
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
@@ -256,16 +216,8 @@ impl JobStore for InMemoryJobStore {
         Ok(job.clone())
     }
 
-    async fn finish(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-        result_json: String,
-    ) -> Result<Job, JobError> {
-        let mut guard = self
-            .jobs
-            .lock()
-            .map_err(|_| lock_poisoned("finish", tenant, id))?;
+    async fn finish(&self, tenant: &TenantId, id: &str, result_json: String) -> Result<Job, JobError> {
+        let mut guard = self.jobs.lock().map_err(|_| lock_poisoned("finish", tenant, id))?;
         let job = guard
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
@@ -281,11 +233,8 @@ impl JobStore for InMemoryJobStore {
         Ok(job.clone())
     }
 
-    async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError> {
-        let mut guard = self
-            .jobs
-            .lock()
-            .map_err(|_| lock_poisoned("fail", tenant, id))?;
+    async fn fail(&self, tenant: &TenantId, id: &str, reason: String) -> Result<Job, JobError> {
+        let mut guard = self.jobs.lock().map_err(|_| lock_poisoned("fail", tenant, id))?;
         let job = guard
             .get_mut(id)
             .filter(|j| j.tenant_id == tenant.as_str())
@@ -294,17 +243,12 @@ impl JobStore for InMemoryJobStore {
             return Ok(job.clone());
         }
         job.status = JobStatus::Failed;
-        job.error = Some(error);
+        job.error = Some(reason);
         job.updated_at = now_rfc3339();
         Ok(job.clone())
     }
 
-    async fn update_progress(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-        progress_json: String,
-    ) -> Result<Job, JobError> {
+    async fn update_progress(&self, tenant: &TenantId, id: &str, progress_json: String) -> Result<Job, JobError> {
         let mut guard = self
             .jobs
             .lock()
@@ -323,49 +267,30 @@ impl JobStore for InMemoryJobStore {
         Ok(job.clone())
     }
 
-    async fn list(
-        &self,
-        tenant: &TenantId,
-        filter: Option<JobStatus>,
-    ) -> Result<Vec<Job>, JobError> {
+    async fn list(&self, tenant: &TenantId, filter: Option<JobStatus>) -> Result<Vec<Job>, JobError> {
         // `list` is tenant-wide, so there is no single job id to report; the
         // sentinel keeps the error's job context explicit rather than blank.
-        let guard = self
-            .jobs
-            .lock()
-            .map_err(|_| lock_poisoned("list", tenant, "<all>"))?;
+        let guard = self.jobs.lock().map_err(|_| lock_poisoned("list", tenant, "<all>"))?;
         let mut jobs: Vec<Job> = guard
             .values()
-            .filter(|j| {
-                j.tenant_id == tenant.as_str()
-                    && filter.map(|status| j.status == status).unwrap_or(true)
-            })
+            .filter(|j| j.tenant_id == tenant.as_str() && filter.map(|status| j.status == status).unwrap_or(true))
             .cloned()
             .collect();
         // Stable order: oldest created_at first, id as tie-break. The tie-break is not
         // decoration — RFC 3339 timestamps have finite resolution, so jobs created in the
         // same instant compare equal and would otherwise come back in `HashMap` iteration
         // order, which is randomised per process.
-        jobs.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        jobs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
         Ok(jobs)
     }
 
     async fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, JobError> {
-        let mut guard = self
-            .jobs
-            .lock()
-            .map_err(|_| lock_poisoned("delete", tenant, id))?;
+        let mut guard = self.jobs.lock().map_err(|_| lock_poisoned("delete", tenant, id))?;
         // Check tenant *before* removing: `HashMap::remove` would otherwise
         // delete another tenant's row before the filter could reject it. A
         // cross-tenant delete is a silent no-op, indistinguishable from a
         // missing id (D-S1b-1).
-        let belongs_to_tenant = guard
-            .get(id)
-            .is_some_and(|j| j.tenant_id == tenant.as_str());
+        let belongs_to_tenant = guard.get(id).is_some_and(|j| j.tenant_id == tenant.as_str());
         if !belongs_to_tenant {
             return Ok(false);
         }
@@ -443,11 +368,7 @@ mod tests {
             .unwrap_err();
 
         match err {
-            JobError::StatusMismatch {
-                id,
-                expected,
-                actual,
-            } => {
+            JobError::StatusMismatch { id, expected, actual } => {
                 assert_eq!(id, job.id);
                 assert_eq!(expected, JobStatus::Running);
                 assert_eq!(actual, JobStatus::Queued);
@@ -527,19 +448,13 @@ mod tests {
             .update_progress(&t(), &job.id, r#"{"done":1,"total":10}"#.to_string())
             .await
             .unwrap();
-        assert_eq!(
-            updated.progress_json.as_deref(),
-            Some(r#"{"done":1,"total":10}"#)
-        );
+        assert_eq!(updated.progress_json.as_deref(), Some(r#"{"done":1,"total":10}"#));
 
         let updated = store
             .update_progress(&t(), &job.id, r#"{"done":5,"total":10}"#.to_string())
             .await
             .unwrap();
-        assert_eq!(
-            updated.progress_json.as_deref(),
-            Some(r#"{"done":5,"total":10}"#)
-        );
+        assert_eq!(updated.progress_json.as_deref(), Some(r#"{"done":5,"total":10}"#));
     }
 
     #[tokio::test]
@@ -677,23 +592,14 @@ mod tests {
         assert_eq!(again.status, JobStatus::Succeeded);
 
         let failed = store.create(&t(), None).await.unwrap();
-        let first_fail = store
-            .fail(&t(), &failed.id, "first".to_owned())
-            .await
-            .unwrap();
-        let again = store
-            .fail(&t(), &failed.id, "second".to_owned())
-            .await
-            .unwrap();
+        let first_fail = store.fail(&t(), &failed.id, "first".to_owned()).await.unwrap();
+        let again = store.fail(&t(), &failed.id, "second".to_owned()).await.unwrap();
         assert_eq!(again.updated_at, first_fail.updated_at);
         assert_eq!(again.error.as_deref(), Some("first"));
         assert_eq!(again.status, JobStatus::Failed);
 
         // A failed job cannot be overwritten by a later finish either.
-        let cross = store
-            .finish(&t(), &failed.id, "{}".to_owned())
-            .await
-            .unwrap();
+        let cross = store.finish(&t(), &failed.id, "{}".to_owned()).await.unwrap();
         assert_eq!(cross.updated_at, first_fail.updated_at);
         assert_eq!(cross.status, JobStatus::Failed);
     }
@@ -738,23 +644,14 @@ mod tests {
             .transition(&t(), &failed.id, JobStatus::Queued, JobStatus::Running)
             .await
             .unwrap();
-        store
-            .update_progress(&t(), &failed.id, progress.clone())
-            .await
-            .unwrap();
+        store.update_progress(&t(), &failed.id, progress.clone()).await.unwrap();
 
-        let first_fail = store
-            .fail(&t(), &failed.id, "first".to_owned())
-            .await
-            .unwrap();
+        let first_fail = store.fail(&t(), &failed.id, "first".to_owned()).await.unwrap();
         assert_eq!(first_fail.status, JobStatus::Failed);
         assert_eq!(first_fail.error.as_deref(), Some("first"));
         assert_eq!(first_fail.progress_json.as_deref(), Some(progress.as_str()));
 
-        let again = store
-            .fail(&t(), &failed.id, "second".to_owned())
-            .await
-            .unwrap();
+        let again = store.fail(&t(), &failed.id, "second".to_owned()).await.unwrap();
         assert_eq!(again.status, JobStatus::Failed);
         assert_eq!(again.error.as_deref(), Some("first"));
         assert_eq!(again.progress_json.as_deref(), Some(progress.as_str()));
@@ -774,10 +671,7 @@ mod tests {
             .transition(&t(), &id, JobStatus::Queued, JobStatus::Running)
             .await
             .unwrap();
-        store
-            .update_progress(&t(), &id, secret.to_owned())
-            .await
-            .unwrap();
+        store.update_progress(&t(), &id, secret.to_owned()).await.unwrap();
 
         let poison_target = Arc::clone(&store);
         let _ = std::thread::spawn(move || {
@@ -811,18 +705,11 @@ mod tests {
             ),
             (
                 "update_progress",
-                store
-                    .update_progress(&t(), &id, "{}".to_owned())
-                    .await
-                    .err(),
+                store.update_progress(&t(), &id, "{}".to_owned()).await.err(),
                 Some(id.as_str()),
             ),
             ("list", store.list(&t(), None).await.err(), None),
-            (
-                "delete",
-                store.delete(&t(), &id).await.err(),
-                Some(id.as_str()),
-            ),
+            ("delete", store.delete(&t(), &id).await.err(), Some(id.as_str())),
         ];
 
         for (operation, err, job_id) in checks {
@@ -834,14 +721,8 @@ mod tests {
                 assert!(message.contains(job_id), "job id missing: {message}");
             }
             assert!(message.contains("panic"), "root cause missing: {message}");
-            assert!(
-                message.contains("restart"),
-                "recovery step missing: {message}"
-            );
-            assert!(
-                !message.contains(secret),
-                "payload leaked into error: {message}"
-            );
+            assert!(message.contains("restart"), "recovery step missing: {message}");
+            assert!(!message.contains(secret), "payload leaked into error: {message}");
         }
     }
 }
