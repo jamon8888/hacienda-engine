@@ -362,14 +362,15 @@ mod confiance {
                 .map(|e| e.confidence);
             assert_eq!(confiance, Some(attendu), "après pipeline : {texte:?}");
         }
-        // L'e-mail a des mots de contexte : le boost +0.35 est attendu ici.
+        // Un e-mail reste à 0.9 même avec un libellé « email » : la forme
+        // seule ne justifie pas une confiance pleine sans somme de contrôle.
         let resultat = pipeline.scan("email jane@example.com").await.unwrap();
         let email = resultat
             .entities
             .iter()
             .find(|e| e.category == PiiCategory::Email)
             .unwrap();
-        assert_eq!(email.confidence, 1.0);
+        assert_eq!(email.confidence, 0.9);
     }
 }
 

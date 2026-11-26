@@ -18,8 +18,10 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
             false,
             "[EMAIL]",
         )
-        .with_base_confidence(0.9)
-        .with_context(&["email", "mail", "e-mail"]),
+        // No `context_words`: a shape-only match must not be boosted to 1.0
+        // by a nearby "email" label — that would claim verification that
+        // never ran.
+        .with_base_confidence(0.9),
         // French NIR (numéro de sécurité sociale). Checksum-validated with
         // INSEE mod-97, including Corsican 2A/2B department codes. Placed
         // before the generic digit-run patterns so a valid NIR is not stolen

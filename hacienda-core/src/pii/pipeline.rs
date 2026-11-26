@@ -224,6 +224,13 @@ impl PiiPipeline {
     /// WASM has no `spawn_blocking` and stays inline.
     #[cfg(not(target_arch = "wasm32"))]
     async fn regex_entities(&self, text: &str) -> Result<Vec<RegexEntity>, PiiError> {
+        // Some embedders drive the pipeline with a non-Tokio executor (e.g.
+        // `futures::executor::block_on` in the email projection tests).
+        // `spawn_blocking` panics without a Tokio reactor, so fall back to the
+        // inline scan rather than breaking those callers.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Ok(self.regex_engine.find_all(text));
+        }
         let engine = Arc::clone(&self.regex_engine);
         let owned = text.to_string();
         tokio::task::spawn_blocking(move || engine.find_all(&owned))
