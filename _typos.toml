@@ -65,6 +65,8 @@ cli = "cli"
 mcp = "mcp"
 fpe = "fpe"
 drl = "drl"
+# Jackson's `ser` package is intentionally used by the generated Java/Kotlin serializers.
+ser = "ser"
 # Prefix on Parallel Task API run IDs (`trun_<id>`), not the English word "trun".
 trun = "trun"
 # US Employer Identification Number, not a typo for "IN".
