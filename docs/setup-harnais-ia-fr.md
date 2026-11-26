@@ -1,5 +1,7 @@
 # Mise en place du harnais d'agents IA (Claude Code / OpenCode)
 
+> **Statut : guide historique.** Ce document décrit une installation basée sur `ai-rulez` et des configurations utilisateur datant de son écriture. Pour le harnais actuellement versionné dans ce dépôt, commencer par [`vps-harness/README.md`](../vps-harness/README.md), [`AGENTS.md`](../AGENTS.md) et [`docs/code-map-harness.md`](code-map-harness.md). Ne pas appliquer ces anciennes étapes d'installation sans vérifier qu'elles correspondent encore au poste ciblé.
+
 Guide pour un développeur qui rejoint le projet et doit configurer les assistants IA
 (Claude Code, Codex CLI, OpenCode) sur `hacienda-engine`. Le gouvernail unique du projet
 est [ai-rulez](https://github.com/Goldziher/ai-rulez) : toute la configuration source vit

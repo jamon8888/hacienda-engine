@@ -2,6 +2,8 @@
 
 Read [AGENTS.md](AGENTS.md) first for the product map, crate boundaries, security constraints, development commands, and documentation pointers. It is the shared source of truth for this repository; keep project-wide guidance there rather than copying it here.
 
+For a complete current product inventory and the confirmed gaps/improvement proposals, follow [`docs/features-and-roadmap.md`](docs/features-and-roadmap.md) from `AGENTS.md`. Treat dated specs as historical proposals until confirmed in code.
+
 ## Tools in this environment
 
 - Use **Basemind** for local Hacienda code, symbols/references, indexed documents, and Git history. Run `basemind status --json` if index-backed results look empty or stale. Its code-file count is not every file: ignored/generated or unsupported files may be skipped, while documents use a separate search tier.

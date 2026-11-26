@@ -85,8 +85,10 @@ FPE mode today.
 
 ## CLI reference
 
-The real commands, from `hacienda-cli/src/cli.rs` (deliberately closed — a subcommand that
-doesn't exist is absent from `--help`, not present-and-stubbed):
+Core command shapes are shown below. The CLI also includes capabilities/formats/MIME/cache,
+MCP serving, legal research and monitors, review management, compliance reports, email
+operations, completions, and Claude/Codex configuration installers. `hacienda --help` and
+`hacienda <command> --help` are authoritative for the current flags and subcommands.
 
 ```bash
 hacienda extract <inputs...> [--mode mask|hash|pseudonymize|remove] [--threshold 0.7] \
@@ -125,8 +127,9 @@ curl -X POST http://localhost:8787/v1/pii/redact \
 }
 ```
 
-See `hacienda-api/README.md` for the audit endpoints and `GET /openapi.json` (public, no
-auth) for the full schema — 44 operations across 14 tags.
+See `hacienda-api/README.md` for endpoint behavior and `GET /openapi.json` (public, no
+auth) for the current full schema. The live OpenAPI document is authoritative; route
+counts change as endpoint groups evolve.
 
 ## Docker
 

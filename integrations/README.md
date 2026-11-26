@@ -11,16 +11,14 @@ planned packages are manifests/READMEs only, no adapter code yet.)
 
 ## Why this is not just "xberg's integrations, renamed"
 
-xberg's loaders answer "how do I get documents into my RAG pipeline." These answer
-"how do I get documents into my RAG pipeline **without raw PII ever reaching my vector
-store or LLM context, with a cryptographically verifiable audit trail of what was
-redacted and when**." `POST /v1/documents` always returns already-redacted content
-(per the caller's configured PII pipeline — see `hacienda-api/src/handlers/documents.rs`),
-alongside the detected `entities` (category, span, confidence — never raw text unless
-`pii:reveal` is granted) and the batch's `audit_chain_tip`. Every implemented adapter
-in this folder surfaces that as first-class metadata on whatever object its host framework uses
-(LangChain `Document.metadata`, etc.) rather than discarding it, so a chunk sitting in a
-vector store can always be traced back to the audited extraction that produced it.
+xberg's loaders answer "how do I get documents into my RAG pipeline." These adapters
+send inputs through Hacienda's configured document-processing API before returning
+content to the host framework. `POST /v1/documents` returns processed content, detected
+entities, and optional document/version identifiers. The current `DocumentResult` does
+**not** include an `audit_chain_tip` or rich extraction metadata; see
+[`LIMITATIONS.md`](./LIMITATIONS.md). Implemented adapters preserve the fields they
+receive as framework metadata. Traceability is limited to the identifiers and metadata
+actually returned by the API, not a per-batch audit-tip guarantee.
 
 | Integration | Path | Status |
 |-------------|------|--------|

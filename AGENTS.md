@@ -6,6 +6,8 @@ Use this file as the shared project map. Read the relevant component documentati
 
 Hacienda is a polyglot document-intelligence workspace focused on PII detection and redaction, auditability, review, compliance artefacts, retrieval, and local/client applications. The implementation is split across a Rust Cargo workspace, web applications, language SDKs, integrations, and tooling. The Studio is in development; verify feature status in code/docs before describing it as shipped.
 
+For a user-facing inventory of implemented features, backend/configuration limits, integration maturity, and proposed improvements, read [`docs/features-and-roadmap.md`](docs/features-and-roadmap.md). It is the product-status reference; historical specs and dated architecture analyses describe the state or proposal at the time they were written.
+
 The root `Cargo.toml` currently lists 13 Rust workspace members. The root `package.json` manages JavaScript workspaces with pnpm and Turbo. `Taskfile.yml` is the project task catalog. Treat manifests and command `--help` output as authoritative when docs differ.
 
 ## Repository map
