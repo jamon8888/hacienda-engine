@@ -414,10 +414,12 @@ fn labelled_before(text: &str, start: u32) -> bool {
     // Un label ne qualifie que la valeur de sa propre phrase : sans cette
     // coupure, « SIREN 732829320. Total : 944 681 634 EUR » fait du montant
     // un second SIREN.
-    let boundary = prefix
-        .rfind(". ")
-        .or_else(|| prefix.rfind("; "))
-        .or_else(|| prefix.rfind('\n'));
+    // La frontière la plus proche gagne, quelle que soit sa nature : un
+    // `or_else` choisirait le premier type trouvé, pas le plus récent.
+    let boundary = [prefix.rfind(". "), prefix.rfind("; "), prefix.rfind('\n')]
+        .into_iter()
+        .flatten()
+        .max();
     let window = boundary
         .map_or(prefix, |i| &prefix[i + 1..])
         .to_ascii_uppercase();
@@ -944,6 +946,15 @@ mod tests {
             6,
             "732 829 320"
         ));
+    }
+
+    #[test]
+    fn should_use_the_nearest_sentence_boundary_regardless_of_its_kind() {
+        // Les deux séparateurs existent ; `; ` est le plus proche du montant,
+        // donc le libellé qui précède le point ne doit pas être réutilisé.
+        let texte = "SIREN 732829320. SIREN; 944 681 634 EUR";
+        let debut = texte.find("944 681 634").unwrap() as u32;
+        assert!(!anchor_fr_siren(texte, debut, "944 681 634"));
     }
 
     #[test]
