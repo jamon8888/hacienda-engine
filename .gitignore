@@ -138,6 +138,10 @@ AGENTS.md
 CLAUDE.md
 # END ai-rulez
 
+# Keep repository-wide agent guidance shareable.
+!AGENTS.md
+!CLAUDE.md
+
 # Project build/runtime caches (wasm toolchain homes, npm caches, temp copies)
 .wasm-home/
 .cargo-wasm-home/
@@ -154,3 +158,7 @@ target-i6/
 target-i7/
 target-cr157/
 target-cr160/
+.ai-rulez/local/
+
+# Generated live code map
+docs/CODEMAP.md
