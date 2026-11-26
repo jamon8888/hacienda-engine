@@ -26,22 +26,7 @@ fn sha256(data: &[u8]) -> Vec<u8> {
 /// Luhn (mod-10) check over the digit characters of `s`.
 pub fn luhn_valid(s: &str) -> bool {
     let digits: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
-    if digits.len() < 2 {
-        return false;
-    }
-    let parity = digits.len() % 2;
-    let mut sum = 0u32;
-    for (i, &d) in digits.iter().enumerate() {
-        let mut v = d;
-        if i % 2 == parity {
-            v *= 2;
-            if v > 9 {
-                v -= 9;
-            }
-        }
-        sum += v;
-    }
-    sum.is_multiple_of(10)
+    luhn_valid_digits(&digits)
 }
 
 /// True when the digits open with an issuer prefix (IIN) a real network hands
@@ -77,15 +62,30 @@ fn has_issuer_prefix(digits: &[u32]) -> bool {
     }
     // Diners Club — the one that genuinely overlaps SIRET at 14 digits. Kept
     // anyway: dropping a real card format to dodge a false positive is the
-    // wrong trade for a redaction tool.
-    if (300..=305).contains(&lead(3)) || lead(4) == 3095 || matches!(lead(2), 36 | 38 | 39) {
+    // wrong trade for a redaction tool. `305` also issues 16-digit PANs.
+    if (300..=305).contains(&lead(3)) {
+        return matches!(len, 14 | 16);
+    }
+    if lead(4) == 3095 || matches!(lead(2), 36 | 38 | 39) {
         return len == 14;
     }
     // JCB
     if (3528..=3589).contains(&lead(4)) {
         return (16..=19).contains(&len);
     }
-    // UnionPay
+    // Maestro / other issued IIN blocks. Maestro is issued at many lengths;
+    // 50xx and 56-69 exclude the 51-55 Mastercard block above.
+    if matches!(lead(4), 5018 | 5020 | 5038 | 5084)
+        || (56..=69).contains(&lead(2))
+        || matches!(lead(4), 6304 | 6759 | 6761..=6763)
+    {
+        return (12..=19).contains(&len);
+    }
+    // InstaPayment / RuPay / other issued ranges.
+    if (637..=639).contains(&lead(3)) || lead(4) == 6082 {
+        return (16..=19).contains(&len);
+    }
+    // UnionPay (kept last so the more specific Discover/Maestro branches win).
     if lead(2) == 62 {
         return (16..=19).contains(&len);
     }
@@ -159,6 +159,24 @@ pub fn validate_iban(text: &str) -> Option<bool> {
 // latter would assert a check that never ran, and a *failed* checksum is
 // stronger evidence than an unrun one, so it is rejected outright.
 
+/// ISO 7064 MOD 97-10 over a full identifier: letters map to A=10 … Z=35,
+/// digits stay as-is, and the resulting number must be `1 mod 97`. Used by the
+/// modern Dutch btw-id (since 2020-01-01) on the whole `NL…B..` string.
+fn mod97_10(s: &str) -> Option<bool> {
+    let mut converted = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            converted.push(c);
+        } else if c.is_ascii_alphabetic() {
+            let value = c.to_ascii_uppercase() as u32 - 'A' as u32 + 10;
+            converted.push_str(&value.to_string());
+        } else {
+            return None;
+        }
+    }
+    Some(converted.parse::<u64>().ok()? % 97 == 1)
+}
+
 fn digits_as_u64(s: &str) -> Option<u64> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -188,7 +206,13 @@ fn validate_eu_vat_parts(country: &str, body: &str) -> Option<f32> {
                 return None;
             }
             let (key, siren) = body.split_at(2);
-            if !all_digits(siren, 9) || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            // I and O are excluded from French VAT keys to avoid confusion
+            // with 1 and 0, in either position and in either case.
+            let key_is_valid = key.bytes().all(|b| {
+                b.is_ascii_digit()
+                    || (b.is_ascii_alphabetic() && !matches!(b.to_ascii_uppercase(), b'I' | b'O'))
+            });
+            if !all_digits(siren, 9) || !key_is_valid || !luhn_valid(siren) {
                 return None;
             }
             match (digits_as_u64(key), digits_as_u64(siren)) {
@@ -218,8 +242,15 @@ fn validate_eu_vat_parts(country: &str, body: &str) -> Option<f32> {
                 return None;
             }
             let d: Vec<u64> = head.bytes().map(|b| u64::from(b - b'0')).collect();
-            let sum: u64 = d[..8].iter().zip((2..=9).rev()).map(|(v, w)| v * w).sum();
-            if sum % 11 == d[8] {
+            // Deux algorithmes sont publiés pour le btw-id néerlandais :
+            //  * l'elfproef historique (9..2 sur les huit premiers chiffres,
+            //    comparé au neuvième) pour les numéros basés sur un RSIN/BSN ;
+            //  * ISO 7064 MOD 97-10 sur la chaîne entière `NL…B..` (lettres
+            //    A=10…Z=35) pour les numéros émis depuis le 1er janvier 2020.
+            // Les deux sont acceptés ; un échec des deux est rejeté.
+            let legacy: u64 = d[..8].iter().zip((2..=9).rev()).map(|(v, w)| v * w).sum();
+            let mod97 = mod97_10(&format!("NL{body}"));
+            if legacy % 11 == d[8] || mod97 == Some(true) {
                 Some(1.0)
             } else {
                 None
@@ -307,10 +338,28 @@ pub fn validate_eu_vat(text: &str) -> Option<bool> {
 pub fn validate_fr_nir(text: &str) -> Option<bool> {
     let cleaned: String = text
         .chars()
-        .filter(|c| !matches!(c, ' ' | '.' | '-'))
+        .filter(|c| !matches!(c, ' ' | '.' | '-' | '\u{a0}' | '\u{202f}' | '\t'))
         .flat_map(char::to_uppercase)
         .collect();
     if cleaned.chars().count() != 15 {
+        return Some(false);
+    }
+    // Champs structurels : un mois impossible ou un département invalide
+    // doit être rejeté même si la clé mod-97 tombe juste.
+    let sex = &cleaned[0..1];
+    let month = &cleaned[3..5];
+    let department = &cleaned[5..7];
+    let valid_month = month.bytes().all(|b| b.is_ascii_digit())
+        && month.parse::<u32>().is_ok_and(|m| (1..=12).contains(&m));
+    let valid_department = matches!(department, "2A" | "2B")
+        || (department.bytes().all(|b| b.is_ascii_digit())
+            && department
+                .parse::<u32>()
+                .is_ok_and(|d| (1..=98).contains(&d)));
+    if !matches!(sex, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8")
+        || !valid_month
+        || !valid_department
+    {
         return Some(false);
     }
     let digits_part: String = cleaned.chars().take(13).collect();
@@ -339,6 +388,8 @@ const LA_POSTE_SIREN: &str = "356000000";
 /// and tolerant of the `N°`/`:`/newline noise that sits between a label and its
 /// value on a real form. `EUID` counts because the European identifier embeds
 /// the SIREN verbatim (`FR7501.944681634`).
+const LABEL_LOOKBEHIND_CHARS: usize = 48;
+
 fn labelled_before(text: &str, start: u32) -> bool {
     let end = start as usize;
     if end > text.len() || !text.is_char_boundary(end) {
@@ -347,9 +398,19 @@ fn labelled_before(text: &str, start: u32) -> bool {
     let from = text[..end]
         .char_indices()
         .rev()
-        .nth(48)
+        .nth(LABEL_LOOKBEHIND_CHARS)
         .map_or(0, |(i, _)| i);
-    let window = text[from..end].to_ascii_uppercase();
+    let prefix = &text[from..end];
+    // Un label ne qualifie que la valeur de sa propre phrase : sans cette
+    // coupure, « SIREN 732829320. Total : 944 681 634 EUR » fait du montant
+    // un second SIREN.
+    let boundary = prefix
+        .rfind(". ")
+        .or_else(|| prefix.rfind("; "))
+        .or_else(|| prefix.rfind('\n'));
+    let window = boundary
+        .map_or(prefix, |i| &prefix[i + 1..])
+        .to_ascii_uppercase();
     ["SIRET", "SIREN", "RCS", "EUID"]
         .iter()
         .any(|key| window.contains(key))
@@ -360,17 +421,16 @@ fn labelled_before(text: &str, start: u32) -> bool {
 /// grouping on 14 digits would be 2-3-3-3-3), so the grouping alone is an
 /// anchor. Partial or absent separators still require a label.
 fn has_siret_grouping(s: &str) -> bool {
-    let b = s.as_bytes();
-    if b.len() != 17 {
-        return false;
-    }
-    b.iter().enumerate().all(|(i, &c)| {
-        if matches!(i, 3 | 7 | 11) {
-            matches!(c, b' ' | b'.')
-        } else {
-            c.is_ascii_digit()
-        }
-    })
+    let mut chars = s.chars();
+    let sep = |c: char| matches!(c, ' ' | '.' | '\u{a0}' | '\u{202f}');
+    (0..3).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+        && chars.next().is_some_and(sep)
+        && (0..3).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+        && chars.next().is_some_and(sep)
+        && (0..3).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+        && chars.next().is_some_and(sep)
+        && (0..5).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+        && chars.next().is_none()
 }
 
 /// The French 3-3-3 display grouping of a nine-digit SIREN. Used by the phone
@@ -378,17 +438,14 @@ fn has_siret_grouping(s: &str) -> bool {
 /// SIRET (`732 829 320 00074`) and French phones are written in five pairs,
 /// never 3-3-3.
 fn has_siren_grouping(s: &str) -> bool {
-    let b = s.as_bytes();
-    if b.len() != 11 {
-        return false;
-    }
-    b.iter().enumerate().all(|(i, &c)| {
-        if matches!(i, 3 | 7) {
-            matches!(c, b' ' | b'.')
-        } else {
-            c.is_ascii_digit()
-        }
-    })
+    let mut chars = s.chars();
+    let sep = |c: char| matches!(c, ' ' | '.' | '\u{a0}' | '\u{202f}');
+    (0..3).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+        && chars.next().is_some_and(sep)
+        && (0..3).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+        && chars.next().is_some_and(sep)
+        && (0..3).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+        && chars.next().is_none()
 }
 
 /// Luhn + structural check for a SIREN (9 digits). The label anchor is applied
@@ -408,16 +465,31 @@ pub fn anchor_fr_siren(text: &str, start: u32, matched: &str) -> bool {
     if !labelled_before(text, start) {
         return false;
     }
+    let debut = start as usize;
+    let Some(fin) = debut.checked_add(matched.len()) else {
+        return false;
+    };
+    if fin > text.len()
+        || !text.is_char_boundary(debut)
+        || !text.is_char_boundary(fin)
+        || &text[debut..fin] != matched
+    {
+        return false;
+    }
     // Un SIRET groupé commence par un SIREN valide : « 732 829 320 00074 ».
-    // Sans cette garde, le motif SIREN (plus court) gagne le dédup par
-    // chevauchement et le SIRET disparaît au profit de son propre préfixe.
-    let end = start as usize + matched.len();
-    if end <= text.len() {
-        let reste = text[end..].trim_start_matches([' ', '.']).as_bytes();
-        if reste.len() >= 5
-            && reste[..5].iter().all(u8::is_ascii_digit)
-            && (reste.len() == 5 || !reste[5].is_ascii_digit())
-        {
+    // On ne rejette le SIREN que si les cinq chiffres suivants forment
+    // réellement un SIRET valide avec lui — sinon un code postal après le
+    // SIREN (« 732 829 320 75008 Paris ») ferait perdre un vrai SIREN.
+    let reste = text[fin..].trim_start_matches([' ', '.', '\u{a0}', '\u{202f}', '\t']);
+    let octets = reste.as_bytes();
+    if octets.len() >= 5
+        && octets[..5].iter().all(u8::is_ascii_digit)
+        && (octets.len() == 5 || !octets[5].is_ascii_digit())
+    {
+        let mut candidat = String::with_capacity(matched.len() + 5);
+        candidat.extend(matched.chars().filter(|c| c.is_ascii_digit()));
+        candidat.push_str(&reste[..5]);
+        if validate_fr_siret(&candidat) == Some(true) {
             return false;
         }
     }
@@ -432,15 +504,17 @@ pub fn validate_fr_siret(text: &str) -> Option<bool> {
     if digits.len() != 14 {
         return Some(false);
     }
-    let valid = if digits.starts_with(LA_POSTE_SIREN) {
-        digits
-            .chars()
-            .filter_map(|c| c.to_digit(10))
-            .sum::<u32>()
-            .is_multiple_of(5)
-    } else {
-        luhn_valid(&digits)
-    };
+    // La Poste publishes establishments that satisfy EITHER the usual Luhn
+    // check or the historical digit-sum rule — accepting only one of the two
+    // drops real headquarters SIRETs (e.g. 35600000000048, Luhn-valid with a
+    // digit sum of 26).
+    let valid = luhn_valid(&digits)
+        || (digits.starts_with(LA_POSTE_SIREN)
+            && digits
+                .chars()
+                .filter_map(|c| c.to_digit(10))
+                .sum::<u32>()
+                .is_multiple_of(5));
     Some(valid)
 }
 
@@ -487,13 +561,28 @@ pub fn anchor_ipv4(text: &str, start: u32, matched: &str) -> bool {
 pub fn validate_phone_number(text: &str) -> Option<bool> {
     use rlibphonenumber::phonenumber_matcher::FindNumberExt;
 
-    let trimmed = text.trim();
-    // Same policy as redact-paperasse: a fully compact digit run is too
-    // ambiguous with account/order numbers to claim as a phone by default,
-    // even when libphonenumber accepts it (it does accept `0156359180`).
-    // If OCR drops every separator we miss that number; that trade is
-    // deliberate and documented here so changing it is a decision.
-    if !trimmed.chars().any(|c| !c.is_ascii_digit()) {
+    // Normalise les séparateurs typographiques français avant validation ;
+    // les empreintes retournées par le regex restent dans le texte d'origine.
+    let normalized: String = text
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '\u{a0}' | '\u{202f}' | '\t' => ' ',
+            other => other,
+        })
+        .collect();
+    let trimmed = normalized.as_str();
+    // `0033` est un préfixe international explicite, pas une suite compacte
+    // ambiguë : on le traduit en `+33` pour le matcher.
+    let candidat = match trimmed.strip_prefix("0033") {
+        Some(rest) if !rest.is_empty() => format!("+33{rest}"),
+        _ => trimmed.to_string(),
+    };
+    let compact = trimmed.chars().all(|c| c.is_ascii_digit());
+    // Same policy as redact-paperasse: a bare compact digit run is too
+    // ambiguous with account/order numbers to claim as a phone by default.
+    // `0033612345678` carries an explicit prefix and is exempt.
+    if compact && !trimmed.starts_with("0033") {
         return Some(false);
     }
     // Une adresse IPv4 est une suite de quatre groupes de chiffres séparés
@@ -518,7 +607,8 @@ pub fn validate_phone_number(text: &str) -> Option<bool> {
     let ein_shape = b.len() == 10 && b[2] == b'-' && all_digits(&b[..2]) && all_digits(&b[3..]);
     let digit_count = b.iter().filter(|c| c.is_ascii_digit()).count();
     let nir_shape = digit_count == 15
-        && matches!(b.first().copied(), Some(b'1' | b'2'))
+        && b.first().is_some_and(u8::is_ascii_digit)
+        && (b'1'..=b'8').contains(b.first().unwrap_or(&b'0'))
         && b.iter()
             .all(|c| c.is_ascii_digit() || matches!(c, b' ' | b'.' | b'-'));
     if ssn_shape
@@ -530,9 +620,9 @@ pub fn validate_phone_number(text: &str) -> Option<bool> {
         return Some(false);
     }
 
-    let covers_whole_candidate = trimmed
+    let covers_whole_candidate = candidat
         .find_phone_numbers_auto_region()
-        .any(|m| m.start == 0 && m.end() == trimmed.len());
+        .any(|m| m.start == 0 && m.end() == candidat.len());
     // Un numéro de téléphone n'a pas de somme de contrôle : `None` dit
     // « aucune opinion », ce qui conserve `base_confidence` (0.75) au lieu
     // de promouvoir le résultat à 1.0 comme le fait un vrai checksum.
@@ -729,22 +819,51 @@ mod tests {
     }
 
     #[test]
+    fn should_validate_long_and_extended_issuer_ranges() {
+        // 17-19 digit PANs and IIN blocks outside the original short list.
+        for n in [
+            "4000000000000000006", // Visa, 19 digits
+            "6011000000000000001", // Discover, 19 digits
+            "3528000000000000007", // JCB, 19 digits
+            "3050000000000003",    // Diners, 16 digits
+            "5018000000000009",    // Maestro
+            "5018000000000000007", // Maestro, 19 digits
+        ] {
+            assert_eq!(validate_credit_card(n), Some(true), "should validate: {n}");
+        }
+    }
+
+    #[test]
     fn should_checksum_validate_french_vat() {
         assert_eq!(validate_eu_vat("FR40303265045"), Some(true));
         assert_eq!(validate_eu_vat("fr 40303265045"), Some(true));
         assert_eq!(validate_eu_vat("FR\u{a0}40303265045"), Some(true));
         // A letter key is well-formed but has no verifiable check -> format-only.
         assert_eq!(validate_eu_vat("FRAB303265045"), None);
+        // I and O are excluded from French VAT keys.
+        assert_eq!(validate_eu_vat("FRIO303265045"), Some(false));
         // A failed numeric check is rejected, not downgraded.
         assert_eq!(validate_eu_vat("FR41303265045"), Some(false));
+        // The key formula alone is not enough: the embedded SIREN must be valid.
+        assert_eq!(validate_eu_vat("FR15000000001"), Some(false));
     }
 
     #[test]
     fn should_checksum_validate_be_nl_lu_vat() {
-        for n in ["BE0776091951", "NL123456782B90", "LU12345613"] {
+        for n in [
+            "BE0776091951",
+            "NL123456782B90", // legacy 11-test
+            "NL002455799B11", // modern whole-identifier 11-test
+            "LU12345613",
+        ] {
             assert_eq!(validate_eu_vat(n), Some(true), "should validate: {n}");
         }
-        for n in ["BE0776091952", "NL123456783B90", "LU12345614"] {
+        for n in [
+            "BE0776091952",
+            "NL123456783B90",
+            "NL002455798B11", // modern 11-test, wrong ninth digit
+            "LU12345614",
+        ] {
             assert_eq!(validate_eu_vat(n), Some(false), "should reject: {n}");
         }
     }
@@ -802,15 +921,52 @@ mod tests {
         let la_poste_siret = "35600000009075";
         assert!(!luhn_valid(la_poste_siret));
         assert_eq!(validate_fr_siret(la_poste_siret), Some(true));
+        // Siège de La Poste : Luhn valide, somme des chiffres = 26. Les deux
+        // règles sont acceptées, pas appliquées exclusivement.
+        assert_eq!(validate_fr_siret("35600000000048"), Some(true));
+    }
+
+    #[test]
+    fn should_keep_a_siren_before_an_unrelated_postal_code() {
+        // Les cinq chiffres suivants ne forment pas un SIRET avec ce SIREN.
+        assert!(anchor_fr_siren(
+            "SIREN 732 829 320 75008 Paris",
+            6,
+            "732 829 320"
+        ));
+    }
+
+    #[test]
+    fn should_not_reuse_a_label_across_a_sentence_boundary() {
+        let texte = "SIREN 732829320. Total : 944 681 634 EUR";
+        let debut = texte.find("944 681 634").unwrap() as u32;
+        assert!(!anchor_fr_siren(texte, debut, "944 681 634"));
+    }
+
+    #[test]
+    fn should_reject_an_out_of_range_anchor_input_without_panicking() {
+        // API publique : un appelant peut fournir un offset incohérent.
+        assert!(!anchor_fr_siren("SIREN 12345678é", 6, "732829320"));
+        assert!(!anchor_fr_siren("SIREN 732829320", 999, "732829320"));
+    }
+
+    #[test]
+    fn should_accept_narrow_no_break_space_grouping() {
+        let groupe = "732\u{202f}829\u{202f}320\u{202f}00074";
+        assert!(has_siret_grouping(groupe));
+        assert!(anchor_fr_siret(&format!("SIRET {groupe}"), 6, groupe));
     }
 
     #[test]
     fn should_validate_a_french_nir() {
         for n in [
-            "185017512345609",       // compact
-            "1 85 01 75 123 456 09", // spaced
-            "2.96.01.12.345.678.59", // dotted
-            "185032A03411208",       // Corsican 2A
+            "185017512345609",                                                 // compact
+            "1 85 01 75 123 456 09",                                           // spaced
+            "2.96.01.12.345.678.59",                                           // dotted
+            "185032A03411208",                                                 // Corsican 2A
+            "385017512345606", // registration code 3
+            "885017512345647", // registration code 8
+            "1\u{202f}85\u{202f}01\u{202f}75\u{202f}123\u{202f}456\u{202f}09", // narrow NBSP
         ] {
             assert_eq!(validate_fr_nir(n), Some(true), "should validate: {n}");
         }
@@ -820,7 +976,8 @@ mod tests {
     fn should_reject_an_invalid_french_nir() {
         for n in [
             "291059933807693",  // bad checksum
-            "291139933807692",  // impossible month
+            "291139933807626",  // checksum OK, month 13 impossible
+            "185990175123489",  // checksum OK, department 99 impossible
             "29105993380769",   // too short
             "1850175123456090", // too long
         ] {

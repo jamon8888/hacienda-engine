@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking (unreleased)
+
+- **PII taxonomy and pattern metadata changed.** `PiiCategory` gains `FrNir`,
+  `FrSiren` and `FrSiret`, and `PatternMeta` gains an `anchor` field
+  (`Option<fn(&str, u32, &str) -> bool>`). Downstream exhaustive `match`
+  expressions over `PiiCategory` and struct literals of `PatternMeta` need
+  source updates. The new categories also appear on the wire as `fr_nir`,
+  `fr_siren` and `fr_siret`; clients that deserialize into a closed enum must
+  tolerate unknown variants before upgrading. Detection confidence values
+  changed for email (1.0 → 0.9), SSN (0.4 → 0.85), phone (0.75) and EU VAT
+  (0.8 or 1.0), which may affect `score_threshold` filters.
+
 ### Added
 
 - **GLiNER2 privacy taxonomy alignment** — hybrid 12-variant `PiiCategory` extension, 42-label alias table, comprehensive vertical with per-category thresholds, build-time model selection with digest pinning, and audit provenance `model` field with tagged-length chain hashing.

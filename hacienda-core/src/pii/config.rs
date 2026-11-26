@@ -134,12 +134,15 @@ pub struct VerticalConfig {
 /// `credit_card`, `iban`, `full_name`) use that table's exact spelling so detections land
 /// on their real [`crate::pii::PiiCategory`] variant instead of falling through to
 /// `Custom(label)`.
-const COMPREHENSIVE_LABELS: [&str; 41] = [
+const COMPREHENSIVE_LABELS: [&str; 44] = [
     "address",
     "ssn",
     "passport",
     "drivers_license",
     "eu_vat",
+    "fr_nir",
+    "fr_siren",
+    "fr_siret",
     "national_id",
     "tax_id",
     "credit_card",
@@ -623,9 +626,12 @@ mod tests {
     fn should_size_the_comprehensive_vertical_to_the_taxonomy_minus_the_base_categories() {
         // PiiCategory has 45 named variants (33 + 12 hybrid) plus `Custom(String)`; 4 of the named
         // variants (Email, PhoneNumber, Person, Organization) are already requested
-        // via the base categories, so the comprehensive vertical adds the remaining 41.
+        // via the base categories, so the comprehensive vertical adds the remaining 44.
         let comprehensive = VerticalConfig::comprehensive();
-        assert_eq!(comprehensive.labels.len(), 41);
+        assert_eq!(comprehensive.labels.len(), 44);
+        for label in ["fr_nir", "fr_siren", "fr_siret"] {
+            assert!(comprehensive.labels.iter().any(|l| l == label));
+        }
         assert_eq!(comprehensive.id, "comprehensive");
     }
 

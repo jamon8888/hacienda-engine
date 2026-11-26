@@ -125,4 +125,10 @@ pub enum PiiError {
         end: u32,
         reason: String,
     },
+
+    /// The document-level regex scan panicked on a blocking worker. Treated as
+    /// an error rather than as an empty result: silently dropping every span
+    /// would look like a successful redaction of clean text.
+    #[error("regex scan failed: {0}")]
+    RegexScan(String),
 }

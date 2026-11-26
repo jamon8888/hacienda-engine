@@ -9,7 +9,7 @@ use crate::pii::context;
 use crate::pii::engine::RegexEngine;
 use crate::pii::merge::{merge_entities, MergedEntity};
 use crate::pii::ner::{to_pii_category, NerDetector};
-use crate::pii::types::{MergeConfig, MergePriority, ModelEntity};
+use crate::pii::types::{MergeConfig, MergePriority, ModelEntity, RegexEntity};
 use crate::pii::PiiError;
 use crate::redaction::pseudonym::category_label;
 use crate::redaction::{Pseudonymiser, RedactionAuditEntry, RedactionEngine, RedactionMode};
@@ -19,7 +19,9 @@ use web_time::Instant;
 
 /// Detection and redaction for one configuration.
 pub struct PiiPipeline {
-    regex_engine: RegexEngine,
+    /// Shared so the synchronous scan can run on a blocking worker on native
+    /// targets without cloning the compiled pattern set per request.
+    regex_engine: Arc<RegexEngine>,
     ner_detector: Option<NerDetector>,
     merge_config: MergeConfig,
     redaction_engine: RedactionEngine,
@@ -144,7 +146,7 @@ impl PiiPipeline {
         };
 
         Ok(Self {
-            regex_engine: RegexEngine::new()?,
+            regex_engine: Arc::new(RegexEngine::new()?),
             ner_detector,
             merge_config,
             redaction_engine: RedactionEngine::new(config.redaction.clone(), pseudonymiser)?,
@@ -216,11 +218,29 @@ impl PiiPipeline {
         })
     }
 
+    /// Run the synchronous regex scan. Native builds move it off the async
+    /// executor: phone validation calls libphonenumber per candidate, and a
+    /// digit-heavy document can otherwise block a worker for the whole scan.
+    /// WASM has no `spawn_blocking` and stays inline.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn regex_entities(&self, text: &str) -> Result<Vec<RegexEntity>, PiiError> {
+        let engine = Arc::clone(&self.regex_engine);
+        let owned = text.to_string();
+        tokio::task::spawn_blocking(move || engine.find_all(&owned))
+            .await
+            .map_err(|err| PiiError::RegexScan(err.to_string()))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn regex_entities(&self, text: &str) -> Result<Vec<RegexEntity>, PiiError> {
+        Ok(self.regex_engine.find_all(text))
+    }
+
     async fn detect(&self, text: &str) -> Result<(Vec<MergedEntity>, PipelineMetrics), PiiError> {
         let mut metrics = PipelineMetrics::default();
 
         let regex_start = Instant::now();
-        let mut regex_entities = self.regex_engine.find_all(text);
+        let mut regex_entities = self.regex_entities(text).await?;
         context::enhance(&mut regex_entities, text);
         metrics.regex_ms = regex_start.elapsed().as_millis() as u64;
 
@@ -303,7 +323,7 @@ impl PiiPipeline {
         let mut metrics = PipelineMetrics::default();
 
         let regex_start = Instant::now();
-        let mut regex_entities = self.regex_engine.find_all(text);
+        let mut regex_entities = self.regex_entities(text).await?;
         context::enhance(&mut regex_entities, text);
         metrics.regex_ms = regex_start.elapsed().as_millis() as u64;
 

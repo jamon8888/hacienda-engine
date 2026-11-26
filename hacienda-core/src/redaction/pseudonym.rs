@@ -104,6 +104,15 @@ pub(crate) fn normalize(category: &PiiCategory, text: &str) -> String {
             .chars()
             .filter(|c| *c == '+' || c.is_ascii_digit())
             .collect(),
+        // French identifiers are typed with spaces, dots, NBSP or narrow
+        // NBSP depending on the source. Those are presentation, not identity:
+        // strip them so compact and formatted spellings tokenise identically.
+        // `2A`/`2B` in a Corsican NIR are significant and kept uppercase.
+        PiiCategory::FrNir | PiiCategory::FrSiren | PiiCategory::FrSiret => text
+            .chars()
+            .filter(|c| c.is_ascii_digit() || matches!(c.to_ascii_uppercase(), 'A' | 'B'))
+            .flat_map(|c| c.to_uppercase())
+            .collect(),
         // The base rule covers everything else, including Email. Lowercasing an email
         // local part is technically lossy under RFC 5321 (which permits case-sensitive
         // local parts) but matches what every real mail system does, and treating
@@ -830,6 +839,29 @@ mod normalize_tests {
         assert_eq!(
             normalize(&c, "  Jean Dupont  "),
             normalize(&c, "Jean Dupont")
+        );
+    }
+
+    #[test]
+    fn should_merge_formatted_and_compact_french_identifiers() {
+        let nir = PiiCategory::FrNir;
+        assert_eq!(
+            normalize(&nir, "1 85 01 75 123 456 09"),
+            normalize(&nir, "185017512345609")
+        );
+        assert_eq!(
+            normalize(
+                &nir,
+                "1\u{202f}85\u{202f}01\u{202f}75\u{202f}123\u{202f}456\u{202f}09"
+            ),
+            normalize(&nir, "185017512345609")
+        );
+        // Corsican 2A/2B is significant and must not be lowercased away.
+        assert_eq!(normalize(&nir, "185032a03411208"), "185032A03411208");
+        let siret = PiiCategory::FrSiret;
+        assert_eq!(
+            normalize(&siret, "732 829 320 00074"),
+            normalize(&siret, "73282932000074")
         );
     }
 

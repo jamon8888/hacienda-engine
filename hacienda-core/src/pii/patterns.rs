@@ -26,7 +26,12 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
         // by CreditCard or TaxId on an overlapping span.
         PatternMeta::new(
             PiiCategory::FrNir,
-            r"\b[12][ .]?\d{2}[ .]?(?:0[1-9]|1[0-2]|[2-9]\d)[ .]?(?:\d{2}|2[AB])[ .]?\d{3}[ .]?\d{3}[ .]?\d{2}\b",
+            // Separators include the ordinary space, NBSP (U+00A0) and the
+            // narrow NBSP (U+202F) that French typesetting uses for numeric
+            // grouping. The month is 01-12; the department is 01-98 or 2A/2B.
+            // Leading registration codes 1-8 are all valid (1/2 are the
+            // historical male/female codes).
+            r"\b[1-8][ .\u{a0}\u{202f}]?\d{2}[ .\u{a0}\u{202f}]?(?:0[1-9]|1[0-2])[ .\u{a0}\u{202f}]?(?:0[1-9]|[1-8]\d|9[0-8]|2[AB])[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{2}\b",
             true,
             "[NIR:****]",
         )
@@ -37,7 +42,7 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
         // already stops SIREN from claiming the first nine digits of a SIRET.
         PatternMeta::new(
             PiiCategory::FrSiret,
-            r"\b\d{3}[ .]?\d{3}[ .]?\d{3}[ .]?\d{5}\b",
+            r"\b\d{3}[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{5}\b",
             true,
             "[SIRET:****]",
         )
@@ -47,7 +52,7 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
         // French SIREN (9 digits) — Luhn plus a *label*, never grouping alone.
         PatternMeta::new(
             PiiCategory::FrSiren,
-            r"\b\d{3}[ .]?\d{3}[ .]?\d{3}\b",
+            r"\b\d{3}[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{3}\b",
             true,
             "[SIREN:****]",
         )
@@ -91,7 +96,7 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
         // to be redacted (and reported) as a card on every French invoice.
         PatternMeta::new(
             PiiCategory::CreditCard,
-            r"\b(?:\d[ -]*?){13,16}\b",
+            r"\b(?:\d[ .-]?){12,18}\d\b",
             true,
             "[CARD:****]",
         )
@@ -276,7 +281,18 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
         // supports. The libphonenumber validator is the only opinion.
         PatternMeta::new(
             PiiCategory::PhoneNumber,
-            r"(?:\+[1-9]\d{0,2}[ .-]?\(?\d{1,4}\)?(?:[ .-]?\d{1,4}){1,5})|(?:\(\d{2,4}\)[ .-]?\d{3,4}[ .-]?\d{3,4})|\b\d(?:[ .-]?\d){6,14}\b",
+            concat!(
+                r"(?:\+[1-9]\d{0,2}[\t .\u{a0}\u{202f}-]?\(?\d{1,2}\)?(?:[\t .\u{a0}\u{202f}-]?\d{1,2}){1,6})",
+                r"|(?:\b0033[\t .\u{a0}\u{202f}-]?[1-9](?:[\t .\u{a0}\u{202f}-]?\d){8}\b)",
+                r"|(?:\(\d{3}\)[\t .-]?\d{3}[\t .-]?\d{4})",
+                r"|(?:\b\d{3}[.-]\d{3}[.-]\d{4}\b)",
+                // National numbers: 10 or 11 digits beginning with 0 (UK
+                // `020 7183 8750` has 11), with individually optional
+                // separators (OCR merges them). The lazy quantifier prefers
+                // the shorter span so adjacent numbers stay separate:
+                // `01 56 35 91 80 06 12 34 56 78` yields two entities.
+                r"|(?:\b0[1-9](?:[\t .\u{a0}\u{202f}-]?\d){8,9}?\b)",
+            ),
             false,
             "[PHONE]",
         )

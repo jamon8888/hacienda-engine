@@ -11,7 +11,7 @@
 //! Les affirmations portent sur la catégorie *et* sur la confiance : `1.0`
 //! n'est permis que lorsqu'une somme de contrôle a réellement été exécutée.
 
-use hacienda_core::pii::{PiiCategory, RegexEngine};
+use hacienda_core::pii::{PiiCategory, PiiPipeline, PipelineConfig, RegexEngine};
 
 fn categories(texte: &str) -> Vec<PiiCategory> {
     RegexEngine::new()
@@ -143,6 +143,29 @@ mod faux_positifs {
     }
 
     #[test]
+    fn un_label_ne_qualifie_pas_un_montant_de_la_phrase_suivante() {
+        let texte = "SIREN 732829320. Total : 944 681 634 EUR";
+        let montant = texte.find("944 681 634").unwrap() as u32;
+        let trouvees = RegexEngine::new().unwrap().find_all(texte);
+        assert!(
+            !trouvees.iter().any(|e| {
+                e.start == montant
+                    && (e.category == PiiCategory::FrSiren || e.category == PiiCategory::FrSiret)
+            }),
+            "le montant ne doit pas devenir un SIREN : {trouvees:?}"
+        );
+        // Le vrai SIREN, lui, reste détecté.
+        assert!(trouvees.iter().any(|e| e.category == PiiCategory::FrSiren));
+    }
+
+    #[test]
+    fn une_tva_a_cle_valide_mais_siren_invalide_est_rejetee() {
+        // FR15000000001 satisfait la formule de clé, mais le SIREN
+        // 000000001 échoue à Luhn : ce n'est pas une TVA vérifiée.
+        assert!(!categories("TVA FR15000000001 sur la facture").contains(&PiiCategory::EuVat));
+    }
+
+    #[test]
     fn une_adresse_ip_nest_pas_un_telephone() {
         assert!(!categories("host 203.0.113.42 responded").contains(&PiiCategory::PhoneNumber));
     }
@@ -190,6 +213,15 @@ mod detection {
         // La Poste : le SIREN passe Luhn, mais les établissements se
         // valident par une somme des chiffres divisible par 5.
         assert!(categories("SIRET 35600000009075").contains(&PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn doit_garder_le_siren_devant_un_code_postal() {
+        // Les cinq chiffres qui suivent ne forment pas un SIRET avec ce SIREN.
+        let trouvees = RegexEngine::new()
+            .unwrap()
+            .find_all("SIREN 732 829 320 75008 Paris");
+        assert!(trouvees.iter().any(|e| e.category == PiiCategory::FrSiren));
     }
 
     #[test]
@@ -311,6 +343,33 @@ mod confiance {
             confiance("téléphone : 01 56 35 91 80", PiiCategory::PhoneNumber),
             Some(0.75)
         );
+    }
+
+    #[tokio::test]
+    async fn la_confusion_apres_pipeline_respecte_les_sommes_de_controle() {
+        // `context::enhance` s'exécute dans `PiiPipeline::detect`, pas dans
+        // `RegexEngine::find_all` : on vérifie donc la valeur fusionnée.
+        let pipeline = PiiPipeline::with_detector(PipelineConfig::default(), None).unwrap();
+        for (texte, categorie, attendu) in [
+            ("TVA DE123456789 sur la facture", PiiCategory::EuVat, 0.8),
+            ("téléphone : 01 56 35 91 80", PiiCategory::PhoneNumber, 0.75),
+        ] {
+            let resultat = pipeline.scan(texte).await.unwrap();
+            let confiance = resultat
+                .entities
+                .iter()
+                .find(|e| e.category == categorie)
+                .map(|e| e.confidence);
+            assert_eq!(confiance, Some(attendu), "après pipeline : {texte:?}");
+        }
+        // L'e-mail a des mots de contexte : le boost +0.35 est attendu ici.
+        let resultat = pipeline.scan("email jane@example.com").await.unwrap();
+        let email = resultat
+            .entities
+            .iter()
+            .find(|e| e.category == PiiCategory::Email)
+            .unwrap();
+        assert_eq!(email.confidence, 1.0);
     }
 }
 

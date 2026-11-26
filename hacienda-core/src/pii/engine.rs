@@ -149,6 +149,27 @@ mod tests {
     }
 
     #[test]
+    fn should_capture_full_long_and_grouped_pan_spans() {
+        let engine = RegexEngine::new().unwrap();
+        for (texte, pan) in [
+            ("carte 4000000000000000006 utilisée", "4000000000000000006"),
+            (
+                "carte 4000 0000 0000 0000 006 utilisée",
+                "4000 0000 0000 0000 006",
+            ),
+            ("carte 3050 0000 0000 0003 utilisée", "3050 0000 0000 0003"),
+        ] {
+            let entites = engine.find_all(texte);
+            let carte = entites
+                .iter()
+                .find(|e| e.category == PiiCategory::CreditCard)
+                .unwrap_or_else(|| panic!("PAN manqué dans {texte:?}"));
+            assert_eq!(&texte[carte.start as usize..carte.end as usize], pan);
+            assert_eq!(carte.confidence, 1.0);
+        }
+    }
+
+    #[test]
     fn should_promote_a_validated_credit_card_to_full_confidence() {
         let entities = RegexEngine::new()
             .unwrap()
@@ -309,6 +330,26 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_a_checksum_valid_nir_with_an_impossible_month() {
+        // La clé mod-97 est bonne (26) : seul le contrôle du mois peut rejeter.
+        assert!(categories("numéro 291139933807626 on file").is_empty());
+    }
+
+    #[test]
+    fn should_detect_nir_with_extended_registration_codes_and_narrow_spaces() {
+        for texte in [
+            "numéro 385017512345606 déclaré",
+            "numéro 885017512345647 déclaré",
+            "numéro 1\u{202f}85\u{202f}01\u{202f}75\u{202f}123\u{202f}456\u{202f}09 déclaré",
+        ] {
+            assert!(
+                categories(texte).contains(&PiiCategory::FrNir),
+                "NIR valide manqué : {texte:?}"
+            );
+        }
+    }
+
+    #[test]
     fn should_detect_a_french_national_phone_number() {
         // The gap that motivated the libphonenumber switch: every previous
         // pattern required `+`, parentheses or a `+33` prefix, so the way
@@ -330,6 +371,42 @@ mod tests {
             categories("téléphonez au : 0156 35 9180"),
             vec![PiiCategory::PhoneNumber]
         );
+    }
+
+    #[test]
+    fn should_detect_two_adjacent_french_numbers_without_merging_them() {
+        let texte = "01 56 35 91 80 06 12 34 56 78";
+        let telephone: Vec<_> = RegexEngine::new()
+            .unwrap()
+            .find_all(texte)
+            .into_iter()
+            .filter(|e| e.category == PiiCategory::PhoneNumber)
+            .map(|e| &texte[e.start as usize..e.end as usize])
+            .collect();
+        assert_eq!(
+            telephone,
+            vec!["01 56 35 91 80", "06 12 34 56 78"],
+            "deux numéros adjacents doivent produire deux entités"
+        );
+    }
+
+    #[test]
+    fn should_preserve_an_explicit_0033_prefix() {
+        assert!(categories("appel 0033612345678").contains(&PiiCategory::PhoneNumber));
+    }
+
+    #[test]
+    fn should_accept_tabs_and_narrow_no_break_spaces_as_separators() {
+        for texte in [
+            "appel 01\t56\t35\t91\t80",
+            "appel 01\u{202f}56\u{202f}35\u{202f}91\u{202f}80",
+            "appel +33\u{202f}6\u{202f}12\u{202f}34\u{202f}56\u{202f}78",
+        ] {
+            assert!(
+                categories(texte).contains(&PiiCategory::PhoneNumber),
+                "téléphone manqué : {texte:?}"
+            );
+        }
     }
 
     #[test]

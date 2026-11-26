@@ -440,6 +440,9 @@ pub fn to_pii_category(category: &EntityCategory) -> PiiCategory {
             "country" => PiiCategory::Country,
             "government_id" => PiiCategory::GovernmentId,
             "national_id_number" => PiiCategory::NationalId,
+            "fr_nir" | "french_nir" | "nir" => PiiCategory::FrNir,
+            "fr_siren" | "french_siren" | "siren" => PiiCategory::FrSiren,
+            "fr_siret" | "french_siret" | "siret" => PiiCategory::FrSiret,
             "drivers_license_number" | "license_number" => PiiCategory::DriversLicense,
             "tax_id" | "tax_number" => PiiCategory::TaxId,
             "bank_account" | "account_number" => PiiCategory::BankAccount,
@@ -565,6 +568,22 @@ mod tests {
         assert_eq!(
             to_pii_category(&EntityCategory::Custom("EmployeeId".into())),
             PiiCategory::Custom("EmployeeId".into())
+        );
+    }
+
+    #[test]
+    fn should_map_french_identifier_labels_to_their_dedicated_categories() {
+        assert_eq!(
+            to_pii_category(&EntityCategory::Custom("fr_nir".into())),
+            PiiCategory::FrNir
+        );
+        assert_eq!(
+            to_pii_category(&EntityCategory::Custom("SIREN".into())),
+            PiiCategory::FrSiren
+        );
+        assert_eq!(
+            to_pii_category(&EntityCategory::Custom("siret".into())),
+            PiiCategory::FrSiret
         );
     }
 
