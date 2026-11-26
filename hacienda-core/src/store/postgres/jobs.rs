@@ -29,7 +29,13 @@ impl PostgresJobStore {
 /// and a recovery next step. Bound payloads (`result_json`, `error`,
 /// `progress_json`) are never formatted into the message: they can hold
 /// customer data and are not needed to diagnose a database failure.
-fn sql_error(operation: &str, phase: &str, tenant: &TenantId, id: &str, source: &sqlx::Error) -> JobError {
+fn sql_error(
+    operation: &str,
+    phase: &str,
+    tenant: &TenantId,
+    id: &str,
+    source: &sqlx::Error,
+) -> JobError {
     JobError::Internal(format!(
         "{operation} ({phase}): job {id} (tenant {tenant}): {source}; next step: verify \
          Postgres connectivity and the jobs schema, then retry the operation",
@@ -161,7 +167,12 @@ impl JobStore for PostgresJobStore {
         Ok(row.map(row_to_job_with_progress))
     }
 
-    async fn update_progress(&self, tenant: &TenantId, id: &str, progress_json: String) -> Result<Job, JobError> {
+    async fn update_progress(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        progress_json: String,
+    ) -> Result<Job, JobError> {
         let now = Utc::now();
 
         // Restrict to `running` so a late progress tick cannot overwrite a
@@ -195,7 +206,13 @@ impl JobStore for PostgresJobStore {
         }
     }
 
-    async fn transition(&self, tenant: &TenantId, id: &str, from: JobStatus, to: JobStatus) -> Result<Job, JobError> {
+    async fn transition(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        from: JobStatus,
+        to: JobStatus,
+    ) -> Result<Job, JobError> {
         let now = Utc::now();
 
         // The compare-and-swap stays one atomic statement. When it matches no row,
@@ -242,7 +259,9 @@ impl JobStore for PostgresJobStore {
                         expected: from,
                         actual,
                     },
-                    Err(_) => JobError::Internal(format!("job {id}: unrecognised stored status '{raw}'")),
+                    Err(_) => {
+                        JobError::Internal(format!("job {id}: unrecognised stored status '{raw}'"))
+                    }
                 },
             });
         };
@@ -250,7 +269,12 @@ impl JobStore for PostgresJobStore {
         Ok(row_to_job(row))
     }
 
-    async fn finish(&self, tenant: &TenantId, id: &str, result_json: String) -> Result<Job, JobError> {
+    async fn finish(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        result_json: String,
+    ) -> Result<Job, JobError> {
         // Runtime query: the terminal-state predicate is new and regenerating
         // the committed `.sqlx/` cache needs a live database, which CI does not
         // assume. The predicate makes a duplicate finish a no-op so the
@@ -312,7 +336,11 @@ impl JobStore for PostgresJobStore {
         }
     }
 
-    async fn list(&self, tenant: &TenantId, filter: Option<JobStatus>) -> Result<Vec<Job>, JobError> {
+    async fn list(
+        &self,
+        tenant: &TenantId,
+        filter: Option<JobStatus>,
+    ) -> Result<Vec<Job>, JobError> {
         let tenant_id = tenant.as_str();
         let rows = match filter {
             Some(status) => {
@@ -403,10 +431,16 @@ mod tests {
         let err = sql_error("list", "SELECT for tenant", &t(), "<all>", &source);
         let message = err.to_string();
         assert!(message.contains("list"), "operation missing: {message}");
-        assert!(message.contains("SELECT for tenant"), "phase missing: {message}");
+        assert!(
+            message.contains("SELECT for tenant"),
+            "phase missing: {message}"
+        );
         assert!(message.contains(t().as_str()), "tenant missing: {message}");
         assert!(message.contains("<all>"), "job context missing: {message}");
-        assert!(message.contains("connection refused"), "source missing: {message}");
+        assert!(
+            message.contains("connection refused"),
+            "source missing: {message}"
+        );
         assert!(message.contains("next step"), "recovery missing: {message}");
     }
 
@@ -445,7 +479,9 @@ mod tests {
                 let store = Arc::clone(&store);
                 let id = job.id.clone();
                 handles.push(tokio::spawn(async move {
-                    store.transition(&t(), &id, JobStatus::Queued, JobStatus::Running).await
+                    store
+                        .transition(&t(), &id, JobStatus::Queued, JobStatus::Running)
+                        .await
                 }));
             }
 
@@ -546,9 +582,17 @@ mod tests {
             let job = store.create(&t(), None).await.expect("create failed");
 
             assert!(!store.delete(&t2(), &job.id).await.expect("delete failed"));
-            assert!(store.get(&t(), &job.id).await.expect("get failed").is_some());
+            assert!(store
+                .get(&t(), &job.id)
+                .await
+                .expect("get failed")
+                .is_some());
             assert!(store.delete(&t(), &job.id).await.expect("delete failed"));
-            assert!(store.get(&t(), &job.id).await.expect("get failed").is_none());
+            assert!(store
+                .get(&t(), &job.id)
+                .await
+                .expect("get failed")
+                .is_none());
         });
     }
 

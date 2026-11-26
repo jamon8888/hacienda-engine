@@ -29,7 +29,7 @@ license = "Apache-2.0"
 repository = "https://github.com/jamon8888/hacienda-engine"
 
 [workspace.ownership]
-user_owned = ["poly.toml"]
+user_owned = ["poly.toml", "rustfmt.toml"]
 
 [workspace.opaque_types]
 DateTime = "chrono::DateTime<chrono::Utc>"
