@@ -58,18 +58,49 @@ impl RegexEngine {
 
         for (meta, re) in self.patterns.iter().zip(&self.compiled) {
             for m in re.find_iter(text) {
+                let debut = m.start();
+                let mut fin = m.end();
                 let confidence = match meta.validator {
                     Some(validate) => match validate(m.as_str()) {
+                        Some(false) if meta.retry_shorter => {
+                            // Le regex peut absorber un montant voisin ; on
+                            // réessaie les préfixes se terminant sur un chiffre.
+                            let mut retenu = None;
+                            let mut pos = m.end();
+                            while pos > debut {
+                                // Le préfixe `debut..pos` se termine sur un
+                                // chiffre : on ne coupe jamais au milieu d'un
+                                // séparateur ou d'un caractère UTF-8.
+                                if text.as_bytes()[pos - 1].is_ascii_digit()
+                                    && validate(&text[debut..pos]) == Some(true)
+                                {
+                                    fin = pos;
+                                    retenu = Some(1.0);
+                                    break;
+                                }
+                                pos -= 1;
+                            }
+                            match retenu {
+                                Some(c) => c,
+                                None => continue,
+                            }
+                        }
                         Some(false) => continue,
                         Some(true) => 1.0,
                         None => meta.base_confidence,
                     },
                     None => meta.base_confidence,
                 };
+                let correspondance = &text[debut..fin];
+                if let Some(anchor) = meta.anchor {
+                    if !anchor(text, debut as u32, correspondance) {
+                        continue;
+                    }
+                }
                 entities.push(RegexEntity {
                     category: meta.category.clone(),
-                    start: m.start() as u32,
-                    end: m.end() as u32,
+                    start: debut as u32,
+                    end: fin as u32,
                     confidence,
                     format_preserving: meta.format_preserving,
                     redact_template: meta.redact_template.clone(),
@@ -144,6 +175,41 @@ mod tests {
     }
 
     #[test]
+    fn should_capture_full_long_and_grouped_pan_spans() {
+        let engine = RegexEngine::new().unwrap();
+        for (texte, pan) in [
+            ("carte 4000000000000000006 utilisée", "4000000000000000006"),
+            (
+                "carte 4000 0000 0000 0000 006 utilisée",
+                "4000 0000 0000 0000 006",
+            ),
+            ("carte 3050 0000 0000 0003 utilisée", "3050 0000 0000 0003"),
+        ] {
+            let entites = engine.find_all(texte);
+            let carte = entites
+                .iter()
+                .find(|e| e.category == PiiCategory::CreditCard)
+                .unwrap_or_else(|| panic!("PAN manqué dans {texte:?}"));
+            assert_eq!(&texte[carte.start as usize..carte.end as usize], pan);
+            assert_eq!(carte.confidence, 1.0);
+        }
+    }
+
+    #[test]
+    fn should_not_swallow_a_trailing_amount_into_a_card_candidate() {
+        let texte = "carte 4111 1111 1111 1111 10 EUR";
+        let entites = RegexEngine::new().unwrap().find_all(texte);
+        let carte = entites
+            .iter()
+            .find(|e| e.category == PiiCategory::CreditCard)
+            .expect("la carte doit être détectée");
+        assert_eq!(
+            &texte[carte.start as usize..carte.end as usize],
+            "4111 1111 1111 1111"
+        );
+    }
+
+    #[test]
     fn should_promote_a_validated_credit_card_to_full_confidence() {
         let entities = RegexEngine::new()
             .unwrap()
@@ -192,12 +258,14 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_a_structurally_plausible_ssn_at_medium_confidence_without_context() {
+    fn should_keep_a_structurally_plausible_ssn_below_full_confidence_without_context() {
+        // No checksum exists for an SSN; structural exclusions make 0.85 an
+        // honest claim but not certainty (which is reserved for real checksums).
         let entities = RegexEngine::new()
             .unwrap()
             .find_all("reference 123-45-6789 filed");
         assert_eq!(entities.len(), 1);
-        assert_eq!(entities[0].confidence, 0.4);
+        assert_eq!(entities[0].confidence, 0.85);
     }
 
     #[test]
@@ -207,13 +275,199 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_an_eu_vat_number() {
+    fn should_detect_a_checksum_valid_french_vat_number() {
         // Track C2: the French client base's gap. FR + 11 digits is a real French VAT
-        // shape (2-digit key + SIREN); the pattern itself accepts any EU member code.
+        // shape (2-digit key + SIREN). `FR40303265045` carries key 40 over SIREN
+        // 303265045, which satisfies the mod-97 relation.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("VAT FR40303265045 on the invoice");
         assert_eq!(
-            categories("VAT FR12345678901 on the invoice"),
-            vec![PiiCategory::EuVat]
+            entities.iter().map(|e| &e.category).collect::<Vec<_>>(),
+            vec![&PiiCategory::EuVat]
         );
+        assert_eq!(entities[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn should_reject_an_eu_vat_with_a_bad_checksum() {
+        // Same shape, wrong key: a failed check is stronger evidence than an
+        // unrun one, so the match is discarded rather than scored at 0.8.
+        assert!(categories("VAT FR41303265045 on the invoice").is_empty());
+    }
+
+    #[test]
+    fn should_keep_a_format_only_vat_at_reduced_confidence() {
+        // Germany has no public check digit; 0.8 is an honest claim, not 1.0.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("VAT DE123456789 on file");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].confidence, 0.8);
+    }
+
+    #[test]
+    fn should_detect_a_labelled_siret() {
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("SIRET 732 829 320 00074 on the invoice");
+        assert!(entities
+            .iter()
+            .any(|e| e.category == PiiCategory::FrSiret && e.confidence == 1.0));
+    }
+
+    #[test]
+    fn should_detect_an_unlabelled_but_canonically_grouped_siret() {
+        // Verbatim shape from a real CFE form: the nearest textual label was
+        // 2,758 characters away on a later page, so the grouping is the anchor.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("75008 PARIS 944 681 634 00019 66198");
+        assert!(entities.iter().any(|e| e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_detect_a_labelled_siren_but_not_a_grouped_amount() {
+        let labelled = RegexEngine::new().unwrap().find_all("SIREN 732 829 320");
+        assert!(labelled.iter().any(|e| e.category == PiiCategory::FrSiren));
+
+        // `732 829 320` passes Luhn and is how French typesets millions.
+        // Without a label it must not become a SIREN (other categories may
+        // legitimately claim the span, e.g. a phone-shaped candidate).
+        let amount = RegexEngine::new()
+            .unwrap()
+            .find_all("montant : 732 829 320");
+        assert!(!amount
+            .iter()
+            .any(|e| e.category == PiiCategory::FrSiren || e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_not_detect_an_unlabelled_compact_siret() {
+        // Luhn alone is not evidence: without a label or canonical grouping
+        // this is just a 14-digit number passing a checksum.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("référence 73282932000074");
+        assert!(!entities.iter().any(|e| e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_detect_a_checksum_valid_french_nir() {
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("numéro de sécurité sociale 1 85 01 75 123 456 09");
+        assert_eq!(
+            entities.iter().map(|e| &e.category).collect::<Vec<_>>(),
+            vec![&PiiCategory::FrNir]
+        );
+        assert_eq!(entities[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn should_not_flag_a_nir_shaped_number_with_a_bad_checksum() {
+        assert!(categories("numéro 291059933807693 on file").is_empty());
+    }
+
+    #[test]
+    fn should_reject_a_checksum_valid_nir_with_an_impossible_month() {
+        // La clé mod-97 est bonne (26) : seul le contrôle du mois peut rejeter.
+        assert!(categories("numéro 291139933807626 on file").is_empty());
+    }
+
+    #[test]
+    fn should_detect_nir_with_extended_registration_codes_and_narrow_spaces() {
+        for texte in [
+            "numéro 385017512345606 déclaré",
+            "numéro 885017512345647 déclaré",
+            "numéro 1\u{202f}85\u{202f}01\u{202f}75\u{202f}123\u{202f}456\u{202f}09 déclaré",
+        ] {
+            assert!(
+                categories(texte).contains(&PiiCategory::FrNir),
+                "NIR valide manqué : {texte:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_detect_a_french_national_phone_number() {
+        // The gap that motivated the libphonenumber switch: every previous
+        // pattern required `+`, parentheses or a `+33` prefix, so the way
+        // French people actually write their number sailed through.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("téléphone : 01 56 35 91 80");
+        assert_eq!(
+            entities.iter().map(|e| &e.category).collect::<Vec<_>>(),
+            vec![&PiiCategory::PhoneNumber]
+        );
+        assert_eq!(entities[0].confidence, 0.75);
+    }
+
+    #[test]
+    fn should_detect_an_ocr_merged_french_phone_number() {
+        // Verbatim from a real form: OCR merged the pair separators.
+        assert_eq!(
+            categories("téléphonez au : 0156 35 9180"),
+            vec![PiiCategory::PhoneNumber]
+        );
+    }
+
+    #[test]
+    fn should_detect_two_adjacent_french_numbers_without_merging_them() {
+        let texte = "01 56 35 91 80 06 12 34 56 78";
+        let telephone: Vec<_> = RegexEngine::new()
+            .unwrap()
+            .find_all(texte)
+            .into_iter()
+            .filter(|e| e.category == PiiCategory::PhoneNumber)
+            .map(|e| &texte[e.start as usize..e.end as usize])
+            .collect();
+        assert_eq!(
+            telephone,
+            vec!["01 56 35 91 80", "06 12 34 56 78"],
+            "deux numéros adjacents doivent produire deux entités"
+        );
+    }
+
+    #[test]
+    fn should_preserve_an_explicit_0033_prefix() {
+        assert!(categories("appel 0033612345678").contains(&PiiCategory::PhoneNumber));
+    }
+
+    #[test]
+    fn should_accept_tabs_and_narrow_no_break_spaces_as_separators() {
+        for texte in [
+            "appel 01\t56\t35\t91\t80",
+            "appel 01\u{202f}56\u{202f}35\u{202f}91\u{202f}80",
+            "appel +33\u{202f}6\u{202f}12\u{202f}34\u{202f}56\u{202f}78",
+        ] {
+            assert!(
+                categories(texte).contains(&PiiCategory::PhoneNumber),
+                "téléphone manqué : {texte:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_not_flag_a_siret_as_a_phone_number() {
+        // libphonenumber would pick `00074` out of this; candidate-span
+        // validation rejects it because no match covers the whole span. The
+        // SIRET itself is still detected by its own anchored recognizer.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("SIRET 732 829 320 00074");
+        assert!(!entities
+            .iter()
+            .any(|e| e.category == PiiCategory::PhoneNumber));
+        assert!(entities.iter().any(|e| e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_not_flag_a_compact_digit_run_as_a_phone_number() {
+        // Even though libphonenumber accepts `0156359180`, a bare digit run is
+        // too ambiguous with account/order numbers by policy.
+        assert!(categories("reference 0156359180 filed").is_empty());
     }
 
     #[test]

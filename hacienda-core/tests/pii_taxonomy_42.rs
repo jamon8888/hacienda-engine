@@ -71,9 +71,10 @@ fn should_map_all_42_privacy_filter_labels_to_pii_category() {
 }
 
 #[test]
-fn should_size_comprehensive_to_41() {
+fn should_size_comprehensive_to_44() {
     use hacienda_core::pii::config::VerticalConfig;
-    assert_eq!(VerticalConfig::comprehensive().labels.len(), 41);
+    // 41 hybrid taxonomy labels + fr_nir / fr_siren / fr_siret.
+    assert_eq!(VerticalConfig::comprehensive().labels.len(), 44);
 }
 
 #[test]

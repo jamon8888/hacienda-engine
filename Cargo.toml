@@ -58,6 +58,11 @@ futures = "0.3"
 # expects.
 liter-llm = { version = "1.11.3", default-features = false, features = ["native-http", "tracing"] }
 regex = "1.10"
+# libphonenumber-grade phone validation for PII detection (hacienda-core).
+# `lite` swaps the heavy `regex` engine for `regex-lite` to keep the WASM build
+# small; `builtin_metadata` + `global_static` provide the shared matcher;
+# `protox` keeps metadata compilation pure-Rust (no system `protoc`).
+rlibphonenumber = { version = "2.2", default-features = false, features = ["lite", "builtin_metadata", "global_static", "protox"] }
 # HTTP client for the presigned-upload `confirm` step's server-side HEAD request against
 # the object store (Phase 13 Task 4). Already resolved transitively via `xberg`'s `hf-hub`
 # dependency with a rustls (not native-tls/openssl) backend and no other TLS stack appears

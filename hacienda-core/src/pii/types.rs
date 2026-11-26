@@ -14,9 +14,21 @@ pub enum PiiCategory {
     PassportNumber,
     DriversLicense,
     /// EU intra-community VAT number: a 2-letter member-state code (`EL` for Greece,
-    /// not `GR`) followed by up to 12 digits. Added for Track C2 — the French client
-    /// base's most common gap between the browser's 9 regexes and the Rust set.
+    /// not `GR`) followed by a country-specific body — digits for most states,
+    /// alphanumeric for FR, IE, CY and ES. The body is checksummed where the
+    /// state publishes an algorithm (FR/BE/NL/LU) and format-checked elsewhere.
+    /// Added for Track C2 — the French client base's most common gap between
+    /// the browser's 9 regexes and the Rust set.
     EuVat,
+    /// French NIR (numéro de sécurité sociale / carte vitale), INSEE mod-97
+    /// checksum-validated. Distinct from the generic `NationalId` so an
+    /// allowlist can select it without also enabling every national scheme.
+    FrNir,
+    /// French SIREN (9-digit company identifier), Luhn + label-anchored.
+    FrSiren,
+    /// French SIRET (14-digit establishment identifier), Luhn + label or
+    /// canonical 3-3-3-5 grouping anchored.
+    FrSiret,
     NationalId,
     TaxId,
     CreditCard,
@@ -124,6 +136,19 @@ pub struct PatternMeta {
     /// this only guards against a future config-file/API surface silently losing it.
     #[serde(skip)]
     pub validator: Option<fn(&str) -> Option<bool>>,
+    /// Optional check over the *surrounding* text, for identifiers whose
+    /// matched span alone is not enough evidence. The French SIREN/SIRET
+    /// recognizers need a nearby label (`SIRET`, `RCS`, `EUID`) or — for a
+    /// SIRET only — the canonical 3-3-3-5 grouping: Luhn passes roughly one
+    /// arbitrary string in ten, so an unanchored 9-digit run would redact
+    /// French money amounts. Signature: (full text, match start, matched span).
+    #[serde(skip)]
+    pub anchor: Option<fn(&str, u32, &str) -> bool>,
+    /// When the validator rejects the whole regex match, retry progressively
+    /// shorter prefixes ending on an ASCII digit. Needed by variable-length
+    /// identifiers (cards) whose greedy regex can absorb an adjacent amount.
+    #[serde(default)]
+    pub retry_shorter: bool,
     /// Words that, found near a match, boost its confidence toward `1.0`
     /// ([`crate::pii::context`]). Empty for patterns with no calibrated context word list.
     #[serde(skip)]
@@ -153,6 +178,8 @@ impl PatternMeta {
             redact_template: redact_template.into(),
             base_confidence: 1.0,
             validator: None,
+            anchor: None,
+            retry_shorter: false,
             context_words: &[],
         }
     }
@@ -169,6 +196,20 @@ impl PatternMeta {
     /// `Option<bool>` contract.
     pub fn with_validator(mut self, validator: fn(&str) -> Option<bool>) -> Self {
         self.validator = Some(validator);
+        self
+    }
+
+    /// Attach a check that sees the full text and the match's byte offset — see
+    /// [`PatternMeta::anchor`]. Runs only after `validator` accepts the match.
+    pub fn with_anchor(mut self, anchor: fn(&str, u32, &str) -> bool) -> Self {
+        self.anchor = Some(anchor);
+        self
+    }
+
+    /// Retry shorter digit-ending prefixes when the validator rejects the
+    /// full regex match — see [`PatternMeta::retry_shorter`].
+    pub fn with_retry_shorter(mut self) -> Self {
+        self.retry_shorter = true;
         self
     }
 
