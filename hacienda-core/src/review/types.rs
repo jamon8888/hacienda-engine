@@ -45,6 +45,10 @@ pub struct ReviewQueueItem {
 }
 
 impl ReviewQueueItem {
+    /// Returns [`DEFAULT_TENANT`](crate::tenancy::DEFAULT_TENANT) for legacy review
+    /// records whose JSONL line has no `tenant_id`. The fallback is public because
+    /// the language bindings need the same tenant attribution the Rust store applies
+    /// when replaying those records.
     pub fn default_tenant_id() -> String {
         crate::tenancy::DEFAULT_TENANT.to_owned()
     }

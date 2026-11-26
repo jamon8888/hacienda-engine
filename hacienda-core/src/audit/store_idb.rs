@@ -29,6 +29,7 @@
 //! durable in the sense a compliance record needs. That product decision is unmade;
 //! nothing in this module resolves it.
 
+use crate::audit;
 use async_trait::async_trait;
 use indexed_db_futures::database::Database;
 use indexed_db_futures::prelude::*;
@@ -297,7 +298,7 @@ fn rehydrate(snapshot: Snapshot, node_id: &NodeId, config_hash: &str) -> Result<
 }
 
 #[async_trait]
-impl super::AuditStore for IndexedDbAuditStore {
+impl audit::AuditStore for IndexedDbAuditStore {
     async fn append(
         &self,
         tenant: &TenantId,

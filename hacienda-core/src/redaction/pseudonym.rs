@@ -379,7 +379,7 @@ type Lookup = dyn Fn(&str) -> Option<String> + Send + Sync;
 /// safe to ship into an existing single-tenant deployment with no re-provisioning (spec
 /// §3.1's back-compat requirement). For any other tenant, the looked-up name gains a
 /// `HACIENDA_TENANT_<TENANT>_` prefix, where `<TENANT>` is the tenant id uppercased —
-/// requiring every character to already be in `[A-Za-z0-9_]` (tenant ids are otherwise
+/// requiring every character to already be in `[a-z0-9_]` (tenant ids are otherwise
 /// unrestricted — see `tenancy.rs`'s module doc — but an environment variable name is
 /// not). A tenant id outside that set is rejected
 /// ([`PseudonymError::UnsupportedTenantId`]), not folded onto a nearby spelling: folding

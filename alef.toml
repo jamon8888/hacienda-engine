@@ -274,57 +274,115 @@ types = [
   "BucketError",
 ]
 
+# These shims take/return Rust traits (`dyn DossierAcl`, `dyn DocumentDossierIndex`,
+# `dyn KeyResolver`, `Arc<dyn JobStore/ReviewStore/TenantStore>`). The generator emits
+# `serde_json` deserialisation for them, which cannot compile: traits are neither
+# concrete deserialisation targets nor `Serialize` trait objects. Kotlin declarations
+# are dropped alongside the JNI shims so the bridge stays in sync.
+[crates.jni]
+exclude_functions = [
+  "with_dossier_acl",
+  "with_document_dossier_index",
+  "admit",
+  "into_arc",
+]
+
+[crates.kotlin_android]
+# IndexedDbAuditStore is gated on target_arch = "wasm32" in hacienda-core; the native
+# Android JNI crate cannot name it. Its trait impl is also the source of the bogus
+# `use super::AuditStore;` in generated crate roots (fixed at the source instead).
+exclude_types = ["IndexedDbAuditStore"]
+exclude_functions = [
+  "with_dossier_acl",
+  "with_document_dossier_index",
+  "admit",
+  "into_arc",
+]
+
+# Alef runs these commands from the repository root, and an explicit test table
+# replaces (rather than inherits) the built-in defaults. Every override therefore
+# states its own `command`/`coverage` and runs the package-local toolchain from
+# that package's directory. Without `command`, `alef test` selects no suite at all.
 [crates.test.python]
-precondition = "uv sync --all-extras"
-before = ["uv run pytest -x --tb=short hacienda-python/tests/"]
-e2e = "uv run pytest -x --tb=short hacienda-python/tests/e2e/"
+precondition = "cd hacienda-python && uv sync --all-extras"
+before = ["cd hacienda-python && uv run pytest -x --tb=short tests/"]
+command = "cd hacienda-python && uv run --no-sync pytest -x --tb=short tests/"
+coverage = "cd hacienda-python && uv run --no-sync pytest --cov=. --cov-report=lcov tests/"
+e2e = "cd hacienda-python && uv run --no-sync pytest -x --tb=short tests/e2e/"
 
 [crates.test.node]
-precondition = "npm ci"
+precondition = "cd hacienda-node && npm ci"
+command = "cd hacienda-node && npm test"
+coverage = "cd hacienda-node && npm test -- --coverage"
+e2e = "cd hacienda-node && npm run test:e2e"
 
 [crates.test.ruby]
-precondition = "bundle install"
-e2e = "bundle exec rspec"
+precondition = "cd packages/ruby && bundle install"
+command = "cd packages/ruby && bundle exec rspec"
+coverage = "cd packages/ruby && bundle exec rspec --format documentation"
+e2e = "cd packages/ruby && bundle exec rspec"
 
 [crates.test.php]
-precondition = "composer install"
-e2e = "vendor/bin/phpunit"
+precondition = "cd hacienda-php && composer install"
+command = "cd hacienda-php && composer test"
+coverage = "cd hacienda-php && composer test"
+e2e = "cd hacienda-php && vendor/bin/phpunit"
 
 [crates.test.go]
-precondition = "go mod tidy"
-e2e = "go test ./..."
+precondition = "cd packages/go && go mod tidy"
+command = "cd packages/go && go test -v ./..."
+coverage = "cd packages/go && go test -v -coverprofile=coverage.out ./..."
+e2e = "cd packages/go && go test ./..."
 
 [crates.test.java]
-precondition = "./mvnw test"
-e2e = "./mvnw verify"
+precondition = "cd packages/java && command -v mvn"
+command = "cd packages/java && mvn -f pom.xml test --batch-mode --no-transfer-progress"
+coverage = "cd packages/java && mvn -f pom.xml test jacoco:report --batch-mode --no-transfer-progress"
+e2e = "cd packages/java && mvn -f pom.xml verify --batch-mode --no-transfer-progress"
 
 [crates.test.csharp]
-precondition = "dotnet restore"
-e2e = "dotnet test"
+precondition = "cd packages/csharp && dotnet restore"
+command = "cd packages/csharp && dotnet test"
+coverage = "cd packages/csharp && dotnet test --collect:\"XPlat Code Coverage\""
+e2e = "cd packages/csharp && dotnet test"
 
 [crates.test.elixir]
-precondition = "mix deps.get"
-e2e = "mix test"
+precondition = "cd packages/elixir && mix deps.get"
+command = "cd packages/elixir && mix test"
+coverage = "cd packages/elixir && mix test --cover"
+e2e = "cd packages/elixir && mix test"
 
 [crates.test.wasm]
-precondition = "npm ci"
-e2e = "npm run test:e2e"
+precondition = "cd hacienda-wasm && npm ci"
+command = "cd hacienda-wasm && npm test"
+coverage = "cd hacienda-wasm && npm test -- --coverage"
+e2e = "cd hacienda-wasm && npm run test:e2e"
 
 [crates.test.jni]
-precondition = "./gradlew build"
-e2e = "./gradlew test"
+precondition = "cd packages/kotlin-android && ./gradlew build"
+command = "cd packages/kotlin-android && ./gradlew test"
+coverage = "cd packages/kotlin-android && ./gradlew test"
+e2e = "cd packages/kotlin-android && ./gradlew test"
 
 [crates.test.kotlin_android]
-precondition = "./gradlew build"
-e2e = "./gradlew test"
+precondition = "cd packages/kotlin-android && ./gradlew build"
+command = "cd packages/kotlin-android && ./gradlew test"
+coverage = "cd packages/kotlin-android && ./gradlew test"
+e2e = "cd packages/kotlin-android && ./gradlew test"
 
 [crates.test.swift]
-precondition = "swift package resolve"
-e2e = "swift test"
+precondition = "swift package resolve --package-path packages/swift"
+command = "swift test --package-path packages/swift"
+coverage = "swift test --package-path packages/swift"
+e2e = "swift test --package-path packages/swift"
 
 [crates.test.zig]
-precondition = "zig fetch"
-e2e = "zig test"
+# `zig test` without a source file or module is rejected before any test runs;
+# the package's build script owns the test step.
+precondition = "cd packages/zig && zig build"
+command = "cd packages/zig && zig build test"
+coverage = "cd packages/zig && zig build test"
+e2e = "cd packages/zig && zig build test"
 
 [crates.publish.languages.python]
 vendor_mode = "none"

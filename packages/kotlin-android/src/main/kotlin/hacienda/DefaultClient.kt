@@ -581,27 +581,6 @@ class HaciendaFacade internal constructor(handle: Long) : AutoCloseable {
             .setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
             .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
-
-    // Attach the dossier-membership ACL that gates [`RevealTicket`] minting
-    // (issue #147: creating a ticket = `pii:reveal` **and** belonging to the dossier).
-    //
-    // Without an ACL configured, minting is refused (fail-closed) — see the
-    // [`Self::dossier_acl`] field doc.
-    fun withDossierAcl(acl: DossierAcl): HaciendaFacade {
-        val handle = withHandle { handle -> HaciendaBridge.nativeHaciendaFacadeWithDossierAcl(handle, MAPPER.writeValueAsString(acl)) }
-        return HaciendaFacade(handle)
-    }
-
-    // Attach the document→dossier index that proves every `document_id` of a ticket
-    // request belongs to the request's `dossier_id` (issue #147 ownership gate).
-    //
-    // Without an index configured, minting is refused (fail-closed) — see the
-    // [`Self::document_dossier_index`] field doc.
-    fun withDocumentDossierIndex(index: DocumentDossierIndex): HaciendaFacade {
-        val handle = withHandle { handle -> HaciendaBridge.nativeHaciendaFacadeWithDocumentDossierIndex(handle, MAPPER.writeValueAsString(index)) }
-        return HaciendaFacade(handle)
-    }
-
     // Runtime identity of the NER detector this facade actually uses.
     //
     // Capability surfaces read this from their own facade so a report never
@@ -972,13 +951,6 @@ class InMemoryJobStore internal constructor(handle: Long) : AutoCloseable {
             .setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
             .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
-
-    // Wrap this store in an `Arc` so it satisfies `Arc<dyn JobStore>`.
-    fun intoArc(): JobStore {
-        val responseJson = withHandle { handle -> HaciendaBridge.nativeInMemoryJobStoreIntoArc(handle) }
-        return MAPPER.readValue(responseJson, JobStore::class.java)
-    }
-
     suspend fun create(tenant: TenantId, owner: String? = null): Job {
         return withContext(Dispatchers.IO) {
             val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeInMemoryJobStoreCreate(`alef$receiver`, MAPPER.writeValueAsString(mapOf("owner" to owner)), `alef$borrowed0`) } } }
@@ -1056,13 +1028,6 @@ class InMemoryReviewStore internal constructor(handle: Long) : AutoCloseable {
             .setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
             .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
-
-    // Wrap this store in an `Arc` so it satisfies `Arc<dyn ReviewStore>`.
-    fun intoArc(): ReviewStore {
-        val responseJson = withHandle { handle -> HaciendaBridge.nativeInMemoryReviewStoreIntoArc(handle) }
-        return MAPPER.readValue(responseJson, ReviewStore::class.java)
-    }
-
     suspend fun submit(tenant: TenantId, item: ReviewQueueItem): ReviewQueueItem {
         return withContext(Dispatchers.IO) {
             val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeInMemoryReviewStoreSubmit(`alef$receiver`, MAPPER.writeValueAsString(mapOf("item" to item)), `alef$borrowed0`) } } }
@@ -1110,86 +1075,6 @@ class InMemoryReviewStore internal constructor(handle: Long) : AutoCloseable {
             val handle = nativeHandle
             nativeHandle = 0L
             HaciendaBridge.nativeFreeInMemoryReviewStore(handle)
-        }
-    }
-}
-@Suppress("TooManyFunctions")
-class IndexedDbAuditStore internal constructor(handle: Long) : AutoCloseable {
-    private val handleLock = Any()
-    private var nativeHandle: Long = handle
-
-    internal fun <T> withHandle(block: (Long) -> T): T = synchronized(handleLock) {
-        check(nativeHandle != 0L) { "IndexedDbAuditStore is closed" }
-        block(nativeHandle)
-    }
-    companion object {
-        private val MAPPER = com.fasterxml.jackson.databind.ObjectMapper()
-            .registerModule(com.fasterxml.jackson.datatype.jdk8.Jdk8Module())
-            .findAndRegisterModules()
-            .setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
-            .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-    }
-
-    suspend fun append(tenant: TenantId, inputs: List<AuditEntryInput>): List<AuditEntry> {
-        return withContext(Dispatchers.IO) {
-            val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreAppend(`alef$receiver`, MAPPER.writeValueAsString(mapOf("inputs" to inputs)), `alef$borrowed0`) } } }
-            MAPPER.readValue(responseJson, object : TypeReference<List<AuditEntry>>() {})
-        }
-    }
-
-    suspend fun entries(tenant: TenantId): List<AuditEntry> {
-        return withContext(Dispatchers.IO) {
-            val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreEntries(`alef$receiver`, "{}", `alef$borrowed0`) } } }
-            MAPPER.readValue(responseJson, object : TypeReference<List<AuditEntry>>() {})
-        }
-    }
-
-    // Identical to [`InMemoryAuditStore`](super::InMemoryAuditStore)'s, and for the same
-    // reason: this backend shares [`State`], so the whole history — sealed entries
-    // included — is already in memory. IndexedDB is the durability step behind the
-    // mutating methods, not a store this one has to page through; reading it here would
-    // re-fetch a snapshot of exactly what the guard is already holding.
-    suspend fun history(tenant: TenantId, after: AuditCursor? = null, limit: Long): AuditPage {
-        return withContext(Dispatchers.IO) {
-            val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreHistory(`alef$receiver`, MAPPER.writeValueAsString(mapOf("after" to after, "limit" to limit)), `alef$borrowed0`) } } }
-            MAPPER.readValue(responseJson, AuditPage::class.java)
-        }
-    }
-
-    suspend fun tip(tenant: TenantId): String {
-        return withContext(Dispatchers.IO) { synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreTip(`alef$receiver`, "{}", `alef$borrowed0`) } } } }
-    }
-
-    suspend fun seals(tenant: TenantId): List<SegmentSeal> {
-        return withContext(Dispatchers.IO) {
-            val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreSeals(`alef$receiver`, "{}", `alef$borrowed0`) } } }
-            MAPPER.readValue(responseJson, object : TypeReference<List<SegmentSeal>>() {})
-        }
-    }
-
-    suspend fun verify(tenant: TenantId): Unit {
-        withContext(Dispatchers.IO) { synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreVerify(`alef$receiver`, "{}", `alef$borrowed0`) } } } }
-    }
-
-    suspend fun rotate(tenant: TenantId): SegmentSeal {
-        return withContext(Dispatchers.IO) {
-            val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreRotate(`alef$receiver`, "{}", `alef$borrowed0`) } } }
-            MAPPER.readValue(responseJson, SegmentSeal::class.java)
-        }
-    }
-
-    suspend fun close(tenant: TenantId): SegmentSeal {
-        return withContext(Dispatchers.IO) {
-            val responseJson = synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeIndexedDbAuditStoreClose(`alef$receiver`, "{}", `alef$borrowed0`) } } }
-            MAPPER.readValue(responseJson, SegmentSeal::class.java)
-        }
-    }
-
-    override fun close() = synchronized(handleLock) {
-        if (nativeHandle != 0L) {
-            val handle = nativeHandle
-            nativeHandle = 0L
-            HaciendaBridge.nativeFreeIndexedDbAuditStore(handle)
         }
     }
 }
@@ -1863,21 +1748,6 @@ class TenantPseudonymiserRegistry internal constructor(handle: Long) : AutoClose
             .setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
             .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
-
-    // Resolve and cache `tenant`'s pseudonymiser.
-    //
-    // Idempotent, and safe to call again for an already-admitted tenant — the existing
-    // entry is replaced with a freshly resolved one. That is the path a key rotation
-    // takes (see P3): re-admit the tenant after the resolver reports a new active key.
-    //
-    // # Errors
-    //
-    // Whatever `resolver` returns for a missing or malformed key — see
-    // [`Pseudonymiser::new`] / [`Pseudonymiser::with_active`].
-    fun admit(tenant: TenantId, resolver: KeyResolver, active: KeyId? = null, retired: List<KeyId>): Unit {
-        synchronized(HaciendaBridge.borrowedHandleLock) { tenant.withHandle { `alef$borrowed0` -> withHandle { `alef$receiver` -> HaciendaBridge.nativeTenantPseudonymiserRegistryAdmit(`alef$receiver`, MAPPER.writeValueAsString(mapOf("resolver" to resolver, "active" to active, "retired" to retired)), `alef$borrowed0`) } } }
-    }
-
     // The admitted pseudonymiser for `tenant`, if any.
     //
     // `None` means the tenant was never admitted (or its last admission attempt

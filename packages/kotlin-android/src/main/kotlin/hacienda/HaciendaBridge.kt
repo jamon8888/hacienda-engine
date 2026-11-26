@@ -225,10 +225,6 @@ object HaciendaBridge {
     external fun nativeFileSinkRotate(handle: Long)
     external fun nativeFreeFileSink(handle: Long)
     @Throws(HaciendaBridgeException::class)
-    external fun nativeHaciendaFacadeWithDossierAcl(handle: Long, requestJson: String): Long
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeHaciendaFacadeWithDocumentDossierIndex(handle: Long, requestJson: String): Long
-    @Throws(HaciendaBridgeException::class)
     external fun nativeHaciendaFacadeNerRuntimeState(handle: Long): String
     @Throws(HaciendaBridgeException::class)
     external fun nativeHaciendaFacadeConfig(handle: Long): String
@@ -283,8 +279,6 @@ object HaciendaBridge {
     external fun nativeInMemoryDossierAclIsMember(handle: Long, requestJson: String, tenantHandle: Long): Boolean
     external fun nativeFreeInMemoryDossierAcl(handle: Long)
     @Throws(HaciendaBridgeException::class)
-    external fun nativeInMemoryJobStoreIntoArc(handle: Long): String
-    @Throws(HaciendaBridgeException::class)
     external fun nativeInMemoryJobStoreCreate(handle: Long, requestJson: String, tenantHandle: Long): String
     @Throws(HaciendaBridgeException::class)
     external fun nativeInMemoryJobStoreGet(handle: Long, requestJson: String, tenantHandle: Long): String?
@@ -302,8 +296,6 @@ object HaciendaBridge {
     external fun nativeInMemoryJobStoreDelete(handle: Long, requestJson: String, tenantHandle: Long): Boolean
     external fun nativeFreeInMemoryJobStore(handle: Long)
     @Throws(HaciendaBridgeException::class)
-    external fun nativeInMemoryReviewStoreIntoArc(handle: Long): String
-    @Throws(HaciendaBridgeException::class)
     external fun nativeInMemoryReviewStoreSubmit(handle: Long, requestJson: String, tenantHandle: Long): String
     @Throws(HaciendaBridgeException::class)
     external fun nativeInMemoryReviewStoreAssign(handle: Long, requestJson: String, tenantHandle: Long): String
@@ -316,23 +308,6 @@ object HaciendaBridge {
     @Throws(HaciendaBridgeException::class)
     external fun nativeInMemoryReviewStoreStats(handle: Long, requestJson: String, tenantHandle: Long): String
     external fun nativeFreeInMemoryReviewStore(handle: Long)
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreAppend(handle: Long, requestJson: String, tenantHandle: Long): String
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreEntries(handle: Long, requestJson: String, tenantHandle: Long): String
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreHistory(handle: Long, requestJson: String, tenantHandle: Long): String
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreTip(handle: Long, requestJson: String, tenantHandle: Long): String
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreSeals(handle: Long, requestJson: String, tenantHandle: Long): String
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreVerify(handle: Long, requestJson: String, tenantHandle: Long)
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreRotate(handle: Long, requestJson: String, tenantHandle: Long): String
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeIndexedDbAuditStoreClose(handle: Long, requestJson: String, tenantHandle: Long): String
-    external fun nativeFreeIndexedDbAuditStore(handle: Long)
     @Throws(HaciendaBridgeException::class)
     external fun nativeKeyIdAsStr(handle: Long): String
     external fun nativeFreeKeyId(handle: Long)
@@ -419,8 +394,6 @@ object HaciendaBridge {
     @Throws(HaciendaBridgeException::class)
     external fun nativeTenantIdAsStr(handle: Long): String
     external fun nativeFreeTenantId(handle: Long)
-    @Throws(HaciendaBridgeException::class)
-    external fun nativeTenantPseudonymiserRegistryAdmit(handle: Long, requestJson: String, tenantHandle: Long)
     @Throws(HaciendaBridgeException::class)
     external fun nativeTenantPseudonymiserRegistryGet(handle: Long, requestJson: String, tenantHandle: Long): Long
     @Throws(HaciendaBridgeException::class)

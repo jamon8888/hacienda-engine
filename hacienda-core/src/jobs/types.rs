@@ -107,6 +107,10 @@ pub struct Job {
 }
 
 impl Job {
+    /// Returns [`DEFAULT_TENANT`](crate::tenancy::DEFAULT_TENANT) for records written
+    /// before `tenant_id` existed. Language bindings call this after deserialising a
+    /// legacy job, so the fallback belongs on the public method rather than only on
+    /// the field's `serde` attribute.
     pub fn default_tenant_id() -> String {
         crate::tenancy::DEFAULT_TENANT.to_owned()
     }
