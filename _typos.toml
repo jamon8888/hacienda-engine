@@ -145,6 +145,29 @@ authentification = "authentification"
 Distincte = "Distincte"
 objet = "objet"
 remplacement = "remplacement"
+# French identifiers and prose added with the PII regex hardening suite
+# (hacienda-core/tests/pii_francais.rs and pii/**). The English-only
+# dictionary suggests incorrect "corrections" for all of these.
+Formes = "Formes"
+IIN = "IIN"
+accepte = "accepte"
+algorithme = "algorithme"
+algorithmes = "algorithmes"
+candidat = "candidat"
+commun = "commun"
+controle = "controle"
+correspondance = "correspondance"
+corse = "corse"
+entite = "entite"
+entites = "entites"
+entreprise = "entreprise"
+exemple = "exemple"
+groupe = "groupe"
+groupes = "groupes"
+somme = "somme"
+structurels = "structurels"
+termine = "termine"
+variantes = "variantes"
 
 [default.extend-identifiers]
 # "EIN" (Employer Identification Number, US tax ID) is a real identifier used verbatim in
