@@ -144,6 +144,11 @@ pub struct PatternMeta {
     /// French money amounts. Signature: (full text, match start, matched span).
     #[serde(skip)]
     pub anchor: Option<fn(&str, u32, &str) -> bool>,
+    /// When the validator rejects the whole regex match, retry progressively
+    /// shorter prefixes ending on an ASCII digit. Needed by variable-length
+    /// identifiers (cards) whose greedy regex can absorb an adjacent amount.
+    #[serde(default)]
+    pub retry_shorter: bool,
     /// Words that, found near a match, boost its confidence toward `1.0`
     /// ([`crate::pii::context`]). Empty for patterns with no calibrated context word list.
     #[serde(skip)]
@@ -174,6 +179,7 @@ impl PatternMeta {
             base_confidence: 1.0,
             validator: None,
             anchor: None,
+            retry_shorter: false,
             context_words: &[],
         }
     }
@@ -197,6 +203,13 @@ impl PatternMeta {
     /// [`PatternMeta::anchor`]. Runs only after `validator` accepts the match.
     pub fn with_anchor(mut self, anchor: fn(&str, u32, &str) -> bool) -> Self {
         self.anchor = Some(anchor);
+        self
+    }
+
+    /// Retry shorter digit-ending prefixes when the validator rejects the
+    /// full regex match — see [`PatternMeta::retry_shorter`].
+    pub fn with_retry_shorter(mut self) -> Self {
+        self.retry_shorter = true;
         self
     }
 

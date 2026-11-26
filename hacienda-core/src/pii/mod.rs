@@ -129,6 +129,12 @@ pub enum PiiError {
     /// The document-level regex scan panicked on a blocking worker. Treated as
     /// an error rather than as an empty result: silently dropping every span
     /// would look like a successful redaction of clean text.
-    #[error("regex scan failed: {0}")]
-    RegexScan(String),
+    #[error("regex scan failed: {message}")]
+    RegexScan {
+        message: String,
+        /// Boxed so the enum stays WASM-compatible: `tokio` is a native-only
+        /// dependency, but the originating `JoinError` is kept as a source.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }

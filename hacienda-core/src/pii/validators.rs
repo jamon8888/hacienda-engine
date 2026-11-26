@@ -345,17 +345,27 @@ pub fn validate_fr_nir(text: &str) -> Option<bool> {
         return Some(false);
     }
     // Champs structurels : un mois impossible ou un département invalide
-    // doit être rejeté même si la clé mod-97 tombe juste.
+    // doit être rejeté même si la clé mod-97 tombe juste. Un chiffre non
+    // ASCII (par exemple arabe) donnerait 15 caractères mais casserait les
+    // tranches d'octets ci-dessous : refus avant tout slicing.
+    if !cleaned.is_ascii() {
+        return Some(false);
+    }
     let sex = &cleaned[0..1];
     let month = &cleaned[3..5];
     let department = &cleaned[5..7];
+    // INSEE utilise 20-99 quand le mois de naissance est inconnu, et 99
+    // (avec une commune 999) pour une naissance à l'étranger : ce sont des
+    // codes administratifs valides, pas des champs impossibles.
     let valid_month = month.bytes().all(|b| b.is_ascii_digit())
-        && month.parse::<u32>().is_ok_and(|m| (1..=12).contains(&m));
+        && month
+            .parse::<u32>()
+            .is_ok_and(|m| (1..=12).contains(&m) || (20..=99).contains(&m));
     let valid_department = matches!(department, "2A" | "2B")
         || (department.bytes().all(|b| b.is_ascii_digit())
             && department
                 .parse::<u32>()
-                .is_ok_and(|d| (1..=98).contains(&d)));
+                .is_ok_and(|d| (1..=99).contains(&d)));
     if !matches!(sex, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8")
         || !valid_month
         || !valid_department
@@ -975,14 +985,22 @@ mod tests {
     #[test]
     fn should_reject_an_invalid_french_nir() {
         for n in [
-            "291059933807693",  // bad checksum
-            "291139933807626",  // checksum OK, month 13 impossible
-            "185990175123489",  // checksum OK, department 99 impossible
-            "29105993380769",   // too short
-            "1850175123456090", // too long
+            "291059933807693",        // bad checksum
+            "291139933807626",        // checksum OK, month 13 impossible
+            "185010012345694",        // checksum OK, department 00 impossible
+            "18\u{0665}017512345609", // non-ASCII digit must not reach byte slicing
+            "29105993380769",         // too short
+            "1850175123456090",       // too long
         ] {
             assert_eq!(validate_fr_nir(n), Some(false), "should reject: {n}");
         }
+    }
+
+    #[test]
+    fn should_accept_insee_administrative_month_and_foreign_birth_department() {
+        // 20-99 = birth month unknown; 99 = born outside France.
+        assert_eq!(validate_fr_nir("291205933807654"), Some(true));
+        assert_eq!(validate_fr_nir("185019912345640"), Some(true));
     }
 
     #[test]

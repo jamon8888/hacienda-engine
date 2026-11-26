@@ -235,7 +235,10 @@ impl PiiPipeline {
         let owned = text.to_string();
         tokio::task::spawn_blocking(move || engine.find_all(&owned))
             .await
-            .map_err(|err| PiiError::RegexScan(err.to_string()))
+            .map_err(|err| PiiError::RegexScan {
+                message: err.to_string(),
+                source: Box::new(err),
+            })
     }
 
     #[cfg(target_arch = "wasm32")]

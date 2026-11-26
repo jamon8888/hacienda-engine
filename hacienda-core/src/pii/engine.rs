@@ -58,23 +58,49 @@ impl RegexEngine {
 
         for (meta, re) in self.patterns.iter().zip(&self.compiled) {
             for m in re.find_iter(text) {
+                let debut = m.start();
+                let mut fin = m.end();
                 let confidence = match meta.validator {
                     Some(validate) => match validate(m.as_str()) {
+                        Some(false) if meta.retry_shorter => {
+                            // Le regex peut absorber un montant voisin ; on
+                            // réessaie les préfixes se terminant sur un chiffre.
+                            let mut retenu = None;
+                            let mut pos = m.end();
+                            while pos > debut {
+                                // Le préfixe `debut..pos` se termine sur un
+                                // chiffre : on ne coupe jamais au milieu d'un
+                                // séparateur ou d'un caractère UTF-8.
+                                if text.as_bytes()[pos - 1].is_ascii_digit()
+                                    && validate(&text[debut..pos]) == Some(true)
+                                {
+                                    fin = pos;
+                                    retenu = Some(1.0);
+                                    break;
+                                }
+                                pos -= 1;
+                            }
+                            match retenu {
+                                Some(c) => c,
+                                None => continue,
+                            }
+                        }
                         Some(false) => continue,
                         Some(true) => 1.0,
                         None => meta.base_confidence,
                     },
                     None => meta.base_confidence,
                 };
+                let correspondance = &text[debut..fin];
                 if let Some(anchor) = meta.anchor {
-                    if !anchor(text, m.start() as u32, m.as_str()) {
+                    if !anchor(text, debut as u32, correspondance) {
                         continue;
                     }
                 }
                 entities.push(RegexEntity {
                     category: meta.category.clone(),
-                    start: m.start() as u32,
-                    end: m.end() as u32,
+                    start: debut as u32,
+                    end: fin as u32,
                     confidence,
                     format_preserving: meta.format_preserving,
                     redact_template: meta.redact_template.clone(),
@@ -167,6 +193,20 @@ mod tests {
             assert_eq!(&texte[carte.start as usize..carte.end as usize], pan);
             assert_eq!(carte.confidence, 1.0);
         }
+    }
+
+    #[test]
+    fn should_not_swallow_a_trailing_amount_into_a_card_candidate() {
+        let texte = "carte 4111 1111 1111 1111 10 EUR";
+        let entites = RegexEngine::new().unwrap().find_all(texte);
+        let carte = entites
+            .iter()
+            .find(|e| e.category == PiiCategory::CreditCard)
+            .expect("la carte doit être détectée");
+        assert_eq!(
+            &texte[carte.start as usize..carte.end as usize],
+            "4111 1111 1111 1111"
+        );
     }
 
     #[test]

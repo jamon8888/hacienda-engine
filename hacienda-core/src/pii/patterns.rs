@@ -30,10 +30,11 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
             PiiCategory::FrNir,
             // Separators include the ordinary space, NBSP (U+00A0) and the
             // narrow NBSP (U+202F) that French typesetting uses for numeric
-            // grouping. The month is 01-12; the department is 01-98 or 2A/2B.
+            // grouping. INSEE allows 20-99 as an administrative month code
+            // (unknown birth month) and 99 as a department (born abroad).
             // Leading registration codes 1-8 are all valid (1/2 are the
             // historical male/female codes).
-            r"\b[1-8][ .\u{a0}\u{202f}]?\d{2}[ .\u{a0}\u{202f}]?(?:0[1-9]|1[0-2])[ .\u{a0}\u{202f}]?(?:0[1-9]|[1-8]\d|9[0-8]|2[AB])[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{2}\b",
+            r"\b[1-8][ .\u{a0}\u{202f}]?\d{2}[ .\u{a0}\u{202f}]?(?:0[1-9]|1[0-2]|[2-9]\d)[ .\u{a0}\u{202f}]?(?:0[1-9]|[1-9]\d|2[AB])[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{3}[ .\u{a0}\u{202f}]?\d{2}\b",
             true,
             "[NIR:****]",
         )
@@ -98,12 +99,16 @@ pub fn builtin_patterns() -> Vec<PatternMeta> {
         // to be redacted (and reported) as a card on every French invoice.
         PatternMeta::new(
             PiiCategory::CreditCard,
+            // Greedy so grouped long PANs are captured whole; when it
+            // absorbs a neighbouring amount, `retry_shorter` lets the engine
+            // retry shorter digit-ending prefixes until Luhn+IIN accepts.
             r"\b(?:\d[ .-]?){12,18}\d\b",
             true,
             "[CARD:****]",
         )
         .with_base_confidence(0.3)
         .with_validator(validators::validate_credit_card)
+        .with_retry_shorter()
         .with_context(&[
             "credit",
             "card",

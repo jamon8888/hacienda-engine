@@ -216,6 +216,18 @@ mod detection {
     }
 
     #[test]
+    fn doit_accepter_les_codes_administratifs_insee() {
+        // 20-99 : mois de naissance inconnu ; 99 : né à l'étranger.
+        assert!(categories("NIR 291205933807654 déclaré").contains(&PiiCategory::FrNir));
+        assert!(categories("NIR 185019912345640 déclaré").contains(&PiiCategory::FrNir));
+    }
+
+    #[test]
+    fn doit_rejeter_un_nir_avec_un_chiffre_non_ascii() {
+        assert!(!categories("NIR 18\u{0665}017512345609 déclaré").contains(&PiiCategory::FrNir));
+    }
+
+    #[test]
     fn doit_garder_le_siren_devant_un_code_postal() {
         // Les cinq chiffres qui suivent ne forment pas un SIRET avec ce SIREN.
         let trouvees = RegexEngine::new()
