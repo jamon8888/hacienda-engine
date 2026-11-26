@@ -23,9 +23,14 @@
     { "id": "api_key", "text": "api_key: sk_live_51H8xyzABCDEFGHIJKLMNOPQR set.", "categories": ["api_key"] },
     { "id": "secret_token", "text": "password: hunter2ExtraLongSecretValue set.", "categories": ["secret_token"] },
     { "id": "jwt_token", "text": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "categories": ["jwt_token"] },
-    { "id": "eu_vat", "text": "VAT FR12345678901 on the invoice.", "categories": ["eu_vat"] },
+    { "id": "eu_vat", "text": "VAT FR40303265045 on the invoice.", "categories": ["eu_vat"] },
     { "id": "eu_vat_greece", "text": "VAT EL123456789 on the invoice.", "categories": ["eu_vat"] },
     { "id": "drivers_license", "text": "License A1234567 shown.", "categories": ["drivers_license"] },
+    { "id": "nir_fr", "text": "NIR 185017512345609 déclaré.", "categories": ["fr_nir"] },
+    { "id": "siret_fr", "text": "SIRET 73282932000074 mentionné.", "categories": ["fr_siret"] },
+    { "id": "siren_fr", "text": "SIREN 732829320 déclaré.", "categories": ["fr_siren"] },
+    { "id": "telephone_fr_national", "text": "Appelez le 01 56 35 91 80.", "categories": ["phone_number"] },
+    { "id": "tva_fr_valide", "text": "TVA FR40303265045 intracommunautaire.", "categories": ["eu_vat"] },
     { "id": "clean_text", "text": "The quarterly report shipped on time and under budget.", "categories": [] }
   ]
 }

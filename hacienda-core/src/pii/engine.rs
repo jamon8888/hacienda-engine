@@ -66,6 +66,11 @@ impl RegexEngine {
                     },
                     None => meta.base_confidence,
                 };
+                if let Some(anchor) = meta.anchor {
+                    if !anchor(text, m.start() as u32, m.as_str()) {
+                        continue;
+                    }
+                }
                 entities.push(RegexEntity {
                     category: meta.category.clone(),
                     start: m.start() as u32,
@@ -192,12 +197,14 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_a_structurally_plausible_ssn_at_medium_confidence_without_context() {
+    fn should_keep_a_structurally_plausible_ssn_below_full_confidence_without_context() {
+        // No checksum exists for an SSN; structural exclusions make 0.85 an
+        // honest claim but not certainty (which is reserved for real checksums).
         let entities = RegexEngine::new()
             .unwrap()
             .find_all("reference 123-45-6789 filed");
         assert_eq!(entities.len(), 1);
-        assert_eq!(entities[0].confidence, 0.4);
+        assert_eq!(entities[0].confidence, 0.85);
     }
 
     #[test]
@@ -207,13 +214,143 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_an_eu_vat_number() {
+    fn should_detect_a_checksum_valid_french_vat_number() {
         // Track C2: the French client base's gap. FR + 11 digits is a real French VAT
-        // shape (2-digit key + SIREN); the pattern itself accepts any EU member code.
+        // shape (2-digit key + SIREN). `FR40303265045` carries key 40 over SIREN
+        // 303265045, which satisfies the mod-97 relation.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("VAT FR40303265045 on the invoice");
         assert_eq!(
-            categories("VAT FR12345678901 on the invoice"),
-            vec![PiiCategory::EuVat]
+            entities.iter().map(|e| &e.category).collect::<Vec<_>>(),
+            vec![&PiiCategory::EuVat]
         );
+        assert_eq!(entities[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn should_reject_an_eu_vat_with_a_bad_checksum() {
+        // Same shape, wrong key: a failed check is stronger evidence than an
+        // unrun one, so the match is discarded rather than scored at 0.8.
+        assert!(categories("VAT FR41303265045 on the invoice").is_empty());
+    }
+
+    #[test]
+    fn should_keep_a_format_only_vat_at_reduced_confidence() {
+        // Germany has no public check digit; 0.8 is an honest claim, not 1.0.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("VAT DE123456789 on file");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].confidence, 0.8);
+    }
+
+    #[test]
+    fn should_detect_a_labelled_siret() {
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("SIRET 732 829 320 00074 on the invoice");
+        assert!(entities
+            .iter()
+            .any(|e| e.category == PiiCategory::FrSiret && e.confidence == 1.0));
+    }
+
+    #[test]
+    fn should_detect_an_unlabelled_but_canonically_grouped_siret() {
+        // Verbatim shape from a real CFE form: the nearest textual label was
+        // 2,758 characters away on a later page, so the grouping is the anchor.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("75008 PARIS 944 681 634 00019 66198");
+        assert!(entities.iter().any(|e| e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_detect_a_labelled_siren_but_not_a_grouped_amount() {
+        let labelled = RegexEngine::new().unwrap().find_all("SIREN 732 829 320");
+        assert!(labelled.iter().any(|e| e.category == PiiCategory::FrSiren));
+
+        // `732 829 320` passes Luhn and is how French typesets millions.
+        // Without a label it must not become a SIREN (other categories may
+        // legitimately claim the span, e.g. a phone-shaped candidate).
+        let amount = RegexEngine::new()
+            .unwrap()
+            .find_all("montant : 732 829 320");
+        assert!(!amount
+            .iter()
+            .any(|e| e.category == PiiCategory::FrSiren || e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_not_detect_an_unlabelled_compact_siret() {
+        // Luhn alone is not evidence: without a label or canonical grouping
+        // this is just a 14-digit number passing a checksum.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("référence 73282932000074");
+        assert!(!entities.iter().any(|e| e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_detect_a_checksum_valid_french_nir() {
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("numéro de sécurité sociale 1 85 01 75 123 456 09");
+        assert_eq!(
+            entities.iter().map(|e| &e.category).collect::<Vec<_>>(),
+            vec![&PiiCategory::FrNir]
+        );
+        assert_eq!(entities[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn should_not_flag_a_nir_shaped_number_with_a_bad_checksum() {
+        assert!(categories("numéro 291059933807693 on file").is_empty());
+    }
+
+    #[test]
+    fn should_detect_a_french_national_phone_number() {
+        // The gap that motivated the libphonenumber switch: every previous
+        // pattern required `+`, parentheses or a `+33` prefix, so the way
+        // French people actually write their number sailed through.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("téléphone : 01 56 35 91 80");
+        assert_eq!(
+            entities.iter().map(|e| &e.category).collect::<Vec<_>>(),
+            vec![&PiiCategory::PhoneNumber]
+        );
+        assert_eq!(entities[0].confidence, 0.75);
+    }
+
+    #[test]
+    fn should_detect_an_ocr_merged_french_phone_number() {
+        // Verbatim from a real form: OCR merged the pair separators.
+        assert_eq!(
+            categories("téléphonez au : 0156 35 9180"),
+            vec![PiiCategory::PhoneNumber]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_siret_as_a_phone_number() {
+        // libphonenumber would pick `00074` out of this; candidate-span
+        // validation rejects it because no match covers the whole span. The
+        // SIRET itself is still detected by its own anchored recognizer.
+        let entities = RegexEngine::new()
+            .unwrap()
+            .find_all("SIRET 732 829 320 00074");
+        assert!(!entities
+            .iter()
+            .any(|e| e.category == PiiCategory::PhoneNumber));
+        assert!(entities.iter().any(|e| e.category == PiiCategory::FrSiret));
+    }
+
+    #[test]
+    fn should_not_flag_a_compact_digit_run_as_a_phone_number() {
+        // Even though libphonenumber accepts `0156359180`, a bare digit run is
+        // too ambiguous with account/order numbers by policy.
+        assert!(categories("reference 0156359180 filed").is_empty());
     }
 
     #[test]

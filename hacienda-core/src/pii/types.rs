@@ -17,6 +17,15 @@ pub enum PiiCategory {
     /// not `GR`) followed by up to 12 digits. Added for Track C2 — the French client
     /// base's most common gap between the browser's 9 regexes and the Rust set.
     EuVat,
+    /// French NIR (numéro de sécurité sociale / carte vitale), INSEE mod-97
+    /// checksum-validated. Distinct from the generic `NationalId` so an
+    /// allowlist can select it without also enabling every national scheme.
+    FrNir,
+    /// French SIREN (9-digit company identifier), Luhn + label-anchored.
+    FrSiren,
+    /// French SIRET (14-digit establishment identifier), Luhn + label or
+    /// canonical 3-3-3-5 grouping anchored.
+    FrSiret,
     NationalId,
     TaxId,
     CreditCard,
@@ -124,6 +133,14 @@ pub struct PatternMeta {
     /// this only guards against a future config-file/API surface silently losing it.
     #[serde(skip)]
     pub validator: Option<fn(&str) -> Option<bool>>,
+    /// Optional check over the *surrounding* text, for identifiers whose
+    /// matched span alone is not enough evidence. The French SIREN/SIRET
+    /// recognizers need a nearby label (`SIRET`, `RCS`, `EUID`) or — for a
+    /// SIRET only — the canonical 3-3-3-5 grouping: Luhn passes roughly one
+    /// arbitrary string in ten, so an unanchored 9-digit run would redact
+    /// French money amounts. Signature: (full text, match start, matched span).
+    #[serde(skip)]
+    pub anchor: Option<fn(&str, u32, &str) -> bool>,
     /// Words that, found near a match, boost its confidence toward `1.0`
     /// ([`crate::pii::context`]). Empty for patterns with no calibrated context word list.
     #[serde(skip)]
@@ -153,6 +170,7 @@ impl PatternMeta {
             redact_template: redact_template.into(),
             base_confidence: 1.0,
             validator: None,
+            anchor: None,
             context_words: &[],
         }
     }
@@ -169,6 +187,13 @@ impl PatternMeta {
     /// `Option<bool>` contract.
     pub fn with_validator(mut self, validator: fn(&str) -> Option<bool>) -> Self {
         self.validator = Some(validator);
+        self
+    }
+
+    /// Attach a check that sees the full text and the match's byte offset — see
+    /// [`PatternMeta::anchor`]. Runs only after `validator` accepts the match.
+    pub fn with_anchor(mut self, anchor: fn(&str, u32, &str) -> bool) -> Self {
+        self.anchor = Some(anchor);
         self
     }
 
