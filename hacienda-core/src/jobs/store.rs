@@ -101,7 +101,7 @@ pub trait JobStore: Send + Sync {
     /// otherwise return the stored job unchanged. This includes preserving the
     /// original reason and `updated_at` on a duplicate `fail` or on a `fail`
     /// racing a `finish`.
-    async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError>;
+    async fn fail(&self, tenant: &TenantId, id: &str, reason: String) -> Result<Job, JobError>;
 
     /// Overwrite a running job's progress payload.
     ///
@@ -281,7 +281,7 @@ impl JobStore for InMemoryJobStore {
         Ok(job.clone())
     }
 
-    async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError> {
+    async fn fail(&self, tenant: &TenantId, id: &str, reason: String) -> Result<Job, JobError> {
         let mut guard = self
             .jobs
             .lock()
@@ -294,7 +294,7 @@ impl JobStore for InMemoryJobStore {
             return Ok(job.clone());
         }
         job.status = JobStatus::Failed;
-        job.error = Some(error);
+        job.error = Some(reason);
         job.updated_at = now_rfc3339();
         Ok(job.clone())
     }

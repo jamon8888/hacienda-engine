@@ -1,0 +1,12 @@
+python-version = "3.11"
+preset = "strict"
+ignore-missing-imports = ["hacienda._hacienda"]
+
+[[sub-config]]
+matches = "**/api.py"
+
+[sub-config.errors]
+bad-argument-count = false
+not-iterable = false
+missing-attribute = false
+open-unpacking = false

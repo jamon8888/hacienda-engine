@@ -138,7 +138,9 @@ pub trait AuditStore: Send + Sync {
     /// Every seal `tenant` can see, oldest first.
     ///
     /// The seals form a hash chain. Pass the slice to [`verify_seal_chain`] to confirm
-    /// no seal was tampered with or deleted since it was recorded.
+    /// that no seal was altered and that no leading seal was removed. Removal of the
+    /// newest seal is not detected; compare the last seal's `seal_hash` with an
+    /// independently retained expected tip.
     async fn seals(&self, tenant: &TenantId) -> Result<Vec<SegmentSeal>, AuditError>;
 
     /// Verify `tenant`'s open segment, every sealed segment, and the links between them.

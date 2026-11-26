@@ -1,4 +1,5 @@
-alef_version = "0.44.0"
+[workspace]
+alef_version = "0.132.6"
 extra_clippy_allows = ["redundant_field_names"]
 languages = [
   "python",
@@ -11,12 +12,28 @@ languages = [
   "csharp",
   "elixir",
   "wasm",
-  "dart",
-  "jni",
   "kotlin_android",
+  "jni",
   "swift",
   "zig",
 ]
+
+[workspace.tools]
+python_package_manager = "uv"
+node_package_manager = "npm"
+
+[workspace.package_metadata]
+authors = ["Hacienda contributors"]
+description = "xberg + PII/Compliance Distribution — GDPR/DORA/AI Act compliant document intelligence"
+license = "Apache-2.0"
+repository = "https://github.com/jamon8888/hacienda-engine"
+
+[workspace.ownership]
+user_owned = ["poly.toml", "rustfmt.toml"]
+
+[workspace.opaque_types]
+DateTime = "chrono::DateTime<chrono::Utc>"
+Value = "serde_json::Value"
 
 [workspace.dto]
 python = "dataclass"
@@ -37,16 +54,13 @@ type_conversions = true
 package_metadata = true
 public_api = true
 
-[workspace.generate.overrides]
+[workspace.generate_overrides]
 wasm = { async_wrappers = false }
 java = { async_wrappers = false }
 kotlin_android = { async_wrappers = false }
 
 [workspace.docs]
 reference_output = "docs-site/src/content/docs/reference"
-cli_sources = ["hacienda/src/cli.rs", "hacienda-core/src/cli_overrides.rs"]
-mcp_sources = ["hacienda-core/src/mcp/server.rs"]
-skills = { template_dir = "templates/docs/skills", output_dir = ".codex/skills" }
 
 [workspace.sync]
 extra_paths = [
@@ -56,24 +70,18 @@ extra_paths = [
   "packages/go/go.mod",
   "hacienda-node/npm/package.json",
   "packages/ruby/hacienda.gemspec",
-  "packages/java/pom.xml",
   "packages/csharp/Hacienda/Hacienda.csproj",
   "packages/elixir/mix.exs",
-  "packages/dart/pubspec.yaml",
   "packages/zig/build.zig.zon",
-  "packages/swift/Package.swift",
 ]
 
 [[crates]]
 name = "hacienda"
 core_import = "hacienda"
 error_type = "HaciendaError"
+features = ["jobs", "ner-candle", "ner-candle-wasm", "postgres", "rag-embeddings", "s3"]
 sources = [
   "hacienda/src/lib.rs",
-  "hacienda/src/cli.rs",
-  "hacienda/src/api.rs",
-  "hacienda/src/prelude.rs",
-  "hacienda/src/config.rs",
   "hacienda-core/src/lib.rs",
   "hacienda-core/src/config.rs",
   "hacienda-core/src/facade.rs",
@@ -81,14 +89,47 @@ sources = [
   "hacienda-core/src/pii/mod.rs",
   "hacienda-core/src/pii/pipeline.rs",
   "hacienda-core/src/pii/config.rs",
-  "hacienda-core/src/pii/profiles.rs",
-  "hacienda-core/src/pii/xberg_integration.rs",
   "hacienda-core/src/redaction/mod.rs",
   "hacienda-core/src/compliance/mod.rs",
   "hacienda-core/src/audit/mod.rs",
   "hacienda-core/src/review/mod.rs",
   "hacienda-core/src/glossary/mod.rs",
 ]
+
+[[crates.source_crates]]
+name = "hacienda-installation"
+sources = ["crates/hacienda-installation/src/lib.rs"]
+roots = ["InstallationConfig"]
+
+[[crates.source_crates]]
+name = "xberg"
+from_registry = true
+sources = ["src/lib.rs"]
+roots = ["ExtractInput", "ExtractionConfig", "ExtractionResult", "ExtractedDocument"]
+
+[[crates.source_crates]]
+name = "uuid"
+from_registry = true
+sources = ["src/lib.rs"]
+roots = ["Uuid"]
+
+[[crates.source_crates]]
+name = "chrono"
+from_registry = true
+sources = ["src/lib.rs"]
+roots = ["DateTime", "Utc"]
+
+[[crates.source_crates]]
+name = "serde_json"
+from_registry = true
+sources = ["src/lib.rs"]
+roots = ["Value"]
+
+[[crates.source_crates]]
+name = "url"
+from_registry = true
+sources = ["src/lib.rs"]
+roots = ["Url"]
 [crates.output]
 python = "hacienda-python/src/"
 node = "hacienda-node/src/"
@@ -100,169 +141,282 @@ elixir = "packages/elixir/native/hacienda_nif/src/"
 wasm = "hacienda-wasm/src/"
 java = "packages/java/"
 csharp = "packages/csharp/src/"
-jni = "hacienda-jni/src/"
 kotlin_android = "packages/kotlin-android/"
 swift = "packages/swift/Sources/Hacienda/"
-dart = "packages/dart/lib/src/"
 zig = "packages/zig/src/"
 
 [crates.exclude]
-types = ["HaciendaFacadeConfig", "PipelineConfigInternal", "AuditChainInternal"]
-fields = ["HaciendaFacade::extraction_config", "HaciendaFacade::pii_pipeline"]
-methods = ["HaciendaFacade::register_internal_processors"]
+fields = [
+  "HaciendaFacade.extraction_config",
+  "HaciendaFacade.pii_pipeline",
+  "EditorEnvelope.editor",
+  "PatternMeta.validator",
+  "PresignedPut.expires_at",
+  "OcrConfig.tesseract_config",
+  "OcrPipelineStage.tesseract_config",
+]
+functions = [
+  "supported_formats",
+  "auth_middleware",
+  "token_header",
+  "connect",
+  "migrate",
+  "migrate_from_embedded",
+  "build_token_resolver",
+  "export",
+]
+methods = [
+  "FileAuditStore.io_order_wait",
+  "CapabilitySet.iter",
+  "CapabilitySet.from_iter",
+  "AuthExtension.from_request_parts",
+  "AuthState.from_config",
+  "HaciendaFacade.issue_key_with_auth",
+  "NerDetector.new",
+  "NerDetector.with_categories",
+  "PatternMeta.with_validator",
+  "EnvKeyResolver.with_lookup",
+  "RevealTicketStore.with_clock",
+  "RevealTicketStore.now",
+  "RevealTicketStore.consume",
+  "RevealTicket.is_live_at",
+  "UsageStore.summary",
+  "HaciendaFacade.audit_entries_with_auth",
+  "HaciendaFacade.audit_export_with_auth",
+  "HaciendaFacade.audit_history_with_auth",
+  "HaciendaFacade.audit_seals_with_auth",
+  "HaciendaFacade.audit_tip_with_auth",
+  "HaciendaFacade.close_with_auth",
+  "HaciendaFacade.compliance_checklist_with_auth",
+  "HaciendaFacade.compliance_report_with_auth",
+  "HaciendaFacade.dora_report_with_auth",
+  "HaciendaFacade.glossary_snapshot_with_auth",
+  "HaciendaFacade.list_keys_with_auth",
+  "HaciendaFacade.mint_pseudonym_token_with_auth",
+  "HaciendaFacade.mint_reveal_ticket_with_auth",
+  "HaciendaFacade.model_card_with_auth",
+  "HaciendaFacade.process_batch_with_auth",
+  "HaciendaFacade.process_with_auth",
+  "HaciendaFacade.record_llm_egress_with_auth",
+  "HaciendaFacade.redact_text_with_auth",
+  "HaciendaFacade.resolve_reveal_ticket_with_auth",
+  "HaciendaFacade.reveal_token_with_auth",
+  "HaciendaFacade.review_queue_read_with_auth",
+  "HaciendaFacade.review_queue_with_auth",
+  "HaciendaFacade.revoke_key_with_auth",
+  "HaciendaFacade.scan_text_with_auth",
+  "HaciendaFacade.verify_audit_with_auth",
+  "ApiKeyStore.list",
+  "InMemoryApiKeyStore.list",
+  "Pseudonymiser.key_statuses",
+  "DocumentVersionStore.list_versions",
+  "PresetStore.list",
+  "LlmEgressRecord.to_entry_inputs",
+  "ApiKeyTokenResolver.new",
+  "HaciendaFacade.with_stores",
+  "Token.to_auth_context",
+  "AuthRouterBuilder.new",
+  "AuthRouterBuilder.build",
+]
+types = [
+  "PostgresAuditStore",
+  "PostgresReviewStore",
+  "PostgresJobStore",
+  "PostgresDocumentVersionStore",
+  "PostgresPresetStore",
+  "PostgresApiKeyStore",
+  "PostgresUsageStore",
+  "PostgresTenantStore",
+  "Value",
+  "ApiKey",
+  "ApiKeyStore",
+  "InMemoryApiKeyStore",
+  "DocumentVersion",
+  "DocumentVersionStore",
+  "Preset",
+  "PresetStore",
+  "UsageRecord",
+  "UsageStore",
+  "KeyStatus",
+  "AuthContext",
+  "AuthState",
+  "AuthExtension",
+  "Token",
+  "TokenResolver",
+  "ApiKeyTokenResolver",
+  "AuthnTokenResolver",
+  "DevTokenResolver",
+  "InMemoryTokenStore",
+  "RevealTicket",
+  "RevealTicketStore",
+  "S3Config",
+  "S3ObjectStore",
+  "Tenant",
+  "TenantStore",
+  "InMemoryTenantStore",
+  "HaciendaError",
+  "XbergSurfaceError",
+  "PiiError",
+  "AuditError",
+  "ReviewError",
+  "AuthzError",
+  "PseudonymError",
+  "RevealTicketError",
+  "ApiKeyError",
+  "RedactionError",
+  "StoreError",
+  "VersionError",
+  "PresetError",
+  "UsageError",
+  "S3ConfigError",
+  "ModelAssetsError",
+  "MigrateError",
+  "BucketError",
+]
 
-[crates.features]
-default = ["xberg-full", "pii", "compliance", "audit", "review", "glossary"]
-xberg-full = ["dep:xberg/full", "dep:xberg/tokio-runtime"]
-pii = ["hacienda-core/pii"]
-compliance = ["hacienda-core/compliance", "pii"]
-audit = ["hacienda-core/audit"]
-review = ["hacienda-core/review"]
-glossary = ["hacienda-core/glossary"]
+# These shims take/return Rust traits (`dyn DossierAcl`, `dyn DocumentDossierIndex`,
+# `dyn KeyResolver`, `Arc<dyn JobStore/ReviewStore/TenantStore>`). The generator emits
+# `serde_json` deserialisation for them, which cannot compile: traits are neither
+# concrete deserialisation targets nor `Serialize` trait objects. Kotlin declarations
+# are dropped alongside the JNI shims so the bridge stays in sync.
+[crates.jni]
+exclude_functions = [
+  "with_dossier_acl",
+  "with_document_dossier_index",
+  "admit",
+  "into_arc",
+]
 
-[crates.lint.python]
-preconditions = ["uv sync --all-extras"]
-before_commands = ["uv run ruff check --fix .", "uv run mypy ."]
-lint_command = "uv run ruff check ."
-format_command = "uv run ruff format ."
+[crates.kotlin_android]
+# IndexedDbAuditStore is gated on target_arch = "wasm32" in hacienda-core; the native
+# Android JNI crate cannot name it. Its trait impl is also the source of the bogus
+# `use super::AuditStore;` in generated crate roots (fixed at the source instead).
+exclude_types = ["IndexedDbAuditStore"]
+exclude_functions = [
+  "with_dossier_acl",
+  "with_document_dossier_index",
+  "admit",
+  "into_arc",
+]
 
-[crates.lint.node]
-preconditions = ["npm ci"]
-lint_command = "npm run lint"
-format_command = "npm run format"
-
-[crates.lint.ruby]
-preconditions = ["bundle install"]
-lint_command = "bundle exec rubocop"
-format_command = "bundle exec rubocop -a"
-
-[crates.lint.php]
-preconditions = ["composer install"]
-lint_command = "vendor/bin/phpstan analyse"
-format_command = "vendor/bin/php-cs-fixer fix"
-
-[crates.lint.go]
-preconditions = ["go mod tidy"]
-lint_command = "golangci-lint run"
-format_command = "gofmt -w ."
-
-[crates.lint.java]
-preconditions = ["./mvnw compile"]
-lint_command = "./mvnw spotless:check"
-format_command = "./mvnw spotless:apply"
-
-[crates.lint.csharp]
-preconditions = ["dotnet restore"]
-lint_command = "dotnet format --verify-no-changes"
-format_command = "dotnet format"
-
-[crates.lint.elixir]
-preconditions = ["mix deps.get"]
-lint_command = "mix credo --strict"
-format_command = "mix format"
-
-[crates.lint.wasm]
-preconditions = ["npm ci"]
-lint_command = "npm run lint"
-format_command = "npm run format"
-
-[crates.lint.dart]
-preconditions = ["dart pub get"]
-lint_command = "dart analyze"
-format_command = "dart format ."
-
-[crates.lint.jni]
-preconditions = ["./gradlew build"]
-lint_command = "./gradlew detekt"
-format_command = "./gradlew ktfmt"
-
-[crates.lint.kotlin_android]
-preconditions = ["./gradlew build"]
-lint_command = "./gradlew detekt"
-format_command = "./gradlew ktfmt"
-
-[crates.lint.swift]
-preconditions = ["swift package resolve"]
-lint_command = "swiftlint lint"
-format_command = "swift-format --in-place Sources/"
-
-[crates.lint.zig]
-preconditions = ["zig fetch"]
-lint_command = "zig fmt --check ."
-format_command = "zig fmt ."
-
+# Alef runs these commands from the repository root, and an explicit test table
+# replaces (rather than inherits) the built-in defaults. Every override therefore
+# states its own `command`/`coverage` and runs the package-local toolchain from
+# that package's directory. Without `command`, `alef test` selects no suite at all.
 [crates.test.python]
-preconditions = ["uv sync --all-extras"]
-before_commands = ["uv run pytest -x --tb=short hacienda-python/tests/"]
-e2e_command = "uv run pytest -x --tb=short hacienda-python/tests/e2e/"
+precondition = "cd hacienda-python && uv sync --all-extras"
+before = ["cd hacienda-python && uv run pytest -x --tb=short tests/"]
+command = "cd hacienda-python && uv run --no-sync pytest -x --tb=short tests/"
+coverage = "cd hacienda-python && uv run --no-sync pytest --cov=. --cov-report=lcov tests/"
+e2e = "cd hacienda-python && uv run --no-sync pytest -x --tb=short tests/e2e/"
 
 [crates.test.node]
-preconditions = ["npm ci"]
-e2e_command = "npm run test:e2e"
+precondition = "cd hacienda-node && npm ci"
+command = "cd hacienda-node && npm test"
+coverage = "cd hacienda-node && npm test -- --coverage"
+e2e = "cd hacienda-node && npm run test:e2e"
 
 [crates.test.ruby]
-preconditions = ["bundle install"]
-e2e_command = "bundle exec rspec"
+precondition = "cd packages/ruby && bundle install"
+command = "cd packages/ruby && bundle exec rspec"
+coverage = "cd packages/ruby && bundle exec rspec --format documentation"
+e2e = "cd packages/ruby && bundle exec rspec"
 
 [crates.test.php]
-preconditions = ["composer install"]
-e2e_command = "vendor/bin/phpunit"
+precondition = "cd hacienda-php && composer install"
+command = "cd hacienda-php && composer test"
+coverage = "cd hacienda-php && composer test"
+e2e = "cd hacienda-php && vendor/bin/phpunit"
 
 [crates.test.go]
-preconditions = ["go mod tidy"]
-e2e_command = "go test ./..."
+precondition = "cd packages/go && go mod tidy"
+command = "cd packages/go && go test -v ./..."
+coverage = "cd packages/go && go test -v -coverprofile=coverage.out ./..."
+e2e = "cd packages/go && go test ./..."
 
 [crates.test.java]
-preconditions = ["./mvnw test"]
-e2e_command = "./mvnw verify"
+precondition = "cd packages/java && command -v mvn"
+command = "cd packages/java && mvn -f pom.xml test --batch-mode --no-transfer-progress"
+coverage = "cd packages/java && mvn -f pom.xml test jacoco:report --batch-mode --no-transfer-progress"
+e2e = "cd packages/java && mvn -f pom.xml verify --batch-mode --no-transfer-progress"
 
 [crates.test.csharp]
-preconditions = ["dotnet restore"]
-e2e_command = "dotnet test"
+precondition = "cd packages/csharp && dotnet restore"
+command = "cd packages/csharp && dotnet test"
+coverage = "cd packages/csharp && dotnet test --collect:\"XPlat Code Coverage\""
+e2e = "cd packages/csharp && dotnet test"
 
 [crates.test.elixir]
-preconditions = ["mix deps.get"]
-e2e_command = "mix test"
+precondition = "cd packages/elixir && mix deps.get"
+command = "cd packages/elixir && mix test"
+coverage = "cd packages/elixir && mix test --cover"
+e2e = "cd packages/elixir && mix test"
 
 [crates.test.wasm]
-preconditions = ["npm ci"]
-e2e_command = "npm run test:e2e"
-
-[crates.test.dart]
-preconditions = ["dart pub get"]
-e2e_command = "dart test"
+precondition = "cd hacienda-wasm && npm ci"
+command = "cd hacienda-wasm && npm test"
+coverage = "cd hacienda-wasm && npm test -- --coverage"
+e2e = "cd hacienda-wasm && npm run test:e2e"
 
 [crates.test.jni]
-preconditions = ["./gradlew build"]
-e2e_command = "./gradlew test"
+precondition = "cd packages/kotlin-android && ./gradlew build"
+command = "cd packages/kotlin-android && ./gradlew test"
+coverage = "cd packages/kotlin-android && ./gradlew test"
+e2e = "cd packages/kotlin-android && ./gradlew test"
 
 [crates.test.kotlin_android]
-preconditions = ["./gradlew build"]
-e2e_command = "./gradlew test"
+precondition = "cd packages/kotlin-android && ./gradlew build"
+command = "cd packages/kotlin-android && ./gradlew test"
+coverage = "cd packages/kotlin-android && ./gradlew test"
+e2e = "cd packages/kotlin-android && ./gradlew test"
 
 [crates.test.swift]
-preconditions = ["swift package resolve"]
-e2e_command = "swift test"
+precondition = "swift package resolve --package-path packages/swift"
+command = "swift test --package-path packages/swift"
+coverage = "swift test --package-path packages/swift"
+e2e = "swift test --package-path packages/swift"
 
 [crates.test.zig]
-preconditions = ["zig fetch"]
-e2e_command = "zig test"
+# `zig test` without a source file or module is rejected before any test runs;
+# the package's build script owns the test step.
+precondition = "cd packages/zig && zig build"
+command = "cd packages/zig && zig build test"
+coverage = "cd packages/zig && zig build test"
+e2e = "cd packages/zig && zig build test"
 
-[crates.publish]
-python = { vendor_mode = "registry", registry = "pypi" }
-node = { vendor_mode = "registry", registry = "npm" }
-ruby = { vendor_mode = "registry", registry = "rubygems" }
-php = { vendor_mode = "pie", registry = "packagist" }
-go = { vendor_mode = "github-release" }
-java = { vendor_mode = "maven-central", pom_path = "packages/java/pom.xml" }
-csharp = { vendor_mode = "nuget", csproj = "packages/csharp/Hacienda/Hacienda.csproj" }
-elixir = { vendor_mode = "hex", nif_versions = ["2.16", "2.17"] }
-wasm = { vendor_mode = "npm", registry = "npm" }
-dart = { vendor_mode = "pub", registry = "pub.dev" }
-kotlin_android = { vendor_mode = "maven-central" }
-swift = { vendor_mode = "github-release", artifact_type = "xcframework" }
-zig = { vendor_mode = "github-release" }
+[crates.publish.languages.python]
+vendor_mode = "none"
 
-[crates.e2e]
-fixtures_dir = "fixtures/"
-output_dir = "e2e/"
+[crates.publish.languages.node]
+vendor_mode = "none"
+
+[crates.publish.languages.ruby]
+vendor_mode = "core-only"
+
+[crates.publish.languages.php]
+vendor_mode = "none"
+
+[crates.publish.languages.go]
+vendor_mode = "none"
+
+[crates.publish.languages.java]
+vendor_mode = "none"
+
+[crates.publish.languages.csharp]
+vendor_mode = "none"
+
+[crates.publish.languages.elixir]
+vendor_mode = "core-only"
+nif_versions = ["2.16", "2.17"]
+
+[crates.publish.languages.wasm]
+vendor_mode = "none"
+
+[crates.publish.languages.kotlin_android]
+vendor_mode = "none"
+
+[crates.publish.languages.swift]
+vendor_mode = "none"
+
+[crates.publish.languages.zig]
+vendor_mode = "none"

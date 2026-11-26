@@ -1,0 +1,70 @@
+# alef ownership record -- COMMIT THIS FILE, do not add it to .gitignore.
+#
+# Lists the alef-generated paths whose format cannot carry an `alef:hash:`
+# provenance marker (`package.json`, `*.jar`, ...). Every other format proves
+# alef's ownership from the marker in the file itself and never appears here.
+# Without this list committed, a fresh clone cannot tell an alef-generated
+# `package.json` from a hand-written one and refuses to regenerate it.
+#
+# Ownership is a fact about history, not about content: a path lands here only
+# because alef created the file, or because a human ran `alef adopt` on it.
+# Nothing here is inferred by comparing bytes against generated output -- a
+# hand-written file that happens to match must never be claimed. Do not hand-add
+# entries; run `alef adopt <path>`, read the diff it prints, and let it write.
+
+owned_paths = [
+  ".clang-format",
+  "config.m4",
+  "crates/hacienda-ffi/cmake/hacienda-ffi-config.cmake",
+  "crates/hacienda-node/README.md",
+  "crates/hacienda-wasm/README.md",
+  "docs-site/src/content/docs/reference/api-c.md",
+  "docs-site/src/content/docs/reference/api-csharp.md",
+  "docs-site/src/content/docs/reference/api-elixir.md",
+  "docs-site/src/content/docs/reference/api-go.md",
+  "docs-site/src/content/docs/reference/api-java.md",
+  "docs-site/src/content/docs/reference/api-kotlin-android.md",
+  "docs-site/src/content/docs/reference/api-php.md",
+  "docs-site/src/content/docs/reference/api-python.md",
+  "docs-site/src/content/docs/reference/api-ruby.md",
+  "docs-site/src/content/docs/reference/api-rust.md",
+  "docs-site/src/content/docs/reference/api-swift.md",
+  "docs-site/src/content/docs/reference/api-typescript.md",
+  "docs-site/src/content/docs/reference/api-wasm.md",
+  "docs-site/src/content/docs/reference/api-zig.md",
+  "docs-site/src/content/docs/reference/configuration.md",
+  "docs-site/src/content/docs/reference/errors.md",
+  "docs-site/src/content/docs/reference/types.md",
+  "hacienda-ffi/README.md",
+  "hacienda-node/binding.cjs",
+  "hacienda-node/index.mjs",
+  "packages/csharp/Directory.Build.props",
+  "packages/csharp/README.md",
+  "packages/elixir/README.md",
+  "packages/go/README.md",
+  "packages/java/README.md",
+  "packages/java/pom.xml",
+  "packages/kotlin-android/.editorconfig",
+  "packages/kotlin-android/.gitignore",
+  "packages/kotlin-android/README.md",
+  "packages/kotlin-android/consumer-rules.pro",
+  "packages/kotlin-android/gradle.properties",
+  "packages/kotlin-android/gradle/wrapper/gradle-wrapper.jar",
+  "packages/kotlin-android/gradle/wrapper/gradle-wrapper.properties",
+  "packages/kotlin-android/gradlew",
+  "packages/kotlin-android/gradlew.bat",
+  "packages/kotlin-android/proguard-rules.pro",
+  "packages/kotlin-android/src/main/AndroidManifest.xml",
+  "packages/kotlin-android/src/main/jniLibs/arm64-v8a/.gitkeep",
+  "packages/kotlin-android/src/main/jniLibs/x86_64/.gitkeep",
+  "packages/kotlin-android/src/test/resources/host-jni/darwin/.gitkeep",
+  "packages/kotlin-android/src/test/resources/host-jni/linux/.gitkeep",
+  "packages/kotlin-android/src/test/resources/host-jni/windows/.gitkeep",
+  "packages/php/README.md",
+  "packages/python/README.md",
+  "packages/ruby/README.md",
+  "packages/ruby/Rakefile",
+  "packages/ruby/hacienda.gemspec",
+  "packages/swift/README.md",
+  "packages/zig/README.md",
+]

@@ -481,12 +481,15 @@ fn compute_legacy_seal_hash(
 ///    immediately preceding entry in the slice. An attacker who recomputes seal hashes
 ///    after splicing seals together would still break this check.
 ///
-/// The two together are what defeat truncation. Dropping the oldest segment and blanking
-/// the new first seal's `prev_seal_hash` alters a field the hash covers, so check 1 fires.
-/// Recomputing the hash to match the blanked field satisfies check 1, but that changes the
-/// seal's own hash, so check 2 fires on its successor. An attacker who repairs both has had
-/// to re-mint every seal in the run — which is exactly the work a hash chain is meant to
-/// force, and what an anchor over these seal hashes will eventually make impossible.
+/// Together these checks detect removal of the oldest seal. Dropping it and blanking the
+/// new first seal's `prev_seal_hash` alters a field the hash covers, so check 1 fires.
+/// Recomputing that hash satisfies check 1 but changes the seal's own hash, so check 2
+/// fires on its successor.
+///
+/// These checks do not detect removal of the newest seal: the surviving seals keep valid
+/// hashes and links, and no trusted tip is supplied to compare against. Callers must
+/// compare the last seal's `seal_hash` with an independently retained expected tip to
+/// detect tail deletion.
 ///
 /// # Errors
 ///

@@ -9,6 +9,14 @@ license.workspace = true
 default = []
 # Load the Candle GLiNER2 NER backend from a local model directory.
 ner-candle = ["hacienda-core/ner-candle"]
+# Forward the capabilities the generated binding crates request from this umbrella crate.
+# Every name exists in hacienda-core's [features] table; leaving them undeclared here makes
+# Cargo reject the generated manifests before any binding code is compiled.
+jobs = ["hacienda-core/jobs"]
+ner-candle-wasm = ["hacienda-core/ner-candle-wasm"]
+postgres = ["hacienda-core/postgres"]
+rag-embeddings = ["hacienda-core/rag-embeddings"]
+s3 = ["hacienda-core/s3"]
 
 [dependencies]
 hacienda-core = { path = "../hacienda-core" }

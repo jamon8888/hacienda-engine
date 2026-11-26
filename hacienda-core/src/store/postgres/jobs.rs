@@ -308,7 +308,7 @@ impl JobStore for PostgresJobStore {
         }
     }
 
-    async fn fail(&self, tenant: &TenantId, id: &str, error: String) -> Result<Job, JobError> {
+    async fn fail(&self, tenant: &TenantId, id: &str, reason: String) -> Result<Job, JobError> {
         // Server clock for the terminal timestamp and `RETURNING
         // progress_json` for the response, for the same reasons as `finish`.
         let maybe_row: Option<JobRowWithProgress> = sqlx::query_as(
@@ -320,7 +320,7 @@ impl JobStore for PostgresJobStore {
             "#,
         )
         .bind(JobStatus::Failed.to_string())
-        .bind(error)
+        .bind(reason)
         .bind(id)
         .bind(tenant.as_str())
         .fetch_optional(&self.pool)

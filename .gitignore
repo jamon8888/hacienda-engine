@@ -154,3 +154,10 @@ target-i6/
 target-i7/
 target-cr157/
 target-cr160/
+.alef/
+*.node
+.gems/
+vendor/
+*.h.bak
+*.test
+*.nupkg
