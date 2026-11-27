@@ -256,6 +256,10 @@ jobs:
     name: build / desktop
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
     uses: ./.github/workflows/build-desktop.yaml
+    # build-desktop.yaml's attach-release job declares contents: write; a
+    # called workflow may never request more than its caller grants.
+    permissions:
+      contents: write
     with:
       upload_artifacts: false
     # Tauri signing secrets are needed for a representative desktop build.
