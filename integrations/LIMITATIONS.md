@@ -81,13 +81,12 @@ the source comments alone suggested.
   `embedding_dim: 0` (naive ingest works, vector retrieval is meaningless) or
   `embedding_dim > 0` (naive ingest fails outright, `embeddings=` is required).
 - **`mode="fulltext"` retrieval requires a full-text-capable backend.** The in-memory
-  `RagStore` backend (what a bare `hacienda serve` uses without further config)
-  reports `Capabilities { full_text: false, .. }` and any `"fulltext"`/`"hybrid"`
-  request against it fails server-side with "retrieval mode unsupported by backend"
-  (confirmed live). Only the pgvector backend (`Capabilities { full_text: true, .. }`)
-  supports it. **Not independently verified live in this session** — no pgvector
-  instance was available — so treat the pgvector code path as read-from-source, not
-  smoke-tested, unlike the vector-mode path above.
+  store reports `Capabilities { full_text: false, .. }` and rejects `"fulltext"`/
+  `"hybrid"` retrieval. PostgreSQL/pgvector implements full-text and hybrid retrieval.
+  LanceDB also implements full-text/hybrid retrieval when its full-text index is ready;
+  its reported capability depends on index state. These capabilities are backend facts,
+  not a guarantee that every deployment has them enabled. Check the configured store
+  and its capability response before selecting a retrieval mode.
 - **No PII redaction on the RAG ingest path.** Confirmed in
   `crates/hacienda-rag/src/store.rs`: `RagStore::upsert_document` is a pure storage
   write, no text scanning. If you push raw (non-redacted) text into a collection via

@@ -1,0 +1,139 @@
+# basemind configuration — https://github.com/Goldziher/basemind
+# Lives at the repo root, or under `.config/` (`.config/basemind.toml` / `.config/basemind/
+# config.toml`), and is meant to be committed. The index (blobs + Fjall) is derived state
+# kept in the machine-global cache under ~/.local/share/basemind/ (override BASEMIND_DATA_HOME),
+# keyed by workspace and wiped on schema bumps — nothing is written into the repo, so there is
+# nothing to gitignore. Never put durable config in the cache.
+# Every value below is the built-in default; uncomment and edit only what you want to change.
+"$schema" = "v1"
+
+[scan]
+# Files to index. Default is "everything"; the tree-sitter language registry + a binary/size check
+# filter the long tail. Narrow it if you only care about specific languages. Must not be empty.
+# Globs are repo-relative, forward-slash, case-sensitive; `*` also crosses `/`. A bare name with no
+# glob characters (`src`, `docs/api`) matches that path and everything beneath it, like .gitignore.
+# include = ["**/*"]
+# Extra exclude globs, ADDED ON TOP of the always-on floor (node_modules, target, dist, build, out,
+# vendor, coverage, venv, .venv, __pycache__, .git, .basemind, bazel-*, .idea, .DS_Store, …). Same
+# syntax as include: `generated` excludes every directory of that name; exclude beats include.
+# The floor also drops credentials and key material so no secret becomes searchable: .env and
+# .env.* (which includes .env.example), .aws, .ssh, .gnupg, .npmrc, .pypirc, .netrc,
+# .git-credentials, id_rsa / id_dsa / id_ecdsa / id_ed25519, *.pem, *.key, *.p12, *.pfx, *.jks,
+# *.keystore.
+exclude = ["apps/hacienda-studio/public/models/gliner2/tokenizer.json"]
+# Floor entries to drop so that tree gets indexed, by directory name, file name or glob (`build`,
+# `.env.*`, `*.pem`), or the floor pattern itself. `.git` and `.basemind` can never be allowed, and
+# a credential entry is honoured only with the operator's BASEMIND_ALLOW_REPO_CREDENTIALS grant. The
+# default exclude also lists dist/target/node_modules/.venv, so remove those from exclude as well
+# when allowing them.
+# floor_allow = []
+# Honor .gitignore / .git/info/exclude while walking. Leave on unless you deliberately want
+# ignored files indexed.
+# respect_gitignore = true
+# Follow symlinks during the walk. Off by default — symlinks often escape the repo (e.g. Bazel's
+# bazel-* convenience symlinks). Turn on for repos that symlink real source into place. Ignored in
+# this file unless the operator sets BASEMIND_ALLOW_FOLLOW_SYMLINKS=1 in the environment.
+# follow_symlinks = false
+# Skip files larger than this many bytes (prevents minified-bundle stalls).
+# max_file_bytes = 2097152
+# Skip paths under any submodule root listed in .gitmodules.
+# skip_submodules = true
+# Run L2 extraction (calls + docs) inline with L1. Powers `code_refs`. Turning off roughly halves
+# scan time on large repos but leaves reference search empty until an L2 pass.
+# eager_l2 = true
+# Absolute paths OUTSIDE the repo to also index (e.g. a Bazel external cache). Ignored unless the
+# operator sets BASEMIND_ALLOW_EXTRA_ROOTS in the environment (1 = any workspace, or a `:`-separated
+# list of absolute workspace roots), because this file is authored by the repository. Credential
+# directories (.ssh, .aws, .gnupg, /etc) are refused even then. Symlinks inside them are followed
+# only when scan.follow_symlinks is on.
+# extra_roots = []
+
+# Per-grammar overrides, keyed by tree-sitter-language-pack name (`basemind lang list`).
+# enabled = false: stop parsing that grammar's files as code; they fall through to the document
+#   tier like any unrecognised file (use [documents] exclude to drop them entirely). Fixes
+#   misdetections such as `.txt` (vimdoc) and `.conf` (nginx).
+# extensions / filenames: map extra paths onto the grammar (override built-in detection).
+# preload = true: `basemind lang install` also fetches this grammar.
+# [languages.vimdoc]
+# enabled = false
+# [languages.jinja2]
+# extensions = [".mako", ".tpl"]
+# filenames = ["BUILD.in"]
+# preload = true
+
+[code_intel]
+# Precise, scope- and import-aware name resolution. On by default: JS/TS resolve via oxc, Python and
+# Java via the stack-graphs engine, so `code_refs` (pinned callers and the definition relation)
+# distinguishes a shadowed local from an import instead of matching by name. Set false to fall back to fast
+# tree-sitter locals binding for every language. Applies to files (re)scanned after the change.
+# precise_resolution = true
+
+[watch]
+# Coalesce filesystem events within this window (milliseconds).
+# debounce_ms = 250
+# Reserved: parsed but has no effect yet.
+# live_l2 = false
+
+[cache]
+# Reserved: parsed but has no effect yet (see [resources] max_map_cache_mb for the outline cache).
+# file_map_lru = 256
+
+[mcp]
+# Reserved: "stdio" is the only transport and nothing reads this key.
+# transport = "stdio"
+
+[documents]
+# Document RAG tier (PDF / Office / HTML / email). Requires a `documents` build; images and scanned
+# PDFs also need `documents-ocr`.
+# enabled = true
+# Embed documents for semantic search. ON by default — embeddings pay off on real prose / OCR.
+embed = false
+# Embedding model preset. Changing it forces a FULL RE-EMBED of the corpus (time + CPU): every
+# document is re-encoded at the new model's dimension.
+#   fast        — smallest / fastest, lowest quality
+#   balanced    — default; 768-dim, good quality/cost tradeoff
+#   quality     — larger model, best English quality, slower
+#   multilingual— multilingual model for non-English corpora
+# embedding_preset = "balanced"
+# Globs scoping which non-code files are indexed as documents. Empty include = everything that
+# passes [scan]; exclude applies to document indexing itself and beats include.
+# include = []
+# exclude = []
+# Per-document size cap in bytes (separate from scan.max_file_bytes, so big PDFs/Office files work).
+# max_file_bytes = 52428800
+# Extensions to skip on top of the built-in archive/binary floor (case-insensitive, dot optional).
+# extension_denylist = []
+# Embedding scope: when embed_include is non-empty only matching documents are embedded; embed_exclude
+# always wins. Non-embedded documents stay extracted + keyword-searchable. Changing either (or embed)
+# removes the vectors of newly ineligible documents on the next full scan. The default embed_exclude keeps
+# structured data (json, jsonc, json5, jsonl, ndjson, geojson, yaml, toml, csv, tsv, xml) out of the
+# vector store; setting the key replaces the list, so `embed_exclude = []` embeds those formats too.
+# embed_include = []
+# embed_exclude = ["*.json", "*.jsonc", "*.json5", "*.jsonl", "*.ndjson", "*.geojson", "*.yaml", "*.yml", "*.toml", "*.csv", "*.tsv", "*.xml"]
+
+[code_search]
+# Semantic code-search tier. Requires a `code-search` build.
+# enabled = true
+# Embed source code for VECTOR search. OFF by default — local embeddings on code aren't worth the
+# cost (code is embedded with a general English model, and NL→symbol is already served by the BM25
+# keyword lane over the same text). Chunking + BM25 keyword search work regardless. Turn on only if
+# you specifically want vector search over code (downloads an ONNX model, re-embeds on preset change).
+# embed = false
+# Embedding scope for source files (only used when embed = true): embed_include is an allow-list
+# (empty = all chunked files), embed_exclude wins over it; files left out are still chunked +
+# BM25-indexed. Changing either removes the vectors of newly ineligible files on the next scan.
+# embed_include = []
+# embed_exclude = []
+
+[resources]
+# Footprint bounds. 0 = auto for the thread / concurrency caps. The shared daemon treats these as
+# ceilings: min(value here, daemon cap), with 0 / "auto" / "off" resolving to the cap. Raise a
+# daemon cap with BASEMIND_DAEMON_MAX_SCAN_THREADS / _EMBED_THREADS / _EMBED_BATCH /
+# _CONCURRENT_DOCUMENTS / _FOOTPRINT_MB / _MAP_CACHE_MB / _CANDIDATES in the daemon's environment
+# (the daemon also caps file, document and debounce settings; see the configuration docs).
+# scan_threads = 0
+# embed_threads = 0
+# max_concurrent_documents = 0
+# embed_batch_size = 32
+# max_footprint_mb = 0
+# max_map_cache_mb = 256
