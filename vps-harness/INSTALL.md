@@ -8,7 +8,7 @@ utilisez `doctor` pour vérifier l'environnement courant.
 
 ## 1. Principe
 
-```
+```text
 <HOME>/.local/share/agent-harness/        # paquet versionné (données de l'utilisateur)
   versions/0.2.0/agent_harness/           # code Python
   versions/0.2.0/bin/agent-harness        # lanceur copié
