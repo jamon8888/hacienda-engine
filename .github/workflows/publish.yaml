@@ -130,7 +130,7 @@ jobs:
           pattern: hacienda-*-artifacts
           path: dist/
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           draft: true

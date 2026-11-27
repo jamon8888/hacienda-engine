@@ -1,0 +1,262 @@
+# Unified build gate for every hacienda-engine build target.
+#
+# This is the single place to add a new build surface. Each matrix entry is
+# self-describing: the runner it needs, the command that builds it, and (for
+# distributables) the artifact to keep. Adding a target = adding one `include`
+# block, with no duplication of toolchain/protoc/cache setup (that lives in
+# .github/actions/setup-build-env).
+#
+# Existing workflows remain the source of truth for *tests* (ci-rust,
+# ci-postgres, ci-e2e), *static checks* (ci-lint, ci-security) and *releases*
+# (publish*). This workflow is the *build* companion: it proves that every
+# artifact the project can ship still compiles on every PR and push to main.
+name: CI - Build All
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upload_artifacts:
+        description: "Upload build artifacts (useful for manual verification)"
+        required: false
+        default: false
+        type: boolean
+  # Let a future release/aggregate workflow reuse this entire build matrix.
+  workflow_call:
+    inputs:
+      upload_artifacts:
+        description: "Upload build artifacts"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-all-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Rust engine -------------------------------------------------
+          - name: rust-debug
+            runner: ubuntu-24.04
+            cmd: cargo build --workspace --all-targets --features "ner-candle"
+
+          - name: rust-release
+            runner: ubuntu-24.04
+            cmd: cargo build --workspace --release --features "ner-candle"
+
+          - name: cli-release
+            runner: ubuntu-24.04
+            cmd: cargo build -p hacienda-cli --release --features "ner-candle"
+            artifact: target/release/hacienda
+
+          # --- WASM --------------------------------------------------------
+          # `--profile wasm-release` is required by Cargo.toml's
+          # [profile.wasm-release] (fat LTO, scoped to hacienda-wasm only).
+          - name: wasm
+            runner: ubuntu-24.04
+            targets: wasm32-unknown-unknown
+            cmd: wasm-pack build --target web --no-default-features --profile wasm-release crates/hacienda-wasm
+            artifact: crates/hacienda-wasm/pkg/**
+
+          # --- Language bindings (alef) ------------------------------------
+          # One job per language so a failing toolchain is attributable to a
+          # single surface. Runner choices mirror publish.yaml, which builds
+          # these same bindings on release tags.
+          - name: bindings-python
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang python --release
+
+          - name: bindings-node
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang node --release
+
+          - name: bindings-ffi
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang ffi --release
+
+          - name: bindings-go
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang go --release
+
+          - name: bindings-java
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang java --release
+
+          - name: bindings-csharp
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang csharp --release
+
+          - name: bindings-ruby
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang ruby --release
+
+          - name: bindings-php
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang php --release
+
+          - name: bindings-elixir
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang elixir --release
+
+          - name: bindings-dart
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang dart --release
+
+          - name: bindings-zig
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang zig --release
+
+          - name: bindings-jni
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang jni --release
+
+          - name: bindings-wasm
+            runner: ubuntu-24.04
+            alef: "true"
+            cmd: alef build --lang wasm --release
+
+          # Swift and Kotlin/Android need macOS (Xcode + Android SDK), same
+          # as publish.yaml's matrix.
+          - name: bindings-swift
+            runner: macos-15
+            alef: "true"
+            cmd: alef build --lang swift --release
+
+          - name: bindings-kotlin-android
+            runner: macos-15
+            alef: "true"
+            cmd: alef build --lang kotlin_android --release
+
+          - name: bindings-csharp-windows
+            runner: windows-2022
+            alef: "true"
+            cmd: alef build --lang csharp --release
+
+          # --- SDKs --------------------------------------------------------
+          - name: sdk-python
+            runner: ubuntu-24.04
+            python: "3.10"
+            workdir: sdks/python
+            cmd: uv build
+            artifact: sdks/python/dist/**
+
+          - name: sdk-typescript
+            runner: ubuntu-24.04
+            node: "22"
+            cmd: npm ci && npm run build --workspace=sdks/typescript
+            artifact: sdks/typescript/dist/**
+
+          # --- Containers --------------------------------------------------
+          - name: docker-images
+            runner: ubuntu-24.04
+            cmd: >-
+              for f in docker/Dockerfile docker/Dockerfile.musl-build
+              docker/Dockerfile.musl-ffi docker/Dockerfile.musl-node
+              docker/Dockerfile.musl-rustler; do
+              echo "Building $f"; docker buildx build -f "$f" -t "hacienda-ci:$(basename "$f")" .; done
+
+          # --- Integrations -------------------------------------------------
+          # The old ci-integrations.yaml.disabled only ran tests; this builds
+          # (installs) every integration package so a broken lockfile or a
+          # missing native dependency is caught as a build failure.
+          - name: integrations
+            runner: ubuntu-24.04
+            python: "3.12"
+            node: "20"
+            cmd: >-
+              for p in python/crewai python/langchain python/llama-index
+              python/txtai; do
+              echo "Installing integrations/$p"; (cd "integrations/$p" && uv sync --all-extras --prerelease=allow); done &&
+              for p in node/n8n-nodes-hacienda node/langchain; do
+              echo "Installing integrations/$p"; (cd "integrations/$p" && npm install); done
+
+    # A self-hosted agent fleet can replace the GitHub-hosted Linux runners
+    # without editing this file: set repository variable CI_LINUX_RUNNER to a
+    # label list from .github/actionlint.yaml (e.g. "self-hosted, runner-medium").
+    # macOS/Windows entries stay hosted until equivalent self-hosted agents
+    # exist. See docs/ci/build-all.md.
+    runs-on: >-
+      ${{ startsWith(matrix.runner, 'ubuntu') && (vars.CI_LINUX_RUNNER || matrix.runner) || matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          targets: ${{ matrix.targets }}
+          install-alef: ${{ matrix.alef || 'false' }}
+          cache-key: build-all-${{ matrix.name }}
+
+      - name: Setup UV
+        if: matrix.python
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Pin Python
+        if: matrix.python
+        run: uv python install ${{ matrix.python }}
+
+      - name: Setup Node
+        if: matrix.node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install wasm-pack
+        if: matrix.name == 'wasm'
+        run: ./scripts/ci/wasm/install-wasm-pack.sh
+
+      - name: Build
+        working-directory: ${{ matrix.workdir || '.' }}
+        run: ${{ matrix.cmd }}
+
+      - name: Upload artifact
+        if: matrix.artifact && inputs.upload_artifacts == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Desktop (Tauri) bundles are heavy and already have a dedicated pipeline.
+  # Delegate to it for manual/aggregate runs so this workflow still represents
+  # *all* builds without doubling desktop CI time on every PR.
+  desktop:
+    name: build / desktop
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
+    uses: ./.github/workflows/build-desktop.yaml
+    with:
+      upload_artifacts: false
+    # Tauri signing secrets are needed for a representative desktop build.
+    secrets: inherit
