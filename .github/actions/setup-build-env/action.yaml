@@ -1,0 +1,89 @@
+# Shared build environment for every hacienda-engine CI build job.
+#
+# Keeping toolchain/protoc/cache setup in one composite action means a new
+# build target only needs to declare *how* it builds (its command) in
+# ci-build-all.yaml's matrix — it never has to remember which nightly is
+# pinned or which system libraries the workspace needs.
+#
+# The pinned nightly date is documented at the top of ci-rust.yaml: an
+# unpinned channel drifted a new clippy lint into ~38 pre-existing methods on
+# 2026-08-08 and turned every Rust-touching PR red for a reason unrelated to
+# its diff. Change this default only after re-verifying the whole workspace.
+name: "Setup hacienda build environment"
+description: "Installs the pinned Rust toolchain, protoc, caching, and optionally alef for hacienda-engine build jobs"
+inputs:
+  toolchain:
+    description: "Rust toolchain to install (pinned nightly by default — see ci-rust.yaml)"
+    required: false
+    default: "nightly-2026-08-06"
+  targets:
+    description: "Comma-separated extra Rust targets to install (e.g. wasm32-unknown-unknown)"
+    required: false
+    default: ""
+  components:
+    description: "Comma-separated Rust components to install"
+    required: false
+    default: "rustfmt,clippy"
+  install-protoc:
+    description: "Install the Protocol Buffers compiler (needed by every Rust build in this workspace)"
+    required: false
+    default: "true"
+  install-alef:
+    description: "Install alef, the multi-language bindings generator"
+    required: false
+    default: "false"
+  cache-key:
+    description: "Extra key appended to the shared rust-cache key (use when a job changes dependency inputs)"
+    required: false
+    default: "build-all"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Protocol Buffers compiler
+      if: inputs.install-protoc == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
+
+    - name: Install Protocol Buffers compiler (macOS)
+      if: inputs.install-protoc == 'true' && runner.os == 'macOS'
+      shell: bash
+      run: brew install protobuf
+
+    - name: Install Protocol Buffers compiler (Windows)
+      if: inputs.install-protoc == 'true' && runner.os == 'Windows'
+      shell: bash
+      run: choco install protoc -y --no-progress
+
+    - name: Install pinned Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}
+
+    - name: Cache Rust build artifacts
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.cache-key }}
+
+    # install-alef's `latest` reads a top-level `version = "x"` key from
+    # alef.toml, but this repo pins `alef_version` at the top instead — so
+    # `latest` silently resolved to a much newer alef whose schema rejects
+    # this repo's config. Read the repo's own pin explicitly instead.
+    - name: Read pinned alef version
+      if: inputs.install-alef == 'true'
+      id: alef-pin
+      shell: bash
+      run: |
+        version="$(sed -n 's/^alef_version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' alef.toml | head -1)"
+        [[ -n "$version" ]] || { echo "::error::alef_version not found in alef.toml"; exit 1; }
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Install alef
+      if: inputs.install-alef == 'true'
+      uses: xberg-io/actions/install-alef@v1
+      with:
+        version: ${{ steps.alef-pin.outputs.version }}

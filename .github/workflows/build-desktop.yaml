@@ -15,6 +15,16 @@ on:
         required: false
         default: true
         type: boolean
+  # Called by ci-build-all.yaml for manual/aggregate runs. The default is
+  # false there because that workflow already uploads its own artifacts;
+  # direct dispatches keep the old default of true.
+  workflow_call:
+    inputs:
+      upload_artifacts:
+        description: "Upload build artifacts"
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "desktop-v*"
@@ -181,7 +191,7 @@ jobs:
           pattern: desktop-*
           path: dist/
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
