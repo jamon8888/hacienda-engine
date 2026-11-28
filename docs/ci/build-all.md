@@ -10,10 +10,17 @@ to `main`, and it is the place to add new build surfaces as the engine grows.
 | --- | --- | --- |
 | Rust workspace (debug + release) + CLI | `rust-debug`, `rust-release`, `cli-release` | `Taskfile.yml` `build:*` |
 | WASM package | `wasm` | `Taskfile.yml` `build:wasm` + `[profile.wasm-release]` in `Cargo.toml` |
-| Language bindings (15 languages) | `bindings-*` | `alef.toml` + `publish.yaml` matrix |
+| Language bindings | *disabled (see below)* | `alef.toml` + `publish.yaml` matrix |
 | Python / TypeScript SDKs | `sdk-python`, `sdk-typescript` | `ci-sdk-python.yaml`, `ci-sdk-typescript.yaml` |
-| Docker images | `docker-images` | `ci-docker.yaml`, `publish-docker.yaml` |
-| Integration packages | `integrations` | `ci-integrations.yaml.disabled` |
+| Operator Docker image | `docker-images` | `ci-docker.yaml` |
+| Implemented integrations (Python/Node langchain) | `integrations` | `ci-integrations.yaml.disabled` |
+
+### Known blockers
+
+- **Language bindings are deliberately not gated yet.** `alef.toml` still uses a pre-0.44 schema (top-level `languages`/`alef_version`, `preconditions`/`lint_command`/`e2e_command` keys, a feature map instead of a list). `alef build` rejects it on every tested version with `legacy schema detected`. Migrating that config also changes release-publishing semantics (`vendor_mode`, `[crates.publish]`, `[crates.e2e]`), so it belongs in its own change. The commented binding entries in the matrix show where to re-enable them.
+- The pinned alef version is still read from `alef.toml` by the shared setup action for when bindings are re-enabled; `install-alef`'s `latest` ignored this repo's pin.
+- The musl Docker variants remain syntax-check-only in `ci-docker.yaml`; their `rust:1.78` base cannot compile current dependencies (`ignore` 0.4.25 needs edition 2024). This workflow builds only the operator-facing `docker/Dockerfile`.
+- Only implemented integrations (Python and Node `langchain`) are built; crewai, llama-index, txtai and n8n are explicitly "PLANNED" and have no source trees.
 | Tauri desktop bundles | `desktop` (manual runs only) | delegated to `build-desktop.yaml` |
 
 Static checks and tests stay in their dedicated workflows (`ci-lint.yaml`,

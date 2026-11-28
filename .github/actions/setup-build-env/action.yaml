@@ -69,6 +69,21 @@ runs:
       with:
         shared-key: ${{ inputs.cache-key }}
 
+    # install-alef's `latest` reads a top-level `version = "x"` key from
+    # alef.toml, but this repo pins `alef_version` at the top instead — so
+    # `latest` silently resolved to a much newer alef whose schema rejects
+    # this repo's config. Read the repo's own pin explicitly instead.
+    - name: Read pinned alef version
+      if: inputs.install-alef == 'true'
+      id: alef-pin
+      shell: bash
+      run: |
+        version="$(sed -n 's/^alef_version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' alef.toml | head -1)"
+        [[ -n "$version" ]] || { echo "::error::alef_version not found in alef.toml"; exit 1; }
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
     - name: Install alef
       if: inputs.install-alef == 'true'
       uses: xberg-io/actions/install-alef@v1
+      with:
+        version: ${{ steps.alef-pin.outputs.version }}
